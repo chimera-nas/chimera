@@ -241,29 +241,29 @@ struct nfs_request {
         struct LINK3args        *args_link;
         struct PATHCONF3args    *args_pathconf;
     };
-    struct COMPOUND4args           *args_compound;
-    /* Explicit-transaction bookkeeping (CHIMERA_VFS_CAP_TRANSACTIONAL).  One
-     * NFS3 RPC runs as one transaction: begin (WRITE/READ) -> the op's VFS
-     * calls -> commit before the reply is sent.  txn is the backend handle
-     * (NULL for non-transactional backends -> autocommit, unchanged).  txn_ts
+    struct COMPOUND4args        *args_compound;
+    /* Explicit-compound bookkeeping (CHIMERA_VFS_CAP_COMPOUND).  One
+     * NFS3 RPC runs as one compound: begin (WRITE/READ) -> the op's VFS
+     * calls -> commit before the reply is sent.  compound is the backend handle
+     * (NULL for non-transactional backends -> autocommit, unchanged).  compound_ts
      * is the wait-die priority, assigned once and reused across retries so a
-     * conflicting op cannot starve; txn_attempt bounds the retries.  txn_op_status
-     * carries the op result across an async EndTransaction(ABORT). */
-    struct chimera_vfs_transaction *txn;
-    uint64_t                        txn_ts;
-    int                             txn_attempt;
-    enum chimera_vfs_error          txn_op_status;
-    uint32_t                        write_length;
-    uint32_t                        write_sync;
-    /* Shared NFS3 transaction driver (chimera_nfs3_txn_run/finish): fh+mode the
-    * op begins on (saved for replay), and the op's two callbacks -- txn_start
-    * runs its VFS chain with req->txn set, txn_reply builds+sends the reply. */
-    uint8_t                         txn_fh[NFS4_FHSIZE];
-    int                             txn_fhlen;
-    uint8_t                         txn_mode;
-    void                            (*txn_start)(
+     * conflicting op cannot starve; compound_attempt bounds the retries.  compound_op_status
+     * carries the op result across an async compound_end(ABORT). */
+    struct chimera_vfs_compound *compound;
+    uint64_t                     compound_ts;
+    int                          compound_attempt;
+    enum chimera_vfs_error       compound_op_status;
+    uint32_t                     write_length;
+    uint32_t                     write_sync;
+    /* Shared NFS3 compound driver (chimera_nfs3_compound_run/finish): fh+mode the
+     * op begins on (saved for replay), and the op's two callbacks -- compound_start
+     * runs its VFS chain with req->compound set, compound_reply builds+sends the reply. */
+    uint8_t                      compound_fh[NFS4_FHSIZE];
+    int                          compound_fhlen;
+    uint8_t                      compound_mode;
+    void                         (*compound_start)(
         struct nfs_request *req);
-    void                            (*txn_reply)(
+    void                         (*compound_reply)(
         struct nfs_request *req);
     union {
         struct READLINK3res    res_readlink;

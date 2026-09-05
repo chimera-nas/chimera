@@ -6,7 +6,7 @@
 
 #include "client_internal.h"
 #include "client_statfs.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_fstatfs_getattr_complete(
@@ -20,7 +20,7 @@ chimera_fstatfs_getattr_complete(
         chimera_attrs_to_statvfs(attr, &request->sync_statvfs);
     }
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_fstatfs_getattr_complete */
 
 static void
@@ -30,7 +30,7 @@ chimera_fstatfs_start(
 {
     chimera_vfs_getattr(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->fstatfs.handle,
         CHIMERA_VFS_ATTR_MASK_STATFS,
         chimera_fstatfs_getattr_complete,
@@ -44,7 +44,7 @@ chimera_fstatfs_reply(
 {
     chimera_fstatfs_callback_t callback     = request->fstatfs.callback;
     void                      *callback_arg = request->fstatfs.private_data;
-    enum chimera_vfs_error     status       = request->txn_op_status;
+    enum chimera_vfs_error     status       = request->compound_op_status;
     struct chimera_statvfs     st           = request->sync_statvfs;
 
     chimera_client_request_free(thread, request);
@@ -62,9 +62,9 @@ chimera_dispatch_fstatfs(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->fstatfs.handle->fh,
-                           request->fstatfs.handle->fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_fstatfs_start, chimera_fstatfs_reply);
+    chimera_client_compound_run(thread, request,
+                                request->fstatfs.handle->fh,
+                                request->fstatfs.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_fstatfs_start, chimera_fstatfs_reply);
 } /* chimera_dispatch_fstatfs */

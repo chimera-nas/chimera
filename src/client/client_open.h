@@ -5,18 +5,18 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 /* An open that creates or truncates mutates the namespace and needs a write
- * transaction; a plain open is a read-mode snapshot. */
-static inline enum chimera_vfs_txn_mode
-chimera_open_txn_mode(unsigned int flags)
+ * compound; a plain open is a read-mode snapshot. */
+static inline enum chimera_vfs_compound_mode
+chimera_open_compound_mode(unsigned int flags)
 {
     return (flags & (CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_TRUNCATE)) ?
-           CHIMERA_VFS_TXN_WRITE : CHIMERA_VFS_TXN_READ;
-} /* chimera_open_txn_mode */
+           CHIMERA_VFS_COMPOUND_WRITE : CHIMERA_VFS_COMPOUND_READ;
+} /* chimera_open_compound_mode */
 
-/* Shared reply for both the path and _at open transactions.  The returned open
+/* Shared reply for both the path and _at open compounds.  The returned open
  * handle is stashed in request->sync_open_handle by the op completion. */
 static void
 chimera_open_reply(
@@ -25,7 +25,7 @@ chimera_open_reply(
 {
     chimera_open_callback_t         callback     = request->open.callback;
     void                           *callback_arg = request->open.private_data;
-    enum chimera_vfs_error          status       = request->txn_op_status;
+    enum chimera_vfs_error          status       = request->compound_op_status;
     struct chimera_vfs_open_handle *oh           = request->sync_open_handle;
 
     chimera_client_request_free(thread, request);
@@ -44,7 +44,7 @@ chimera_open_vfs_complete(
 
     request->sync_open_handle = oh;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_open_vfs_complete */
 
 static void
@@ -55,7 +55,7 @@ chimera_open_start(
     /* set_attr (creation mode) is initialized by the caller. */
     chimera_vfs_open(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->open.path,
@@ -72,11 +72,11 @@ chimera_dispatch_open(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           chimera_open_txn_mode(request->open.flags),
-                           chimera_open_start, chimera_open_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                chimera_open_compound_mode(request->open.flags),
+                                chimera_open_start, chimera_open_reply);
 } /* chimera_dispatch_open */
 
 static void
@@ -93,7 +93,7 @@ chimera_open_at_complete(
 
     request->sync_open_handle = oh;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_open_at_complete */
 
 static void
@@ -104,7 +104,7 @@ chimera_open_at_start(
     /* set_attr (creation mode) is initialized by the caller. */
     chimera_vfs_open_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->open.parent_handle,
         request->open.path,
         request->open.path_len,
@@ -125,8 +125,8 @@ chimera_dispatch_open_at(
 {
     request->open.parent_handle = parent_handle;
 
-    chimera_client_txn_run(thread, request,
-                           parent_handle->fh, parent_handle->fh_len,
-                           chimera_open_txn_mode(request->open.flags),
-                           chimera_open_at_start, chimera_open_reply);
+    chimera_client_compound_run(thread, request,
+                                parent_handle->fh, parent_handle->fh_len,
+                                chimera_open_compound_mode(request->open.flags),
+                                chimera_open_at_start, chimera_open_reply);
 } /* chimera_dispatch_open_at */

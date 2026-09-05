@@ -20,8 +20,8 @@ chimera_nfs3_mknod_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_mknod.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_mknod.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
         chimera_nfs3_set_wcc_data(&req->res_mknod.resfail.dir_wcc, NULL, NULL);
     }
 
@@ -69,7 +69,7 @@ chimera_nfs3_mknod_complete(
         chimera_nfs3_set_wcc_data(&req->res_mknod.resok.dir_wcc, r_dir_pre_attr, r_dir_post_attr);
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_mknod_complete */
 
 static void
@@ -84,7 +84,7 @@ chimera_nfs3_mknod_open_callback(
     struct sattr3            *sattr;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_txn_finish(req, error_code);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
@@ -115,15 +115,15 @@ chimera_nfs3_mknod_open_callback(
             break;
         default:
             /* Malformed node type: build the BADTYPE reply now and finish with
-             * OK so the (empty) transaction just commits to release and the
+             * OK so the (empty) compound just commits to release and the
              * reply preserves the BADTYPE status set here. */
             req->res_mknod.status = NFS3ERR_BADTYPE;
             chimera_nfs3_set_wcc_data(&req->res_mknod.resfail.dir_wcc, NULL, NULL);
-            chimera_nfs3_txn_finish(req, CHIMERA_VFS_OK);
+            chimera_nfs3_compound_finish(req, CHIMERA_VFS_OK);
             return;
     } /* switch */
 
-    chimera_vfs_mknod_at(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_mknod_at(req->thread->vfs_thread, &req->cred, req->compound,
                          handle,
                          args->where.name.str,
                          args->where.name.len,
@@ -138,7 +138,7 @@ chimera_nfs3_mknod_open_callback(
 static void
 chimera_nfs3_mknod_start(struct nfs_request *req)
 {
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -183,7 +183,7 @@ chimera_nfs3_mknod(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_WRITE,
-                         chimera_nfs3_mknod_start, chimera_nfs3_mknod_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_WRITE,
+                              chimera_nfs3_mknod_start, chimera_nfs3_mknod_reply);
 } /* chimera_nfs3_mknod */

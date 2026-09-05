@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_read_complete(
@@ -19,14 +19,14 @@ chimera_read_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    /* Stash the result for the txn reply.  The read buffers (iov) outlive the
-    * read transaction's async commit, so they are safe to hand back later. */
+    /* Stash the result for the compound reply.  The read buffers (iov) outlive the
+     * read compound's async commit, so they are safe to hand back later. */
     request->read.result_count = count;
     request->read.result_eof   = eof;
     request->read.r_iov        = iov;
     request->read.r_niov       = niov;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_read_complete */
 
 static void
@@ -35,7 +35,7 @@ chimera_read_start(
     struct chimera_client_request *request)
 {
     chimera_vfs_read(thread->vfs_thread,
-                     chimera_client_req_cred(request), request->txn,
+                     chimera_client_req_cred(request), request->compound,
                      request->read.handle,
                      request->read.offset,
                      request->read.length,
@@ -53,7 +53,7 @@ chimera_read_reply(
 {
     chimera_read_callback_t callback     = request->read.callback;
     void                   *callback_arg = request->read.private_data;
-    enum chimera_vfs_error  status       = request->txn_op_status;
+    enum chimera_vfs_error  status       = request->compound_op_status;
     struct evpl_iovec      *iov          = request->read.r_iov;
     int                     niov         = request->read.r_niov;
 
@@ -67,9 +67,9 @@ chimera_dispatch_read(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->read.handle->fh,
-                           request->read.handle->fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_read_start, chimera_read_reply);
+    chimera_client_compound_run(thread, request,
+                                request->read.handle->fh,
+                                request->read.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_read_start, chimera_read_reply);
 } /* chimera_dispatch_read */

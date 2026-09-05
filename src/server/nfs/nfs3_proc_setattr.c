@@ -17,8 +17,8 @@ chimera_nfs3_setattr_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_setattr.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_setattr.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
         chimera_nfs3_set_wcc_data(&req->res_setattr.resfail.obj_wcc, NULL, NULL);
     }
 
@@ -48,7 +48,7 @@ chimera_nfs3_setattr_complete(
         chimera_nfs3_set_wcc_data(&req->res_setattr.resok.obj_wcc, pre_attr, post_attr);
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_setattr_complete */
 
 static void
@@ -62,7 +62,7 @@ chimera_nfs3_setattr_do_setattr(struct nfs_request *req)
 
     chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
 
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, req->compound,
                         req->handle,
                         attr,
                         CHIMERA_NFS3_ATTR_WCC_MASK,
@@ -81,18 +81,18 @@ chimera_nfs3_setattr_guard_callback(
     struct SETATTR3args *args = req->args_setattr;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_txn_finish(req, error_code);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
     if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME) ||
         attr->va_ctime.tv_sec  != args->guard.obj_ctime.seconds ||
         attr->va_ctime.tv_nsec != args->guard.obj_ctime.nseconds) {
-        /* Guard mismatch: build NOT_SYNC now; finish OK so the (empty) txn just
+        /* Guard mismatch: build NOT_SYNC now; finish OK so the (empty) compound just
          * releases and the reply preserves the status set here. */
         req->res_setattr.status = NFS3ERR_NOT_SYNC;
         chimera_nfs3_set_wcc_data(&req->res_setattr.resfail.obj_wcc, NULL, NULL);
-        chimera_nfs3_txn_finish(req, CHIMERA_VFS_OK);
+        chimera_nfs3_compound_finish(req, CHIMERA_VFS_OK);
         return;
     }
 
@@ -124,14 +124,14 @@ chimera_nfs3_setattr_open_callback(
              error_code == CHIMERA_VFS_ENXIO)) {
             error_code = CHIMERA_VFS_EINVAL;
         }
-        chimera_nfs3_txn_finish(req, error_code);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
     req->handle = handle;
 
     if (args->guard.check) {
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->txn,
+        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->compound,
                             handle,
                             CHIMERA_VFS_ATTR_CTIME,
                             chimera_nfs3_setattr_guard_callback,
@@ -157,7 +157,7 @@ chimera_nfs3_setattr_start(struct nfs_request *req)
         open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         open_flags,
@@ -202,7 +202,7 @@ chimera_nfs3_setattr(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_WRITE,
-                         chimera_nfs3_setattr_start, chimera_nfs3_setattr_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_WRITE,
+                              chimera_nfs3_setattr_start, chimera_nfs3_setattr_reply);
 } /* chimera_nfs3_setattr */

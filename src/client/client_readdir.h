@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static int
 chimera_readdir_entry_callback(
@@ -46,7 +46,7 @@ chimera_readdir_complete(
     request->readdir.r_cookie = cookie;
     request->readdir.r_eof    = eof;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_readdir_complete */
 
 static void
@@ -54,12 +54,12 @@ chimera_readdir_start(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    /* One batch from request->readdir.cookie runs as one read transaction.  A
+    /* One batch from request->readdir.cookie runs as one read compound.  A
      * conflict replay re-reads from the same input cookie; entries stream via
      * the entry callback, but a diskfs wait-die abort fires at lock acquisition
      * before any entry is emitted, so a replay does not double-emit. */
     chimera_vfs_readdir(thread->vfs_thread,
-                        chimera_client_req_cred(request), request->txn,
+                        chimera_client_req_cred(request), request->compound,
                         request->readdir.handle,
                         0,  // attr_mask for entries
                         0,  // dir_attr_mask
@@ -79,7 +79,7 @@ chimera_readdir_reply(
 {
     chimera_readdir_complete_t complete     = request->readdir.complete;
     void                      *callback_arg = request->readdir.private_data;
-    enum chimera_vfs_error     status       = request->txn_op_status;
+    enum chimera_vfs_error     status       = request->compound_op_status;
     uint64_t                   cookie       = request->readdir.r_cookie;
     uint32_t                   eof          = request->readdir.r_eof;
 
@@ -93,9 +93,9 @@ chimera_dispatch_readdir(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->readdir.handle->fh,
-                           request->readdir.handle->fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_readdir_start, chimera_readdir_reply);
+    chimera_client_compound_run(thread, request,
+                                request->readdir.handle->fh,
+                                request->readdir.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_readdir_start, chimera_readdir_reply);
 } /* chimera_dispatch_readdir */

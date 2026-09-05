@@ -16,8 +16,8 @@ chimera_nfs3_link_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_link.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_link.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
         chimera_nfs3_set_post_op_attr(&req->res_link.resfail.file_attributes, NULL);
         chimera_nfs3_set_wcc_data(&req->res_link.resfail.linkdir_wcc, NULL, NULL);
     }
@@ -45,7 +45,7 @@ chimera_nfs3_link_complete(
         chimera_nfs3_set_wcc_data(&req->res_link.resok.linkdir_wcc, r_dir_pre_attr, r_dir_post_attr);
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_link_complete */
 
 static void
@@ -54,7 +54,7 @@ chimera_nfs3_link_start(struct nfs_request *req)
     struct LINK3args *args = req->args_link;
 
     chimera_vfs_link_at(req->thread->vfs_thread,
-                        &req->cred, req->txn,
+                        &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         req->saved_fh,
@@ -97,7 +97,7 @@ chimera_nfs3_link(
 
     /* Decode the existing-file handle (sets the request export + squash) and
      * unwrap the target-directory handle into req->saved_fh.  Both handles must
-     * outlive the async transaction (and survive a conflict replay), so they
+     * outlive the async compound (and survive a conflict replay), so they
      * live in the request: the file in req->fh, the target dir in req->saved_fh
      * (unused by other NFSv3 link state). */
     res.status = chimera_nfs3_decode_fh(req, args->file.data.data, args->file.data.len);
@@ -122,7 +122,7 @@ chimera_nfs3_link(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_WRITE,
-                         chimera_nfs3_link_start, chimera_nfs3_link_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_WRITE,
+                              chimera_nfs3_link_start, chimera_nfs3_link_reply);
 } /* chimera_nfs3_link */

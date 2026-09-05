@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_commit_complete(
@@ -16,7 +16,7 @@ chimera_commit_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_commit_complete */
 
 static void
@@ -26,7 +26,7 @@ chimera_commit_start(
 {
     chimera_vfs_commit(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->commit.handle,
         0,  /* offset - sync entire file */
         0,  /* count - sync entire file */
@@ -43,7 +43,7 @@ chimera_commit_reply(
 {
     chimera_commit_callback_t callback     = request->commit.callback;
     void                     *callback_arg = request->commit.private_data;
-    enum chimera_vfs_error    status       = request->txn_op_status;
+    enum chimera_vfs_error    status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -55,9 +55,9 @@ chimera_dispatch_commit(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->commit.handle->fh,
-                           request->commit.handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_commit_start, chimera_commit_reply);
+    chimera_client_compound_run(thread, request,
+                                request->commit.handle->fh,
+                                request->commit.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_commit_start, chimera_commit_reply);
 } /* chimera_dispatch_commit */

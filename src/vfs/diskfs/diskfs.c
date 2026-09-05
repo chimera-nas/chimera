@@ -19,11 +19,11 @@ diskfs_dispatch(
 
 
 /*
- * Explicit-transaction lifecycle (CHIMERA_VFS_CAP_TRANSACTIONAL).  The VFS core
- * allocates the opaque handle (diskfs_txn, txn_size below) and stamps its core
- * header (wait-die priority + routing key) before any enlisted op runs.  Begin
- * initializes the diskfs-private portion in place; every enlisted op recovers
- * the txn from request->transaction (see diskfs_txn_begin) and holds its
+ * Explicit-transaction lifecycle (CHIMERA_VFS_CAP_COMPOUND).  The VFS core
+ * allocates the opaque handle (diskfs_txn, compound_size below) and stamps its
+ * core header (wait-die priority + routing key) before any enlisted op runs.
+ * Begin initializes the diskfs-private portion in place; every enlisted op
+ * recovers the txn from request->compound (see diskfs_txn_begin) and holds its
  * locks/blocks until End commits (one intent-log FUA for the whole txn) or
  * aborts.
  */
@@ -34,7 +34,7 @@ diskfs_begin_transaction(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct diskfs_txn   *txn = (struct diskfs_txn *) request->transaction;
+    struct diskfs_txn   *txn = (struct diskfs_txn *) request->compound;
     enum diskfs_txn_type type;
 
     (void) shared;
@@ -43,7 +43,7 @@ diskfs_begin_transaction(
     /* The core allocated and zeroed the handle and stamped its core header;
      * initialize the diskfs-private portion in place on this owning thread
      * before the first enlisted op arrives. */
-    type = (txn->core.mode == CHIMERA_VFS_TXN_WRITE)
+    type = (txn->core.mode == CHIMERA_VFS_COMPOUND_WRITE)
            ? DISKFS_TXN_WRITE : DISKFS_TXN_READ;
 
     diskfs_txn_init(thread, txn, type, 0 /* explicit */);
@@ -60,22 +60,22 @@ diskfs_end_transaction(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct diskfs_txn *txn = (struct diskfs_txn *) request->transaction;
+    struct diskfs_txn *txn = (struct diskfs_txn *) request->compound;
 
     (void) thread;
     (void) shared;
     (void) private_data;
 
-    if (request->transaction_op.end_flag == CHIMERA_VFS_TXN_ABORT) {
+    if (request->compound_op.end_flag == CHIMERA_VFS_COMPOUND_ABORT) {
         diskfs_txn_abort(txn);
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
         return;
     }
 
-    /* COMMIT_ASYNC and COMMIT_SYNC both commit durably in v1 -- being more
+    /* COMMIT and COMMIT_DURABLE both commit durably in v1 -- being more
      * durable than UNSTABLE requires is always NFS-correct; skipping the redo
-     * FUA for COMMIT_ASYNC is a follow-up optimization. */
+     * FUA for COMMIT is a follow-up optimization. */
     request->status = CHIMERA_VFS_OK;
     diskfs_txn_commit(txn, diskfs_txn_request_complete_cb, request);
 } /* diskfs_end_transaction */
@@ -241,10 +241,10 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_GET_LAYOUT:
             diskfs_get_layout(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_BEGIN_TRANSACTION:
+        case CHIMERA_VFS_OP_COMPOUND_BEGIN:
             diskfs_begin_transaction(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_END_TRANSACTION:
+        case CHIMERA_VFS_OP_COMPOUND_END:
             diskfs_end_transaction(thread, shared, request, private_data);
             break;
         default:
@@ -261,10 +261,10 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .sdk_version = CHIMERA_VFS_SDK_VERSION,
     .name        = "diskfs",
     .fh_magic    = CHIMERA_VFS_FH_MAGIC_DISKFS,
-    /* CHIMERA_VFS_CAP_TRANSACTIONAL is deliberately not declared: diskfs's
+    /* CHIMERA_VFS_CAP_COMPOUND is deliberately not declared: diskfs's
      * transaction engine is deferred to a second wave of the
      * compound-operations work.  Without the cap,
-     * chimera_vfs_begin_transaction() never binds a transaction to diskfs and
+     * chimera_vfs_compound_begin() never binds a compound to diskfs and
      * every consumer runs diskfs ops in autocommit mode; the engine code
      * (diskfs_txn_*) stays in the tree, dormant. */
     .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
@@ -281,5 +281,5 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .thread_init    = diskfs_thread_init,
     .thread_destroy = diskfs_thread_destroy,
     .dispatch       = diskfs_dispatch,
-    .txn_size       = sizeof(struct diskfs_txn),
+    .compound_size  = sizeof(struct diskfs_txn),
 };

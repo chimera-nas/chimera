@@ -73,7 +73,7 @@ static void
 chimera_vfs_mkdir_at_dispatch(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_transaction *txn,
+    struct chimera_vfs_compound    *compound,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -150,7 +150,7 @@ chimera_vfs_mkdir_at_dispatch(
         return;
     }
 
-    request->transaction = txn;
+    request->compound = compound;
 
     request->opcode                               = CHIMERA_VFS_OP_MKDIR_AT;
     request->complete                             = chimera_vfs_mkdir_at_complete;
@@ -180,7 +180,7 @@ struct chimera_vfs_mkdir_at_gate {
     struct chimera_vfs_gate_ctx     gate_ctx;
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
-    struct chimera_vfs_transaction *txn;
+    struct chimera_vfs_compound    *compound;
     struct chimera_vfs_open_handle *handle;
     const char                     *name;
     int                             namelen;
@@ -208,7 +208,7 @@ chimera_vfs_mkdir_at_gate_complete(
         return;
     }
 
-    chimera_vfs_mkdir_at_dispatch(gate->thread, gate->cred, gate->txn, gate->handle,
+    chimera_vfs_mkdir_at_dispatch(gate->thread, gate->cred, gate->compound, gate->handle,
                                   gate->name, gate->namelen, gate->attr,
                                   gate->attr_mask, gate->pre_attr_mask,
                                   gate->post_attr_mask, gate->callback,
@@ -220,7 +220,7 @@ SYMBOL_EXPORT void
 chimera_vfs_mkdir_at(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_transaction *txn,
+    struct chimera_vfs_compound    *compound,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
@@ -242,7 +242,7 @@ chimera_vfs_mkdir_at(
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
-        gate->txn            = txn;
+        gate->compound       = compound;
         gate->handle         = handle;
         gate->name           = name;
         gate->namelen        = namelen;
@@ -262,7 +262,7 @@ chimera_vfs_mkdir_at(
         return;
     }
 
-    chimera_vfs_mkdir_at_dispatch(thread, cred, txn, handle, name, namelen, attr,
+    chimera_vfs_mkdir_at_dispatch(thread, cred, compound, handle, name, namelen, attr,
                                   attr_mask, pre_attr_mask, post_attr_mask,
                                   callback, private_data);
 } /* chimera_vfs_mkdir_at */

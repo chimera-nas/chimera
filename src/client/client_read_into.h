@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_read_into_complete(
@@ -25,7 +25,7 @@ chimera_read_into_complete(
     request->read_into.result_count = count;
     request->read_into.result_eof   = eof;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_read_into_complete */
 
 static void
@@ -34,7 +34,7 @@ chimera_read_into_start(
     struct chimera_client_request *request)
 {
     chimera_vfs_read_into(thread->vfs_thread,
-                          chimera_client_req_cred(request), request->txn,
+                          chimera_client_req_cred(request), request->compound,
                           request->read_into.handle,
                           request->read_into.offset,
                           request->read_into.length,
@@ -54,7 +54,7 @@ chimera_read_into_reply(
 {
     chimera_read_into_callback_t callback     = request->read_into.callback;
     void                        *callback_arg = request->read_into.private_data;
-    enum chimera_vfs_error       status       = request->txn_op_status;
+    enum chimera_vfs_error       status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -68,9 +68,9 @@ chimera_dispatch_read_into(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->read_into.handle->fh,
-                           request->read_into.handle->fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_read_into_start, chimera_read_into_reply);
+    chimera_client_compound_run(thread, request,
+                                request->read_into.handle->fh,
+                                request->read_into.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_read_into_start, chimera_read_into_reply);
 } /* chimera_dispatch_read_into */

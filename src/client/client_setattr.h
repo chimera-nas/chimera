@@ -5,9 +5,9 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
-/* Shared reply for every setattr transaction (path, lpath, and _at).  The
+/* Shared reply for every setattr compound (path, lpath, and _at).  The
  * internally-opened handle (path variants) is released in the op completion;
  * the _at variant's parent handle is caller-owned and never released here. */
 static void
@@ -17,7 +17,7 @@ chimera_setattr_reply(
 {
     chimera_setattr_callback_t callback     = request->setattr.callback;
     void                      *callback_arg = request->setattr.private_data;
-    enum chimera_vfs_error     status       = request->txn_op_status;
+    enum chimera_vfs_error     status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -56,7 +56,7 @@ chimera_setattr_vfs_complete(
     chimera_vfs_release(request->thread->vfs_thread, handle);
     request->setattr.parent_handle = NULL;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_setattr_vfs_complete */
 
 static void
@@ -71,7 +71,7 @@ chimera_setattr_open_complete(
     (void) attr;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_txn_finish(request->thread, request, error_code);
+        chimera_client_compound_finish(request->thread, request, error_code);
         return;
     }
 
@@ -79,7 +79,7 @@ chimera_setattr_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         oh,
         &request->setattr.set_attr,
         0,  /* pre_attr_mask */
@@ -101,7 +101,7 @@ chimera_setattr_start(
 {
     chimera_vfs_open(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->setattr.path,
@@ -120,11 +120,11 @@ chimera_dispatch_setattr(
 {
     request->setattr.parent_handle = NULL;
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_setattr_start, chimera_setattr_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_setattr_start, chimera_setattr_reply);
 } /* chimera_dispatch_setattr */
 
 /* Variant that does NOT follow a final symlink (for lchown(2) and friends): the
@@ -136,7 +136,7 @@ chimera_lsetattr_start(
 {
     chimera_vfs_open(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->setattr.path,
@@ -155,11 +155,11 @@ chimera_dispatch_lsetattr(
 {
     request->setattr.parent_handle = NULL;
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_lsetattr_start, chimera_setattr_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_lsetattr_start, chimera_setattr_reply);
 } /* chimera_dispatch_lsetattr */
 
 /* Completion callback for setattr_at operations - doesn't release parent handle */
@@ -174,7 +174,7 @@ chimera_setattr_dispatch_at_complete(
     struct chimera_client_request *request = private_data;
 
     /* Note: parent handle is NOT released - caller owns it */
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_setattr_dispatch_at_complete */
 
 static void
@@ -184,7 +184,7 @@ chimera_setattr_at_start(
 {
     chimera_vfs_setattr(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->setattr.parent_handle,
         &request->setattr.set_attr,
         0,  /* pre_attr_mask */
@@ -201,8 +201,8 @@ chimera_dispatch_setattr_at(
 {
     request->setattr.parent_handle = parent_handle;
 
-    chimera_client_txn_run(thread, request,
-                           parent_handle->fh, parent_handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_setattr_at_start, chimera_setattr_reply);
+    chimera_client_compound_run(thread, request,
+                                parent_handle->fh, parent_handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_setattr_at_start, chimera_setattr_reply);
 } /* chimera_dispatch_setattr_at */

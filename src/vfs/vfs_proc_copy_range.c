@@ -28,7 +28,7 @@
 struct chimera_vfs_copy_fallback {
     struct chimera_vfs_thread        *thread;
     struct chimera_vfs_cred           cred;
-    struct chimera_vfs_transaction   *txn;
+    struct chimera_vfs_compound      *compound;
     struct chimera_vfs_open_handle   *src_handle;
     struct chimera_vfs_open_handle   *dst_handle;
     uint64_t                          src_offset;
@@ -198,7 +198,7 @@ chimera_vfs_copy_fallback_read_cb(
 
     chimera_vfs_write(
         ctx->thread,
-        &ctx->cred, ctx->txn,
+        &ctx->cred, ctx->compound,
         ctx->dst_handle,
         ctx->dst_offset,
         count,
@@ -230,7 +230,7 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
 
     chimera_vfs_read(
         ctx->thread,
-        &ctx->cred, ctx->txn,
+        &ctx->cred, ctx->compound,
         ctx->src_handle,
         ctx->src_offset,
         chunk,
@@ -245,7 +245,7 @@ static void
 chimera_vfs_copy_range_fallback(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
-    struct chimera_vfs_transaction   *txn,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *src_handle,
     uint64_t                          src_offset,
     struct chimera_vfs_open_handle   *dst_handle,
@@ -267,7 +267,7 @@ chimera_vfs_copy_range_fallback(
 
     ctx->thread         = thread;
     ctx->cred           = *cred;
-    ctx->txn            = txn;
+    ctx->compound       = compound;
     ctx->src_handle     = src_handle;
     ctx->dst_handle     = dst_handle;
     ctx->src_offset     = src_offset;
@@ -314,7 +314,7 @@ SYMBOL_EXPORT void
 chimera_vfs_copy_range(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
-    struct chimera_vfs_transaction   *txn,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *src_handle,
     uint64_t                          src_offset,
     struct chimera_vfs_open_handle   *dst_handle,
@@ -344,7 +344,7 @@ chimera_vfs_copy_range(
             callback(CHIMERA_VFS_ENOTSUP, 0, NULL, NULL, private_data);
             return;
         }
-        chimera_vfs_copy_range_fallback(thread, cred, txn, src_handle, src_offset,
+        chimera_vfs_copy_range_fallback(thread, cred, compound, src_handle, src_offset,
                                         dst_handle, dst_offset, length,
                                         pre_attr_mask, post_attr_mask,
                                         callback, private_data);
@@ -360,7 +360,7 @@ chimera_vfs_copy_range(
 
     request->opcode                             = CHIMERA_VFS_OP_COPY_RANGE;
     request->complete                           = chimera_vfs_copy_range_complete;
-    request->transaction                        = txn;
+    request->compound                           = compound;
     request->copy_range.src_handle              = src_handle;
     request->copy_range.dst_handle              = dst_handle;
     request->copy_range.src_offset              = src_offset;

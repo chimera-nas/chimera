@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 #include "vfs/vfs_procs.h"
 
 static void
@@ -25,7 +25,7 @@ chimera_write_same_op_complete(
 
     request->write_same.r_count = count;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_write_same_op_complete */
 
 static void
@@ -36,7 +36,7 @@ chimera_write_same_start(
     chimera_vfs_write_same(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        request->txn,
+        request->compound,
         request->write_same.handle,
         request->write_same.offset,
         request->write_same.block_size,
@@ -58,7 +58,7 @@ chimera_write_same_reply(
 {
     chimera_write_same_callback_t callback     = request->write_same.callback;
     void                         *callback_arg = request->write_same.private_data;
-    enum chimera_vfs_error        status       = request->txn_op_status;
+    enum chimera_vfs_error        status       = request->compound_op_status;
     uint64_t                      count        = request->write_same.r_count;
 
     chimera_client_request_free(thread, request);
@@ -71,9 +71,9 @@ chimera_dispatch_write_same(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->write_same.handle->fh,
-                           request->write_same.handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_write_same_start, chimera_write_same_reply);
+    chimera_client_compound_run(thread, request,
+                                request->write_same.handle->fh,
+                                request->write_same.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_write_same_start, chimera_write_same_reply);
 } /* chimera_dispatch_write_same */

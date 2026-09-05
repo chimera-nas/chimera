@@ -426,7 +426,7 @@ chimera_posix_errno_from_status(enum chimera_vfs_error status)
         /* Internal statuses with no host errno equivalent. */
         case CHIMERA_VFS_ESYMLINK:     return ELOOP;
         case CHIMERA_VFS_EBADCOOKIE:   return EINVAL;
-        case CHIMERA_VFS_ETXN_EXHAUSTED: return EAGAIN;
+        case CHIMERA_VFS_ECOMPOUND_EXHAUSTED: return EAGAIN;
         default:                       return EIO;
     } // switch
 } // chimera_posix_errno_from_status

@@ -103,7 +103,7 @@ chimera_vfs_mkdir_parent_open_complete(
 
     chimera_vfs_mkdir_at(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         oh,
         request->mkdir.path + request->mkdir.name_offset,
         request->mkdir.pathlen - request->mkdir.name_offset,
@@ -138,7 +138,7 @@ chimera_vfs_mkdir_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->mkdir.parent_fh,
         request->mkdir.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -148,17 +148,17 @@ chimera_vfs_mkdir_parent_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_mkdir(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_transaction *txn,
-    const void                     *fh,
-    int                             fhlen,
-    const char                     *path,
-    int                             pathlen,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        attr_mask,
-    chimera_vfs_mkdir_callback_t    callback,
-    void                           *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *path,
+    int                            pathlen,
+    struct chimera_vfs_attrs      *set_attr,
+    uint64_t                       attr_mask,
+    chimera_vfs_mkdir_callback_t   callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -198,7 +198,7 @@ chimera_vfs_mkdir(
     request->mkdir.attr_mask    = attr_mask;
     request->mkdir.callback     = callback;
     request->mkdir.private_data = private_data;
-    request->transaction        = txn;
+    request->compound           = compound;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         /* Fast path: pass full path to _at operation, kernel resolves */
@@ -209,7 +209,7 @@ chimera_vfs_mkdir(
 
         chimera_vfs_open_fh(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             request->mkdir.parent_fh,
             request->mkdir.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -231,7 +231,7 @@ chimera_vfs_mkdir(
 
             chimera_vfs_open_fh(
                 thread,
-                cred, request->transaction,
+                cred, request->compound,
                 request->mkdir.parent_fh,
                 request->mkdir.parent_fh_len,
                 CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -255,7 +255,7 @@ chimera_vfs_mkdir(
 
         chimera_vfs_lookup(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             request->mkdir.path,

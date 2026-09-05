@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_fsetattr_complete(
@@ -17,7 +17,7 @@ chimera_fsetattr_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_fsetattr_complete */
 
 static void
@@ -29,7 +29,7 @@ chimera_fsetattr_start(
      * futimens-to-now) ride the descriptor's open-time grant. */
     chimera_vfs_fsetattr(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->fsetattr.handle,
         &request->fsetattr.set_attr,
         0,  /* pre_attr_mask */
@@ -45,7 +45,7 @@ chimera_fsetattr_reply(
 {
     chimera_fsetattr_callback_t callback     = request->fsetattr.callback;
     void                       *callback_arg = request->fsetattr.private_data;
-    enum chimera_vfs_error      status       = request->txn_op_status;
+    enum chimera_vfs_error      status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -57,9 +57,9 @@ chimera_dispatch_fsetattr(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->fsetattr.handle->fh,
-                           request->fsetattr.handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_fsetattr_start, chimera_fsetattr_reply);
+    chimera_client_compound_run(thread, request,
+                                request->fsetattr.handle->fh,
+                                request->fsetattr.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_fsetattr_start, chimera_fsetattr_reply);
 } /* chimera_dispatch_fsetattr */

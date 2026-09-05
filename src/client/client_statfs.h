@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static inline void
 chimera_attrs_to_statvfs(
@@ -43,7 +43,7 @@ chimera_statfs_getattr_complete(
     chimera_vfs_release(request->thread->vfs_thread, handle);
     request->statfs.handle = NULL;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_statfs_getattr_complete */
 
 static void
@@ -58,7 +58,7 @@ chimera_statfs_open_complete(
     (void) attr;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_txn_finish(request->thread, request, error_code);
+        chimera_client_compound_finish(request->thread, request, error_code);
         return;
     }
 
@@ -66,7 +66,7 @@ chimera_statfs_open_complete(
 
     chimera_vfs_getattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         oh,
         CHIMERA_VFS_ATTR_MASK_STATFS,
         chimera_statfs_getattr_complete,
@@ -87,7 +87,7 @@ chimera_statfs_start(
 {
     chimera_vfs_open(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->statfs.path,
@@ -106,7 +106,7 @@ chimera_statfs_reply(
 {
     chimera_statfs_callback_t callback     = request->statfs.callback;
     void                     *callback_arg = request->statfs.private_data;
-    enum chimera_vfs_error    status       = request->txn_op_status;
+    enum chimera_vfs_error    status       = request->compound_op_status;
     struct chimera_statvfs    st           = request->sync_statvfs;
 
     chimera_client_request_free(thread, request);
@@ -126,9 +126,9 @@ chimera_dispatch_statfs(
 {
     request->statfs.handle = NULL;
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_statfs_start, chimera_statfs_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_statfs_start, chimera_statfs_reply);
 } /* chimera_dispatch_statfs */

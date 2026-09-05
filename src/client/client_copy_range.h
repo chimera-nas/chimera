@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_copy_range_complete(
@@ -19,7 +19,7 @@ chimera_copy_range_complete(
 
     request->copy_range.r_length = length;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_copy_range_complete */
 
 static void
@@ -29,7 +29,7 @@ chimera_copy_range_start(
 {
     chimera_vfs_copy_range(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->copy_range.src_handle,
         request->copy_range.src_offset,
         request->copy_range.dst_handle,
@@ -49,7 +49,7 @@ chimera_copy_range_reply(
 {
     chimera_copy_range_callback_t callback     = request->copy_range.callback;
     void                         *callback_arg = request->copy_range.private_data;
-    enum chimera_vfs_error        status       = request->txn_op_status;
+    enum chimera_vfs_error        status       = request->compound_op_status;
     uint64_t                      length       = request->copy_range.r_length;
 
     chimera_client_request_free(thread, request);
@@ -62,9 +62,9 @@ chimera_dispatch_copy_range(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->copy_range.dst_handle->fh,
-                           request->copy_range.dst_handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_copy_range_start, chimera_copy_range_reply);
+    chimera_client_compound_run(thread, request,
+                                request->copy_range.dst_handle->fh,
+                                request->copy_range.dst_handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_copy_range_start, chimera_copy_range_reply);
 } /* chimera_dispatch_copy_range */

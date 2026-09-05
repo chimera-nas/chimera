@@ -13,7 +13,7 @@
  * rename threads concurrently against ONE shared client/server so the server
  * processes them in parallel: readdir holds dir wants child, rename holds child
  * wants dir => ABBA.  Under wait-die this starved/hung; under WFG exactly one
- * (the youngest explicit txn) aborts and retries, both complete.
+ * (the youngest explicit compound) aborts and retries, both complete.
  *
  * Threads share a single client (no fork) so they drive genuine concurrent RPCs.
  */

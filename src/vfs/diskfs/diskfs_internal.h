@@ -1231,28 +1231,28 @@ struct diskfs_txn_delta {
 
 struct diskfs_txn {
     /* MUST be first: an explicit transaction handle is &txn->core, and an
-     * enlisted op recovers the diskfs_txn by casting request->transaction back. */
-    struct chimera_vfs_transaction core;
-    enum diskfs_txn_type           type;
+     * enlisted op recovers the diskfs_txn by casting request->compound back. */
+    struct chimera_vfs_compound core;
+    enum diskfs_txn_type        type;
     /* 1 = autocommit txn (diskfs-pooled, never a WFG victim); 0 = explicit
-     * CAP_TRANSACTIONAL txn (core-owned memory, freed by the VFS core at end).
+     * CAP_COMPOUND txn (core-owned memory, freed by the VFS core at end).
      * The authoritative autocommit marker -- core.ts is purely the WFG victim
      * priority (explicit txns carry ts>0, autocommit ts==0). */
-    uint8_t                        autocommit;
-    struct diskfs_thread          *thread;
-    struct diskfs_txn             *next;   /* per-thread free list link */
-    struct diskfs_txn_slot         inodes[DISKFS_TXN_MAX_INODES];
-    int                            num_inodes;
-    struct diskfs_txn_block       *blocks; /* dirty blocks pinned by this txn */
-    uint32_t                       nblocks;      /* count of blocks added (diag tracing) */
-    uint32_t                       n_journal;    /* of nblocks, how many are AG-log journal claims */
-    uint32_t                       n_reserve_again; /* times the btree RESERVE phase re-drove (SM_AGAIN) */
+    uint8_t                     autocommit;
+    struct diskfs_thread       *thread;
+    struct diskfs_txn          *next;      /* per-thread free list link */
+    struct diskfs_txn_slot      inodes[DISKFS_TXN_MAX_INODES];
+    int                         num_inodes;
+    struct diskfs_txn_block    *blocks;    /* dirty blocks pinned by this txn */
+    uint32_t                    nblocks;         /* count of blocks added (diag tracing) */
+    uint32_t                    n_journal;       /* of nblocks, how many are AG-log journal claims */
+    uint32_t                    n_reserve_again;    /* times the btree RESERVE phase re-drove (SM_AGAIN) */
     /* Diag: txn lifecycle stage, to localize a stranded (never-completed) txn at
      * a hang. 1=BEGUN 2=COMMIT_CALLED 3=SUBMITTED 4=PARKED 5=DURABLE 6=COMPLETE. */
-    int                            dbg_stage;
-    struct diskfs_txn_free        *pending_frees; /* ranges freed, applied on commit */
-    struct diskfs_txn_delta       *space_deltas;  /* ALLOC deltas, serialized into redo */
-    uint32_t                       n_space_deltas; /* count of space_deltas (alloc) */
+    int                         dbg_stage;
+    struct diskfs_txn_free     *pending_frees;    /* ranges freed, applied on commit */
+    struct diskfs_txn_delta    *space_deltas;     /* ALLOC deltas, serialized into redo */
+    uint32_t                    n_space_deltas;    /* count of space_deltas (alloc) */
 
     /* WFG wait descriptor: the inode (if any) this txn is currently parked on,
      * published as a seqlock so a deadlock detector on another thread can read it
@@ -1261,18 +1261,18 @@ struct diskfs_txn {
      * clear on this worker at grant finalize); the seqlock gives readers a
      * torn-read-free snapshot.  grant_pending==1 marks "granted but not yet
      * finalized" so the detector prunes the (now dead) wait edge. */
-    _Atomic uint32_t               wfg_seq; /* even = stable, odd = mid-write */
-    uint64_t                       wfg_wait_inum; /* 0 = not waiting */
-    uint32_t                       wfg_wait_gen;
-    uint8_t                        wfg_wait_mode;
-    uint8_t                        wfg_grant_pending;
+    _Atomic uint32_t            wfg_seq;    /* even = stable, odd = mid-write */
+    uint64_t                    wfg_wait_inum;    /* 0 = not waiting */
+    uint32_t                    wfg_wait_gen;
+    uint8_t                     wfg_wait_mode;
+    uint8_t                     wfg_grant_pending;
 
     /* When the IL submission queue is full, the commit parks on its worker's
      * commit-wait FIFO (carrying its completion cb) instead of spinning the
      * event loop; the CQ doorbell resumes it once SQ space frees. */
-    diskfs_txn_commit_cb_t         commit_cb;
-    void                          *commit_private;
-    struct diskfs_txn             *commit_wait_next;
+    diskfs_txn_commit_cb_t      commit_cb;
+    void                       *commit_private;
+    struct diskfs_txn          *commit_wait_next;
 };
 
 /* Diag: dump the call path the first time a single txn's block count crosses
@@ -5058,13 +5058,13 @@ diskfs_txn_begin(
 {
     struct diskfs_txn *txn;
 
-    /* Enlisted in an explicit transaction (CHIMERA_VFS_CAP_TRANSACTIONAL): reuse
+    /* Enlisted in an explicit transaction (CHIMERA_VFS_CAP_COMPOUND): reuse
      * it so every op shares one txn and one commit.  Its locks/blocks persist
-     * across ops until EndTransaction; the op's requested `type` is ignored (the
-     * explicit txn's mode, set at BeginTransaction, governs the lock mode).
+     * across ops until CompoundEnd; the op's requested `type` is ignored (the
+     * explicit txn's mode, set at CompoundBegin, governs the lock mode).
      * `request` is NULL for internal non-op callers (mtime flusher, drain). */
-    if (request && request->transaction) {
-        return (struct diskfs_txn *) request->transaction;
+    if (request && request->compound) {
+        return (struct diskfs_txn *) request->compound;
     }
 
     txn = thread->txn_free_list;
@@ -5099,7 +5099,7 @@ diskfs_txn_release(struct diskfs_txn *txn)
     txn->space_deltas   = NULL;
     txn->n_space_deltas = 0;
 
-    /* Explicit (CAP_TRANSACTIONAL) txns are core-owned: the VFS core allocated
+    /* Explicit (CAP_COMPOUND) txns are core-owned: the VFS core allocated
      * the handle locally at begin and frees it at end-completion, so diskfs must
      * not recycle it here.  Only autocommit txns belong to the diskfs pool. */
     if (!txn->autocommit) {
@@ -5138,10 +5138,10 @@ diskfs_op_fail(
     int                         status)
 {
     request->status = status;
-    if (request->transaction) {
+    if (request->compound) {
         /* Enlisted in an explicit transaction: don't abort here -- the txn (and
-         * its locks/blocks) stays intact and is resolved at EndTransaction.  A
-         * status of ETXN_CONFLICT propagates up to drive a retry; a logical
+         * its locks/blocks) stays intact and is resolved at CompoundEnd.  A
+         * status of ECOMPOUND_CONFLICT propagates up to drive a retry; a logical
          * error just stops this op's protocol chain. */
         request->complete(request);
     } else if (txn) {
@@ -5159,9 +5159,9 @@ diskfs_op_ok(
     struct diskfs_txn          *txn)
 {
     request->status = CHIMERA_VFS_OK;
-    if (request->transaction) {
+    if (request->compound) {
         /* Enlisted: defer the commit (and its single intent-log FUA) to
-         * EndTransaction so the whole transaction commits once. */
+         * CompoundEnd so the whole transaction commits once. */
         request->complete(request);
     } else if (txn) {
         request->wait_reason = "diskfs:committing";   /* diag: reached commit */

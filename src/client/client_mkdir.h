@@ -6,9 +6,9 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
-/* Shared reply for both the path and _at mkdir transactions. */
+/* Shared reply for both the path and _at mkdir compounds. */
 static void
 chimera_mkdir_reply(
     struct chimera_client_thread  *thread,
@@ -16,7 +16,7 @@ chimera_mkdir_reply(
 {
     chimera_mkdir_callback_t callback     = request->mkdir.callback;
     void                    *callback_arg = request->mkdir.private_data;
-    enum chimera_vfs_error   status       = request->txn_op_status;
+    enum chimera_vfs_error   status       = request->compound_op_status;
 
     /* Note: parent handle (for the _at variant) is NOT released - caller owns it */
     chimera_client_request_free(thread, request);
@@ -32,7 +32,7 @@ chimera_mkdir_vfs_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_mkdir_vfs_complete */
 
 static void
@@ -43,7 +43,7 @@ chimera_mkdir_start(
     /* set_attr (creation mode) is initialized by the caller. */
     chimera_vfs_mkdir(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->mkdir.path,
@@ -66,11 +66,11 @@ chimera_dispatch_mkdir(
         return;
     }
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_mkdir_start, chimera_mkdir_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_mkdir_start, chimera_mkdir_reply);
 } /* chimera_dispatch_mkdir */
 
 static void
@@ -84,7 +84,7 @@ chimera_mkdir_dispatch_at_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_mkdir_dispatch_at_complete */
 
 static void
@@ -94,7 +94,7 @@ chimera_mkdir_at_start(
 {
     chimera_vfs_mkdir_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->mkdir.parent_handle,
         request->mkdir.path,
         request->mkdir.path_len,
@@ -114,8 +114,8 @@ chimera_dispatch_mkdir_at(
 {
     request->mkdir.parent_handle = parent_handle;
 
-    chimera_client_txn_run(thread, request,
-                           parent_handle->fh, parent_handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_mkdir_at_start, chimera_mkdir_reply);
+    chimera_client_compound_run(thread, request,
+                                parent_handle->fh, parent_handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_mkdir_at_start, chimera_mkdir_reply);
 } /* chimera_dispatch_mkdir_at */

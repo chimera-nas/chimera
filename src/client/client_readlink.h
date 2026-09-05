@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_readlink_complete(
@@ -23,7 +23,7 @@ chimera_readlink_complete(
 
     request->sync_target_len = targetlen;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_readlink_complete */
 
 static void
@@ -38,7 +38,7 @@ chimera_readlink_open_complete(
     (void) attr;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_txn_finish(request->thread, request, error_code);
+        chimera_client_compound_finish(request->thread, request, error_code);
         return;
     }
 
@@ -46,7 +46,7 @@ chimera_readlink_open_complete(
 
     chimera_vfs_readlink(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         oh,
         request->readlink.target,
         request->readlink.target_maxlength,
@@ -69,7 +69,7 @@ chimera_readlink_start(
      */
     chimera_vfs_open(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->readlink.path,
@@ -88,7 +88,7 @@ chimera_readlink_reply(
 {
     chimera_readlink_callback_t callback     = request->readlink.callback;
     void                       *callback_arg = request->readlink.private_data;
-    enum chimera_vfs_error      status       = request->txn_op_status;
+    enum chimera_vfs_error      status       = request->compound_op_status;
     char                       *target       = request->readlink.target;
     int                         targetlen    = request->sync_target_len;
 
@@ -109,9 +109,9 @@ chimera_dispatch_readlink(
 {
     request->readlink.handle = NULL;
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_readlink_start, chimera_readlink_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_readlink_start, chimera_readlink_reply);
 } /* chimera_dispatch_readlink */

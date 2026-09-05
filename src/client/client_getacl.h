@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 #include "vfs/sdk/vfs_acl.h"
 
 /*
@@ -57,7 +57,7 @@ chimera_getacl_getattr_complete(
     chimera_vfs_release(request->thread->vfs_thread, handle);
     request->getacl.handle = NULL;
 
-    chimera_client_txn_finish(request->thread, request, status);
+    chimera_client_compound_finish(request->thread, request, status);
 } /* chimera_getacl_getattr_complete */
 
 static void
@@ -69,7 +69,7 @@ chimera_getacl_open_complete(
     struct chimera_client_request *request = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_txn_finish(request->thread, request, error_code);
+        chimera_client_compound_finish(request->thread, request, error_code);
         return;
     }
 
@@ -77,7 +77,7 @@ chimera_getacl_open_complete(
 
     chimera_vfs_getattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         oh,
         CHIMERA_VFS_ATTR_ACL,
         chimera_getacl_getattr_complete,
@@ -93,7 +93,7 @@ chimera_getacl_lookup_complete(
     struct chimera_client_request *request = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_txn_finish(request->thread, request, error_code);
+        chimera_client_compound_finish(request->thread, request, error_code);
         return;
     }
 
@@ -102,7 +102,7 @@ chimera_getacl_lookup_complete(
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->fh,
         request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -117,7 +117,7 @@ chimera_getacl_start(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->getacl.path,
@@ -135,7 +135,7 @@ chimera_getacl_reply(
 {
     chimera_setattr_callback_t callback     = request->getacl.callback;
     void                      *callback_arg = request->getacl.private_data;
-    enum chimera_vfs_error     status       = request->txn_op_status;
+    enum chimera_vfs_error     status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -149,9 +149,9 @@ chimera_dispatch_getacl(
 {
     request->getacl.handle = NULL;
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_getacl_start, chimera_getacl_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_getacl_start, chimera_getacl_reply);
 } /* chimera_dispatch_getacl */

@@ -7,7 +7,7 @@
 #include "common/platform.h"
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static inline void
 chimera_attrs_to_stat(
@@ -47,7 +47,7 @@ chimera_stat_lookup_complete(
         chimera_attrs_to_stat(attr, &request->sync_stat);
     }
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_stat_lookup_complete */
 
 static void
@@ -57,7 +57,7 @@ chimera_stat_start(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->stat.path,
@@ -75,7 +75,7 @@ chimera_stat_reply(
 {
     chimera_stat_callback_t callback     = request->stat.callback;
     void                   *callback_arg = request->stat.private_data;
-    enum chimera_vfs_error  status       = request->txn_op_status;
+    enum chimera_vfs_error  status       = request->compound_op_status;
     struct chimera_stat     st           = request->sync_stat;
 
     chimera_client_request_free(thread, request);
@@ -93,9 +93,9 @@ chimera_dispatch_stat(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_stat_start, chimera_stat_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_stat_start, chimera_stat_reply);
 } /* chimera_dispatch_stat */

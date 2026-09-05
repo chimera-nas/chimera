@@ -293,13 +293,13 @@ struct chimera_vfs_handle_state {
 * via chimera_vfs_write_same.  Modules that leave this unset surface ENOTSUP. */
 #define CHIMERA_VFS_CAP_WRITE_SAME            (1U << 28)
 
-/* If set, the module implements explicit multi-operation transactions via
- * CHIMERA_VFS_OP_BEGIN_TRANSACTION / CHIMERA_VFS_OP_END_TRANSACTION and honours
- * request->transaction on every other op (enlist; commit only at end).  Modules
- * that leave this unset behave exactly as before: chimera_vfs_begin_transaction
- * is a no-op returning a NULL handle, request->transaction stays NULL, and each
- * op autocommits independently.  Only diskfs and cairn advertise it. */
-#define CHIMERA_VFS_CAP_TRANSACTIONAL         (1U << 30)
+/* If set, the module implements explicit multi-operation compounds via
+* CHIMERA_VFS_OP_COMPOUND_BEGIN / CHIMERA_VFS_OP_COMPOUND_END and honours
+* request->compound on every other op (enlist; commit only at end).  Modules
+* that leave this unset behave exactly as before: chimera_vfs_compound_begin
+* is a no-op returning a NULL handle, request->compound stays NULL, and each
+* op autocommits independently.  Only diskfs and cairn advertise it. */
+#define CHIMERA_VFS_CAP_COMPOUND              (1U << 30)
 
 struct chimera_vfs_module {
     /* Required
@@ -384,13 +384,13 @@ struct chimera_vfs_module {
         struct chimera_vfs_request *request,
         void                       *private_data);
 
-    /* Required when CHIMERA_VFS_CAP_TRANSACTIONAL is set: sizeof the backend's
-     * transaction object (whose first member is struct chimera_vfs_transaction).
+    /* Required when CHIMERA_VFS_CAP_COMPOUND is set: sizeof the backend's
+     * compound object (whose first member is struct chimera_vfs_compound).
      * The VFS core allocates this many bytes locally at begin so the handle is
      * available synchronously; the backend initializes it in place in its
-     * OP_BEGIN_TRANSACTION handler (running on the transaction's owning thread)
+     * OP_COMPOUND_BEGIN handler (running on the compound's owning thread)
      * and must NOT free it (the core owns the allocation). */
-    uint32_t txn_size;
+    uint32_t compound_size;
 };
 
 /* A module is "path-only" when it supports path-relative ops but has no

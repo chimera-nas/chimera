@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_seek_complete(
@@ -19,7 +19,7 @@ chimera_seek_complete(
     request->seek.r_eof    = eof;
     request->seek.r_offset = offset;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_seek_complete */
 
 static void
@@ -29,7 +29,7 @@ chimera_seek_start(
 {
     chimera_vfs_seek(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->seek.handle,
         request->seek.offset,
         request->seek.what,
@@ -44,7 +44,7 @@ chimera_seek_reply(
 {
     chimera_seek_callback_t callback     = request->seek.callback;
     void                   *callback_arg = request->seek.private_data;
-    enum chimera_vfs_error  status       = request->txn_op_status;
+    enum chimera_vfs_error  status       = request->compound_op_status;
     int                     eof          = request->seek.r_eof;
     uint64_t                offset       = request->seek.r_offset;
 
@@ -58,9 +58,9 @@ chimera_dispatch_seek(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->seek.handle->fh,
-                           request->seek.handle->fh_len,
-                           CHIMERA_VFS_TXN_READ,
-                           chimera_seek_start, chimera_seek_reply);
+    chimera_client_compound_run(thread, request,
+                                request->seek.handle->fh,
+                                request->seek.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_READ,
+                                chimera_seek_start, chimera_seek_reply);
 } /* chimera_dispatch_seek */

@@ -6,7 +6,7 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_mknod_vfs_complete(
@@ -16,7 +16,7 @@ chimera_mknod_vfs_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_mknod_vfs_complete */
 
 static void
@@ -26,7 +26,7 @@ chimera_mknod_start(
 {
     chimera_vfs_mknod(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->mknod.path,
@@ -44,7 +44,7 @@ chimera_mknod_reply(
 {
     chimera_mknod_callback_t callback     = request->mknod.callback;
     void                    *callback_arg = request->mknod.private_data;
-    enum chimera_vfs_error   status       = request->txn_op_status;
+    enum chimera_vfs_error   status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -62,9 +62,9 @@ chimera_dispatch_mknod(
         return;
     }
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_mknod_start, chimera_mknod_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_mknod_start, chimera_mknod_reply);
 } /* chimera_dispatch_mknod */

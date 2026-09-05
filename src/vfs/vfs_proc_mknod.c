@@ -51,7 +51,7 @@ chimera_vfs_mknod_parent_open_complete(
 
     chimera_vfs_mknod_at(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         oh,
         request->mknod.path + request->mknod.name_offset,
         request->mknod.pathlen - request->mknod.name_offset,
@@ -86,7 +86,7 @@ chimera_vfs_mknod_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->mknod.parent_fh,
         request->mknod.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -96,17 +96,17 @@ chimera_vfs_mknod_parent_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_mknod(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_transaction *txn,
-    const void                     *fh,
-    int                             fhlen,
-    const char                     *path,
-    int                             pathlen,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        attr_mask,
-    chimera_vfs_mknod_callback_t    callback,
-    void                           *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *path,
+    int                            pathlen,
+    struct chimera_vfs_attrs      *set_attr,
+    uint64_t                       attr_mask,
+    chimera_vfs_mknod_callback_t   callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -146,7 +146,7 @@ chimera_vfs_mknod(
     request->mknod.attr_mask    = attr_mask;
     request->mknod.callback     = callback;
     request->mknod.private_data = private_data;
-    request->transaction        = txn;
+    request->compound           = compound;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         request->mknod.name_offset = 0;
@@ -156,7 +156,7 @@ chimera_vfs_mknod(
 
         chimera_vfs_open_fh(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             request->mknod.parent_fh,
             request->mknod.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -175,7 +175,7 @@ chimera_vfs_mknod(
 
         chimera_vfs_lookup(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             request->mknod.path,

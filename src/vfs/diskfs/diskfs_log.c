@@ -1818,8 +1818,8 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
      *
      * AUTOCOMMIT only: a pooled autocommit txn survives (diskfs-owned) until it
      * is recycled at applied_wm below, so its completion can fire here at
-     * durable.  An EXPLICIT (CAP_TRANSACTIONAL) txn is core-owned and the VFS
-     * core frees it the moment its EndTransaction completion fires -- but the
+     * durable.  An EXPLICIT (CAP_COMPOUND) txn is core-owned and the VFS
+     * core frees it the moment its CompoundEnd completion fires -- but the
      * apply thread still reads txn->blocks/space_deltas/pending_frees until
      * applied_wm passes, so firing it here would free the txn out from under the
      * apply thread (heap-use-after-free in diskfs_txn_apply_frees).  Its
@@ -1862,7 +1862,7 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
          * the handle. */
         diskfs_txn_release(fe->txn);
         if (!fe->autocommit) {
-            /* Deferred explicit EndTransaction completion -- the handle is still
+            /* Deferred explicit CompoundEnd completion -- the handle is still
              * alive (release early-returned for it) and the apply thread is done
              * with it, so deliver completion now; the VFS core frees the handle. */
             diskfs_metric_time_sample(

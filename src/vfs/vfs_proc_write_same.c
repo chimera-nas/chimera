@@ -31,7 +31,7 @@
 struct chimera_vfs_write_same_fallback {
     struct chimera_vfs_thread        *thread;
     struct chimera_vfs_cred           cred;
-    struct chimera_vfs_transaction   *txn;
+    struct chimera_vfs_compound      *compound;
     struct chimera_vfs_open_handle   *handle;
     uint64_t                          offset;       /* next write offset */
     uint64_t                          remaining;    /* bytes left (block multiple) */
@@ -143,7 +143,7 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
     chimera_vfs_write(
         ctx->thread,
         &ctx->cred,
-        ctx->txn,
+        ctx->compound,
         ctx->handle,
         ctx->offset,
         chunk,
@@ -160,7 +160,7 @@ static void
 chimera_vfs_write_same_fallback(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
-    struct chimera_vfs_transaction   *txn,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *handle,
     uint64_t                          offset,
     uint32_t                          block_size,
@@ -206,7 +206,7 @@ chimera_vfs_write_same_fallback(
 
     ctx->thread         = thread;
     ctx->cred           = *cred;
-    ctx->txn            = txn;
+    ctx->compound       = compound;
     ctx->handle         = handle;
     ctx->offset         = offset;
     ctx->remaining      = (uint64_t) block_size * block_count;
@@ -256,7 +256,7 @@ SYMBOL_EXPORT void
 chimera_vfs_write_same(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
-    struct chimera_vfs_transaction   *txn,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *handle,
     uint64_t                          offset,
     uint32_t                          block_size,
@@ -283,7 +283,7 @@ chimera_vfs_write_same(
             callback(CHIMERA_VFS_ENOTSUP, 0, 0, NULL, NULL, private_data);
             return;
         }
-        chimera_vfs_write_same_fallback(thread, cred, txn, handle, offset, block_size,
+        chimera_vfs_write_same_fallback(thread, cred, compound, handle, offset, block_size,
                                         block_count, pattern, pattern_len,
                                         reloff_pattern, sync, pre_attr_mask,
                                         post_attr_mask, callback, private_data);
@@ -298,7 +298,7 @@ chimera_vfs_write_same(
     }
 
     request->opcode                             = CHIMERA_VFS_OP_WRITE_SAME;
-    request->transaction                        = txn;
+    request->compound                           = compound;
     request->complete                           = chimera_vfs_write_same_complete;
     request->write_same.handle                  = handle;
     request->write_same.offset                  = offset;

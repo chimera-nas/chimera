@@ -64,8 +64,8 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_RMFS: return "RmFs";
         case CHIMERA_VFS_OP_READ_PLUS: return "ReadPlus";
         case CHIMERA_VFS_OP_WRITE_SAME: return "WriteSame";
-        case CHIMERA_VFS_OP_BEGIN_TRANSACTION: return "BeginTransaction";
-        case CHIMERA_VFS_OP_END_TRANSACTION: return "EndTransaction";
+        case CHIMERA_VFS_OP_COMPOUND_BEGIN: return "CompoundBegin";
+        case CHIMERA_VFS_OP_COMPOUND_END: return "CompoundEnd";
         default: return "Unknown";
     } /* switch */
 

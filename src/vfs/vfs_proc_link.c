@@ -50,7 +50,7 @@ chimera_vfs_link_dest_parent_lookup_complete(
 
     chimera_vfs_link_at(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->link.source_fh,
         request->link.source_fh_len,
         request->link.dest_parent_fh,
@@ -91,7 +91,7 @@ chimera_vfs_link_source_lookup_fast_complete(
     /* Dest parent FH and full path already set up; skip dest lookup */
     chimera_vfs_link_at(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->link.source_fh,
         request->link.source_fh_len,
         request->link.dest_parent_fh,
@@ -131,7 +131,7 @@ chimera_vfs_link_source_lookup_complete(
 
     chimera_vfs_lookup(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->fh,
         request->fh_len,
         request->link.new_path,
@@ -144,20 +144,20 @@ chimera_vfs_link_source_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_link(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_transaction *txn,
-    const void                     *fh,
-    int                             fhlen,
-    const char                     *old_path,
-    int                             old_pathlen,
-    unsigned int                    source_lookup_flags,
-    const char                     *new_path,
-    int                             new_pathlen,
-    unsigned int                    replace,
-    uint64_t                        attr_mask,
-    chimera_vfs_link_callback_t     callback,
-    void                           *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *old_path,
+    int                            old_pathlen,
+    unsigned int                   source_lookup_flags,
+    const char                    *new_path,
+    int                            new_pathlen,
+    unsigned int                   replace,
+    uint64_t                       attr_mask,
+    chimera_vfs_link_callback_t    callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -214,7 +214,7 @@ chimera_vfs_link(
     request->link.attr_mask    = attr_mask;
     request->link.callback     = callback;
     request->link.private_data = private_data;
-    request->transaction       = txn;
+    request->compound          = compound;
 
     if (chimera_vfs_module_is_path_only(request->module)) {
         /* Hardlink needs a stable source fh, which a path-only backend cannot
@@ -239,7 +239,7 @@ chimera_vfs_link(
          * followed (linkat AT_SYMLINK_FOLLOW) or linked itself. */
         chimera_vfs_lookup(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             request->link.path,
@@ -266,7 +266,7 @@ chimera_vfs_link(
          * as above. */
         chimera_vfs_lookup(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             request->link.path,

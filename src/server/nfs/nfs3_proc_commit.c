@@ -19,8 +19,8 @@ chimera_nfs3_commit_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_commit.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_commit.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
         chimera_nfs3_set_wcc_data(&req->res_commit.resfail.file_wcc, NULL, NULL);
     }
 
@@ -52,7 +52,7 @@ chimera_nfs3_commit_complete(
                sizeof(req->res_commit.resok.verf));
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_commit_complete */
 
 static void
@@ -65,13 +65,13 @@ chimera_nfs3_commit_open_callback(
     struct COMMIT3args *args = req->args_commit;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_txn_finish(req, error_code);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
     req->handle = handle;
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, req->compound,
                        handle,
                        args->offset,
                        args->count,
@@ -84,7 +84,7 @@ chimera_nfs3_commit_open_callback(
 static void
 chimera_nfs3_commit_start(struct nfs_request *req)
 {
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -126,7 +126,7 @@ chimera_nfs3_commit(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_WRITE,
-                         chimera_nfs3_commit_start, chimera_nfs3_commit_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_WRITE,
+                              chimera_nfs3_commit_start, chimera_nfs3_commit_reply);
 } /* chimera_nfs3_commit */

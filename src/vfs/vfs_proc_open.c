@@ -127,7 +127,7 @@ chimera_vfs_open_root_complete(
 struct chimera_vfs_open_follow_ctx {
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
-    struct chimera_vfs_transaction *txn;
+    struct chimera_vfs_compound    *compound;
     struct chimera_vfs_open_handle *oh;         /* handle on the symlink */
     chimera_vfs_open_callback_t     callback;
     void                           *private_data;
@@ -192,7 +192,7 @@ chimera_vfs_open_follow_readlink_complete(
 
     chimera_vfs_open(ctx->thread,
                      ctx->cred,
-                     ctx->txn,
+                     ctx->compound,
                      ctx->root_fh,
                      ctx->root_fh_len,
                      newpath,
@@ -243,7 +243,7 @@ chimera_vfs_open_op_complete(
 
         ctx->thread       = thread;
         ctx->cred         = request->cred;
-        ctx->txn          = request->transaction;
+        ctx->compound     = request->compound;
         ctx->oh           = oh;
         ctx->callback     = callback;
         ctx->private_data = priv;
@@ -264,7 +264,7 @@ chimera_vfs_open_op_complete(
         chimera_vfs_release(thread, request->open.parent_handle);
         chimera_vfs_request_free(thread, request);
 
-        chimera_vfs_readlink(thread, ctx->cred, ctx->txn, ctx->oh,
+        chimera_vfs_readlink(thread, ctx->cred, ctx->compound, ctx->oh,
                              ctx->target, sizeof(ctx->target) - 1,
                              0,
                              chimera_vfs_open_follow_readlink_complete,
@@ -300,7 +300,7 @@ chimera_vfs_open_parent_open_complete(
 
     chimera_vfs_open_at(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         oh,
         request->open.path + request->open.name_offset,
         request->open.pathlen - request->open.name_offset,
@@ -336,7 +336,7 @@ chimera_vfs_open_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->open.parent_fh,
         request->open.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -435,7 +435,7 @@ chimera_vfs_open_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred, request->transaction,
+        request->cred, request->compound,
         request->open.parent_fh,
         request->open.parent_fh_len,
         request->open.flags,
@@ -445,18 +445,18 @@ chimera_vfs_open_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_open(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_transaction *txn,
-    const void                     *fh,
-    int                             fhlen,
-    const char                     *path,
-    int                             pathlen,
-    unsigned int                    flags,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        attr_mask,
-    chimera_vfs_open_callback_t     callback,
-    void                           *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
+    const void                    *fh,
+    int                            fhlen,
+    const char                    *path,
+    int                            pathlen,
+    unsigned int                   flags,
+    struct chimera_vfs_attrs      *set_attr,
+    uint64_t                       attr_mask,
+    chimera_vfs_open_callback_t    callback,
+    void                          *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -475,14 +475,14 @@ chimera_vfs_open(
             return;
         }
 
-        request->transaction        = txn;
+        request->compound           = compound;
         request->open.callback      = callback;
         request->open.private_data  = private_data;
         request->open.granted_valid = 0;
 
         chimera_vfs_open_fh(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             flags,
@@ -517,7 +517,7 @@ chimera_vfs_open(
     request->open.callback      = callback;
     request->open.private_data  = private_data;
     request->open.granted_valid = 0;
-    request->transaction        = txn;
+    request->compound           = compound;
 
     /* A non-create open may pass no set_attr, but open_at (the path-op / deep
      * path-only dispatch) requires a non-NULL one; hand it a zeroed stand-in. */
@@ -536,7 +536,7 @@ chimera_vfs_open(
 
         chimera_vfs_open_fh(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             request->open.parent_fh,
             request->open.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -558,7 +558,7 @@ chimera_vfs_open(
 
             chimera_vfs_open_fh(
                 thread,
-                cred, request->transaction,
+                cred, request->compound,
                 request->open.parent_fh,
                 request->open.parent_fh_len,
                 CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -582,7 +582,7 @@ chimera_vfs_open(
 
         chimera_vfs_lookup(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             request->open.path,
@@ -601,7 +601,7 @@ chimera_vfs_open(
 
         chimera_vfs_lookup(
             thread,
-            cred, request->transaction,
+            cred, request->compound,
             fh,
             fhlen,
             request->open.path,

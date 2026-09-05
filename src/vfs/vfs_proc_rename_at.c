@@ -300,7 +300,7 @@ static void
 chimera_vfs_rename_at_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
-    struct chimera_vfs_transaction  *txn,
+    struct chimera_vfs_compound     *compound,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -328,7 +328,7 @@ chimera_vfs_rename_at_dispatch(
         return;
     }
 
-    request->transaction = txn;
+    request->compound = compound;
 
     request->opcode                  = CHIMERA_VFS_OP_RENAME_AT;
     request->complete                = chimera_vfs_rename_at_complete;
@@ -418,7 +418,7 @@ struct chimera_vfs_rename_at_gate {
     struct chimera_vfs_gate_ctx      gate_ctx;
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
-    struct chimera_vfs_transaction  *txn;
+    struct chimera_vfs_compound     *compound;
     const void                      *fh;
     int                              fhlen;
     const char                      *name;
@@ -458,7 +458,7 @@ chimera_vfs_rename_at_gate_fail(
 static void
 chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
 {
-    chimera_vfs_rename_at_dispatch(gate->thread, gate->cred, gate->txn, gate->fh,
+    chimera_vfs_rename_at_dispatch(gate->thread, gate->cred, gate->compound, gate->fh,
                                    gate->fhlen, gate->name, gate->namelen,
                                    gate->new_fh, gate->new_fhlen,
                                    gate->new_name, gate->new_namelen,
@@ -618,7 +618,7 @@ SYMBOL_EXPORT void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
-    struct chimera_vfs_transaction  *txn,
+    struct chimera_vfs_compound     *compound,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -677,7 +677,7 @@ chimera_vfs_rename_at(
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
-        gate->txn            = txn;
+        gate->compound       = compound;
         gate->fh             = fh;
         gate->fhlen          = fhlen;
         gate->name           = name;
@@ -712,7 +712,7 @@ chimera_vfs_rename_at(
         return;
     }
 
-    chimera_vfs_rename_at_dispatch(thread, cred, txn, fh, fhlen, name, namelen,
+    chimera_vfs_rename_at_dispatch(thread, cred, compound, fh, fhlen, name, namelen,
                                    new_fh, new_fhlen, new_name, new_namelen,
                                    target_fh, target_fh_len, flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,

@@ -17,8 +17,8 @@ chimera_nfs3_readlink_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_readlink.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status)
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_readlink.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status)
         ;
         req->res_readlink.resok.symlink_attributes.attributes_follow = 0;
     }
@@ -60,7 +60,7 @@ chimera_nfs3_readlink_complete(
         }
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_readlink_complete */
 
 static void
@@ -73,7 +73,7 @@ chimera_nfs3_readlink_open_callback(
     struct READLINK3res *res = &req->res_readlink;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_txn_finish(req, error_code);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
@@ -83,7 +83,7 @@ chimera_nfs3_readlink_open_callback(
      * the entry point and reused across replays). */
     res->resok.data.len = 4096;
 
-    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred, req->compound,
                          handle,
                          res->resok.data.str,
                          res->resok.data.len,
@@ -95,7 +95,7 @@ chimera_nfs3_readlink_open_callback(
 static void
 chimera_nfs3_readlink_start(struct nfs_request *req)
 {
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -140,7 +140,7 @@ chimera_nfs3_readlink(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_READ,
-                         chimera_nfs3_readlink_start, chimera_nfs3_readlink_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_READ,
+                              chimera_nfs3_readlink_start, chimera_nfs3_readlink_reply);
 } /* chimera_nfs3_readlink */

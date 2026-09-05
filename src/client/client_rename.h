@@ -6,7 +6,7 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_rename_vfs_complete(
@@ -15,7 +15,7 @@ chimera_rename_vfs_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_rename_vfs_complete */
 
 static void
@@ -25,7 +25,7 @@ chimera_rename_start(
 {
     chimera_vfs_rename(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->rename.source_path,
@@ -43,7 +43,7 @@ chimera_rename_reply(
 {
     chimera_rename_callback_t callback     = request->rename.callback;
     void                     *callback_arg = request->rename.private_data;
-    enum chimera_vfs_error    status       = request->txn_op_status;
+    enum chimera_vfs_error    status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -61,9 +61,9 @@ chimera_dispatch_rename(
         return;
     }
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_rename_start, chimera_rename_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_rename_start, chimera_rename_reply);
 } /* chimera_dispatch_rename */

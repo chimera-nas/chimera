@@ -1411,7 +1411,7 @@ diskfs_read_inode_cb(
         diskfs_txn_pin_inode_block(thread, diskfs_private->txn, inode, 0);
         inode->atime_sec  = now.tv_sec;
         inode->atime_nsec = now.tv_nsec;
-    } else if (!thread->shared->noatime && !request->transaction) {
+    } else if (!thread->shared->noatime && !request->compound) {
         /* Autocommit reads only: the relatime atime bump aborts this read txn
          * and re-runs under a fresh WRITE txn.  We must not do that to a caller-
          * owned explicit transaction (diskfs_txn_begin would just hand back the

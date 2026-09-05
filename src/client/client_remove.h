@@ -8,9 +8,9 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
-/* Shared reply for both the path and _at remove transactions. */
+/* Shared reply for both the path and _at remove compounds. */
 static void
 chimera_remove_reply(
     struct chimera_client_thread  *thread,
@@ -18,7 +18,7 @@ chimera_remove_reply(
 {
     chimera_remove_callback_t callback     = request->remove.callback;
     void                     *callback_arg = request->remove.private_data;
-    enum chimera_vfs_error    status       = request->txn_op_status;
+    enum chimera_vfs_error    status       = request->compound_op_status;
 
     /* Note: parent handle (for the _at variant) is NOT released - caller owns it */
     chimera_client_request_free(thread, request);
@@ -33,7 +33,7 @@ chimera_remove_vfs_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_remove_vfs_complete */
 
 static void
@@ -43,7 +43,7 @@ chimera_remove_start(
 {
     chimera_vfs_remove(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->remove.path,
@@ -64,11 +64,11 @@ chimera_dispatch_remove(
         return;
     }
 
-    chimera_client_txn_run(thread, request,
-                           thread->client->root_fh,
-                           thread->client->root_fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_remove_start, chimera_remove_reply);
+    chimera_client_compound_run(thread, request,
+                                thread->client->root_fh,
+                                thread->client->root_fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_remove_start, chimera_remove_reply);
 } /* chimera_dispatch_remove */
 
 static void
@@ -80,7 +80,7 @@ chimera_remove_dispatch_at_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_remove_dispatch_at_complete */
 
 static void
@@ -94,8 +94,8 @@ chimera_remove_at_lookup_complete(
     struct chimera_client_thread  *thread  = request->thread;
 
     if (error_code != CHIMERA_VFS_OK) {
-        /* Child doesn't exist or other error - fail the transaction. */
-        chimera_client_txn_finish(thread, request, error_code);
+        /* Child doesn't exist or other error - fail the compound. */
+        chimera_client_compound_finish(thread, request, error_code);
         return;
     }
 
@@ -110,13 +110,13 @@ chimera_remove_at_lookup_complete(
 
         if (((request->remove.flags & CHIMERA_VFS_REMOVE_ISDIR) && !is_dir) ||
             ((request->remove.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && is_dir)) {
-            /* Fail the operation through the txn driver like any other op
-             * error: finish aborts the begun backend transaction (dropping
+            /* Fail the operation through the compound driver like any other op
+             * error: finish aborts the begun backend compound (dropping
              * its locks) and chimera_remove_reply then delivers this same
              * status to the user callback and frees the request. */
-            chimera_client_txn_finish(thread, request,
-                                      is_dir ? CHIMERA_VFS_EISDIR :
-                                      CHIMERA_VFS_ENOTDIR);
+            chimera_client_compound_finish(thread, request,
+                                           is_dir ? CHIMERA_VFS_EISDIR :
+                                           CHIMERA_VFS_ENOTDIR);
             return;
         }
     }
@@ -128,7 +128,7 @@ chimera_remove_at_lookup_complete(
     /* Now call remove with the child FH */
     chimera_vfs_remove_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->remove.parent_handle,
         request->remove.path,
         request->remove.path_len,
@@ -152,7 +152,7 @@ chimera_remove_at_start(
      * not the target it points to. */
     chimera_vfs_lookup_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->remove.parent_handle,
         request->remove.path,
         request->remove.path_len,
@@ -171,8 +171,8 @@ chimera_dispatch_remove_at(
     /* Save parent handle for use in the start/lookup callbacks */
     request->remove.parent_handle = parent_handle;
 
-    chimera_client_txn_run(thread, request,
-                           parent_handle->fh, parent_handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_remove_at_start, chimera_remove_reply);
+    chimera_client_compound_run(thread, request,
+                                parent_handle->fh, parent_handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_remove_at_start, chimera_remove_reply);
 } /* chimera_dispatch_remove_at */

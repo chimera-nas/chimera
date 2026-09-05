@@ -17,8 +17,8 @@ chimera_nfs3_fsstat_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_fsstat.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_fsstat.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
         chimera_nfs3_set_post_op_attr(&req->res_fsstat.resfail.obj_attributes, NULL);
     }
 
@@ -45,10 +45,10 @@ chimera_nfs3_fsstat_complete(
     if (error_code == CHIMERA_VFS_OK) {
         if ((attr->va_set_mask & CHIMERA_NFS3_FSSTAT_MASK) != CHIMERA_NFS3_FSSTAT_MASK) {
             /* Backend can't report fs stats: NFS3ERR_NOTSUPP.  Finish OK so the
-            * (empty read) txn just releases and the reply keeps this status. */
+             * (empty read) compound just releases and the reply keeps this status. */
             res->status = NFS3ERR_NOTSUPP;
             chimera_nfs3_set_post_op_attr(&res->resfail.obj_attributes, attr);
-            chimera_nfs3_txn_finish(req, CHIMERA_VFS_OK);
+            chimera_nfs3_compound_finish(req, CHIMERA_VFS_OK);
             return;
         }
 
@@ -64,7 +64,7 @@ chimera_nfs3_fsstat_complete(
         res->resok.invarsec = 0;
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_fsstat_complete */
 
 static void
@@ -76,13 +76,13 @@ chimera_nfs3_fsstat_open_callback(
     struct nfs_request *req = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_txn_finish(req, error_code);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
     req->handle = handle;
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->compound,
                         handle,
                         CHIMERA_NFS3_FSSTAT_MASK,
                         chimera_nfs3_fsstat_complete,
@@ -92,7 +92,7 @@ chimera_nfs3_fsstat_open_callback(
 static void
 chimera_nfs3_fsstat_start(struct nfs_request *req)
 {
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -134,7 +134,7 @@ chimera_nfs3_fsstat(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_READ,
-                         chimera_nfs3_fsstat_start, chimera_nfs3_fsstat_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_READ,
+                              chimera_nfs3_fsstat_start, chimera_nfs3_fsstat_reply);
 } /* chimera_nfs3_fsstat */

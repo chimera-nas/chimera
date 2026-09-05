@@ -5,7 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
-#include "client_txn.h"
+#include "client_compound.h"
 
 static void
 chimera_allocate_complete(
@@ -16,7 +16,7 @@ chimera_allocate_complete(
 {
     struct chimera_client_request *request = private_data;
 
-    chimera_client_txn_finish(request->thread, request, error_code);
+    chimera_client_compound_finish(request->thread, request, error_code);
 } /* chimera_allocate_complete */
 
 static void
@@ -26,7 +26,7 @@ chimera_allocate_start(
 {
     chimera_vfs_allocate(
         thread->vfs_thread,
-        chimera_client_req_cred(request), request->txn,
+        chimera_client_req_cred(request), request->compound,
         request->allocate.handle,
         request->allocate.offset,
         request->allocate.length,
@@ -44,7 +44,7 @@ chimera_allocate_reply(
 {
     chimera_commit_callback_t callback     = request->allocate.callback;
     void                     *callback_arg = request->allocate.private_data;
-    enum chimera_vfs_error    status       = request->txn_op_status;
+    enum chimera_vfs_error    status       = request->compound_op_status;
 
     chimera_client_request_free(thread, request);
 
@@ -56,9 +56,9 @@ chimera_dispatch_allocate(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_client_txn_run(thread, request,
-                           request->allocate.handle->fh,
-                           request->allocate.handle->fh_len,
-                           CHIMERA_VFS_TXN_WRITE,
-                           chimera_allocate_start, chimera_allocate_reply);
+    chimera_client_compound_run(thread, request,
+                                request->allocate.handle->fh,
+                                request->allocate.handle->fh_len,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                chimera_allocate_start, chimera_allocate_reply);
 } /* chimera_dispatch_allocate */

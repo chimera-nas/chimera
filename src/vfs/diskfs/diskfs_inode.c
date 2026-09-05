@@ -633,7 +633,7 @@ diskfs_wfg_detect(
 
 /* Abort a parked victim transaction: remove its waiter from the inode it is
  * parked on, clear its wait edge, and dispatch its continuation with
- * ETXN_CONFLICT.  Idempotent (a no-op if the waiter is already gone). */
+ * ECOMPOUND_CONFLICT.  Idempotent (a no-op if the waiter is already gone). */
 static void
 diskfs_wfg_abort_victim(
     struct diskfs_thread *thread,
@@ -669,7 +669,7 @@ diskfs_wfg_abort_victim(
     pthread_mutex_unlock(&shard->lock);
 
     if (victim) {
-        victim->status = CHIMERA_VFS_ETXN_CONFLICT;
+        victim->status = CHIMERA_VFS_ECOMPOUND_CONFLICT;
         diskfs_dispatch_grant(victim);
     }
 } /* diskfs_wfg_abort_victim */
@@ -701,7 +701,7 @@ diskfs_inode_acquire_contended(
         if (cycle) {
             if (vic_inum == 0) {
                 /* Victim is the requester. */
-                cb(NULL, CHIMERA_VFS_ETXN_CONFLICT, private_data);
+                cb(NULL, CHIMERA_VFS_ECOMPOUND_CONFLICT, private_data);
                 return;
             }
             /* Abort a parked victim; its wait edge is cleared synchronously, so

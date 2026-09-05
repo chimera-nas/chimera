@@ -293,20 +293,20 @@ struct cairn_shared {
 };
 
 /*
- * Explicit transaction (CHIMERA_VFS_CAP_TRANSACTIONAL).  Unlike the per-cycle
+ * Explicit transaction (CHIMERA_VFS_CAP_COMPOUND).  Unlike the per-cycle
  * autocommit batch (thread->meta_txn / thread->data_batch), each explicit
  * transaction carries its OWN rocksdb transaction + data batch, so concurrent
  * explicit transactions routed to the same delegation thread (and the per-cycle
  * autocommit batch) never interfere.  The handle is &txn->core; an enlisted op
  * is steered to it via thread->cur_txn (set around the dispatch switch -- safe
  * because cairn ops run synchronously with no async yield).  Conflicts surface
- * only at EndTransaction (optimistic commit validation); the internal replay
+ * only at CompoundEnd (optimistic commit validation); the internal replay
  * loop is NOT used, the conflict bubbles up so the protocol re-runs the whole
  * sequence. */
 struct cairn_txn {
-    struct chimera_vfs_transaction core;   /* MUST be first */
-    rocksdb_transaction_t         *meta_txn;
-    rocksdb_writebatch_t          *data_batch;
+    struct chimera_vfs_compound core;      /* MUST be first */
+    rocksdb_transaction_t      *meta_txn;
+    rocksdb_writebatch_t       *data_batch;
 };
 
 struct cairn_thread {
@@ -535,8 +535,8 @@ cairn_read_begin(
      * through to cur_txn->meta_txn (read-your-writes + optimistic conflict
      * tracking).  A READ transaction keeps the per-op snapshot below: it is
      * consistent and, crucially, never adds to a conflict read-set, so its
-     * EndTransaction can't spuriously conflict. */
-    if (thread->cur_txn && thread->cur_txn->core.mode == CHIMERA_VFS_TXN_WRITE) {
+     * CompoundEnd can't spuriously conflict. */
+    if (thread->cur_txn && thread->cur_txn->core.mode == CHIMERA_VFS_COMPOUND_WRITE) {
         return;
     }
 
@@ -1527,7 +1527,7 @@ cairn_queue_request(
     /* Enlisted in an explicit transaction: the mutation is staged in the
      * transaction's meta_txn / data_batch.  Return the result to the protocol
      * NOW (read-your-writes within the txn is served by meta_txn) -- durability
-     * is deferred to EndTransaction, which commits the whole transaction once.
+     * is deferred to CompoundEnd, which commits the whole transaction once.
      * The protocol does not ACK the client until that commit completes. */
     if (thread->cur_txn) {
         request->complete(request);
@@ -1789,7 +1789,7 @@ static rocksdb_transaction_t *
 cairn_get_meta_txn(struct cairn_thread *thread)
 {
     /* Enlisted: use the explicit transaction's own rocksdb txn and do NOT
-    * schedule a per-cycle commit -- it commits only at EndTransaction. */
+     * schedule a per-cycle commit -- it commits only at CompoundEnd. */
     if (thread->cur_txn) {
         if (!thread->cur_txn->meta_txn) {
             thread->cur_txn->meta_txn = cairn_meta_txn_begin(thread->shared, NULL);
@@ -5911,7 +5911,7 @@ cairn_commit_err_is_conflict(const char *err)
 /*
  * Commit an explicit transaction once (no internal replay).  Data batch first
  * (idempotent, no conflict), then the optimistic metadata transaction.  A
- * metadata conflict (Busy / TryAgain) returns ETXN_CONFLICT so the protocol
+ * metadata conflict (Busy / TryAgain) returns ECOMPOUND_CONFLICT so the protocol
  * re-runs the whole sequence; any other failure returns EIO.  `sync` governs
  * only the data-batch durability (the metadata transaction always commits with
  * the sync meta write options).
@@ -5968,7 +5968,7 @@ cairn_txn_commit_once(
             }
             rocksdb_transaction_destroy(ctxn->meta_txn);
             ctxn->meta_txn = NULL;
-            return conflict ? CHIMERA_VFS_ETXN_CONFLICT : CHIMERA_VFS_EIO;
+            return conflict ? CHIMERA_VFS_ECOMPOUND_CONFLICT : CHIMERA_VFS_EIO;
         }
         rocksdb_transaction_destroy(ctxn->meta_txn);
         ctxn->meta_txn = NULL;
@@ -5988,7 +5988,7 @@ cairn_begin_transaction(
     (void) shared;
     (void) private_data;
 
-    /* The core allocated and zeroed the handle (cairn_txn, txn_size below) and
+    /* The core allocated and zeroed the handle (cairn_txn, compound_size below) and
      * stamped its core header; meta_txn/data_batch are already NULL and are
      * created lazily by the first enlisted op.  Nothing to set up here. */
     request->status = CHIMERA_VFS_OK;
@@ -6002,13 +6002,13 @@ cairn_end_transaction(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct cairn_txn      *ctxn = (struct cairn_txn *) request->transaction;
+    struct cairn_txn      *ctxn = (struct cairn_txn *) request->compound;
     enum chimera_vfs_error status;
 
     (void) shared;
     (void) private_data;
 
-    if (request->transaction_op.end_flag == CHIMERA_VFS_TXN_ABORT) {
+    if (request->compound_op.end_flag == CHIMERA_VFS_COMPOUND_ABORT) {
         if (ctxn->meta_txn) {
             char *err = NULL;
             rocksdb_transaction_rollback(ctxn->meta_txn, &err);
@@ -6023,8 +6023,8 @@ cairn_end_transaction(
         status = CHIMERA_VFS_OK;
     } else {
         status = cairn_txn_commit_once(thread, ctxn,
-                                       request->transaction_op.end_flag ==
-                                       CHIMERA_VFS_TXN_COMMIT_SYNC);
+                                       request->compound_op.end_flag ==
+                                       CHIMERA_VFS_COMPOUND_COMMIT_DURABLE);
     }
 
     /* The core owns and frees the handle (cairn_txn) at end-completion; here we
@@ -6076,13 +6076,13 @@ cairn_dispatch(
             break;
     } /* switch */
 
-    /* Transaction lifecycle ops are handled directly (they neither read nor
+    /* Compound lifecycle ops are handled directly (they neither read nor
      * queue), and must not set cur_txn. */
-    if (request->opcode == CHIMERA_VFS_OP_BEGIN_TRANSACTION) {
+    if (request->opcode == CHIMERA_VFS_OP_COMPOUND_BEGIN) {
         cairn_begin_transaction(thread, shared, request, private_data);
         return;
     }
-    if (request->opcode == CHIMERA_VFS_OP_END_TRANSACTION) {
+    if (request->opcode == CHIMERA_VFS_OP_COMPOUND_END) {
         cairn_end_transaction(thread, shared, request, private_data);
         return;
     }
@@ -6090,7 +6090,7 @@ cairn_dispatch(
     /* Steer this op at its explicit transaction (NULL = autocommit).  cairn ops
      * run synchronously start-to-completion, so this stash is valid for the
      * whole op and is cleared right after the switch. */
-    thread->cur_txn = (struct cairn_txn *) request->transaction;
+    thread->cur_txn = (struct cairn_txn *) request->compound;
 
     /*
      * Read-only ops run under a snapshot view (cairn_read_begin/end) and
@@ -6256,7 +6256,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
      * non-SHARED connection-thread buffers. */
     .capabilities   = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ACL_NATIVE |
-        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE | CHIMERA_VFS_CAP_TRANSACTIONAL |
+        CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE | CHIMERA_VFS_CAP_COMPOUND |
         CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_LAYOUT,
@@ -6265,5 +6265,5 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .thread_init    = cairn_thread_init,
     .thread_destroy = cairn_thread_destroy,
     .dispatch       = cairn_dispatch,
-    .txn_size       = sizeof(struct cairn_txn),
+    .compound_size  = sizeof(struct cairn_txn),
 };

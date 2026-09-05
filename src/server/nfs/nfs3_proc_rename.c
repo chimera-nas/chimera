@@ -18,8 +18,8 @@ chimera_nfs3_rename_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_rename.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_rename.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
         chimera_nfs3_set_wcc_data(&req->res_rename.resfail.fromdir_wcc, NULL, NULL);
         chimera_nfs3_set_wcc_data(&req->res_rename.resfail.todir_wcc, NULL, NULL);
     }
@@ -48,7 +48,7 @@ chimera_nfs3_rename_complete(
         chimera_nfs3_set_wcc_data(&req->res_rename.resok.todir_wcc, todir_pre_attr, todir_post_attr);
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_rename_complete */
 
 /* Issue the rename.  target_fh is left NULL: when a caching protocol is
@@ -64,7 +64,7 @@ chimera_nfs3_rename_start(struct nfs_request *req)
      * directory handles (set in chimera_nfs3_rename below). */
     chimera_vfs_rename_at(thread->vfs_thread,
                           &req->cred,
-                          req->txn,
+                          req->compound,
                           req->fh,
                           req->fhlen,
                           args->from.name.str,
@@ -110,7 +110,7 @@ chimera_nfs3_rename(
 
     /* Decode both directory handles: the source sets the request export (and
      * squash); the destination is authenticated into req->saved_fh.  Both must
-     * outlive the async transaction (and survive a conflict replay), so they go
+     * outlive the async compound (and survive a conflict replay), so they go
      * in the request, not on the stack. */
     res.status = chimera_nfs3_decode_fh(req, args->from.dir.data.data, args->from.dir.data.len);
     if (res.status == NFS3_OK &&
@@ -133,7 +133,7 @@ chimera_nfs3_rename(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_WRITE,
-                         chimera_nfs3_rename_start, chimera_nfs3_rename_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_WRITE,
+                              chimera_nfs3_rename_start, chimera_nfs3_rename_reply);
 } /* chimera_nfs3_rename */

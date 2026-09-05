@@ -98,27 +98,28 @@ struct chimera_client_request {
 
     uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
 
-    /* Explicit-transaction bookkeeping (CHIMERA_VFS_CAP_TRANSACTIONAL).  Every
-     * client operation runs as one VFS transaction: begin (READ/WRITE) -> the
-     * op's VFS calls (enlisted via request->txn) -> commit before the user
-     * callback fires.  txn is the backend handle (NULL for a non-transactional
-     * backend -> autocommit, unchanged).  txn_ts is the wait-die priority,
-     * assigned once and reused across retries so a conflicting op cannot starve;
-     * txn_attempt bounds the retries.  txn_op_status carries the op result
-     * across an async EndTransaction.  txn_fh/txn_fhlen is the routing hint the
-     * transaction begins on (saved for replay), txn_mode the begin mode, and
-     * txn_start/txn_reply the op's two driver callbacks (see client_txn.h):
-     * txn_start runs the op's VFS chain with request->txn set; txn_reply
-     * releases resources, invokes the user callback and frees the request. */
-    struct chimera_vfs_transaction    *txn;
-    uint64_t                           txn_ts;
-    int                                txn_attempt;
-    enum chimera_vfs_error             txn_op_status;
-    int                                txn_fhlen;
-    uint8_t                            txn_mode;
-    uint8_t                            txn_fh[CHIMERA_VFS_FH_SIZE];
-    chimera_client_request_callback    txn_start;
-    chimera_client_request_callback    txn_reply;
+    /* Explicit-compound bookkeeping (CHIMERA_VFS_CAP_COMPOUND).  Every
+     * client operation runs as one VFS compound: begin (READ/WRITE) -> the
+     * op's VFS calls (enlisted via request->compound) -> commit before the user
+     * callback fires.  compound is the backend handle (NULL for a non-compound
+     * backend -> autocommit, unchanged).  compound_ts is the wait-die priority,
+     * assigned once and reused across retries so a conflicting op cannot
+     * starve; compound_attempt bounds the retries.  compound_op_status carries
+     * the op result across an async compound end.  compound_fh/compound_fhlen
+     * is the routing hint the compound begins on (saved for replay),
+     * compound_mode the begin mode, and compound_start/compound_reply the op's
+     * two driver callbacks (see client_compound.h): compound_start runs the
+     * op's VFS chain with request->compound set; compound_reply releases
+     * resources, invokes the user callback and frees the request. */
+    struct chimera_vfs_compound       *compound;
+    uint64_t                           compound_ts;
+    int                                compound_attempt;
+    enum chimera_vfs_error             compound_op_status;
+    int                                compound_fhlen;
+    uint8_t                            compound_mode;
+    uint8_t                            compound_fh[CHIMERA_VFS_FH_SIZE];
+    chimera_client_request_callback    compound_start;
+    chimera_client_request_callback    compound_reply;
 
     union {
         /* Synchronous handle close routed to a worker thread (see
@@ -200,7 +201,7 @@ struct chimera_client_request {
             chimera_read_callback_t         callback;
             void                           *private_data;
             void                           *buf;
-            /* Result iov/niov stashed by the op completion for the txn reply to
+            /* Result iov/niov stashed by the op completion for the compound reply to
              * hand back to the caller (the buffers survive the read commit). */
             struct evpl_iovec              *r_iov;
             int                             r_niov;
@@ -362,7 +363,7 @@ struct chimera_client_request {
             chimera_readdir_callback_t      callback;
             chimera_readdir_complete_t      complete;
             void                           *private_data;
-            /* Result cookie/eof stashed by the op completion for the txn reply
+            /* Result cookie/eof stashed by the op completion for the compound reply
              * (kept separate from the input cookie so a replay re-reads from the
              * same starting cookie). */
             uint64_t                        r_cookie;
