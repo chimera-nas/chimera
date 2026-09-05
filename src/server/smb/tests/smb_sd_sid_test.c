@@ -39,26 +39,26 @@
 
 #define TEST_PASS(name) fprintf(stderr, "  PASS: %s\n", name)
 
-#define SID_OWNER_REAL   "S-1-5-21-1-2-3-500"
-#define SID_GROUP_REAL   "S-1-5-21-1-2-3-513"
-#define SID_OPAQUE       "S-1-5-21-1-2-3-1001"
-#define SID_OPAQUE2      "S-1-5-21-1-2-3-9999"
-#define SID_ALICE        "S-1-5-21-1-2-3-1105"
-#define SID_EVERYONE     "S-1-1-0"
-#define SID_UNIX_UID1000 "S-1-5-88-1-1000"
-#define SID_UNIX_GID1000 "S-1-5-88-2-1000"
+#define SID_OWNER_REAL    "S-1-5-21-1-2-3-500"
+#define SID_GROUP_REAL    "S-1-5-21-1-2-3-513"
+#define SID_OPAQUE        "S-1-5-21-1-2-3-1001"
+#define SID_OPAQUE2       "S-1-5-21-1-2-3-9999"
+#define SID_ALICE         "S-1-5-21-1-2-3-1105"
+#define SID_EVERYONE      "S-1-1-0"
+#define SID_UNIX_UID1000  "S-1-5-88-1-1000"
+#define SID_UNIX_GID1000  "S-1-5-88-2-1000"
 
 /* SD control bits (mirrors smb_proc_security.c). */
 #define SE_SELF_RELATIVE  0x8000
 #define SE_DACL_PRESENT   0x0004
 #define SE_DACL_PROTECTED 0x1000
 
-#define ACE_ALLOWED 0
-#define MASK_READ   0x00000001
-#define MASK_RW     0x00000003
+#define ACE_ALLOWED       0
+#define MASK_READ         0x00000001
+#define MASK_RW           0x00000003
 
-#define MAX_ACES 8
-#define ACL_BUF_SIZE (sizeof(struct chimera_acl) + MAX_ACES * sizeof(struct chimera_ace))
+#define MAX_ACES          8
+#define ACL_BUF_SIZE      (sizeof(struct chimera_acl) + MAX_ACES * sizeof(struct chimera_ace))
 
 static void
 put_le16(
@@ -94,14 +94,14 @@ get_le32(const uint8_t *b)
  */
 static uint32_t
 build_sd(
-    uint8_t     *sd,
-    uint32_t     cap,
-    uint16_t     control,
-    const char  *owner,
-    const char  *group,
-    int          nace,
+    uint8_t        *sd,
+    uint32_t        cap,
+    uint16_t        control,
+    const char     *owner,
+    const char     *group,
+    int             nace,
     const uint32_t *masks,
-    const char **sids)
+    const char    **sids)
 {
     uint32_t off = 20;
     uint32_t owner_off = 0, group_off = 0, dacl_off = 0;
