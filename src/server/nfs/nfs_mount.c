@@ -280,6 +280,23 @@ chimera_nfs_mount_mnt(
     }
 
     /*
+     * RFC 2623 §2.3.2: a MNT that does not satisfy the export's security
+     * policy is refused rather than handed the export root handle.  The
+     * per-op path already rejects such a handle (chimera_nfs_fh_decode
+     * returns WRONGSEC), so this only stops MOUNT itself from being the one
+     * place the policy is not applied.
+     */
+    if (!chimera_nfs_export_sec_ok(export, req->sec_bit)) {
+        chimera_nfs_debug("NFS mount of export '%s' refused: caller flavor "
+                          "not in the export's sec= policy", export->name);
+        if (full_path) {
+            free(full_path);
+        }
+        chimera_nfs_mount_lookup_complete(CHIMERA_VFS_EACCES, NULL, req);
+        return;
+    }
+
+    /*
      * Record the mount in the rmtab keyed by the client-requested path (which
      * is what UMNT will present and what showmount displays).  The export
      * resolved, so the subsequent VFS lookup of its root is expected to
