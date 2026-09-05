@@ -5893,17 +5893,22 @@ parse_ctx_secd(
      * phase0_contexts_test with a zeroed request (no compound/thread/shared),
      * so fall back to canonical behaviour when the server context is not
      * reachable. */
-    int canonicalize = 1;
+    int                 canonicalize = 1;
+    struct chimera_vfs *vfs          = NULL;
 
     if (request->compound) {
         canonicalize = request->compound->thread->shared->config.
             acl_inherited_canonicalize;
+        /* The identity authority lets cached real SIDs (the session's own
+         * user, for one) resolve to a uid/gid at create time; the rest are
+         * kept verbatim as opaque SID principals. */
+        vfs = request->compound->thread->shared->vfs;
     }
 
     chimera_smb_parse_sd_to_acl(data, data_len, &request->create.set_attr,
                                 request->create.acl_storage,
                                 sizeof(request->create.acl_storage),
-                                canonicalize);
+                                vfs, canonicalize);
     return true;
 } /* parse_ctx_secd */
 

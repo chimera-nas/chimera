@@ -1017,7 +1017,7 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *open_file;
             /* Security descriptor built in the getattr callback and emitted by
              * the reply builder (SMB2_INFO_SECURITY). */
-            uint8_t                         sec_buf[2048];
+            uint8_t                         sec_buf[4096];
             uint32_t                        sec_buf_len;
             /* When the SD references identities not yet in the cache, the
              * getattr'd owner/group/mode + ACL are copied here so the SD can be
@@ -1098,7 +1098,7 @@ struct chimera_smb_request {
              * wave (which races the rename and must deny it). */
             uint8_t                            recall_final;
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
-            uint8_t                            sec_buf[2048];
+            uint8_t                            sec_buf[4096];
             uint32_t                           sec_buf_len;
             /* Outstanding async identity resolves before the SD is decoded for
              * the final time (fan-out join guard). */
@@ -1107,6 +1107,11 @@ struct chimera_smb_request {
              * security descriptor; vfs_attrs.va_acl points here. */
             uint8_t                            acl_storage[sizeof(struct chimera_acl) +
                                                            64 * sizeof(struct chimera_ace)];
+            /* Native owner / group SIDs decoded from the descriptor when they
+             * resolved through the identity authority; vfs_attrs.va_owner_sid
+             * / va_group_sid point here so the backend stores them. */
+            struct chimera_sid                 owner_sid;
+            struct chimera_sid                 group_sid;
             /* FILE_FULL_EA_INFORMATION set: the client's EA buffer is captured
              * in parse (malloc'd, freed at completion) and applied one EA at a
              * time in an async set_xattr/remove_xattr loop.  ea_list holds the

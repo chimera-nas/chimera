@@ -231,7 +231,10 @@ void chimera_smb_parse_sd_to_attrs(
  * Decode a self-relative security descriptor into owner/group/mode AND a full
  * canonical DACL.  The decoded ACL is written into `acl_buf` (capacity
  * `acl_buf_len` bytes) and, when non-empty, attrs->va_acl is pointed at it with
- * the ATTR_ACL set-mask bit raised.
+ * the ATTR_ACL set-mask bit raised.  `vfs` (may be NULL) is the identity
+ * authority used to map real SIDs that are already cached; a real SID that is
+ * not cached is kept as an opaque CHIMERA_PRINCIPAL_SID (no async resolution
+ * here -- this is the create-time path).
  */
 void chimera_smb_parse_sd_to_acl(
     const uint8_t            *sd_buf,
@@ -239,6 +242,7 @@ void chimera_smb_parse_sd_to_acl(
     struct chimera_vfs_attrs *attrs,
     void                     *acl_buf,
     uint32_t                  acl_buf_len,
+    struct chimera_vfs       *vfs,
     int                       canonicalize_inherited);
 
 int chimera_smb_parse_echo(
