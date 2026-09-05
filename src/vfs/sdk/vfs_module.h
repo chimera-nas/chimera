@@ -28,7 +28,7 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION             1
+#define CHIMERA_VFS_SDK_VERSION             2
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open

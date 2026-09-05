@@ -23,6 +23,8 @@
 #include <stddef.h>
 #include <sys/stat.h>
 
+#include "vfs_sid.h"
+
 struct chimera_vfs_cred;
 
 /*
@@ -88,6 +90,11 @@ enum chimera_principal_type {
     CHIMERA_PRINCIPAL_USER    = 0, /* numeric uid                            */
     CHIMERA_PRINCIPAL_GROUP   = 1, /* numeric gid                            */
     CHIMERA_PRINCIPAL_SPECIAL = 2, /* special-who below                      */
+    /* A native Windows SID the identity layer could not map to a uid or gid.
+     * It is stored and marshalled verbatim so the ACE round-trips losslessly
+     * (as NTFS keeps an ACE for a departed domain user), but it matches no
+     * caller during access evaluation and bears on no POSIX mode class. */
+    CHIMERA_PRINCIPAL_SID     = 3,
 };
 
 enum chimera_special_who {
@@ -122,10 +129,31 @@ enum chimera_special_who {
     CHIMERA_WHO_SERVICE       = 13,
 };
 
+/*
+ * Dual identity.  Access evaluation, POSIX mode projection and NFSv4 always
+ * work from `type`/`special`/`id`.  `sid` optionally carries the native
+ * Windows SID the principal was set with, so marshalling and storage can
+ * round-trip the real domain identity instead of re-deriving an algorithmic
+ * one: it is present (chimera_sid_present) only on USER/GROUP principals
+ * whose SID was resolved through the identity layer, and on every
+ * PRINCIPAL_SID.  SPECIAL principals never carry one (their well-known SIDs
+ * are implied).
+ *
+ * Contract: a principal is a plain value that is copied and compared by
+ * value (memcmp), so every byte of it must be defined.  Assigning `type`,
+ * `special` and `id` does NOT define one: `reserved` and the whole `sid`
+ * (its length, its pad and every byte of data[]) must be zero unless a SID
+ * is present, in which case data[] past the length must be zero.  Build a
+ * principal with memset, or with the chimera_idmap_*_principal constructors;
+ * the identity layer, the ACL builders, the serializer and the SMB parser
+ * all honour this.
+ */
 struct chimera_principal {
-    uint8_t  type;    /* enum chimera_principal_type   */
-    uint8_t  special; /* enum chimera_special_who      */
-    uint32_t id;      /* uid or gid when type != SPECIAL */
+    uint8_t            type;     /* enum chimera_principal_type          */
+    uint8_t            special;  /* enum chimera_special_who             */
+    uint16_t           reserved; /* zero                                 */
+    uint32_t           id;       /* uid or gid when type is USER/GROUP   */
+    struct chimera_sid sid;      /* native SID; absent when unknown      */
 };
 
 struct chimera_ace {
@@ -134,6 +162,13 @@ struct chimera_ace {
     uint32_t                 access_mask;
     struct chimera_principal who;
 };
+
+/* The layout is part of SDK version 2, and it must carry no compiler padding
+ * for the by-value contract above to hold on every compiler. */
+_Static_assert(sizeof(struct chimera_principal) == 80,
+               "chimera_principal layout is part of SDK version 2");
+_Static_assert(sizeof(struct chimera_ace) == 88,
+               "chimera_ace layout is part of SDK version 2");
 
 struct chimera_acl {
     uint16_t           num_aces;

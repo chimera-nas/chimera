@@ -107,6 +107,14 @@ chimera_idmap_principal_to_who(
         return len;
     }
 
+    /* An opaque native SID (and any type this build does not know) has no
+     * NFSv4 name: it maps to no uid or gid, and naming it by its zero id
+     * would present an ACE for root that the server never enforces.  Report
+     * it nameless; the NFSv4 ACL emitter drops nameless ACEs. */
+    if (p->type != CHIMERA_PRINCIPAL_USER && p->type != CHIMERA_PRINCIPAL_GROUP) {
+        return -1;
+    }
+
     /* Numeric user/group.  Resolve to name@domain when a domain is configured
      * and nsswitch knows the id; otherwise emit the numeric form, which is a
      * valid NFSv4 who string (RFC 8881 section 5.9). */
@@ -178,11 +186,15 @@ chimera_idmap_who_to_principal(
         return -1;
     }
 
+    /* Fully define the result on every path, success or failure: the
+     * reserved byte and the native-SID tail must be zero whatever the
+     * caller's storage held (the NFSv4 decoder hands us space from a bump
+     * allocator that is never cleared). */
+    memset(p, 0, sizeof(*p));
+
     special = who_string_to_special(who, len);
     if (special >= 0) {
-        p->type    = CHIMERA_PRINCIPAL_SPECIAL;
-        p->special = (uint8_t) special;
-        p->id      = 0;
+        *p = chimera_idmap_special_principal((uint8_t) special);
         return 0;
     }
 
@@ -204,9 +216,10 @@ chimera_idmap_who_to_principal(
 
     /* Pure numeric id. */
     if (all_digits(who, len)) {
-        p->type    = is_group ? CHIMERA_PRINCIPAL_GROUP : CHIMERA_PRINCIPAL_USER;
-        p->special = 0;
-        p->id      = (uint32_t) strtoul(who, NULL, 10);
+        uint32_t id = (uint32_t) strtoul(who, NULL, 10);
+
+        *p = is_group ? chimera_idmap_gid_principal(id)
+                      : chimera_idmap_uid_principal(id);
         return 0;
     }
 
@@ -229,9 +242,7 @@ chimera_idmap_who_to_principal(
 
             if (getgrnam_r(name, &gr, namebuf, sizeof(namebuf), &res) == 0 &&
                 res) {
-                p->type    = CHIMERA_PRINCIPAL_GROUP;
-                p->special = 0;
-                p->id      = gr.gr_gid;
+                *p = chimera_idmap_gid_principal(gr.gr_gid);
                 return 0;
             }
         } else {
@@ -239,9 +250,7 @@ chimera_idmap_who_to_principal(
 
             if (getpwnam_r(name, &pw, namebuf, sizeof(namebuf), &res) == 0 &&
                 res) {
-                p->type    = CHIMERA_PRINCIPAL_USER;
-                p->special = 0;
-                p->id      = pw.pw_uid;
+                *p = chimera_idmap_uid_principal(pw.pw_uid);
                 return 0;
             }
         }
@@ -285,6 +294,13 @@ chimera_idmap_principal_to_sid(
         }
         memcpy(buf, s, len + 1);
         return len;
+    }
+
+    /* An opaque native SID's identity is its stored bytes, which the SMB
+     * emitter copies verbatim; inventing an algorithmic S-1-5-88 form from
+     * its zero id would name a principal it never was. */
+    if (p->type != CHIMERA_PRINCIPAL_USER && p->type != CHIMERA_PRINCIPAL_GROUP) {
+        return -1;
     }
 
     /* Unix uid/gid SIDs in the modefromsid scheme (S-1-5-88-1/2-<id>), matching
