@@ -169,6 +169,22 @@ chimera_nfs4_lockt(
         return;
     }
 
+    /* RFC 7530 §9.6.2: inside the server-reboot grace window the byte-range
+     * locks held before the restart have not all been reclaimed, so LOCKT
+     * would report a range as available that another client is about to
+     * reclaim.  Refuse it with NFS4ERR_GRACE rather than answer from
+     * half-rebuilt state. */
+    {
+        nfsstat4 g_status = nfs_recovery_io_check(
+            &thread->shared->nfs4_recovery);
+
+        if (g_status != NFS4_OK) {
+            res->status = g_status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+    }
+
     /* RFC 7530 §9.1.4: the lock-owner names a clientid; reject one the server
      * has no record of.  4.1+ identifies the client via the session instead. */
     if (req->minorversion == 0) {

@@ -592,6 +592,21 @@ nfs_recovery_open_check(
     return NFS4_OK;
 } /* nfs_recovery_open_check */
 
+nfsstat4
+nfs_recovery_io_check(struct nfs_recovery *rec)
+{
+    /* RFC 7530 §9.6.2: during the grace period the server must reject READ
+     * and WRITE operations and non-reclaim locking requests with
+     * NFS4ERR_GRACE, and may only service them if it can guarantee that no
+     * conflict with an impending reclaim could arise.  The locks that would
+     * conflict are precisely the ones the window exists to rebuild, so no
+     * such guarantee is available here.  Same window (and same
+     * load-still-in-flight treatment) as the OPEN gate; these operations
+     * carry no reclaim flag, so is_reclaim is always false and the client is
+     * irrelevant. */
+    return nfs_recovery_open_check(rec, NULL, false);
+} /* nfs_recovery_io_check */
+
 void
 nfs_recovery_reclaim_complete(
     struct nfs_recovery     *rec,

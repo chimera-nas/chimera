@@ -175,6 +175,16 @@ nfs_recovery_open_check(
     bool                     is_reclaim);
 
 /*
+ * Gate for the operations the grace window protects that carry no reclaim
+ * flag of their own: READ, WRITE, a size-changing SETATTR and LOCKT.
+ * NFS4ERR_GRACE while the window is open (or the cold-start load is still in
+ * flight), NFS4_OK otherwise.
+ */
+nfsstat4
+nfs_recovery_io_check(
+    struct nfs_recovery *rec);
+
+/*
  * Mark `client` as having completed reclaim.  When the pending_reclaim
  * count drops to zero the grace window ends early.
  */

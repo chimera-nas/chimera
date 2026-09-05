@@ -194,6 +194,16 @@ chimera_nfs4_read(
     req->handle              = NULL;
     req->io_owner_from_deleg = false;
 
+    /* RFC 7530 §9.6.2: READ is refused with NFS4ERR_GRACE while the
+     * server-reboot grace window is open, because a byte-range lock that
+     * would conflict with it may not have been reclaimed yet. */
+    status = nfs_recovery_io_check(&thread->shared->nfs4_recovery);
+    if (status != NFS4_OK) {
+        res->status = status;
+        chimera_nfs4_compound_complete(req, status);
+        return;
+    }
+
     /*
      * NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2).
      */
