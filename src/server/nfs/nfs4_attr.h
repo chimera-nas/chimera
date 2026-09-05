@@ -176,6 +176,7 @@ chimera_nfs4_attr2mask(
                         attr_mask |= CHIMERA_VFS_ATTR_FILES_TOTAL;
                         break;
                     case FATTR4_UNIQUE_HANDLES:
+                    case FATTR4_MOUNTED_ON_FILEID:
                         attr_mask |= CHIMERA_VFS_ATTR_INUM;
                         break;
                     case FATTR4_LEASE_TIME:
@@ -514,6 +515,7 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_TIME_MODIFY - 32)) |
                                             (1UL << (FATTR4_TIME_MODIFY_SET - 32)) |
                                             (1UL << (FATTR4_TIME_METADATA - 32)) |
+                                            (1UL << (FATTR4_MOUNTED_ON_FILEID - 32)) |
                                             (1UL << (FATTR4_SPACE_AVAIL - 32)) |
                                             (1UL << (FATTR4_SPACE_FREE - 32)) |
                                             (1UL << (FATTR4_SPACE_TOTAL - 32)) |
@@ -928,6 +930,22 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, attr->va_mtime.tv_nsec);
         }
 
+        /* mounted_on_fileid (RFC 7530 5.8.2) is the fileid the parent
+        * directory's READDIR reports for this object.  Chimera grafts each
+        * export directly into the pseudo-fs root, and nfs4_root_readdir
+        * reports the export root's own fileid for that entry -- there is no
+        * separate junction inode -- so the mounted-on fileid IS the object's
+        * fileid at every boundary, and trivially so away from one.  Clients
+        * (notably Linux, which requests this on every crossing) need it to
+        * fill in d_ino for a mount point without a second GETATTR. */
+        if ((req_mask[1] & (1 << (FATTR4_MOUNTED_ON_FILEID - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_INUM)) {
+            rsp_mask[1]  |= (1 << (FATTR4_MOUNTED_ON_FILEID - 32));
+            *num_rsp_mask = 2;
+
+            chimera_nfs4_attr_append_uint64(&attrs, attr->va_ino);
+        }
+
         /* fs_layout_types is server-static (no backing VFS attribute); emit it
          * only when pNFS is enabled so it stays consistent with supported_attrs
          * and EXCHANGE_ID's USE_PNFS_MDS flag. */
@@ -1338,7 +1356,8 @@ chimera_nfs4_validate_createattrs(
         (1 << (FATTR4_TIME_ACCESS_SET - 32)) |
         (1 << (FATTR4_TIME_METADATA - 32)) |
         (1 << (FATTR4_TIME_MODIFY - 32)) |
-        (1 << (FATTR4_TIME_MODIFY_SET - 32));
+        (1 << (FATTR4_TIME_MODIFY_SET - 32)) |
+        (1 << (FATTR4_MOUNTED_ON_FILEID - 32));
 
     static const uint32_t writable_word0 =
         (1 << FATTR4_SIZE) |

@@ -176,7 +176,8 @@ verify_validate_mask(
         (1U << (FATTR4_SPACE_AVAIL - 32))  | (1U << (FATTR4_SPACE_FREE - 32)) |
         (1U << (FATTR4_SPACE_TOTAL - 32))  | (1U << (FATTR4_SPACE_USED - 32)) |
         (1U << (FATTR4_TIME_ACCESS - 32))  | (1U << (FATTR4_TIME_METADATA - 32)) |
-        (1U << (FATTR4_TIME_MODIFY - 32));
+        (1U << (FATTR4_TIME_MODIFY - 32))  |
+        (1U << (FATTR4_MOUNTED_ON_FILEID - 32));
     static const uint32_t writeonly_word1 =
         (1U << (FATTR4_TIME_ACCESS_SET - 32)) |
         (1U << (FATTR4_TIME_MODIFY_SET - 32));
