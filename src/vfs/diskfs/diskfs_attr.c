@@ -2899,7 +2899,15 @@ diskfs_get_layout_process(struct chimera_vfs_request *request)
             ext->file_offset : end;
 
         if (!rw) {
-            /* Read of a hole: skip it (the client reads zeros). */
+            /* RFC 5663 2.3.1: the extents of a block/SCSI layout describe its
+             * whole range, so a hole is reported as a NONE_DATA extent (which
+             * the client reads as zeroes).  Skipping it left a sub-range with
+             * no extent at all inside the lo_length the server then advertised
+             * from the last segment's end.  vol_id and storage_offset are not
+             * meaningful for NONE_DATA; device 0 always exists. */
+            diskfs_layout_emit(request, shared, p->loop_off,
+                               gap_end - p->loop_off, 0, 0,
+                               CHIMERA_VFS_BLOCK_NONE_DATA);
             p->loop_off = gap_end;
             diskfs_get_layout_process(request);
             return;
