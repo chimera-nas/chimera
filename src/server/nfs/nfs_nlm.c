@@ -1229,16 +1229,24 @@ chimera_nfs_nlm4_do_cancel(
             break;
         }
     }
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
 
     if (match && match->file_state) {
         /* The entry is queued inside the claim core waiting on a break.  Try
          * to dequeue it; if we win the race against the in-flight cb,
          * synthesize a DENIED completion so the original LOCK reply is
-         * still sent (the protocol layer's cb tears down the entry). */
+         * still sent (the protocol layer's cb tears down the entry).
+         *
+         * This must happen while we still hold nlm_state.mutex: the moment it
+         * is dropped a concurrent client reap (FREE_ALL, SM_NOTIFY, or the
+         * client's last connection dropping) can detach and free `match`, so
+         * touching it afterwards is a use-after-free.  claim_cancel is
+         * documented as never blocking and never re-entering the caller, so
+         * it is safe under our own lock -- nlm_client_release_all_locks
+         * calls it from exactly the same position. */
         cancelled       = chimera_vfs_claim_cancel(vfs_state, &match->ticket);
         ctx_for_lock_cb = match->ticket.private_data;
     }
+    pthread_mutex_unlock(&shared->nlm_state.mutex);
 
     nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_GRANTED,
                   proc);
