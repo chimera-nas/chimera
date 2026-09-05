@@ -1313,6 +1313,9 @@ diskfs_il_write_redo(
     il->retire_tail++;
 
     il->redo_inflight += ctx->segments;     /* one redo block write per chunk below */
+    ctx->wr_offset     = offset;
+    ctx->wr_bytes      = rec->reclen;
+    ctx->wr_segments   = ctx->segments;
     diskfs_il_commit_metrics(il);
 
     /* Issue the record in <=DISKFS_IL_MAX_IOV-iovec chunks to consecutive
@@ -1877,7 +1880,10 @@ diskfs_iq_cq_poll(
  * not drained) and none of those frontiers have advanced for
  * DISKFS_IL_WD_STALL_TICKS ticks, dump the full pipeline state so a CI hang
  * shows which stage froze (classically: the apply thread wedged, leaving
- * applied_wm stuck below durable_wm).  Read-only on the pipeline.
+ * applied_wm stuck below durable_wm).  A commit stall additionally names the
+ * record at the head of the retire ring -- the one journal write whose
+ * completion never arrived -- so the log identifies the stuck I/O rather than
+ * only the stuck stage.  Read-only on the pipeline.
  */
 static void
 diskfs_il_watchdog_cb(
@@ -1945,6 +1951,70 @@ diskfs_il_watchdog_cb(
             (unsigned long) il->live_records,
             (unsigned long) __atomic_load_n(&il->log_head, __ATOMIC_ACQUIRE),
             (unsigned long) __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE));
+
+        /* Name the journal write that never completed.  In-order retirement
+         * stops at the first not-done slot, so retire_head *is* the record
+         * holding the pipeline: reporting its log offset, length and how many
+         * of its chunks are still outstanding turns "the commit stage froze"
+         * into a specific evpl_block_write that got no callback.  Both the ring
+         * and the ctx are commit-thread state (we are that thread), and a ctx
+         * cannot be recycled while its slot is un-retired, so this is safe to
+         * read here -- with the deliberate exception of ctx->rec, which the
+         * push thread owns; hence the submit-time wr_* snapshot. */
+        if (commit_stalled) {
+            if (retire_head == retire_tail) {
+                chimera_diskfs_error(
+                    "IL stall: retire ring empty -- %lu txn(s) submitted but not yet "
+                    "logged, so the stall is upstream of the journal write",
+                    (unsigned long) (gsq_tail - durable_wm));
+            } else {
+                struct diskfs_redo_ctx *ctx =
+                    il->retire[retire_head & DISKFS_RETIRE_RING_MASK].ctx;
+                uint64_t                outstanding = retire_tail - retire_head;
+                uint64_t                pending     = 0;
+                uint64_t                i;
+
+                /* Defensive: this path runs while the filesystem is already
+                 * wedged, so it must not be able to spin or fault and take the
+                 * diagnostic down with it.  Backpressure keeps the ring far
+                 * under-subscribed (DISKFS_COMMIT_WATERMARK << ring size), so
+                 * neither guard should ever fire -- but a diagnostic has to be
+                 * strictly safer than the thing it observes. */
+                if (outstanding > DISKFS_RETIRE_RING_SIZE) {
+                    outstanding = DISKFS_RETIRE_RING_SIZE;
+                }
+
+                for (i = 0; i < outstanding; i++) {
+                    if (!il->retire[(retire_head + i) & DISKFS_RETIRE_RING_MASK].done) {
+                        pending++;
+                    }
+                }
+
+                if (!ctx) {
+                    chimera_diskfs_error(
+                        "IL stall: blocked on retire slot %lu -- slot has no record "
+                        "(%lu of %lu ring slot(s) not done)",
+                        (unsigned long) retire_head,
+                        (unsigned long) pending,
+                        (unsigned long) outstanding);
+                    return;
+                }
+
+                chimera_diskfs_error(
+                    "IL stall: blocked on retire slot %lu -- record seq=%lu end_txn_id=%lu "
+                    "log_offset=%lu len=%lu chunks=%d/%d outstanding entries=%u; "
+                    "%lu of %lu ring slot(s) not done",
+                    (unsigned long) retire_head,
+                    (unsigned long) ctx->seq,
+                    (unsigned long) ctx->end_txn_id,
+                    (unsigned long) ctx->wr_offset,
+                    (unsigned long) ctx->wr_bytes,
+                    ctx->segments, ctx->wr_segments,
+                    ctx->num_entries,
+                    (unsigned long) pending,
+                    (unsigned long) outstanding);
+            }
+        }
     }
 } /* diskfs_il_watchdog_cb */
 
