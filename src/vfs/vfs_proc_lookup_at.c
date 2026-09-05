@@ -92,8 +92,17 @@ chimera_vfs_lookup_at_dispatch(
 
     name_hash = chimera_vfs_hash(name, namelen);
 
+    /* A path-only backend cannot cache positive name->child entries (its
+     * creates return no stable child fh), so the name cache holds only the
+     * negative (tombstone) entries a remove leaves -- and those go stale the
+     * moment the name is recreated through a different key (a fd-relative
+     * create clears "(parent_handle,name)" while a path lookup checks
+     * "(mount_root,whole/path)").  Serving such a tombstone hides a live
+     * object (the end-of-trace audit's lstat then wrongly ENOENTs).  Skip the
+     * name-cache fast path for path-only parents and always dispatch. */
     if (!(attr_mask & ~(CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE)) &&
-        !(dir_attr_mask & ~(CHIMERA_VFS_ATTR_MASK_CACHEABLE))) {
+        !(dir_attr_mask & ~(CHIMERA_VFS_ATTR_MASK_CACHEABLE)) &&
+        !chimera_vfs_module_is_path_only(handle->vfs_module)) {
 
         cached_attr.va_req_mask = 0;
         cached_attr.va_set_mask = 0;
