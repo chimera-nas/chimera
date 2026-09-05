@@ -16,6 +16,15 @@ chimera_nfs4_reclaim_complete(
     struct RECLAIM_COMPLETE4args *args = &argop->opreclaim_complete;
     struct RECLAIM_COMPLETE4res  *res  = &resop->opreclaim_complete;
 
+    /* RFC 8881 §18.51.3: the per-filesystem form names its file system by the
+     * current filehandle, so rca_one_fs == TRUE with none established is
+     * NFS4ERR_NOFILEHANDLE.  The global form takes no filehandle at all. */
+    if (args->rca_one_fs && req->fhlen == 0) {
+        res->rcr_status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->rcr_status);
+        return;
+    }
+
     /* RFC 8881 §18.51.4: a second *global* (rca_one_fs == FALSE)
      * RECLAIM_COMPLETE for the same client is NFS4ERR_COMPLETE_ALREADY.  The
      * per-filesystem variant (rca_one_fs == TRUE) does not set that flag. */
