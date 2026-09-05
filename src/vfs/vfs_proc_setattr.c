@@ -11,6 +11,7 @@
 #include "vfs_attr_cache.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
+#include "sdk/vfs_sid.h"
 #include "common/misc.h"
 #include "common/macros.h"
 
@@ -25,7 +26,9 @@
  * present, an owner/group field set to the value it already holds is not a
  * change and does not require WRITE_OWNER -- which matters because a SET_INFO
  * security descriptor commonly restates the existing owner alongside a DACL,
- * and the owner holds WRITE_ACL but not WRITE_OWNER implicitly.
+ * and the owner holds WRITE_ACL but not WRITE_OWNER implicitly.  The native
+ * owner/group SID companions follow the same rule: restating the SID the
+ * object already carries is not a chown.
  */
 static uint32_t
 chimera_vfs_setattr_required(
@@ -45,7 +48,13 @@ chimera_vfs_setattr_required(
                 cur->va_uid == set_attr->va_uid)) ||
         ((m & CHIMERA_VFS_ATTR_GID) &&
          !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
-           cur->va_gid == set_attr->va_gid));
+           cur->va_gid == set_attr->va_gid)) ||
+        ((m & CHIMERA_VFS_ATTR_OWNER_SID) &&
+         !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
+           chimera_sid_equal(cur->va_owner_sid, set_attr->va_owner_sid))) ||
+        ((m & CHIMERA_VFS_ATTR_GROUP_SID) &&
+         !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) &&
+           chimera_sid_equal(cur->va_group_sid, set_attr->va_group_sid)));
 
     if (chowns) {
         required |= CHIMERA_ACE_WRITE_OWNER;
@@ -189,7 +198,8 @@ chimera_vfs_setattr_denied_error(
     uint64_t m = set_attr->va_set_mask;
 
     if (m & (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_ACL |
-             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID |
+             CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID)) {
         return CHIMERA_VFS_EPERM;
     }
 
@@ -560,7 +570,9 @@ chimera_vfs_setattr_common(
             gate->private_data   = private_data;
 
             chimera_vfs_getattr(thread, cred, handle,
-                                CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+                                CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
+                                CHIMERA_VFS_ATTR_OWNER_SID |
+                                CHIMERA_VFS_ATTR_GROUP_SID,
                                 chimera_vfs_setattr_gate_complete, gate);
             return;
         }

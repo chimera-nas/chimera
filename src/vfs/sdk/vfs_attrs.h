@@ -5,6 +5,7 @@
 #pragma once
 #include <stdint.h>
 #include <time.h>
+#include "vfs_sid.h"
 
 struct chimera_acl;
 
@@ -97,6 +98,19 @@ struct chimera_acl;
  * va_named_attr (backends without named-stream support leave it unset, which the
  * NFS marshaller treats as false). */
 #define CHIMERA_VFS_ATTR_NAMED_ATTR         (1UL << 28)
+
+/* Native Windows SIDs of the owner and owning group (va_owner_sid /
+ * va_group_sid), the SID companions to va_uid / va_gid.  Optional: a backend
+ * sets the bit in va_set_mask only when it has a stored native SID for that
+ * identity; the SMB marshaller then emits it verbatim instead of re-deriving
+ * one from the identity cache or the algorithmic S-1-5-88 scheme.  On
+ * setattr, a UID (GID) set that is not accompanied by OWNER_SID (GROUP_SID)
+ * clears any stored owner (group) SID, since it would no longer describe the
+ * new numeric owner; OWNER_SID with a NULL/absent pointer clears it
+ * explicitly.  Like ACL these are pointer-valued and deliberately excluded
+ * from MASK_STAT and MASK_CACHEABLE. */
+#define CHIMERA_VFS_ATTR_OWNER_SID          (1UL << 29)
+#define CHIMERA_VFS_ATTR_GROUP_SID          (1UL << 30)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -220,6 +234,13 @@ struct chimera_vfs_attrs {
      * this at storage valid only for the duration of the completion callback
      * (same contract as va_fh).  On setattr, the caller owns the buffer. */
     struct chimera_acl *va_acl;
+
+    /* Native owner / group SIDs (CHIMERA_VFS_ATTR_OWNER_SID / GROUP_SID).
+     * Same lifetime contract as va_acl: on getattr the backend points these
+     * at storage valid only for the duration of the completion callback; on
+     * setattr the caller owns the buffers. */
+    const struct chimera_sid *va_owner_sid;
+    const struct chimera_sid *va_group_sid;
 
     /* Opaque pNFS layout state, owned by the NFS server (see
      * CHIMERA_VFS_ATTR_PNFS_LAYOUT). */

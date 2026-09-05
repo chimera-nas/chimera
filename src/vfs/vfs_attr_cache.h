@@ -269,6 +269,18 @@ chimera_vfs_attr_cache_insert(
         entry->score = 0;
         entry->attr  = *attr;
 
+        /* The ACL and owner/group SID fields point at backend storage that is
+         * only valid for the completion callback that produced `attr`, and
+         * none of them is cacheable.  Drop the bits and the pointers on the
+         * cached copy so a later consumer can never dereference a stale
+         * per-thread scratch through a cache hit. */
+        entry->attr.va_set_mask &= ~(CHIMERA_VFS_ATTR_ACL |
+                                     CHIMERA_VFS_ATTR_OWNER_SID |
+                                     CHIMERA_VFS_ATTR_GROUP_SID);
+        entry->attr.va_acl       = NULL;
+        entry->attr.va_owner_sid = NULL;
+        entry->attr.va_group_sid = NULL;
+
         entry->expiration = chimera_vfs_now_ticks() +
             chimera_vfs_ns_to_ticks((uint64_t) cache->ttl * 1000000000ULL);
 
