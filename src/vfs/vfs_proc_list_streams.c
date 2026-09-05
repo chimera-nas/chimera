@@ -32,6 +32,7 @@ chimera_vfs_list_streams(
     uint64_t                            cookie,
     void                               *buffer,
     uint32_t                            max_bytes,
+    int                                 want_fh,
     chimera_vfs_list_streams_callback_t callback,
     void                               *private_data)
 {
@@ -55,6 +56,7 @@ chimera_vfs_list_streams(
     request->list_streams.cookie    = cookie;
     request->list_streams.buffer    = buffer;
     request->list_streams.max_bytes = max_bytes;
+    request->list_streams.want_fh   = want_fh ? 1 : 0;
     request->list_streams.r_len     = 0;
     request->list_streams.r_count   = 0;
     request->list_streams.r_eof     = 0;

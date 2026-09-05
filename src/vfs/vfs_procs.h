@@ -1215,6 +1215,7 @@ chimera_vfs_list_streams(
     uint64_t                            cookie,
     void                               *buffer,
     uint32_t                            max_bytes,
+    int                                 want_fh,
     chimera_vfs_list_streams_callback_t callback,
     void                               *private_data);
 

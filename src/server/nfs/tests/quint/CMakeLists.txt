@@ -55,6 +55,12 @@ target_include_directories(nfs4_deleg_probe PRIVATE
 target_link_libraries(nfs4_deleg_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 
+add_executable(nfs4_named_attr_probe nfs4_named_attr_probe.c)
+target_include_directories(nfs4_named_attr_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_named_attr_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+
 add_executable(nfs_aux_probe nfs_aux_probe.c)
 target_include_directories(nfs_aux_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -175,6 +181,18 @@ add_test(NAME chimera/server/nfs/mbt4/deleg_probe_memfs
     COMMAND $<TARGET_FILE:nfs4_deleg_probe>)
 set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs"
+    LABELS "quint;nfs4_mbt;multiproto;memfs"
+    TIMEOUT 90)
+
+# Named-attribute (OPENATTR) probe: pins the full NFSv4 named-attribute
+# lifecycle the corpus never drives -- OPENATTR, OPEN-create/WRITE/READ of an
+# attribute, FATTR4_NAMED_ATTR tracking, READDIR/LOOKUP/REMOVE of the attr
+# directory -- exercising the shared VFS named-stream storage that SMB ADS also
+# projects onto.  Needs no corpus.
+add_test(NAME chimera/server/nfs/mbt4/named_attr_probe_memfs
+    COMMAND $<TARGET_FILE:nfs4_named_attr_probe>)
+set_tests_properties(chimera/server/nfs/mbt4/named_attr_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_named_attr_probe_memfs"
     LABELS "quint;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
 

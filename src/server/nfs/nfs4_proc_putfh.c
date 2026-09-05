@@ -7,8 +7,39 @@
 #include "nfs4_state.h"
 #include "nfs4_session.h"
 #include "server/server.h"
+#include "nfs4_named_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+/* A synthetic named-attribute-directory handle (OPENATTR result): validate that
+ * the underlying base file still exists, then keep the *decoded* marked handle
+ * (already in req->fh from PUTFH's decode) as the current fh so GETFH/SAVEFH
+ * round-trip it back to the client.  The attr-dir-aware ops (READDIR/LOOKUP/
+ * OPEN/REMOVE/GETATTR) recognise it on req->fh. */
+static void
+chimera_nfs4_putfh_attrdir_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct PUTFH4res   *res = &req->res_compound.resarray[req->index].opputfh;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = (error_code == CHIMERA_VFS_ENOENT ||
+                       error_code == CHIMERA_VFS_ESTALE) ?
+            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, handle);
+
+    /* req->fh already holds the decoded marked (MAGIC-prefixed) handle from the
+     * PUTFH decode; leave it current unchanged. */
+    res->status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_putfh_attrdir_complete */
 
 static void
 chimera_nfs4_putfh_getattr_complete(
@@ -131,8 +162,41 @@ chimera_nfs4_putfh(
         return;
     }
 
-    if (decode_rc != CHIMERA_NFS_FH_OK ||
-        !chimera_vfs_fh_is_plausible(thread->vfs_thread, req->fh, req->fhlen)) {
+    if (decode_rc != CHIMERA_NFS_FH_OK) {
+        res->status = NFS4ERR_BADHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* A named-attribute-directory handle is the base file's VFS fh with a magic
+     * prefix.  It is wrapped on the wire like any handle (OPENATTR builds the
+     * marked inner fh; GETFH wraps it), so the marker is only visible AFTER
+     * decode -- checking the wire bytes would miss it behind the wrap header.
+     * Validate the base it wraps; the decoded marked form stays the current fh
+     * so the attr-dir-aware ops (READDIR/LOOKUP/OPEN/REMOVE/GETATTR) route on
+     * it. */
+    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        const uint8_t *base;
+        int            base_len;
+
+        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
+
+        if (base_len > NFS4_FHSIZE ||
+            !chimera_vfs_fh_is_plausible(thread->vfs_thread, base, base_len)) {
+            res->status = NFS4ERR_BADHANDLE;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_putfh_attrdir_complete,
+                            req);
+        return;
+    }
+
+    if (!chimera_vfs_fh_is_plausible(thread->vfs_thread, req->fh, req->fhlen)) {
         res->status = NFS4ERR_BADHANDLE;
         chimera_nfs4_compound_complete(req, res->status);
         return;
