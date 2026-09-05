@@ -31,6 +31,82 @@ chimera_vfs_lookup_pathonly_complete(
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data);
 
+/* Length of the path prefix preceding the first ".." component (with the
+ * separating slash stripped): -1 when there is no ".." component, 0 when the
+ * path begins with "..". */
+static inline int
+chimera_vfs_dotdot_prefix_len(
+    const char *p,
+    int         len)
+{
+    int i = 0;
+
+    while (i < len) {
+        int start = i;
+
+        while (i < len && p[i] != '/') {
+            i++;
+        }
+        if (i - start == 2 && p[start] == '.' && p[start + 1] == '.') {
+            int end = start;
+
+            while (end > 0 && p[end - 1] == '/') {
+                end--;
+            }
+            return end;
+        }
+        while (i < len && p[i] == '/') {
+            i++;
+        }
+    }
+    return -1;
+} /* chimera_vfs_dotdot_prefix_len */
+
+/* Completion of the ".."-prefix resolution (follows symlinks) for a path-only
+ * mount.  A path-only backend collapses ".." lexically, so "b/.." with a
+ * dangling or non-directory "b" would wrongly succeed; resolving the prefix
+ * first gives POSIX's ENOENT (dangling chain) or ENOTDIR (non-dir), and only a
+ * real directory lets the whole path (with its ".." collapsed) resolve.  The
+ * prefix lookup is a whole-path resolution against the mount root, so DAC stays
+ * server-delegated -- no per-component EACCES. */
+static void
+chimera_vfs_lookup_pathonly_dotdot_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request     *lp_request = private_data;
+    struct chimera_vfs_thread      *thread     = lp_request->thread;
+    struct chimera_vfs_open_handle *oh         = lp_request->lookup.handle;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(thread, oh);
+        lp_request->lookup.callback(error_code, NULL,
+                                    lp_request->lookup.private_data);
+        chimera_vfs_request_free(thread, lp_request);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISDIR(attr->va_mode)) {
+        chimera_vfs_release(thread, oh);
+        lp_request->lookup.callback(CHIMERA_VFS_ENOTDIR, NULL,
+                                    lp_request->lookup.private_data);
+        chimera_vfs_request_free(thread, lp_request);
+        return;
+    }
+
+    chimera_vfs_lookup_at(
+        thread,
+        lp_request->cred,
+        oh,
+        lp_request->lookup.pathc,
+        strlen(lp_request->lookup.pathc),
+        lp_request->lookup.attr_mask | CHIMERA_VFS_ATTR_MODE,
+        0,
+        chimera_vfs_lookup_pathonly_complete,
+        lp_request);
+} /* chimera_vfs_lookup_pathonly_dotdot_complete */
+
 static inline void
 chimera_vfs_lookup_open_dispatch(
     enum chimera_vfs_error          error_code,
@@ -60,14 +136,36 @@ chimera_vfs_lookup_open_dispatch(
     /* Crossed into a path-only mount: it has no child fhs to walk, so hand the
      * whole remaining path to it in one lookup and return the final attrs. */
     if (chimera_vfs_module_is_path_only(oh->vfs_module)) {
-        const char *remaining = lp_request->lookup.pathc;
+        const char *remaining  = lp_request->lookup.pathc;
+        int         remlen     = strlen(remaining);
+        int         prefix_len = chimera_vfs_dotdot_prefix_len(remaining, remlen);
+
+        /* A ".." after a real component collapses lexically in the backend, so
+         * resolve the component(s) before the first ".." first (following
+         * symlinks, as POSIX does for a non-final component): a dangling chain
+         * or missing prefix is ENOENT, a non-directory prefix is ENOTDIR, and
+         * only a real directory prefix lets the whole path resolve. */
+        if (prefix_len > 0) {
+            chimera_vfs_lookup(
+                thread,
+                lp_request->cred,
+                oh->fh,
+                oh->fh_len,
+                remaining,
+                prefix_len,
+                CHIMERA_VFS_ATTR_MODE,
+                CHIMERA_VFS_LOOKUP_FOLLOW,
+                chimera_vfs_lookup_pathonly_dotdot_complete,
+                lp_request);
+            return;
+        }
 
         chimera_vfs_lookup_at(
             thread,
             lp_request->cred,
             oh,
             remaining,
-            strlen(remaining),
+            remlen,
             lp_request->lookup.attr_mask | CHIMERA_VFS_ATTR_MODE,
             0,
             chimera_vfs_lookup_pathonly_complete,
