@@ -648,10 +648,11 @@ nfs4_client_setclientid(
 
 nfsstat4
 nfs4_client_setclientid_confirm(
-    struct nfs4_client_table *table,
-    uint64_t                  clientid,
-    const uint8_t            *confirm,
-    struct nfs_client       **destroy_unified)
+    struct nfs4_client_table           *table,
+    uint64_t                            clientid,
+    const uint8_t                      *confirm,
+    const struct nfs4_client_principal *principal,
+    struct nfs_client                 **destroy_unified)
 {
     struct nfs4_client *r, *old;
     nfsstat4            status;
@@ -675,6 +676,17 @@ nfs4_client_setclientid_confirm(
          * specifies NFS4ERR_STALE_CLIENTID here; NFS4ERR_STALE_STATEID is only
          * valid for stateid operations. */
         status = NFS4ERR_STALE_CLIENTID;
+        goto out_unlock;
+    }
+
+    /* RFC 7530 §16.34.5: in every case where the confirm names an existing
+     * record, "if the principals of the records do not match that of the
+     * SETCLIENTID_CONFIRM, the server returns NFS4ERR_CLID_INUSE".  Without
+     * it a principal that learns the {clientid, confirm verifier} pair --
+     * the confirm verifiers being a monotonic counter -- can confirm, and on
+     * a reboot record supersede, a client it did not create. */
+    if (!nfs4_principal_matches(r, principal)) {
+        status = NFS4ERR_CLID_INUSE;
         goto out_unlock;
     }
 

@@ -32,11 +32,21 @@ chimera_nfs4_setclientid_confirm(
     struct chimera_server_nfs_shared *shared          = thread->shared;
     struct nfs_client                *destroy_unified = NULL;
     struct nfs4_session              *session;
+    struct nfs4_client_principal      principal;
     nfsstat4                          status;
+
+    /* RFC 7530 §16.34.5 binds the confirm to the principal that issued the
+     * SETCLIENTID, so it travels into the record match. */
+    principal.flavor          = req->principal_flavor;
+    principal.uid             = req->principal_uid;
+    principal.gid             = req->principal_gid;
+    principal.machinename     = req->principal_machinename;
+    principal.machinename_len = req->principal_machinename_len;
 
     status = nfs4_client_setclientid_confirm(&shared->nfs4_shared_clients,
                                              args->clientid,
                                              args->setclientid_confirm,
+                                             &principal,
                                              &destroy_unified);
 
     /* A superseded (rebooted) client's state hierarchy is torn down outside

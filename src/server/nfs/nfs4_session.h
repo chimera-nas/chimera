@@ -357,14 +357,17 @@ nfs4_client_setclientid(
  * named by `clientid`/`confirm`.  On a client reboot this promotes the
  * superseding record and tears the old one down, returning its unified state
  * hierarchy via *destroy_unified for teardown outside the table lock.
- * Returns NFS4ERR_STALE_CLIENTID (no such clientid) or NFS4ERR_CLID_INUSE
- * (confirm verifier mismatch) on failure. */
+ * `principal` is the confirming request's principal, which §16.34.5 requires
+ * to be the one that created the record.  Returns NFS4ERR_STALE_CLIENTID (no
+ * such clientid, or no record awaiting this confirm verifier) or
+ * NFS4ERR_CLID_INUSE (principal mismatch) on failure. */
 nfsstat4
 nfs4_client_setclientid_confirm(
-    struct nfs4_client_table *table,
-    uint64_t                  clientid,
-    const uint8_t            *confirm,
-    struct nfs_client       **destroy_unified);
+    struct nfs4_client_table           *table,
+    uint64_t                            clientid,
+    const uint8_t                      *confirm,
+    const struct nfs4_client_principal *principal,
+    struct nfs_client                 **destroy_unified);
 
 /* RFC 8881 §18.35.4 EXCHANGE_ID client-record matching state machine.  Runs
  * entirely under the table lock and fills *out (see nfs4_exchange_id_result).
