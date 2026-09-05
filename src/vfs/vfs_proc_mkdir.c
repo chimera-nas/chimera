@@ -199,32 +199,41 @@ chimera_vfs_mkdir(
     request->mkdir.private_data = private_data;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
-        /* Fast path: pass full path to _at operation, kernel resolves */
-        request->mkdir.name_offset = 0;
+        /* Fast path: pass the whole in-mount name to mkdir_at and let the
+         * backend resolve it -- but ONLY when there is no mid-path component.
+         * A mid-path symlink must be followed in the core (it may target a
+         * client-namespace absolute path that only the core can cross back
+         * through the mount), so a multi-component name falls through to the
+         * parent-resolving path below. */
+        if (!memchr(request->mkdir.path, '/', request->mkdir.pathlen)) {
+            request->mkdir.name_offset = 0;
 
-        memcpy(request->mkdir.parent_fh, fh, fhlen);
-        request->mkdir.parent_fh_len = fhlen;
+            memcpy(request->mkdir.parent_fh, fh, fhlen);
+            request->mkdir.parent_fh_len = fhlen;
 
-        chimera_vfs_open_fh(
-            thread,
-            cred,
-            request->mkdir.parent_fh,
-            request->mkdir.parent_fh_len,
-            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-            chimera_vfs_mkdir_parent_open_complete,
-            request);
-        return;
-    }
-
-    /* Deep path crossing into a path-only mount: rebase onto the mount root and
-     * dispatch mkdir_at with the whole in-mount sub-path as the name. */
-    {
+            chimera_vfs_open_fh(
+                thread,
+                cred,
+                request->mkdir.parent_fh,
+                request->mkdir.parent_fh_len,
+                CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+                chimera_vfs_mkdir_parent_open_complete,
+                request);
+            return;
+        }
+    } else {
+        /* Deep path crossing into a path-only mount: rebase onto the mount root
+         * and dispatch mkdir_at with the in-mount sub-path as the name -- again
+         * only when that sub-path is a single component; a mid-path symlink
+         * falls through so the core resolves (and follows) the parent. */
         int rebase = chimera_vfs_pathonly_rebase(thread, request->mkdir.path,
                                                  request->mkdir.pathlen,
                                                  request->mkdir.parent_fh,
                                                  &request->mkdir.parent_fh_len);
 
-        if (rebase >= 0 && rebase < request->mkdir.pathlen) {
+        if (rebase >= 0 && rebase < request->mkdir.pathlen &&
+            !memchr(request->mkdir.path + rebase, '/',
+                    request->mkdir.pathlen - rebase)) {
             request->mkdir.name_offset = rebase;
 
             chimera_vfs_open_fh(
