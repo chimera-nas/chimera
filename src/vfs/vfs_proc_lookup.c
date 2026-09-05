@@ -87,7 +87,8 @@ chimera_vfs_lookup_pathonly_dotdot_complete(
         return;
     }
 
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISDIR(attr->va_mode)) {
+    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode)) {
         chimera_vfs_release(thread, oh);
         lp_request->lookup.callback(CHIMERA_VFS_ENOTDIR, NULL,
                                     lp_request->lookup.private_data);
