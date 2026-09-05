@@ -791,6 +791,13 @@ struct chimera_vfs_request {
              * issuing them, so a close completing inline cannot finish the
              * umount mid-sweep. */
             int                       pending_closes;
+            /* Close-fence snapshot: the value chimera_vfs_close_thread's
+             * closes_issued had once this mount's cache came up empty.  The
+             * backend UMOUNT waits for closes_completed to reach it, so a
+             * CLOSE the close thread already took out of the cache cannot
+             * still be on the wire when the backend tears the mount down. */
+            uint64_t                  close_fence;
+            int                       close_fence_valid;
             /* Poll state while waiting for handles still referenced by
              * someone else to be dropped (chimera_vfs_umount_wait). */
             void                     *wait;

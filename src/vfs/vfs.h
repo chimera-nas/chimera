@@ -131,6 +131,17 @@ struct chimera_vfs_close_thread {
     int                        shutdown;
     int                        num_pending;
     int                        signaled;
+    /* Close fence.  A handle leaves the open cache into this thread's custody
+     * before its backend CLOSE is issued, which makes it invisible to
+     * chimera_vfs_open_cache_purge_by_mount -- so an umount sweeping the cache
+     * can see nothing left on the mount while that CLOSE is still on the wire.
+     * closes_issued is bumped under the shard lock as each handle is taken (so
+     * there is no window between leaving the cache and being counted);
+     * closes_completed is bumped when the close finishes.  An umount snapshots
+     * issued and waits for completed to reach it, which drains the closes in
+     * flight at that moment without waiting for global quiescence. */
+    uint64_t                   closes_issued;
+    uint64_t                   closes_completed;
     struct evpl_doorbell       doorbell;
     struct evpl_timer          timer;
     pthread_mutex_t            lock;
