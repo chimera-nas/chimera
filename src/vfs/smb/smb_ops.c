@@ -1519,9 +1519,18 @@ chimera_smb_lookup_create_reply(
                               request->lookup_at.component_len);
         request->lookup_at.r_attr.va_fh_len = 0;
     } else {
+        /* Set the fh's nofollow bit only for a reparse point (a symlink or a
+         * special file): its fh must re-open the node itself, not follow it.  A
+         * directory or a regular file is never followed, so its fh must NOT
+         * carry the bit -- open_fh would otherwise re-CREATE it with
+         * OPEN_REPARSE_POINT and a directory then reads back as a non-directory,
+         * breaking a create dispatched against it as a resolved parent. */
+        int nofollow =
+            (r.info.file_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
+
         path_id                             = chimera_smb_path_intern(conn->server, fullpath, fullpath_len);
         request->lookup_at.r_attr.va_fh_len =
-            chimera_smb_encode_open_fh(request->fh, path_id, 1,
+            chimera_smb_encode_open_fh(request->fh, path_id, nofollow,
                                        request->lookup_at.r_attr.va_fh);
         request->lookup_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
