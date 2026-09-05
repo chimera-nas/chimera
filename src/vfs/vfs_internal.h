@@ -725,6 +725,21 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
         return;
     }
 
+    /* Ejection guard: enlistment requires the op's {module, mount_private} to
+     * match the transaction's owner (stamped at begin).  On mismatch -- e.g. a
+     * path walk carried the caller's transaction across a mount/junction
+     * boundary -- the op is EJECTED: it runs standalone (autocommit), routes by
+     * its own fh_hash below, and its effects are independent of the
+     * transaction's commit/abort.  This is deliberate best-effort semantics,
+     * and it is also the memory-safety barrier: a backend recovers its own txn
+     * object by casting request->transaction, so a foreign backend must never
+     * see another backend's transaction object. */
+    if (request->transaction &&
+        (request->module != request->transaction->module ||
+         request->mount_private != request->transaction->mount_private)) {
+        request->transaction = NULL;
+    }
+
     /* A transaction lives on one backend thread (thread-local backend state); an
      * enlisted op (or the end op) must run on the thread the begin ran on, so
      * route by the transaction's affinity key rather than this op's own fh_hash. */
