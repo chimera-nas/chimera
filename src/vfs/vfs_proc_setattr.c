@@ -11,6 +11,7 @@
 #include "vfs_attr_cache.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
+#include "sdk/vfs_sid.h"
 #include "common/misc.h"
 #include "common/macros.h"
 
@@ -25,7 +26,9 @@
  * present, an owner/group field set to the value it already holds is not a
  * change and does not require WRITE_OWNER -- which matters because a SET_INFO
  * security descriptor commonly restates the existing owner alongside a DACL,
- * and the owner holds WRITE_ACL but not WRITE_OWNER implicitly.
+ * and the owner holds WRITE_ACL but not WRITE_OWNER implicitly.  The native
+ * owner/group SID companions follow the same rule: restating the SID the
+ * object already carries is not a chown.
  */
 static uint32_t
 chimera_vfs_setattr_required(
@@ -45,7 +48,13 @@ chimera_vfs_setattr_required(
                 cur->va_uid == set_attr->va_uid)) ||
         ((m & CHIMERA_VFS_ATTR_GID) &&
          !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
-           cur->va_gid == set_attr->va_gid));
+           cur->va_gid == set_attr->va_gid)) ||
+        ((m & CHIMERA_VFS_ATTR_OWNER_SID) &&
+         !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
+           chimera_sid_equal(cur->va_owner_sid, set_attr->va_owner_sid))) ||
+        ((m & CHIMERA_VFS_ATTR_GROUP_SID) &&
+         !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) &&
+           chimera_sid_equal(cur->va_group_sid, set_attr->va_group_sid)));
 
     if (chowns) {
         required |= CHIMERA_ACE_WRITE_OWNER;
@@ -102,7 +111,11 @@ chimera_vfs_setattr_cred_in_group(
  * current owner/group.  Only the super-user may change the owner (uid); the
  * group (gid) may be changed only by the file's owner and only to a group in
  * the caller's group set.  A field left unset, or set to its current value, is
- * not a change.  Returns CHIMERA_VFS_OK when permitted, else CHIMERA_VFS_EPERM.
+ * not a change.  The native owner/group SID companions are governed as part
+ * of the identity they accompany: naming one is a chown for the ownership
+ * test, and the owner may attach, restate or clear its SID but not replace a
+ * stored owner SID with a different one.  Returns CHIMERA_VFS_OK when
+ * permitted, else CHIMERA_VFS_EPERM.
  */
 static enum chimera_vfs_error
 chimera_vfs_setattr_chown_check(
@@ -113,13 +126,16 @@ chimera_vfs_setattr_chown_check(
     uint64_t m  = set_attr->va_set_mask;
     int has_uid = (m & CHIMERA_VFS_ATTR_UID) != 0;
     int has_gid = (m & CHIMERA_VFS_ATTR_GID) != 0;
+    int has_sid = (m & (CHIMERA_VFS_ATTR_OWNER_SID |
+                        CHIMERA_VFS_ATTR_GROUP_SID)) != 0;
 
     if (cred->uid == 0) {
         return CHIMERA_VFS_OK;
     }
 
-    /* chown(path, -1, -1) names no owner or group and is always permitted. */
-    if (!has_uid && !has_gid) {
+    /* chown(path, -1, -1) names no owner, group or SID and is always
+     * permitted. */
+    if (!has_uid && !has_gid && !has_sid) {
         return CHIMERA_VFS_OK;
     }
 
@@ -136,7 +152,21 @@ chimera_vfs_setattr_chown_check(
         return CHIMERA_VFS_EPERM;
     }
 
-    /* The owner may change the group only to one it is a member of. */
+    /* Nor replace a native owner SID the object already carries with a
+    * different one: that names another Windows principal as owner, which is
+    * an ownership change (Windows demands WRITE_OWNER for it as well).
+    * Attaching a SID to an object that has none, restating it, or clearing
+    * it leaves the identity the uid names and is permitted -- a domain user
+    * saving a DACL on a file created over NFS relies on the attach. */
+    if ((m & CHIMERA_VFS_ATTR_OWNER_SID) &&
+        (cur->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
+        chimera_sid_present(set_attr->va_owner_sid) &&
+        !chimera_sid_equal(cur->va_owner_sid, set_attr->va_owner_sid)) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    /* The owner may change the group only to one it is a member of.  The
+     * group SID follows the gid and needs no rule of its own. */
     if (has_gid &&
         (cur->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
         set_attr->va_gid != cur->va_gid &&
@@ -154,7 +184,11 @@ chimera_vfs_setattr_chown_check(
  * but, following the BSD/Solaris NFSv4 implementations, only to its own identity
  * -- the new uid must equal the caller's uid, and the new gid must be a group
  * the caller is a member of.  A field left unset, or restated to its current
- * value, is not a change.  Returns CHIMERA_VFS_OK when permitted, else EPERM.
+ * value, is not a change.  A native owner/group SID is accepted only as a
+ * restatement of the stored one or as the companion of a uid (gid) the caller
+ * is taking to its own identity in the same call: the engine cannot compare a
+ * SID with the caller, so the numeric identity vouches for it.  Returns
+ * CHIMERA_VFS_OK when permitted, else EPERM.
  */
 static enum chimera_vfs_error
 chimera_vfs_setattr_write_owner_check(
@@ -178,6 +212,22 @@ chimera_vfs_setattr_write_owner_check(
         return CHIMERA_VFS_EPERM;
     }
 
+    if ((m & CHIMERA_VFS_ATTR_OWNER_SID) &&
+        !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
+          chimera_sid_equal(cur->va_owner_sid, set_attr->va_owner_sid)) &&
+        !((m & CHIMERA_VFS_ATTR_UID) &&
+          set_attr->va_uid == (uint64_t) cred->uid)) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    if ((m & CHIMERA_VFS_ATTR_GROUP_SID) &&
+        !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) &&
+          chimera_sid_equal(cur->va_group_sid, set_attr->va_group_sid)) &&
+        !((m & CHIMERA_VFS_ATTR_GID) &&
+          chimera_vfs_setattr_cred_in_group(cred, set_attr->va_gid))) {
+        return CHIMERA_VFS_EPERM;
+    }
+
     return CHIMERA_VFS_OK;
 } /* chimera_vfs_setattr_write_owner_check */
 
@@ -189,7 +239,8 @@ chimera_vfs_setattr_denied_error(
     uint64_t m = set_attr->va_set_mask;
 
     if (m & (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_ACL |
-             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID |
+             CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID)) {
         return CHIMERA_VFS_EPERM;
     }
 
@@ -424,8 +475,13 @@ chimera_vfs_setattr_gate_complete(
      * signal, since Windows withholds the owner's implicit WRITE_OWNER) or an
      * explicit WRITE_OWNER ACE grants it.  This keeps the synthesised-ACL and
      * mode-only (e.g. NFSv3) representations consistent: an owner's POSIX-legal
-     * chgrp is permitted in both, while a uid change still demands privilege. */
-    if (gate->set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+     * chgrp is permitted in both, while a uid change still demands privilege.
+     * The native owner/group SID companions enter the same block, so a
+     * SID-only set faces these rules rather than a WRITE_OWNER requirement
+     * that nothing else checks. */
+    if (gate->set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID |
+                                       CHIMERA_VFS_ATTR_OWNER_SID |
+                                       CHIMERA_VFS_ATTR_GROUP_SID)) {
         int is_owner = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
             (uint64_t) gate->cred->uid == attr->va_uid;
 
@@ -560,7 +616,9 @@ chimera_vfs_setattr_common(
             gate->private_data   = private_data;
 
             chimera_vfs_getattr(thread, cred, handle,
-                                CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+                                CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
+                                CHIMERA_VFS_ATTR_OWNER_SID |
+                                CHIMERA_VFS_ATTR_GROUP_SID,
                                 chimera_vfs_setattr_gate_complete, gate);
             return;
         }
