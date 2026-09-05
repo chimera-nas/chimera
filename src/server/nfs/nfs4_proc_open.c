@@ -1131,6 +1131,44 @@ chimera_nfs4_open_claim_fh_complete(
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_claim_fh_complete */
 
+/*
+ * Validate the delegate_stateid an OPEN with CLAIM_DELEGATE_CUR cites (RFC
+ * 7530 §16.16 / §10.4.3).  The claim asserts the caller already holds a
+ * delegation on the file, so the stateid has to resolve to a live delegation
+ * of this very client; a stateid that designates no such state is
+ * NFS4ERR_BAD_STATEID (or STALE_STATEID/EXPIRED, as the table decides) rather
+ * than something to quietly serve as an ordinary open.
+ */
+static nfsstat4
+chimera_nfs4_open_check_delegate_cur(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct OPEN4args                 *args   = &req->args_compound->argarray[req->index].opopen;
+    struct nfs_state_table           *table  = &thread->shared->nfs4_state_table;
+    void                             *state_void;
+    uint8_t                           state_type;
+    nfsstat4                          status;
+
+    status = nfs_state_table_acquire(table,
+                                     &args->claim.delegate_cur_info.delegate_stateid,
+                                     NFS4_SLOT_TYPE_DELEG,
+                                     &state_void,
+                                     &state_type);
+
+    if (status != NFS4_OK) {
+        return status;
+    }
+
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+
+    nfs_state_table_release(table, state_void, state_type,
+                            thread->vfs_thread);
+
+    return status;
+} /* chimera_nfs4_open_check_delegate_cur */
+
 static void
 chimera_nfs4_open_parent_complete(
     enum chimera_vfs_error          error_code,
@@ -1364,8 +1402,8 @@ chimera_nfs4_open_parent_complete(
             /* RFC 7530 §16.16: open of a file the client already holds a
              * delegation on, identified by name within the current FH's
              * directory.  Treat like CLAIM_NULL using the name carried in
-             * delegate_cur_info; the delegation the client cites is its own,
-             * so no recall is needed. */
+             * delegate_cur_info; the delegation the client cites must be its
+             * own -- verified below -- so no recall is needed. */
             status = chimera_nfs4_validate_name(&args->claim.delegate_cur_info.file);
             if (status != NFS4_OK) {
                 struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
@@ -1374,6 +1412,16 @@ chimera_nfs4_open_parent_complete(
                 chimera_nfs4_open_complete(req, status);
                 return;
             }
+
+            status = chimera_nfs4_open_check_delegate_cur(req);
+            if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                res->status = status;
+                chimera_nfs4_open_complete(req, status);
+                return;
+            }
+
             if (args->openhow.opentype == OPEN4_NOCREATE) {
                 struct nfs4_open_lookup_regular_ctx *ctx;
 
