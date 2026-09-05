@@ -252,6 +252,28 @@ static void chimera_vfs_remove_at_gate_complete(
  * name-based REMOVE), resolve the child by name so the sticky-directory owner
  * rule and any per-object DELETE grant can be evaluated -- otherwise a sticky
  * directory's owner check is silently skipped. */
+/* Completion of the parent getattr taken when a name-based remove could not
+ * resolve its child: a non-directory parent is ENOTDIR, anything else keeps the
+ * child-resolution error (ENOENT). */
+static void
+chimera_vfs_remove_at_parent_type_check(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_remove_at_gate *gate = private_data;
+    enum chimera_vfs_error             status = CHIMERA_VFS_ENOENT;
+
+    if (error_code == CHIMERA_VFS_OK &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode)) {
+        status = CHIMERA_VFS_ENOTDIR;
+    }
+
+    gate->callback(status, NULL, NULL, gate->private_data);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
+} /* chimera_vfs_remove_at_parent_type_check */
+
 static void
 chimera_vfs_remove_at_sticky_lookup(
     enum chimera_vfs_error    error_code,
@@ -261,9 +283,15 @@ chimera_vfs_remove_at_sticky_lookup(
     struct chimera_vfs_remove_at_gate *gate = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        /* Name absent/unreadable: surface the natural removal error (ENOENT). */
-        gate->callback(error_code, NULL, NULL, gate->private_data);
-        chimera_vfs_gate_scratch_free(gate->thread, gate);
+        /* The child could not be resolved.  Before surfacing the error, settle
+         * ENOTDIR vs ENOENT from the parent itself: resolving the child by name
+         * re-derived the parent by FH, which on a path-only backend re-opens a
+         * (possibly unlinked-while-open) path and returns ENOENT even when the
+         * live parent is a non-directory descriptor -- for which POSIX requires
+         * ENOTDIR.  The already-open parent handle answers authoritatively. */
+        chimera_vfs_getattr(gate->thread, gate->cred, gate->handle,
+                            CHIMERA_VFS_ATTR_MASK_STAT,
+                            chimera_vfs_remove_at_parent_type_check, gate);
         return;
     }
 
@@ -272,10 +300,10 @@ chimera_vfs_remove_at_sticky_lookup(
     gate->child_fh_len      = attr->va_fh_len;
     gate->child_fh_resolved = 1;
 
-    chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
-                            gate->handle->fh, gate->handle->fh_len,
-                            gate->child_fh, gate->child_fh_len,
-                            chimera_vfs_remove_at_gate_complete, gate);
+    chimera_vfs_gate_delete_handle(&gate->gate_ctx, gate->thread, gate->cred,
+                                   gate->handle,
+                                   gate->child_fh, gate->child_fh_len,
+                                   chimera_vfs_remove_at_gate_complete, gate);
 } /* chimera_vfs_remove_at_sticky_lookup */
 
 static void
@@ -370,10 +398,10 @@ chimera_vfs_remove_at_common(
         gate->private_data = private_data;
 
         if (child_fh && child_fh_len > 0) {
-            chimera_vfs_gate_delete(&gate->gate_ctx, thread, cred,
-                                    handle->fh, handle->fh_len,
-                                    child_fh, child_fh_len,
-                                    chimera_vfs_remove_at_gate_complete, gate);
+            chimera_vfs_gate_delete_handle(&gate->gate_ctx, thread, cred,
+                                           handle,
+                                           child_fh, child_fh_len,
+                                           chimera_vfs_remove_at_gate_complete, gate);
         } else {
             /* No child FH from the caller (e.g. an NFS name-based REMOVE):
             * resolve it by name so the sticky-directory owner rule and any

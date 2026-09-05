@@ -54,7 +54,12 @@ chimera_vfs_gate_fh_getattr(
         status = chimera_vfs_gate(attr, ctx->cred, ctx->required);
     }
 
-    chimera_vfs_release(ctx->thread, ctx->handle);
+    /* ctx->handle is NULL when the caller lent us an already-open handle
+     * (chimera_vfs_gate_handle): it owns that handle, so we must not release
+     * it here. */
+    if (ctx->handle) {
+        chimera_vfs_release(ctx->thread, ctx->handle);
+    }
 
     ctx->callback(status, ctx->private_data);
 } /* chimera_vfs_gate_fh_getattr */
@@ -230,6 +235,95 @@ chimera_vfs_gate_fh_dac(
                              callback, private_data);
 } /* chimera_vfs_gate_fh_dac */
 
+/* ------------------------------------------------------------------------- *
+ * Handle variants: authorize against an already-open handle the caller holds,
+ * rather than re-resolving the object by FH (open_fh + getattr).  A path-only
+ * backend's FH is an opaque path token; re-opening it after the name was
+ * unlinked-while-open returns ENOENT, masking the real object (whose live
+ * getattr, via the open token, still answers -- e.g. ENOTDIR for a non-dir
+ * parent).  For every backend it also drops a redundant open round-trip and
+ * removes a TOCTOU window (it authorizes exactly the object the caller
+ * resolved, not whatever the FH resolves to now).  ctx->handle stays NULL: the
+ * caller owns the lent handle, so the getattr completions must not release it.
+ * ------------------------------------------------------------------------- */
+static void
+chimera_vfs_gate_handle_impl(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        required,
+    int                             needed,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data)
+{
+    if (!needed) {
+        callback(CHIMERA_VFS_OK, private_data);
+        return;
+    }
+
+    ctx->thread       = thread;
+    ctx->cred         = cred;
+    ctx->required     = required;
+    ctx->callback     = callback;
+    ctx->private_data = private_data;
+    ctx->handle       = NULL;             /* borrowed: caller owns `handle` */
+
+    chimera_vfs_getattr(thread, cred, handle, CHIMERA_VFS_GATE_ATTR_MASK,
+                        chimera_vfs_gate_fh_getattr, ctx);
+} /* chimera_vfs_gate_handle_impl */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_handle(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        required,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data)
+{
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
+                                 chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred),
+                                 callback, private_data);
+} /* chimera_vfs_gate_handle */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_handle_dac(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        required,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data)
+{
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
+                                 chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred),
+                                 callback, private_data);
+} /* chimera_vfs_gate_handle_dac */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_handle_prefix(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        required,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data)
+{
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
+                                 chimera_vfs_gate_needed_prefix(handle->vfs_module->capabilities, cred),
+                                 callback, private_data);
+} /* chimera_vfs_gate_handle_prefix */
+
 /*
  * Variant of chimera_vfs_gate_fh_dac() for the lookup prefix: additionally
  * enforced for remote-DAC proxies, whose server cannot see cache-served
@@ -342,8 +436,23 @@ chimera_vfs_gate_delete_parent_getattr(
     uint32_t                     mode;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(ctx->thread, ctx->handle);
+        if (ctx->handle) {
+            chimera_vfs_release(ctx->thread, ctx->handle);
+        }
         ctx->callback(error_code, ctx->private_data);
+        return;
+    }
+
+    /* Deleting an entry requires the parent to be a directory; a non-directory
+     * parent (e.g. a dirfd that names a regular file, whose still-open inode
+     * outlived its name) is ENOTDIR ahead of the permission evaluation -- and
+     * ahead of the ENOENT a re-resolved path-only FH would otherwise yield. */
+    if (!ctx->any_type && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode)) {
+        if (ctx->handle) {
+            chimera_vfs_release(ctx->thread, ctx->handle);
+        }
+        ctx->callback(CHIMERA_VFS_ENOTDIR, ctx->private_data);
         return;
     }
 
@@ -354,8 +463,12 @@ chimera_vfs_gate_delete_parent_getattr(
     ctx->parent_uid = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?
         attr->va_uid : (uint64_t) -1;
 
-    chimera_vfs_release(ctx->thread, ctx->handle);
-    ctx->handle = NULL;
+    /* A borrowed parent handle (gate_delete_handle) leaves ctx->handle NULL --
+     * the caller owns it. */
+    if (ctx->handle) {
+        chimera_vfs_release(ctx->thread, ctx->handle);
+        ctx->handle = NULL;
+    }
 
     /* Fast path: parent grants DELETE_CHILD and is not sticky -- allowed
      * without fetching the child at all. */
@@ -453,3 +566,42 @@ chimera_vfs_gate_delete_always(
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_delete_parent_open, ctx);
 } /* chimera_vfs_gate_delete_always */
+
+/*
+ * As chimera_vfs_gate_delete(), but the parent directory is an already-open
+ * handle the caller holds rather than a FH to re-resolve (see the handle-
+ * variant rationale above chimera_vfs_gate_handle_impl).  The child is still
+ * fetched by FH, and only when the parent's DELETE_CHILD grant is absent or the
+ * parent is sticky.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_gate_delete_handle(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *parent_handle,
+    const void                     *child_fh,
+    int                             child_fhlen,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data)
+{
+    if (!chimera_vfs_gate_needed(parent_handle->vfs_module->capabilities, cred)) {
+        callback(CHIMERA_VFS_OK, private_data);
+        return;
+    }
+
+    ctx->thread       = thread;
+    ctx->cred         = cred;
+    ctx->child_fh     = child_fh;
+    ctx->child_fhlen  = child_fhlen;
+    ctx->callback     = callback;
+    ctx->private_data = private_data;
+    ctx->handle       = NULL;             /* borrowed: caller owns parent_handle */
+    ctx->any_type     = 0;
+    ctx->dc           = 0;
+    ctx->sticky       = 0;
+    ctx->parent_uid   = (uint64_t) -1;
+
+    chimera_vfs_getattr(thread, cred, parent_handle, CHIMERA_VFS_GATE_ATTR_MASK,
+                        chimera_vfs_gate_delete_parent_getattr, ctx);
+} /* chimera_vfs_gate_delete_handle */
