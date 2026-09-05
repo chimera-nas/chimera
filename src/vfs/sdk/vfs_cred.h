@@ -138,8 +138,9 @@ chimera_vfs_cred_init_unix(
  * @param cred   The credential to initialize
  * @param uid    User ID to assign to created files
  * @param gid    Group ID to assign to created files
- * @param ngids  Unused; reserved for future use
- * @param gids   Unused; reserved for future use
+ * @param ngids  Number of supplementary group IDs (capped at
+ *               CHIMERA_VFS_CRED_MAX_GIDS)
+ * @param gids   Array of supplementary group IDs (may be NULL if ngids == 0)
  */
 void
 chimera_vfs_cred_init_attr(
