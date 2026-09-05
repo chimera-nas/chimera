@@ -907,7 +907,7 @@ chimera_s3_list(
      * it. */
     chimera_s3_request_get(request);
 
-    chimera_vfs_find(thread->vfs, &thread->shared->cred,
+    chimera_vfs_find(thread->vfs, &request->cred,
                      request->bucket_fh,
                      request->bucket_fhlen,
                      CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs/sdk/vfs_error.h"
+
 struct chimera_s3_request;
 
 enum chimera_s3_status {
@@ -34,6 +36,29 @@ enum chimera_s3_status {
     CHIMERA_S3_STATUS_INVALID_TAG,
     CHIMERA_S3_STATUS_NO_SUCH_TAG_SET,
 };
+
+/*
+ * Map a VFS error to the S3 status a handler should report for it, falling back
+ * to whatever that handler would otherwise have used.
+ *
+ * Access failures need this: now that each request runs under the identity of
+ * the access key that authenticated it, the store answers EACCES/EPERM for work
+ * the caller may not do, and reporting that as InternalError would tell a client
+ * the server is broken when it is in fact enforcing permissions.
+ */
+static inline enum chimera_s3_status
+chimera_s3_status_from_vfs(
+    enum chimera_vfs_error error_code,
+    enum chimera_s3_status fallback)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:
+            return CHIMERA_S3_STATUS_ACCESS_DENIED;
+        default:
+            return fallback;
+    } /* switch */
+} /* chimera_s3_status_from_vfs */
 
 const char *
 chimera_s3_status_to_string(

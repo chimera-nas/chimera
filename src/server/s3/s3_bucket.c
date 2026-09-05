@@ -109,7 +109,7 @@ chimera_s3_create_bucket_mkdir_cb(
 
     /* EEXIST is success in us-east-1: recreating your own bucket is a no-op. */
     if (error_code && error_code != CHIMERA_VFS_EEXIST) {
-        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -151,7 +151,7 @@ chimera_s3_create_bucket_lookup_cb(
 
     if (error_code || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
         /* Bucket root path is missing/unresolvable. */
-        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -167,12 +167,12 @@ chimera_s3_create_bucket_lookup_cb(
     request->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
         CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
     request->set_attr.va_mode = S_IFDIR | 0755;
-    request->set_attr.va_uid  = 0;
-    request->set_attr.va_gid  = 0;
+    request->set_attr.va_uid  = request->cred.uid;
+    request->set_attr.va_gid  = request->cred.gid;
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_mkdir(thread->vfs, &thread->shared->cred,
+    chimera_vfs_mkdir(thread->vfs, &request->cred,
                       request->bucket_fh, request->bucket_fhlen,
                       request->bucket_name, request->bucket_namelen,
                       &request->set_attr, CHIMERA_VFS_ATTR_FH,
@@ -196,7 +196,7 @@ chimera_s3_create_bucket(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &shared->cred,
+    chimera_vfs_lookup(thread->vfs, &request->cred,
                        shared->root_fh, shared->root_fh_len,
                        shared->bucket_root_path, shared->bucket_root_pathlen,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
@@ -335,7 +335,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     struct chimera_server_s3_shared *shared  = thread->shared;
 
     if (ctx->cur < ctx->ndirs) {
-        chimera_vfs_remove(thread->vfs, &shared->cred,
+        chimera_vfs_remove(thread->vfs, &request->cred,
                            ctx->bucket_fh, ctx->bucket_fhlen,
                            ctx->dirs[ctx->cur], strlen(ctx->dirs[ctx->cur]), 0,
                            chimera_s3_delbucket_dir_removed, ctx);
@@ -343,7 +343,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     }
 
     /* All scaffolding gone; remove the bucket directory from the bucket root. */
-    chimera_vfs_remove(thread->vfs, &shared->cred,
+    chimera_vfs_remove(thread->vfs, &request->cred,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len, 0,
                        chimera_s3_delbucket_root_removed, ctx);
@@ -389,7 +389,7 @@ chimera_s3_delbucket_lookup_cb(
     memcpy(ctx->bucket_fh, attr->va_fh, attr->va_fh_len);
     ctx->bucket_fhlen = attr->va_fh_len;
 
-    chimera_vfs_find(thread->vfs, &thread->shared->cred,
+    chimera_vfs_find(thread->vfs, &request->cred,
                      ctx->bucket_fh, ctx->bucket_fhlen,
                      CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
                      chimera_s3_delbucket_filter,
@@ -460,7 +460,7 @@ chimera_s3_delete_bucket(
                                     request->bucket_namelen, request->bucket_name);
 
     /* Resolve the bucket directory, then walk + purge it. */
-    chimera_vfs_lookup(thread->vfs, &shared->cred,
+    chimera_vfs_lookup(thread->vfs, &request->cred,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
