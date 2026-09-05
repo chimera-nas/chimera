@@ -23,6 +23,8 @@
 #include <stddef.h>
 #include <sys/stat.h>
 
+#include "vfs_sid.h"
+
 struct chimera_vfs_cred;
 
 /*
@@ -88,6 +90,11 @@ enum chimera_principal_type {
     CHIMERA_PRINCIPAL_USER    = 0, /* numeric uid                            */
     CHIMERA_PRINCIPAL_GROUP   = 1, /* numeric gid                            */
     CHIMERA_PRINCIPAL_SPECIAL = 2, /* special-who below                      */
+    /* A native Windows SID the identity layer could not map to a uid or gid.
+     * It is stored and marshalled verbatim so the ACE round-trips losslessly
+     * (as NTFS keeps an ACE for a departed domain user), but it matches no
+     * caller during access evaluation and bears on no POSIX mode class. */
+    CHIMERA_PRINCIPAL_SID     = 3,
 };
 
 enum chimera_special_who {
@@ -122,10 +129,21 @@ enum chimera_special_who {
     CHIMERA_WHO_SERVICE       = 13,
 };
 
+/*
+ * Dual identity.  Access evaluation, POSIX mode projection and NFSv4 always
+ * work from `type`/`special`/`id`.  `sid` optionally carries the native
+ * Windows SID the principal was set with, so marshalling and storage can
+ * round-trip the real domain identity instead of re-deriving an algorithmic
+ * one: it is present (sid.len != 0) only on USER/GROUP principals whose SID
+ * was resolved through the identity layer, and on every PRINCIPAL_SID.
+ * SPECIAL principals never carry one (their well-known SIDs are implied).
+ */
 struct chimera_principal {
-    uint8_t  type;    /* enum chimera_principal_type   */
-    uint8_t  special; /* enum chimera_special_who      */
-    uint32_t id;      /* uid or gid when type != SPECIAL */
+    uint8_t            type;     /* enum chimera_principal_type          */
+    uint8_t            special;  /* enum chimera_special_who             */
+    uint16_t           reserved; /* zero                                 */
+    uint32_t           id;       /* uid or gid when type is USER/GROUP   */
+    struct chimera_sid sid;      /* native SID; sid.len 0 when unknown   */
 };
 
 struct chimera_ace {
