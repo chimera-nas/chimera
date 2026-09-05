@@ -1147,6 +1147,20 @@ chimera_nfs4_unmarshall_attrs(
                     return NFS4ERR_ATTRNOTSUPP;
                 }
 
+                /* RFC 7530 §6.2.1.4.1: ACE4_INHERIT_ONLY_ACE with neither
+                 * ACE4_FILE_INHERIT_ACE nor ACE4_DIRECTORY_INHERIT_ACE set
+                 * describes an ACE that is never enforced and never inherited,
+                 * so setting it SHOULD fail with NFS4ERR_ATTRNOTSUPP rather
+                 * than store an entry that silently does nothing.  The ACEs the
+                 * server itself materialises always carry an inherit bit
+                 * alongside INHERIT_ONLY (vfs_acl.c), so a GETATTR/SETATTR
+                 * round trip is unaffected. */
+                if ((flag & CHIMERA_ACE_FLAG_INHERIT_ONLY) &&
+                    !(flag & (CHIMERA_ACE_FLAG_FILE_INHERIT |
+                              CHIMERA_ACE_FLAG_DIR_INHERIT))) {
+                    return NFS4ERR_ATTRNOTSUPP;
+                }
+
                 is_group = !!(flag & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
 
                 acl_buf->aces[i].type        = (uint16_t) type;
