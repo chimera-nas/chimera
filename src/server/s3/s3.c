@@ -676,7 +676,7 @@ s3_server_dispatch(
     *notify_data     = s3_request;
 
     /* Verify AWS authentication */
-    auth_result = chimera_s3_auth_verify(shared->cred_cache, request);
+    auth_result = chimera_s3_auth_verify(shared->cred_cache, request, &s3_request->cred);
 
     switch (auth_result) {
         case CHIMERA_S3_AUTH_OK:
@@ -1158,7 +1158,7 @@ s3_server_dispatch(
         chimera_s3_request_get(s3_request);
 
         chimera_vfs_lookup(thread->vfs,
-                           &thread->shared->cred,
+                           &s3_request->cred,
                            shared->root_fh,
                            shared->root_fh_len,
                            bucket->path,
@@ -1272,14 +1272,34 @@ chimera_s3_bucket_get_path(const struct s3_bucket *bucket)
 
 SYMBOL_EXPORT int
 chimera_s3_add_cred(
-    void       *s3_shared,
-    const char *access_key,
-    const char *secret_key,
-    int         pinned)
+    void           *s3_shared,
+    const char     *access_key,
+    const char     *secret_key,
+    int             has_identity,
+    uint32_t        uid,
+    uint32_t        gid,
+    uint32_t        ngids,
+    const uint32_t *gids,
+    int             pinned)
 {
     struct chimera_server_s3_shared *shared = s3_shared;
 
-    return chimera_s3_cred_cache_add(shared->cred_cache, access_key, secret_key, pinned);
+    /* A key bound to no user acts as the anonymous identity rather than root:
+     * omitting the binding must not hand out privilege. */
+    if (!has_identity) {
+        chimera_s3_error(
+            "S3 access key %s is not bound to a user; it will act as uid=%u gid=%u "
+            "and can only reach objects those ids may reach. Set \"username\" on "
+            "the key to bind it to a configured user.",
+            access_key, shared->config->anon_uid, shared->config->anon_gid);
+        uid   = shared->config->anon_uid;
+        gid   = shared->config->anon_gid;
+        ngids = 0;
+        gids  = NULL;
+    }
+
+    return chimera_s3_cred_cache_add(shared->cred_cache, access_key, secret_key,
+                                     uid, gid, ngids, gids, pinned);
 } /* chimera_s3_add_cred */
 
 SYMBOL_EXPORT int
@@ -1322,8 +1342,10 @@ s3_server_init(
     shared->tcp_flavor   = chimera_server_config_get_tcp_flavor(config);
     shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
-    shared->config->port    = chimera_server_config_get_s3_port(config);
-    shared->config->io_size = 128 * 1024;
+    shared->config->port     = chimera_server_config_get_s3_port(config);
+    shared->config->io_size  = 128 * 1024;
+    shared->config->anon_uid = chimera_server_config_get_s3_anon_uid(config);
+    shared->config->anon_gid = chimera_server_config_get_s3_anon_gid(config);
 
     /* Built from the same flavor tcp_protocol came from: a protocol and an
      * endpoint that disagree about whether they are a socket is a listen
@@ -1339,9 +1361,6 @@ s3_server_init(
     shared->cred_cache = chimera_s3_cred_cache_create(64, 3600);
 
     shared->multipart_table = chimera_s3_multipart_table_create(256);
-
-    /* Initialize root credentials for now - TODO: proper credential mapping */
-    chimera_vfs_cred_init_unix(&shared->cred, 0, 0, 0, NULL);
 
     /* Initialize the root file handle for VFS lookups */
     chimera_vfs_get_root_fh(shared->root_fh, &shared->root_fh_len);

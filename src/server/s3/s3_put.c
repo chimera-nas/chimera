@@ -79,7 +79,7 @@ chimera_s3_put_finish_common(
     }
 
     if (error_code) {
-        request->status = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        request->status = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         if (request->file_handle) {
             chimera_vfs_release(thread->vfs, request->file_handle);
             request->file_handle = NULL;
@@ -97,7 +97,7 @@ chimera_s3_put_finish_common(
     chimera_s3_request_get(request);
 
     chimera_vfs_getattr(thread->vfs,
-                        &thread->shared->cred,
+                        &request->cred,
                         request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
                         CHIMERA_VFS_ATTR_MTIME,
@@ -149,7 +149,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
 
         chimera_vfs_rename_at(
             thread->vfs,
-            &thread->shared->cred,
+            &request->cred,
             request->dir_handle->fh,
             request->dir_handle->fh_len,
             request->put.tmp_name,
@@ -172,7 +172,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
 
         chimera_vfs_link_at(
             thread->vfs,
-            &thread->shared->cred,
+            &request->cred,
             request->file_handle->fh,
             request->file_handle->fh_len,
             request->dir_handle->fh,
@@ -211,7 +211,7 @@ chimera_s3_put_recv_callback(
     request->io_pending--;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         return;
     }
@@ -311,7 +311,7 @@ chimera_s3_put_recv(
 
     request->io_pending++;
 
-    chimera_vfs_write(request->thread->vfs, &thread->shared->cred,
+    chimera_vfs_write(request->thread->vfs, &request->cred,
                       request->file_handle,
                       request->file_cur_offset,
                       avail,
@@ -374,7 +374,7 @@ chimera_s3_put_create_unlinked_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -410,7 +410,7 @@ chimera_s3_put_create_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -443,7 +443,7 @@ chimera_s3_put_open_dir_callback(
     struct chimera_vfs_module       *module;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(thread->evpl, request);
@@ -464,7 +464,7 @@ chimera_s3_put_open_dir_callback(
 
         chimera_s3_request_get(request);
 
-        chimera_vfs_create_unlinked(thread->vfs, &thread->shared->cred,
+        chimera_vfs_create_unlinked(thread->vfs, &request->cred,
                                     oh->fh,
                                     oh->fh_len,
                                     &request->set_attr,
@@ -480,7 +480,7 @@ chimera_s3_put_open_dir_callback(
 
         chimera_s3_request_get(request);
 
-        chimera_vfs_open_at(thread->vfs, &thread->shared->cred,
+        chimera_vfs_open_at(thread->vfs, &request->cred,
                             oh,
                             request->put.tmp_name,
                             request->put.tmp_name_len,
@@ -506,7 +506,7 @@ chimera_s3_put_lookup_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(thread->evpl, request);
@@ -518,7 +518,7 @@ chimera_s3_put_lookup_callback(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &request->cred,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -589,7 +589,7 @@ chimera_s3_put(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_create(thread->vfs, &thread->shared->cred,
+    chimera_vfs_create(thread->vfs, &request->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        dirpath,
