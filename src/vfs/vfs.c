@@ -165,6 +165,8 @@ chimera_vfs_close_thread_callback(
     struct chimera_vfs_close_thread *close_thread = private_data;
 
     close_thread->num_pending--;
+
+    __atomic_add_fetch(&close_thread->closes_completed, 1, __ATOMIC_RELEASE);
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
@@ -178,7 +180,8 @@ chimera_vfs_close_thread_sweep(
     uint64_t                        count  = 0;
     struct chimera_vfs_open_handle *handles, *handle;
 
-    handles = chimera_vfs_open_cache_defer_close(cache, chimera_vfs_now_ticks(), min_age, &count);
+    handles = chimera_vfs_open_cache_defer_close(cache, chimera_vfs_now_ticks(), min_age, &count,
+                                                 &close_thread->closes_issued);
 
     while (handles) {
 
@@ -196,6 +199,10 @@ chimera_vfs_close_thread_sweep(
                               handle->fh_hash,
                               chimera_vfs_close_thread_callback,
                               close_thread);
+        } else {
+            /* Nothing to close, so the fence slot this handle took when it left
+             * the cache is settled here rather than by a callback. */
+            __atomic_add_fetch(&close_thread->closes_completed, 1, __ATOMIC_RELEASE);
         }
 
         /* defer_close removed the handle from the bucket but frees the struct

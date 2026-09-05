@@ -786,7 +786,8 @@ chimera_vfs_open_cache_defer_close(
     struct vfs_open_cache *cache,
     uint64_t               now_ticks,
     uint64_t               min_age,
-    uint64_t              *r_count)
+    uint64_t              *r_count,
+    uint64_t              *r_issued)
 {
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *closed = NULL;
@@ -812,6 +813,13 @@ chimera_vfs_open_cache_defer_close(
             chimera_vfs_open_cache_shard_remove(shard, handle);
             LL_PREPEND(closed, handle);
             shard->open_handles--;
+
+            /* Count the handle as taken here, under the same shard lock that
+             * removes it, so that no observer can find it absent from both the
+             * cache and the close fence.  Bumping this after the loop instead
+             * would leave exactly that window, which is the race the fence
+             * exists to close. */
+            __atomic_add_fetch(r_issued, 1, __ATOMIC_RELEASE);
         }
 
         /* Count AFTER processing - this is the number of handles still in the cache */
