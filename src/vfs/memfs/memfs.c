@@ -3902,11 +3902,19 @@ memfs_read(
         return;
     }
 
-    /* read() of a directory is EISDIR (the previous behavior fabricated
-     * zero-filled bytes from the empty data fork). */
-    if (unlikely(!stream && S_ISDIR(inode->mode))) {
+    /* A read of a named stream (stream != NULL) targets the stream's own data
+     * fork and is valid on any base object, including a directory's ADS.  A
+     * plain read only makes sense for a regular file: inode->file shares a
+     * union with the dirent tree and the symlink target, so any other type
+     * would have its union member reinterpreted as fork blocks/num_blocks and
+     * indexed far out of bounds (inodes are recycled, so num_blocks is not
+     * even reliably zero).  A directory is EISDIR (the previous behavior
+     * fabricated zero-filled bytes from the empty data fork); RFC 1813 3.3.6
+     * asks for INVAL on every other non-NF3REG handle. */
+    if (unlikely(!stream && !S_ISREG(inode->mode))) {
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_EISDIR;
+        request->status = S_ISDIR(inode->mode) ?
+            CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
