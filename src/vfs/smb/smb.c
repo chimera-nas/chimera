@@ -1307,6 +1307,10 @@ chimera_smb_client_dispatch(
             server_index = chimera_smb_fh_server_index(request->fh);
             start        = chimera_smb_client_readlink;
             break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            server_index = chimera_smb_fh_server_index(request->fh);
+            start        = chimera_smb_client_allocate;
+            break;
         default:
             request->status = CHIMERA_VFS_ENOTSUP;
             request->complete(request);

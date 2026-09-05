@@ -752,6 +752,10 @@ void chimera_smb_set_child_fh(
 void chimera_smb_client_setattr(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
+
+void chimera_smb_client_allocate(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
 void chimera_smb_client_commit(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
@@ -810,6 +814,16 @@ void smb_apply_attrs(
     struct chimera_vfs_attrs         *attr,
     const struct smb_open_info       *info,
     uint64_t                          ino);
+
+/* Resolve a dirfd-relative leaf `name` against the parent handle `request->fh`
+ * into a full mount-relative path in `out` ("" parent -> just the name). */
+int smb_at_full_path(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *name,
+    int                             namelen,
+    char                           *out,
+    int                             out_max);
 
 /* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
 void smb_send_create(
@@ -877,3 +891,15 @@ smb_handle_open_state(struct chimera_vfs_open_handle *handle)
 {
     return handle ? (struct chimera_smb_client_open *) handle->vfs_private : NULL;
 } /* smb_handle_open_state */
+
+/* True when an *at op's parent handle is a known non-directory: a dirfd-
+ * relative op through it is ENOTDIR.  The path-only backend would otherwise
+ * resolve the parent's interned path -- stale if its name was unlinked while
+ * the fd stayed open -- and report a misleading ENOENT. */
+static inline int
+smb_parent_is_nondir(struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_smb_client_open *os = smb_handle_open_state(handle);
+
+    return os && !os->is_directory;
+} /* smb_parent_is_nondir */

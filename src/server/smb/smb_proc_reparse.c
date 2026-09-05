@@ -16,6 +16,12 @@
 /* ------------------------------------------------------------------ */
 
 static void
+chimera_smb_set_reparse_rebind_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data);
+
+static void
 chimera_smb_set_reparse_create_cb(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *set_attr,
@@ -27,14 +33,40 @@ chimera_smb_set_reparse_create_cb(
     struct chimera_smb_request *request    = private_data;
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
 
-    chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
-    chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
+    (void) set_attr;
+    (void) dir_pre_attr;
+    (void) dir_post_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
+        chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
+    /* Re-bind the open handle to the new special-file inode (exactly as the
+     * symlink path does) so the client's follow-up owner/mode SET_SECURITY
+     * lands on the node rather than the removed placeholder.  Without this the
+     * device/FIFO/socket keeps the server's default owner (root) and mode
+     * (0666) that mknod_at laid down. */
+    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+        attr->va_fh_len <= sizeof(request->ioctl.rp_new_fh)) {
+        memcpy(request->ioctl.rp_new_fh, attr->va_fh, attr->va_fh_len);
+        request->ioctl.rp_new_fh_len = attr->va_fh_len;
+
+        chimera_vfs_open_fh(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            request->ioctl.rp_new_fh,
+            request->ioctl.rp_new_fh_len,
+            0,
+            chimera_smb_set_reparse_rebind_cb,
+            request);
+        return;
+    }
+
+    chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
+    chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_reparse_create_cb */
 
@@ -184,7 +216,7 @@ chimera_smb_set_reparse_remove_cb(
                 open_file->name,
                 open_file->name_len,
                 set_attr,
-                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV,
+                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV | CHIMERA_VFS_ATTR_FH,
                 0,
                 0,
                 chimera_smb_set_reparse_create_cb,
@@ -203,7 +235,7 @@ chimera_smb_set_reparse_remove_cb(
                 open_file->name,
                 open_file->name_len,
                 set_attr,
-                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV,
+                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV | CHIMERA_VFS_ATTR_FH,
                 0,
                 0,
                 chimera_smb_set_reparse_create_cb,
@@ -220,7 +252,7 @@ chimera_smb_set_reparse_remove_cb(
                 open_file->name,
                 open_file->name_len,
                 set_attr,
-                CHIMERA_VFS_ATTR_MODE,
+                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH,
                 0,
                 0,
                 chimera_smb_set_reparse_create_cb,
@@ -237,7 +269,7 @@ chimera_smb_set_reparse_remove_cb(
                 open_file->name,
                 open_file->name_len,
                 set_attr,
-                CHIMERA_VFS_ATTR_MODE,
+                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH,
                 0,
                 0,
                 chimera_smb_set_reparse_create_cb,

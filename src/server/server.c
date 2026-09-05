@@ -115,6 +115,7 @@ struct chimera_server_config {
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
     int                                   smb_mode_from_sid;
+    int                                   smb_posix_rename;
     int                                   smb_replay_pending_windows;
     int                                   smb2_max_async_credits;
     uint32_t                              smb_fs_physical_bytes_per_sector;
@@ -260,6 +261,7 @@ chimera_server_config_init(void)
      * clients and the ACL conformance suites want the translated ACL); the
      * POSIX-over-SMB loopback enables it. */
     config->smb_mode_from_sid = 0;
+    config->smb_posix_rename  = 0;
 
     /* How a replayed durable-v2 CREATE is answered when its create_guid matches
      * an open whose own CREATE has not completed yet (it is deferred on a
@@ -664,6 +666,20 @@ chimera_server_config_get_smb_mode_from_sid(const struct chimera_server_config *
 {
     return config->smb_mode_from_sid;
 } /* chimera_server_config_get_smb_mode_from_sid */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_posix_rename(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_posix_rename = enable;
+} /* chimera_server_config_set_smb_posix_rename */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_posix_rename(const struct chimera_server_config *config)
+{
+    return config->smb_posix_rename;
+} /* chimera_server_config_get_smb_posix_rename */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_replay_pending_windows(

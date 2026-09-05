@@ -180,6 +180,18 @@ int
 chimera_server_config_get_smb_mode_from_sid(
     const struct chimera_server_config *config);
 
+/* POSIX rename semantics: skip the SMB contained-open recall and destination-
+ * parent dir-lease probe so a rename never fails because of open handles (POSIX
+ * rename does not).  Default 0; the POSIX-over-SMB loopback enables it. */
+void
+chimera_server_config_set_smb_posix_rename(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_posix_rename(
+    const struct chimera_server_config *config);
+
 /* Answer a replayed durable-v2 CREATE that collides with a still-deferred
  * CREATE the way Windows servers do (STATUS_ACCESS_DENIED, and no replay
  * detection while the original is deferred on a share conflict) instead of the

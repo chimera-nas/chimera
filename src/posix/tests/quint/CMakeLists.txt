@@ -257,7 +257,7 @@ add_test(NAME chimera/posix/mbt/batch_memfs
             --backend memfs
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_
-            --exclude-prefix fuse_)
+            --exclude-prefix fuse_ --exclude-prefix smb_)
 set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_memfs"
     LABELS "quint;posix_mbt;memfs"
@@ -279,7 +279,7 @@ add_test(NAME chimera/posix/mbt/batch_diskfs
             --backend diskfs
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_
-            --exclude-prefix fuse_)
+            --exclude-prefix fuse_ --exclude-prefix smb_)
 set_tests_properties(chimera/posix/mbt/batch_diskfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_diskfs"
     LABELS "quint;posix_mbt;diskfs"
@@ -305,7 +305,7 @@ add_test(NAME chimera/posix/mbt/batch_cairn
             --backend cairn
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --exclude-prefix step --exclude-prefix nfs3_
-            --exclude-prefix nfs4_ --exclude-prefix fuse_)
+            --exclude-prefix nfs4_ --exclude-prefix fuse_ --exclude-prefix smb_)
 set_tests_properties(chimera/posix/mbt/batch_cairn PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_cairn"
     LABELS "quint;posix_mbt;cairn"
@@ -327,7 +327,7 @@ add_test(NAME chimera/posix/mbt/batch_nfs3_memfs
             --backend nfs3_memfs
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --exclude-prefix step --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix nfs4_)
+            --exclude-prefix fuse_ --exclude-prefix nfs4_ --exclude-prefix smb_)
 set_tests_properties(chimera/posix/mbt/batch_nfs3_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs3_memfs"
     LABELS "quint;posix_mbt;memfs;nfs3_mbt"
@@ -343,7 +343,7 @@ add_test(NAME chimera/posix/mbt/batch_nfs4_memfs
             --backend nfs4_memfs
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --exclude-prefix step --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix nfs3_)
+            --exclude-prefix fuse_ --exclude-prefix nfs3_ --exclude-prefix smb_)
 set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs4_memfs"
     LABELS "quint;posix_mbt;memfs;nfs4_mbt"
@@ -352,13 +352,18 @@ set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
 
 # The same corpus through the SMB2 loopback: the posix client mounts the
 # in-process chimera SMB server through the smb proxy VFS module (src/vfs/smb).
-# The nfs3_ profile is the closest pinned match to what `posix_replay.py
-# --probe --backend smb_memfs` measures (they differ only in copy_file_range,
-# which the model exercises through an advertised-feature knob).
+# It replays the smb_ profile (posix_run.qnt's posixSmb instance): the memfs
+# profile with copy_file_range mandatory (SMB2 FSCTL_SRV_COPYCHUNK) but no
+# reflink or SEEK_DATA/SEEK_HOLE -- what the smb_memfs backend actually does.
 #
-# OFF by default, and it is not a flake: the SMB2 loopback cannot satisfy the
-# POSIX model today, and the batch fails ~49 of 53 traces.  The blockers are
-# properties of src/vfs/smb, not of the harness:
+# OFF by default, and it is not a flake: the SMB2 loopback cannot yet satisfy
+# the whole POSIX model, and the batch still fails ~40 of 53 traces.  Most of
+# the original SD1-SD5 blockers below are fixed (real owner/mode/nlink via
+# modefromsid, path-id fh re-open, readdir paging, symlink + specfile create);
+# the residual is the symlink-resolution / name-cache cascade (stepLinks),
+# the loopback backend clock not being harness-synced (stepPerms atime), and
+# assorted namespace-cascade edges.  The blockers are properties of src/vfs/smb
+# and the server, not of the harness:
 #
 #   SD1  a session is bound to the connection that authenticated it.  A second
 #        client thread opens its own connection and replays the mount's session
@@ -396,7 +401,8 @@ if(CHIMERA_POSIX_MBT_SMB)
                 --backend smb_memfs
                 --trace-dir ${SPECS_BUNDLE_DIR}/posix
                 --exclude-prefix step --exclude-prefix disk_
-                --exclude-prefix fuse_ --exclude-prefix nfs4_)
+                --exclude-prefix fuse_ --exclude-prefix nfs3_
+                --exclude-prefix nfs4_)
     set_tests_properties(chimera/posix/mbt/batch_smb_memfs PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_smb_memfs"
         LABELS "quint;posix_mbt;memfs;smb_mbt"
@@ -416,7 +422,7 @@ if(CHIMERA_LINUX)
                 --backend linux
                 --trace-dir ${SPECS_BUNDLE_DIR}/posix
                 --exclude-prefix step --exclude-prefix nfs3_
-                --exclude-prefix nfs4_ --exclude-prefix fuse_)
+                --exclude-prefix nfs4_ --exclude-prefix fuse_ --exclude-prefix smb_)
     set_tests_properties(chimera/posix/mbt/batch_linux PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_linux"
         LABELS "quint;posix_mbt;linux"
@@ -430,7 +436,7 @@ if(CHIMERA_VFS_IO_URING)
                 --backend io_uring
                 --trace-dir ${SPECS_BUNDLE_DIR}/posix
                 --exclude-prefix step --exclude-prefix nfs3_
-                --exclude-prefix nfs4_ --exclude-prefix fuse_)
+                --exclude-prefix nfs4_ --exclude-prefix fuse_ --exclude-prefix smb_)
     set_tests_properties(chimera/posix/mbt/batch_io_uring PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_io_uring"
         LABELS "quint;posix_mbt;io_uring"
@@ -456,7 +462,7 @@ foreach(ptmod ${POSIX_MBT_PT_LOOPBACKS})
                 --backend nfs3_${ptmod}
                 --trace-dir ${SPECS_BUNDLE_DIR}/posix
                 --exclude-prefix step --exclude-prefix disk_
-                --exclude-prefix fuse_ --exclude-prefix nfs4_)
+                --exclude-prefix fuse_ --exclude-prefix nfs4_ --exclude-prefix smb_)
     set_tests_properties(chimera/posix/mbt/batch_nfs3_${ptmod} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs3_${ptmod}"
         LABELS "quint;posix_mbt;${ptmod};nfs3_mbt"
@@ -468,7 +474,7 @@ foreach(ptmod ${POSIX_MBT_PT_LOOPBACKS})
                 --backend nfs4_${ptmod}
                 --trace-dir ${SPECS_BUNDLE_DIR}/posix
                 --exclude-prefix step --exclude-prefix disk_
-                --exclude-prefix fuse_ --exclude-prefix nfs3_)
+                --exclude-prefix fuse_ --exclude-prefix nfs3_ --exclude-prefix smb_)
     set_tests_properties(chimera/posix/mbt/batch_nfs4_${ptmod} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs4_${ptmod}"
         LABELS "quint;posix_mbt;${ptmod};nfs4_mbt"
