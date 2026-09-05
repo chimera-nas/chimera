@@ -19,9 +19,18 @@
          EXCHGID4_FLAG_UPD_CONFIRMED_REC_A)
 
 /* State-management operations chimera enforces under SP4_MACH_CRED, as a
- * bitmap4 (RFC 8881 §2.10.8.3): BIND_CONN_TO_SESSION(41), EXCHANGE_ID(42),
- * CREATE_SESSION(43), DESTROY_SESSION(44), DESTROY_CLIENTID(57).  Bit op N is
- * word[N/32] bit (N%32); ops 41-57 all fall in word 1. */
+ * bitmap4 (RFC 8881 §2.10.8.3): DELEGPURGE(7) in word 0, and
+ * BIND_CONN_TO_SESSION(41), EXCHANGE_ID(42), CREATE_SESSION(43),
+ * DESTROY_SESSION(44), DESTROY_CLIENTID(57) in word 1.  Bit op N is
+ * word[N/32] bit (N%32).
+ *
+ * This is exactly the set §18.35.3 names as the one a client typically
+ * requests, and the set whose members the result spo_must_enforce MUST include
+ * whenever the client asked for them.  Advertising the whole set unconditionally
+ * -- which §18.35.3 permits, "the result MAY be different" -- satisfies that
+ * MUST for every client without having to remember each client's requested
+ * bitmap across the confirmed-record replay below. */
+#define NFS4_MACH_ENFORCE_WORD0 (1u << 7)
 #define NFS4_MACH_ENFORCE_WORD1                                                 \
         ((1u << (41 - 32)) | (1u << (42 - 32)) | (1u << (43 - 32)) |            \
          (1u << (44 - 32)) | (1u << (57 - 32)))
@@ -51,7 +60,7 @@ nfs4_set_state_protect(
     xdr_dbuf                *dbuf)
 {
     if (spa_how == SP4_MACH_CRED) {
-        static const uint32_t      enforce[2] = { 0, NFS4_MACH_ENFORCE_WORD1 };
+        static const uint32_t      enforce[2] = { NFS4_MACH_ENFORCE_WORD0, NFS4_MACH_ENFORCE_WORD1 };
         struct state_protect_ops4 *ops        = &res_sp->spr_mach_ops;
 
         chimera_nfs_debug("EXCHANGE_ID: negotiated SP4_MACH_CRED state protection");

@@ -98,6 +98,29 @@ chimera_nfs4_delegpurge(
     (void) thread;
     (void) argop;
 
+    /* DELEGPURGE is in the spo_must_enforce set EXCHANGE_ID advertises, so a
+     * client that negotiated SP4_MACH_CRED must send it with the machine
+     * credential (RFC 8881 §2.10.8.3; NFS4ERR_WRONG_CRED is a listed
+     * DELEGPURGE error).  §18.5.3 requires the client be derived from the
+     * preceding SEQUENCE's session and the clientid argument ignored; state
+     * protection exists only in 4.1+, so a sessionless (4.0) request has none
+     * to enforce. */
+    if (req->session) {
+        const struct nfs4_client_principal p = {
+            .flavor          = req->principal_flavor,
+            .uid             = req->principal_uid,
+            .gid             = req->principal_gid,
+            .machinename     = req->principal_machinename,
+            .machinename_len = req->principal_machinename_len,
+        };
+
+        if (!nfs4_client_mach_cred_ok(req->session->nfs4_session_client, &p)) {
+            res->status = NFS4ERR_WRONG_CRED;
+            chimera_nfs4_compound_complete(req, NFS4ERR_WRONG_CRED);
+            return;
+        }
+    }
+
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_delegpurge */
