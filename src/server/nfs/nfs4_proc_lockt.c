@@ -66,10 +66,20 @@ chimera_nfs4_lockt_probe(
     }
 
     memset(&owner, 0, sizeof(owner));
-    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
-    owner.client_key = args->owner.clientid;
-    owner.owner_lo   = XXH3_64bits(args->owner.owner.data,
-                                   args->owner.owner.len);
+    owner.proto = CHIMERA_CLAIM_PROTO_NFSV4;
+    /* RFC 8881 §2.4: in 4.1+ the client is identified by the session, not by
+     * the clientid embedded in lock_owner4 -- clients routinely leave that
+     * field zero or stale.  LOCK registers its claims under the server-assigned
+     * client id (nfs4_proc_lock.c), so keying the probe on the wire field would
+     * make the caller's own locks look foreign and defeat the SHOULD-exclude-
+     * self rule of RFC 7530 §16.11.5. */
+    if (req->minorversion > 0 && req->session && req->session->client_unified) {
+        owner.client_key = req->session->client_unified->client_id;
+    } else {
+        owner.client_key = args->owner.clientid;
+    }
+    owner.owner_lo = XXH3_64bits(args->owner.owner.data,
+                                 args->owner.owner.len);
     owner.owner_hi = 0;
 
     chimera_vfs_claim_init_range(&probe,
