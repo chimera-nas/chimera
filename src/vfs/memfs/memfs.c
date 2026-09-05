@@ -1894,7 +1894,8 @@ memfs_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_ACL) {
         memfs_inode_set_acl(inode, attr->va_acl);
         if (inode->acl) {
-            inode->mode = (inode->mode & S_IFMT) | chimera_acl_to_mode(inode->acl);
+            inode->mode = (inode->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                chimera_acl_to_mode(inode->acl);
         }
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
     } else if ((set_mask & CHIMERA_VFS_ATTR_MODE) && inode->acl) {
@@ -2007,7 +2008,8 @@ memfs_inherit_acl(
 
         if (n > 0) {
             memfs_inode_set_acl(child, tmp);
-            child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(child->acl);
+            child->mode = (child->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                chimera_acl_to_mode(child->acl);
         }
         free(tmp);
 
