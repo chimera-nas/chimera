@@ -261,7 +261,7 @@ chimera_vfs_remove_at_parent_type_check(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_vfs_remove_at_gate *gate = private_data;
+    struct chimera_vfs_remove_at_gate *gate   = private_data;
     enum chimera_vfs_error             status = CHIMERA_VFS_ENOENT;
 
     if (error_code == CHIMERA_VFS_OK &&

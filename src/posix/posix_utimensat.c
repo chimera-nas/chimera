@@ -255,8 +255,7 @@ chimera_posix_utimensat_lookup_complete(
 } /* chimera_posix_utimensat_lookup_complete */
 
 static void
-chimera_posix_utimensat_lookup(
-    struct chimera_client_request *request)
+chimera_posix_utimensat_lookup(struct chimera_client_request *request)
 {
     struct chimera_posix_utimensat_ctx *ctx = request->setattr.private_data;
 

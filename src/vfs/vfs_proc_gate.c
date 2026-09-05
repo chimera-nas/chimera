@@ -236,16 +236,16 @@ chimera_vfs_gate_fh_dac(
 } /* chimera_vfs_gate_fh_dac */
 
 /* ------------------------------------------------------------------------- *
- * Handle variants: authorize against an already-open handle the caller holds,
- * rather than re-resolving the object by FH (open_fh + getattr).  A path-only
- * backend's FH is an opaque path token; re-opening it after the name was
- * unlinked-while-open returns ENOENT, masking the real object (whose live
- * getattr, via the open token, still answers -- e.g. ENOTDIR for a non-dir
- * parent).  For every backend it also drops a redundant open round-trip and
- * removes a TOCTOU window (it authorizes exactly the object the caller
- * resolved, not whatever the FH resolves to now).  ctx->handle stays NULL: the
- * caller owns the lent handle, so the getattr completions must not release it.
- * ------------------------------------------------------------------------- */
+* Handle variants: authorize against an already-open handle the caller holds,
+* rather than re-resolving the object by FH (open_fh + getattr).  A path-only
+* backend's FH is an opaque path token; re-opening it after the name was
+* unlinked-while-open returns ENOENT, masking the real object (whose live
+* getattr, via the open token, still answers -- e.g. ENOTDIR for a non-dir
+* parent).  For every backend it also drops a redundant open round-trip and
+* removes a TOCTOU window (it authorizes exactly the object the caller
+* resolved, not whatever the FH resolves to now).  ctx->handle stays NULL: the
+* caller owns the lent handle, so the getattr completions must not release it.
+* ------------------------------------------------------------------------- */
 static void
 chimera_vfs_gate_handle_impl(
     struct chimera_vfs_gate_ctx    *ctx,

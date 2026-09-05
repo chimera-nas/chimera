@@ -659,7 +659,7 @@ smb_attr_enrich_begin(
     struct chimera_vfs_request              *request,
     const struct chimera_smb_client_file_id *fid,
     struct chimera_vfs_attrs                *attr,
-    void                                   (*done)(
+    void (                                  *done )(
         struct chimera_smb_client_conn *,
         struct chimera_vfs_request *))
 {
@@ -2146,8 +2146,8 @@ chimera_smb_client_remove_at(
     struct chimera_vfs_request     *request)
 {
     /* A dirfd-relative unlink/rmdir whose parent is a non-directory is ENOTDIR
-     * (even when the parent's name was unlinked while its fd stayed open -- its
-     * interned path is then stale and would resolve to a misleading ENOENT). */
+    * (even when the parent's name was unlinked while its fd stayed open -- its
+    * interned path is then stale and would resolve to a misleading ENOENT). */
     if (smb_parent_is_nondir(request->remove_at.handle)) {
         request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
