@@ -587,6 +587,12 @@ chimera_nfs4_open_finish(
         owner->seqid = args->seqid;
         nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
                            status == NFS4_OK ? &res->resok4.stateid : NULL);
+        /* RFC 7530 §9.1.7 wants the stored last response replayed verbatim.
+         * rflags carries OPEN4_RESULT_CONFIRM (§16.18.5), which a client may
+         * act on, so keep it alongside the stateid. */
+        if (status == NFS4_OK) {
+            owner->replay.rflags = res->resok4.rflags;
+        }
         pthread_mutex_unlock(&owner->lock);
     }
 
@@ -1597,23 +1603,26 @@ chimera_nfs4_open(
                                                                args->seqid);
 
         if (cls == NFS4_SEQID_REPLAY) {
-            /* Return the cached reply.  Simplified replay (status +
-             * stateid only); cinfo/attrset/rflags/delegation are
-             * reconstructed as zero/none.  Linux clients tolerate this
-             * since they re-fetch attrs via GETATTR after OPEN.
+            /* Return the cached reply.  Simplified replay (status, stateid
+             * and rflags); cinfo/attrset/delegation are reconstructed as
+             * zero/none.  Linux clients tolerate that since they re-fetch
+             * attrs via GETATTR after OPEN.
+             *
+             * rflags is replayed rather than zeroed: RFC 7530 §9.1.7 requires
+             * the stored last response, and dropping OPEN4_RESULT_CONFIRM
+             * (§16.18.5) tells a retransmitting client the opposite of what
+             * the original reply said about its OPEN_CONFIRM obligation.
              *
              * A retransmit on the SAME connection is normally answered
              * byte-exact by the v4.0 reply cache before the compound is
              * even decoded (nfs4_v40_drc.c), so this branch is reached
-             * only when the retransmit arrives on a new connection --
-             * where losing rflags matters least, since a reconnecting
-             * client re-establishes its state anyway. */
+             * only when the retransmit arrives on a new connection. */
             res->status                            = owner->replay.status;
             res->resok4.stateid                    = owner->replay.stateid;
             res->resok4.cinfo.atomic               = 0;
             res->resok4.cinfo.before               = 0;
             res->resok4.cinfo.after                = 0;
-            res->resok4.rflags                     = 0;
+            res->resok4.rflags                     = owner->replay.rflags;
             res->resok4.num_attrset                = 0;
             res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
             pthread_mutex_unlock(&owner->lock);
