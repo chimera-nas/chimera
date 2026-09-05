@@ -52,6 +52,7 @@ void rocksdb_flush_wal(
 #define CAIRN_KEY_ACL            7
 #define CAIRN_KEY_FS             8
 #define CAIRN_KEY_PNFS           9
+#define CAIRN_KEY_SID            10
 
 /*
  * Storage layout:
@@ -135,6 +136,13 @@ struct cairn_acl_key {
  * on every lookup.  Cairn neither produces nor interprets the contents -- the
  * NFS server packs a deviceid plus a backing filehandle in there. */
 struct cairn_pnfs_key {
+    uint8_t  keytype;
+    uint64_t inum;
+} __attribute__((packed));
+
+/* Native owner / group SIDs, kept in a record separate from the
+ * ACL so "no ACL record" still means "mode-derived DACL". */
+struct cairn_sid_key {
     uint8_t  keytype;
     uint64_t inum;
 } __attribute__((packed));
@@ -975,6 +983,154 @@ cairn_load_acl(
  * if present, else one synthesised from the inode mode.  Uses a per-thread
  * scratch buffer valid for the duration of the (synchronous) completion.
  */
+/*
+ * Native owner / group SID record (CAIRN_KEY_SID): the SID companions to the
+ * inode's uid / gid.  Value layout: u8 owner_len, owner bytes, u8 group_len,
+ * group bytes; a zero length means none is known.  The record is absent when
+ * neither SID is known.
+ */
+#define CAIRN_SID_REC_MAX (2 + 2 * CHIMERA_SID_MAX_LEN)
+
+static inline void
+cairn_remove_sids(
+    struct cairn_thread *thread,
+    uint64_t             inum)
+{
+    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
+    char                  *err = NULL;
+    struct cairn_sid_key   key;
+
+    key.keytype = CAIRN_KEY_SID;
+    key.inum    = inum;
+
+    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error deleting sids: %s\n", err);
+} /* cairn_remove_sids */
+
+static inline void
+cairn_put_sids(
+    struct cairn_thread      *thread,
+    uint64_t                  inum,
+    const struct chimera_sid *owner,
+    const struct chimera_sid *group)
+{
+    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
+    char                  *err = NULL;
+    struct cairn_sid_key   key;
+    uint8_t                buf[CAIRN_SID_REC_MAX];
+    int                    len = 0;
+
+    if (!chimera_sid_present(owner) && !chimera_sid_present(group)) {
+        cairn_remove_sids(thread, inum);
+        return;
+    }
+
+    buf[len++] = chimera_sid_present(owner) ? owner->len : 0;
+    if (chimera_sid_present(owner)) {
+        memcpy(buf + len, owner->data, owner->len);
+        len += owner->len;
+    }
+    buf[len++] = chimera_sid_present(group) ? group->len : 0;
+    if (chimera_sid_present(group)) {
+        memcpy(buf + len, group->data, group->len);
+        len += group->len;
+    }
+
+    key.keytype = CAIRN_KEY_SID;
+    key.inum    = inum;
+
+    rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
+                            (const char *) buf, len, &err);
+    chimera_cairn_abort_if(err, "Error putting sids: %s\n", err);
+} /* cairn_put_sids */
+
+/*
+ * Load the stored owner / group SIDs for `inum`; each output is cleared when
+ * it is not recorded.  Returns 1 if a record was found, 0 otherwise.
+ */
+static inline int
+cairn_load_sids(
+    struct cairn_thread *thread,
+    uint64_t             inum,
+    struct chimera_sid  *owner,
+    struct chimera_sid  *group)
+{
+    rocksdb_pinnableslice_t *slice;
+    struct cairn_sid_key     key;
+    char                    *err = NULL;
+    const uint8_t           *blob;
+    size_t                   len;
+    int                      found = 0;
+
+    owner->len = 0;
+    group->len = 0;
+
+    key.keytype = CAIRN_KEY_SID;
+    key.inum    = inum;
+
+    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error getting sids: %s\n", err);
+
+    if (slice) {
+        blob = (const uint8_t *) rocksdb_pinnableslice_value(slice, &len);
+        if (len >= 1) {
+            uint8_t olen = blob[0];
+
+            if (olen && 1 + olen <= len &&
+                chimera_sid_from_bin(owner, blob + 1, olen) == (int) olen &&
+                1 + olen < len) {
+                uint8_t glen = blob[1 + olen];
+
+                if (glen && 2 + olen + glen <= len) {
+                    chimera_sid_from_bin(group, blob + 2 + olen, glen);
+                }
+            } else if (!olen && len >= 2) {
+                uint8_t glen = blob[1];
+
+                if (glen && 2 + glen <= len) {
+                    chimera_sid_from_bin(group, blob + 2, glen);
+                }
+            }
+            found = 1;
+        }
+        rocksdb_pinnableslice_destroy(slice);
+    }
+
+    return found;
+} /* cairn_load_sids */
+
+/*
+ * Populate attr->va_owner_sid / va_group_sid when requested and stored, from
+ * per-thread scratch valid for the duration of the (synchronous) completion.
+ */
+static inline void
+cairn_map_sids(
+    struct cairn_thread      *thread,
+    struct chimera_vfs_attrs *attr,
+    const struct cairn_inode *inode)
+{
+    static __thread struct chimera_sid owner_scratch;
+    static __thread struct chimera_sid group_scratch;
+
+    if (!(attr->va_req_mask & (CHIMERA_VFS_ATTR_OWNER_SID |
+                               CHIMERA_VFS_ATTR_GROUP_SID))) {
+        return;
+    }
+
+    if (!cairn_load_sids(thread, inode->inum, &owner_scratch, &group_scratch)) {
+        return;
+    }
+
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_OWNER_SID) && owner_scratch.len) {
+        attr->va_owner_sid = &owner_scratch;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_OWNER_SID;
+    }
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_GROUP_SID) && group_scratch.len) {
+        attr->va_group_sid = &group_scratch;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
+    }
+} /* cairn_map_sids */
+
 static inline void
 cairn_map_acl(
     struct cairn_thread      *thread,
@@ -983,6 +1139,9 @@ cairn_map_acl(
 {
     static __thread uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
     struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+
+    /* The SID companions travel with the ACL everywhere it is mapped. */
+    cairn_map_sids(thread, attr, inode);
 
     if (!(attr->va_req_mask & CHIMERA_VFS_ATTR_ACL)) {
         return;
@@ -2212,6 +2371,52 @@ cairn_setattr(
                 cairn_put_acl(thread, inode->inum, new_acl);
             }
         }
+
+        /* Native owner / group SID coherence: an explicit OWNER_SID /
+         * GROUP_SID set stores (or clears) the companion; a bare chown /
+         * chgrp drops the stale one.  Load-modify-put on the SID record,
+         * which is separate from the ACL so a chown never touches the DACL. */
+        if (orig_set_mask & (CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID |
+                             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+            struct chimera_sid owner, group;
+            int                had     = cairn_load_sids(thread, inode->inum,
+                                                         &owner, &group);
+            int                changed = 0;
+
+            if (orig_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) {
+                if (chimera_sid_present(sa->va_owner_sid)) {
+                    owner   = *sa->va_owner_sid;
+                    changed = 1;
+                } else if (owner.len) {
+                    owner.len = 0;
+                    changed   = 1;
+                }
+            } else if ((orig_set_mask & CHIMERA_VFS_ATTR_UID) && owner.len) {
+                owner.len = 0;
+                changed   = 1;
+            }
+
+            if (orig_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) {
+                if (chimera_sid_present(sa->va_group_sid)) {
+                    group   = *sa->va_group_sid;
+                    changed = 1;
+                } else if (group.len) {
+                    group.len = 0;
+                    changed   = 1;
+                }
+            } else if ((orig_set_mask & CHIMERA_VFS_ATTR_GID) && group.len) {
+                group.len = 0;
+                changed   = 1;
+            }
+
+            if (changed) {
+                if (owner.len || group.len) {
+                    cairn_put_sids(thread, inode->inum, &owner, &group);
+                } else if (had) {
+                    cairn_remove_sids(thread, inode->inum);
+                }
+            }
+        }
     }
 
     /* pNFS layout blob.  Keyed off orig_set_mask for the same reason the ACL
@@ -2590,6 +2795,7 @@ cairn_rmfs_delete_inode(
     struct cairn_symlink_key symlink_key;
     struct cairn_acl_key     acl_key;
     struct cairn_pnfs_key    pnfs_key;
+    struct cairn_sid_key     sid_key;
     struct cairn_xattr_key   xattr_start, *xattr_key;
     struct cairn_extent_key  extent_start, *extent_key;
     rocksdb_iterator_t      *iter;
@@ -2614,6 +2820,11 @@ cairn_rmfs_delete_inode(
     pnfs_key.inum    = inum;
     rocksdb_writebatch_delete(meta_batch,
                               (const char *) &pnfs_key, sizeof(pnfs_key));
+
+    sid_key.keytype = CAIRN_KEY_SID;
+    sid_key.inum    = inum;
+    rocksdb_writebatch_delete(meta_batch,
+                              (const char *) &sid_key, sizeof(sid_key));
 
     xattr_start.keytype = CAIRN_KEY_XATTR;
     xattr_start.inum    = inum;
@@ -3330,6 +3541,7 @@ cairn_remove_at(
             cairn_remove_inode(thread, inode);
             cairn_remove_acl(thread, inode->inum);
             cairn_remove_pnfs(thread, inode->inum);
+            cairn_remove_sids(thread, inode->inum);
         } else {
             cairn_put_inode(thread, inode);
         }
@@ -3910,6 +4122,7 @@ cairn_close(
         cairn_remove_inode(thread, inode);
         cairn_remove_acl(thread, inode->inum);
         cairn_remove_pnfs(thread, inode->inum);
+        cairn_remove_sids(thread, inode->inum);
     } else {
         cairn_put_inode(thread, inode);
     }
@@ -5065,6 +5278,7 @@ cairn_rename_at(
                     cairn_remove_inode(thread, existing_inode);
                     cairn_remove_acl(thread, existing_inode->inum);
                     cairn_remove_pnfs(thread, existing_inode->inum);
+                    cairn_remove_sids(thread, existing_inode->inum);
                 } else {
                     cairn_put_inode(thread, existing_inode);
                 }
