@@ -350,6 +350,7 @@ struct chimera_smb_conn;
 #define CHIMERA_SMB_MAX_RW_SIZE_LARGE_MTU     (8 * 1024 * 1024)
 #define CHIMERA_SMB_MAX_RW_SIZE_SINGLE_CREDIT 65536
 
+
 /* Maximum supported file size, matching the Windows/Samba value
  * (0xFFFFFFF0000 == 2^44 - 2^16).  A write, SetEndOfFile or SetAllocation whose
  * size would exceed this is rejected with STATUS_INVALID_PARAMETER. */
@@ -1434,6 +1435,25 @@ struct chimera_smb_conn {
     char                               local_addr[128];
     char                               remote_addr[128];
 };
+
+/* The MaxReadSize/MaxWriteSize this connection actually advertised, for the
+ * READ/WRITE handlers to bound against.
+ *
+ * MS-SMB2 3.3.5.12 and 3.3.5.13 require INVALID_PARAMETER when Length exceeds
+ * MaxReadSize / MaxWriteSize, and that means the value sent in THIS
+ * connection's NEGOTIATE response -- not the largest the server is willing to
+ * advertise to anyone.  READ compared against the LARGE_MTU constant directly,
+ * which is 128x too permissive on a connection that negotiated the
+ * single-credit size, and WRITE did not check at all.  Derived from the same
+ * capability NEGOTIATE branches on, so it cannot drift from what was sent. */
+static inline uint32_t
+chimera_smb_max_rw_size(const struct chimera_smb_conn *conn)
+{
+    return (conn->capabilities & SMB2_GLOBAL_CAP_LARGE_MTU)
+           ? CHIMERA_SMB_MAX_RW_SIZE_LARGE_MTU
+           : CHIMERA_SMB_MAX_RW_SIZE_SINGLE_CREDIT;
+} /* chimera_smb_max_rw_size */
+
 
 /*
  * Compute the SMB2 CreditResponse for one response and update the connection's

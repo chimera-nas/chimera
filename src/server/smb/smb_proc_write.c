@@ -282,6 +282,19 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.13: Length greater than MaxWriteSize is INVALID_PARAMETER.
+     * This was missing entirely -- the clause above bounds where the write
+     * lands, not how much it carries -- so a write of any size the transport
+     * would deliver was accepted, whatever this connection advertised.  The
+     * bound is the negotiated value: without SMB2_GLOBAL_CAP_LARGE_MTU that is
+     * 64 KiB, not the 8 MiB a LARGE_MTU connection gets. */
+    if (request->write.length > chimera_smb_max_rw_size(request->compound->conn)) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     /* MS-SMB2 §3.3.5.13: an RDMA channel is only valid over an RDMA transport.
     * The Channel field is client-controlled; honoring RDMA_V1 on a plain-TCP
     * connection would dispatch evpl_rdma_read on a non-RDMA bind.  Reject with
