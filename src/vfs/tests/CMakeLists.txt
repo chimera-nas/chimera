@@ -56,6 +56,10 @@ add_executable(vfs_idmap_test vfs_idmap_test.c)
 target_link_libraries(vfs_idmap_test chimera_vfs)
 add_test(chimera/vfs/idmap_test vfs_idmap_test)
 
+add_executable(vfs_sid_test vfs_sid_test.c)
+target_link_libraries(vfs_sid_test chimera_vfs)
+add_test(chimera/vfs/sid_test vfs_sid_test)
+
 add_executable(vfs_identity_test vfs_identity_test.c)
 target_link_libraries(vfs_identity_test chimera_vfs chimera_vfs_memfs evpl)
 add_test(chimera/vfs/identity_test vfs_identity_test)
