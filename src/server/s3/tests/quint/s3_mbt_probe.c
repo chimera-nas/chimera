@@ -668,6 +668,46 @@ main(
               "double remove should report absence");
     }
 
+    /* ---- per-key identity (#494) ---------------------------------------- */
+
+    /* A valid signature is not authority.  A key bound to no user acts as the
+     * anonymous identity, so it must not be able to write into a bucket owned
+     * by the harness user -- authenticating says who you are, not what you may
+     * touch.  Before per-key identities every key ran as root and this PUT
+     * succeeded. */
+    {
+        struct s3_mbt_req anon_put = { .method     = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                       .path       = "/bk0/anon-object",
+                                       .access_key = "anonaccess",
+                                       .secret_key = "anonsecret",
+                                       .body       = (const uint8_t *) "x",
+                                       .body_len   = 1 };
+        struct s3_mbt_req owner_put = { .method     = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                        .path       = "/bk0/owner-object",
+                                        .access_key = S3_MBT_ACCESS_KEY,
+                                        .secret_key = S3_MBT_SECRET_KEY,
+                                        .body       = (const uint8_t *) "x",
+                                        .body_len   = 1 };
+
+        CHECK(chimera_server_add_s3_cred(env.server, "anonaccess",
+                                         "anonsecret", NULL, 1) == 0,
+              "add unbound cred failed");
+
+        r = s3_mbt_call(&env, &anon_put);
+        CHECK(r->status == 403,
+              "unbound-key PUT into another user's bucket: got %d want 403",
+              r->status);
+
+        /* ...while the key that owns the bucket still writes to it, so the
+         * denial above is authorization and not a blanket breakage. */
+        r = s3_mbt_call(&env, &owner_put);
+        CHECK(r->status == 200,
+              "owner-key PUT into its own bucket: got %d want 200", r->status);
+
+        CHECK(chimera_server_remove_s3_cred(env.server, "anonaccess") == 0,
+              "remove unbound cred failed");
+    }
+
     /* ---- teardown -------------------------------------------------------- */
 
     s3_mbt_env_fs_teardown(&env, "fs0");
