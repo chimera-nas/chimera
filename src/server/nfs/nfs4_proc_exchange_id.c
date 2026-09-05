@@ -150,6 +150,23 @@ chimera_nfs4_exchange_id(
         return;
     }
 
+    /* RFC 8881 §18.35.3 makes three of the SP4_SSV protection parameters
+     * unconditionally invalid: "If ssp_hash_algs is empty, the server MUST
+     * return NFS4ERR_INVAL", likewise for ssp_encr_algs, and "If ssp_window is
+     * zero, the server MUST return NFS4ERR_INVAL".  These are argument
+     * checks, independent of whether the server goes on to accept SP4_SSV
+     * (chimera declines it -- see nfs4_set_state_protect), so they run on the
+     * spa_how the client actually sent rather than the mode the negotiation
+     * below may replay from a confirmed record. */
+    if (args->eia_state_protect.spa_how == SP4_SSV &&
+        (args->eia_state_protect.spa_ssv_parms.num_ssp_hash_algs == 0 ||
+         args->eia_state_protect.spa_ssv_parms.num_ssp_encr_algs == 0 ||
+         args->eia_state_protect.spa_ssv_parms.ssp_window == 0)) {
+        res->eir_status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->eir_status);
+        return;
+    }
+
     update = (args->eia_flags & EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0;
 
     principal.flavor          = req->principal_flavor;
