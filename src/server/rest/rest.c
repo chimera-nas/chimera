@@ -819,7 +819,8 @@ chimera_rest_init(
     rest->debug_fsops  = chimera_server_config_get_rest_debug_fsops(config);
     rest->auth_enabled = chimera_server_config_get_rest_auth_enabled(config);
 
-    chimera_rest_auth_init_secret(rest);
+    chimera_rest_auth_init_secret(rest,
+                                  chimera_server_config_get_state_dir(config));
 
     rest->winbind_enabled = chimera_server_config_get_smb_winbind_enabled(
         config);

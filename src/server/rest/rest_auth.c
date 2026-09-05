@@ -7,6 +7,9 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
 #include <crypt.h>
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
@@ -185,8 +188,33 @@ hmac_sha256(
 /* ========== Secret init ========== */
 
 void
-chimera_rest_auth_init_secret(struct chimera_rest_server *rest)
+chimera_rest_auth_init_secret(
+    struct chimera_rest_server *rest,
+    const char                 *state_dir)
 {
+    char    path[512];
+    ssize_t n;
+    int     fd;
+
+    /* A freshly random per-process secret invalidates every bearer token the
+     * moment the daemon restarts, and no two processes can verify each other's
+     * tokens.  RFC 8725 wants an HS256 signing key that is long-lived and
+     * shared by every verifier, so resolve it the way the NFS file-handle key
+     * already is: reuse the copy persisted under state_dir if there is one,
+     * otherwise mint one and persist it 0600 for the next start. */
+    snprintf(path, sizeof(path), "%s/rest_jwt.key", state_dir);
+
+    fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        n = read(fd, rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN);
+        close(fd);
+        if (n == (ssize_t) CHIMERA_REST_JWT_SECRET_LEN) {
+            chimera_rest_info("Loaded JWT signing secret from %s", path);
+            return;
+        }
+        chimera_rest_error("Short read of JWT secret %s; regenerating", path);
+    }
+
     /* RAND_bytes returns 1 on success; on 0/-1 it may not write the buffer at
      * all (CWE-252).  A zero/unseeded jwt_secret would let anyone forge a valid
      * JWT for any user -- a full control-plane authentication bypass -- so a
@@ -195,6 +223,21 @@ chimera_rest_auth_init_secret(struct chimera_rest_server *rest)
     if (RAND_bytes(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) != 1) {
         chimera_rest_abort("Failed to seed JWT signing secret from CSPRNG");
     }
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        if (write(fd, rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) !=
+            (ssize_t) CHIMERA_REST_JWT_SECRET_LEN) {
+            chimera_rest_error("Failed to persist JWT secret to %s; issued "
+                               "tokens will not survive restart", path);
+        }
+        close(fd);
+    } else {
+        chimera_rest_error("Could not persist JWT secret to %s (%s); issued "
+                           "tokens will not survive restart", path,
+                           strerror(errno));
+    }
+
     chimera_rest_info("JWT authentication secret initialized");
 } /* chimera_rest_auth_init_secret */
 
