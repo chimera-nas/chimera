@@ -164,6 +164,16 @@ chimera_nfs4_deallocate(
         return;
     }
 
+    /* RFC 7862 §15.2 punches [da_offset, da_offset + da_length); a range whose
+     * end does not fit in a uint64 names no such interval, so reject it rather
+     * than letting the wrapped end reach a backend. */
+    if (args->da_length &&
+        args->da_offset > UINT64_MAX - args->da_length) {
+        res->dr_status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->dr_status);
+        return;
+    }
+
     /*
      * RFC 8881 §8.2.3 requires DEALLOCATE to honor the special stateids.  These
      * carry no state-table entry, so open the current FH on the fly instead of
