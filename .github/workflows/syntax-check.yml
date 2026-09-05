@@ -9,6 +9,12 @@ on:
   merge_group:         # also gate the merge queue
   workflow_dispatch:   # allow manual runs
 
+# uncrustify only reads the tree, so the GITHUB_TOKEN needs nothing
+# beyond that.  Without an explicit block a job inherits whatever the
+# repository default happens to be.
+permissions:
+  contents: read
+
 jobs:
   syntax-check:
     name: Check code formatting with uncrustify

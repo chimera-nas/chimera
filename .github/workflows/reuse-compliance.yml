@@ -9,6 +9,12 @@ on:
   pull_request:
   merge_group:         # also gate the merge queue
 
+# The lint pass only reads the tree, so the GITHUB_TOKEN needs nothing
+# beyond that.  Without an explicit block a job inherits whatever the
+# repository default happens to be.
+permissions:
+  contents: read
+
 jobs:
   reuse-lint:
     runs-on: ubuntu-24.04
