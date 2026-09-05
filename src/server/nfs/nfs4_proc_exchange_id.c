@@ -46,11 +46,11 @@
  */
 static uint32_t
 nfs4_set_state_protect(
-    const struct state_protect4_a *req_sp,
-    struct state_protect4_r       *res_sp,
-    xdr_dbuf                      *dbuf)
+    uint32_t                 spa_how,
+    struct state_protect4_r *res_sp,
+    xdr_dbuf                *dbuf)
 {
-    if (req_sp->spa_how == SP4_MACH_CRED) {
+    if (spa_how == SP4_MACH_CRED) {
         static const uint32_t      enforce[2] = { 0, NFS4_MACH_ENFORCE_WORD1 };
         struct state_protect_ops4 *ops        = &res_sp->spr_mach_ops;
 
@@ -68,7 +68,7 @@ nfs4_set_state_protect(
     /* SP4_SSV is declined: chimera cannot enforce SSV-derived credentials, so
      * it falls through to the SP4_NONE result below rather than advertising a
      * capability it does not back.  See the function comment above. */
-    if (req_sp->spa_how == SP4_SSV) {
+    if (spa_how == SP4_SSV) {
         chimera_nfs_debug(
             "EXCHANGE_ID: client requested SP4_SSV; declining (not enforced), "
             "negotiating SP4_NONE instead");
@@ -181,24 +181,50 @@ chimera_nfs4_exchange_id(
     }
 
     /* Negotiate state protection (RFC 8881 §18.35.3) and record the chosen mode
-     * on the client so per-op enforcement (SP4_MACH_CRED) can consult it. */
-    uint32_t sp_how = nfs4_set_state_protect(&args->eia_state_protect,
-                                             &res->eir_resok4.eir_state_protect,
-                                             req->encoding->dbuf);
-
-    /* Phase 5: 4.1+ EXCHANGE_ID is the moment of identity establishment;
+     * on the client so per-op enforcement (SP4_MACH_CRED) can consult it.
+     *
+     * The mode is a property of the client ID, and §18.35.3 states that "once
+     * the client ID is confirmed, this property cannot be updated by subsequent
+     * EXCHANGE_ID operations".  So whenever the record this call resolved to is
+     * already confirmed -- the case-2 trunking match and the case-6 update --
+     * the negotiation replays the mode stored at creation instead of this
+     * call's spa_how, and the store below is skipped.  Re-deriving it would let
+     * a later EXCHANGE_ID downgrade a confirmed SP4_MACH_CRED client to
+     * SP4_NONE and silently disable the WRONG_CRED enforcement that client
+     * asked for on CREATE_SESSION / BIND_CONN_TO_SESSION / DESTROY_*.
+     *
+     * The negotiation runs under the client-table lock because the stored mode
+     * it may replay must be read there; EXCHANGE_ID is a per-client-lifetime
+     * operation, not a hot path.
+     *
+     * Phase 5: 4.1+ EXCHANGE_ID is the moment of identity establishment;
      * stub-persist the unified client so a future stable-storage backend
      * can pick it up after a restart. */
     {
-        struct nfs4_client *c  = NULL;
-        struct nfs_client  *uc = NULL;
+        struct nfs4_client *c       = NULL;
+        struct nfs_client  *uc      = NULL;
+        uint32_t            spa_how = args->eia_state_protect.spa_how;
+        uint32_t            sp_how;
+        int                 immutable = 0;
+
         pthread_mutex_lock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
         HASH_FIND(nfs4_client_hh_by_id,
                   thread->shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
                   &eid.clientid, sizeof(eid.clientid), c);
+        if (c && eid.confirmed) {
+            spa_how   = c->nfs4_client_sp_how;
+            immutable = 1;
+        }
+
+        sp_how = nfs4_set_state_protect(spa_how,
+                                        &res->eir_resok4.eir_state_protect,
+                                        req->encoding->dbuf);
+
         if (c) {
-            c->nfs4_client_sp_how = sp_how;
-            uc                    = c->unified;
+            if (!immutable) {
+                c->nfs4_client_sp_how = sp_how;
+            }
+            uc = c->unified;
             /* EXCHANGE_ID is client liveness: renew the lease so a client
              * mid-handshake (EXCHANGE_ID -> CREATE_SESSION -> first SEQUENCE)
              * is not expired by the lease sweep before it establishes a
