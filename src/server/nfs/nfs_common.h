@@ -5,6 +5,7 @@
 #pragma once
 
 #include <utlist.h>
+#include <urcu/urcu-qsbr.h>
 
 #include "nfs.h"
 #include "nfs_fh_wrap.h"
@@ -281,6 +282,10 @@ struct chimera_nfs_export {
     uint32_t                   anonuid;
     uint32_t                   anongid;
     uint32_t                   sec_allowed;  /* CHIMERA_NFS_SEC_* mask; 0 = any */
+    /* Deferred-reclaim head: request threads reach an export locklessly via
+     * exports_by_id[], so a removal must wait out a grace period before the
+     * struct is freed. */
+    struct rcu_head            rcu;
     struct chimera_nfs_export *prev;
     struct chimera_nfs_export *next;
 };
