@@ -1002,6 +1002,7 @@ chimera_nfs4_layoutget(
     struct LAYOUTGET4args   *args = &argop->oplayoutget;
     struct LAYOUTGET4res    *res  = &resop->oplayoutget;
     struct ff_layoutget_ctx *ctx;
+    struct nfs_client       *client;
 
     req->handle = NULL;
 
@@ -1026,6 +1027,44 @@ chimera_nfs4_layoutget(
         res->logr_status = NFS4ERR_NOFILEHANDLE;
         chimera_nfs4_compound_complete(req, res->logr_status);
         return;
+    }
+
+    /* RFC 8881 §18.43.3: once the client holds a layout on this file,
+     * loga_stateid MUST be that layout's stateid, and §12.5.3 makes its seqid
+     * the server's to advance -- so a superseded seqid is NFS4ERR_OLD_STATEID
+     * and one never issued is NFS4ERR_BAD_STATEID (both listed in §18.43.4).
+     * A zero seqid means "the current stateid" (§8.2.2).  Only a layout-typed
+     * stateid is judged here: before the first layout is granted the client
+     * legitimately presents an open, lock, or delegation stateid, about which
+     * the layout state has nothing to say -- and the all-ones READ-bypass
+     * stateid decodes as the layout type without being one. */
+    client = req->session ? req->session->client_unified : NULL;
+
+    if (client && !nfs4_stateid_is_special(&args->loga_stateid)) {
+        struct nfs4_stateid_view view;
+
+        nfs4_stateid_decode(&view, &args->loga_stateid);
+
+        if (view.type == NFS4_STATEID_TYPE_LAYOUT) {
+            struct nfs_layout_state *layout =
+                nfs_layout_state_find(client, req->fh, req->fhlen);
+            uint32_t                 in_seqid = args->loga_stateid.seqid;
+
+            if (!layout) {
+                res->logr_status = NFS4ERR_BAD_STATEID;
+            } else if (in_seqid != 0 && in_seqid < layout->seqid) {
+                res->logr_status = NFS4ERR_OLD_STATEID;
+            } else if (in_seqid > layout->seqid) {
+                res->logr_status = NFS4ERR_BAD_STATEID;
+            } else {
+                res->logr_status = NFS4_OK;
+            }
+
+            if (res->logr_status != NFS4_OK) {
+                chimera_nfs4_compound_complete(req, res->logr_status);
+                return;
+            }
+        }
     }
 
     ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
@@ -1088,9 +1127,8 @@ chimera_nfs4_layoutreturn(
 
             /* RFC 8881 §12.5.3: the layout stateid carried by LAYOUTRETURN must
              * match the server's current seqid for this layout.  A stale seqid
-             * is OLD_STATEID, a future one BAD_STATEID.  (LAYOUTGET, by
-             * contrast, tolerates an old seqid -- the client may race two
-             * LAYOUTGETs.) */
+             * is OLD_STATEID, a future one BAD_STATEID.  (LAYOUTGET applies the
+             * same rule, except that it also accepts a zero seqid.) */
             if (in_seqid < layout->seqid) {
                 res->lorr_status = NFS4ERR_OLD_STATEID;
                 chimera_nfs4_compound_complete(req, res->lorr_status);
