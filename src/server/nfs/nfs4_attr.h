@@ -1233,6 +1233,11 @@ chimera_nfs4_unmarshall_attrs(
 
                 is_group = !!(flag & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
 
+                /* acl_buf comes from the request's bump allocator, which is
+                 * never cleared, and an ACE is compared and stored by value:
+                 * zero it so the principal's reserved byte and native-SID
+                 * tail are defined, not whatever the previous RPC left. */
+                memset(&acl_buf->aces[i], 0, sizeof(acl_buf->aces[i]));
                 acl_buf->aces[i].type        = (uint16_t) type;
                 acl_buf->aces[i].flags       = (uint16_t) flag;
                 acl_buf->aces[i].access_mask = mask;

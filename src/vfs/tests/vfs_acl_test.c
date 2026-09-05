@@ -12,6 +12,7 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_acl_serialize.h"
+#include "vfs/sdk/vfs_sid.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -393,6 +394,97 @@ test_delete_allowed(void)
 
 #undef INIT_ATTR
 
+/*
+ * A CHIMERA_PRINCIPAL_SID ACE is an opaque native SID with no known unix id:
+ * it is stored and marshalled verbatim but matches no caller during access
+ * evaluation, exactly like a departed-user SID does on NTFS.
+ */
+static void
+test_sid_principal_never_matches(void)
+{
+    ACL_BUF(acl, 2);
+    struct chimera_vfs_cred u = mkcred(1000, 2000);
+    uint32_t                g;
+
+    memset(acl_storage, 0, sizeof(acl_storage));
+    acl->num_aces            = 1;
+    acl->ctrl_flags          = 0;
+    acl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+    acl->aces[0].flags       = 0;
+    acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA;
+    acl->aces[0].who.type    = CHIMERA_PRINCIPAL_SID;
+    assert(chimera_sid_from_str(&acl->aces[0].who.sid, "S-1-5-21-9-9-9-1234") == 0);
+
+    /* Neither the caller nor the owner is granted data access by a SID-only
+     * DACL; only the implicit metadata/owner rights ever apply. */
+    g = chimera_acl_access_check(acl, 0, 4242, 4243, &u,
+                                 CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA, 0);
+    assert(g == 0);
+    g = chimera_acl_access_raw(acl, 4242, 4243, &u, CHIMERA_ACE_READ_DATA);
+    assert(g == 0);
+
+    /* It does not bear on the POSIX mode projection either. */
+    assert(chimera_acl_to_mode(acl) == 0);
+
+    TEST_PASS("CHIMERA_PRINCIPAL_SID ACE matches no caller and no mode class");
+} /* test_sid_principal_never_matches */
+
+/*
+ * chmod preserves a SID-bearing named ACE with its SID intact, and
+ * inheritance carries the SID onto the child while CREATOR_* substitution
+ * never leaks a SID onto the child's OWNER@/GROUP@ entry.
+ */
+static void
+test_sid_survives_chmod_and_inherit(void)
+{
+    ACL_BUF(in, 4);
+    ACL_BUF(out, 16);
+    ACL_BUF(child, 8);
+    struct chimera_sid sid;
+    int                n;
+
+    memset(in_storage, 0, sizeof(in_storage));
+    memset(out_storage, 0, sizeof(out_storage));
+    memset(child_storage, 0, sizeof(child_storage));
+    assert(chimera_sid_from_str(&sid, "S-1-5-21-7-8-9-1001") == 0);
+
+    /* Named user 4000 carrying its real SID, plus an inheritable CREATOR_OWNER
+     * template that must never carry a SID onto the child. */
+    in->ctrl_flags          = 0;
+    in->aces[0].type        = CHIMERA_ACE_ALLOWED;
+    in->aces[0].flags       = CHIMERA_ACE_FLAG_FILE_INHERIT;
+    in->aces[0].access_mask = CHIMERA_ACE_WRITE_DATA;
+    in->aces[0].who.type    = CHIMERA_PRINCIPAL_USER;
+    in->aces[0].who.id      = 4000;
+    in->aces[0].who.sid     = sid;
+    in->aces[1].type        = CHIMERA_ACE_ALLOWED;
+    in->aces[1].flags       = CHIMERA_ACE_FLAG_FILE_INHERIT;
+    in->aces[1].access_mask = CHIMERA_ACE_READ_DATA;
+    in->aces[1].who.type    = CHIMERA_PRINCIPAL_SPECIAL;
+    in->aces[1].who.special = CHIMERA_WHO_CREATOR_OWNER;
+    in->num_aces            = 2;
+
+    n = chimera_acl_chmod(in, 0640, out, 16);
+    assert(n > 1);
+    assert(out->aces[0].who.type == CHIMERA_PRINCIPAL_USER);
+    assert(out->aces[0].who.id == 4000);
+    assert(chimera_sid_equal(&out->aces[0].who.sid, &sid));
+    /* the regenerated special-who entries carry no SID */
+    for (int i = 1; i < n; i++) {
+        assert(!chimera_sid_present(&out->aces[i].who.sid));
+    }
+
+    n = chimera_acl_inherit(in, 0 /* file */, 0644, child, 8);
+    assert(n == 2);
+    assert(chimera_sid_equal(&child->aces[0].who.sid, &sid));
+    assert(child->aces[1].who.type == CHIMERA_PRINCIPAL_SPECIAL);
+    assert(child->aces[1].who.special == CHIMERA_WHO_OWNER);
+    assert(!chimera_sid_present(&child->aces[1].who.sid));
+
+    TEST_PASS("SID survives chmod and inherit; specials never carry one");
+} /* test_sid_survives_chmod_and_inherit */
+
+
 int
 main(
     int    argc,
@@ -409,6 +501,8 @@ main(
     test_serialize_roundtrip();
     test_gate();
     test_delete_allowed();
+    test_sid_principal_never_matches();
+    test_sid_survives_chmod_and_inherit();
 
     fprintf(stderr, "All ACL engine tests passed\n");
     return 0;

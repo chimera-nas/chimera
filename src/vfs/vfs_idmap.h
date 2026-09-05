@@ -58,7 +58,9 @@ chimera_idmap_special_principal(uint8_t special)
 /*
  * Encode `p` as an NFSv4 owner/who string into `buf` (capacity `buflen`).
  * `domain` may be NULL (then numeric ids are emitted verbatim).  Returns the
- * string length, or -1 if the buffer is too small.
+ * string length, or -1 if the buffer is too small or the principal has no
+ * NFSv4 name -- a CHIMERA_PRINCIPAL_SID maps to no uid or gid and must not
+ * be presented as one; the caller drops such an ACE.
  */
 int chimera_idmap_principal_to_who(
     const struct chimera_principal *p,
@@ -70,6 +72,8 @@ int chimera_idmap_principal_to_who(
  * Decode an NFSv4 owner/who string (`who`, length `len`) into `p`.
  * `is_group` selects group vs user when the string names a principal.
  * `domain` may be NULL.  Returns 0 on success, -1 if it could not be resolved.
+ * `*p` is fully defined on return -- every byte, including the native-SID
+ * tail -- and zeroed on failure, whatever the caller's storage held.
  */
 int chimera_idmap_who_to_principal(
     const char               *who,

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <sys/stat.h>
+#include <string.h>
 
 #include "sdk/vfs_acl.h"
 #include "sdk/vfs_cred.h"
@@ -115,6 +116,10 @@ ace_applies(
             return (uint64_t) cred->uid == who->id;
         case CHIMERA_PRINCIPAL_GROUP:
             return cred_in_group(cred, who->id);
+        case CHIMERA_PRINCIPAL_SID:
+            /* An opaque native SID with no unix identity: preserved for
+             * round-tripping, but it can never describe a Unix caller. */
+            return 0;
         default:
             return 0;
     } /* switch */
@@ -341,6 +346,7 @@ chimera_acl_from_mode(
 #define EMIT(t, m, sp) \
         do { \
             if (n >= max_aces) { return -1; } \
+            memset(&out->aces[n], 0, sizeof(out->aces[n])); \
             out->aces[n].type        = (t); \
             out->aces[n].flags       = 0; \
             out->aces[n].access_mask = (m); \
@@ -382,6 +388,7 @@ chimera_acl_default_acl(
 #define EMIT(t, m, sp) \
         do { \
             if (n >= max_aces) { return -1; } \
+            memset(&out->aces[n], 0, sizeof(out->aces[n])); \
             out->aces[n].type        = (t); \
             out->aces[n].flags       = 0; \
             out->aces[n].access_mask = (m); \
@@ -552,12 +559,13 @@ inherit_subst_creator(const struct chimera_principal *who)
 {
     struct chimera_principal p = *who;
 
-    if (p.type == CHIMERA_PRINCIPAL_SPECIAL) {
-        if (p.special == CHIMERA_WHO_CREATOR_OWNER) {
-            p.special = CHIMERA_WHO_OWNER;
-        } else if (p.special == CHIMERA_WHO_CREATOR_GROUP) {
-            p.special = CHIMERA_WHO_GROUP;
-        }
+    if (p.type == CHIMERA_PRINCIPAL_SPECIAL &&
+        (p.special == CHIMERA_WHO_CREATOR_OWNER ||
+         p.special == CHIMERA_WHO_CREATOR_GROUP)) {
+        p.special = (p.special == CHIMERA_WHO_CREATOR_OWNER) ?
+            CHIMERA_WHO_OWNER : CHIMERA_WHO_GROUP;
+        /* The whole SID, not just its length: an ACE is compared by value. */
+        memset(&p.sid, 0, sizeof(p.sid));
     }
     return p;
 } /* inherit_subst_creator */
