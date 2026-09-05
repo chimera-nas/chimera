@@ -29,10 +29,23 @@
 /* "S-<rev>-<authority>" plus 15 x "-<u32>" plus NUL fits comfortably. */
 #define CHIMERA_SID_STR_MAX       192
 
+/*
+ * chimera_sid_from_bin / chimera_sid_from_str fully define the struct (the
+ * pad and the bytes past `len` are zeroed, and the whole struct is zeroed on
+ * failure), so a chimera_sid -- and any ACE principal carrying one -- is
+ * byte-deterministic and safe to copy by value and compare with memcmp.  The
+ * explicit pad keeps the struct free of compiler padding, so that guarantee
+ * comes from the language rather than from how a given compiler happens to
+ * copy padding bytes.
+ */
 struct chimera_sid {
     uint8_t len;                       /* 0 = absent; else 8 + 4 * count */
+    uint8_t pad[3];                    /* always zero */
     uint8_t data[CHIMERA_SID_MAX_LEN]; /* binary SID, valid for `len` bytes */
 };
+
+_Static_assert(sizeof(struct chimera_sid) == 72,
+               "chimera_sid must have no compiler padding");
 
 /*
  * Validate the binary SID at the start of `buf` (`avail` bytes) and return

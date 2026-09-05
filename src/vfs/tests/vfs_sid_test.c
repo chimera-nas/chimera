@@ -36,6 +36,20 @@ test_str_roundtrip(void)
     assert(chimera_sid_to_str(&s, buf, sizeof(buf)) > 0);
     assert(strcmp(buf, "S-1-5-21-1-2-3-1001") == 0);
 
+    /* The struct is fully defined: every byte past the SID is zero, so a
+     * copy of it (e.g. inside an ACE) compares byte-for-byte with one that
+     * was deserialized into zeroed storage. */
+    for (unsigned i = s.len; i < CHIMERA_SID_MAX_LEN; i++) {
+        assert(s.data[i] == 0);
+    }
+    /* ... and a failed parse leaves nothing of the previous contents. */
+    memset(&s, 0xa5, sizeof(s));
+    assert(chimera_sid_from_str(&s, "S-1-5-abc") == -1);
+    assert(!chimera_sid_present(&s));
+    for (unsigned i = 0; i < CHIMERA_SID_MAX_LEN; i++) {
+        assert(s.data[i] == 0);
+    }
+
     /* A well-known SID with a single sub-authority. */
     assert(chimera_sid_from_str(&s, "S-1-1-0") == 0);
     assert(s.len == 12);
