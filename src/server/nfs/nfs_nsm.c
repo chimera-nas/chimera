@@ -699,6 +699,33 @@ nsm_conn_peer_addr(
     }
 } /* nsm_conn_peer_addr */
 
+/* True unless `host` is monitored at an address other than `src`.
+ *
+ * SM_NOTIFY carries no authentication, so the only correlation available is
+ * the one a real statd makes: the notify has to come from the peer it claims
+ * restarted.  A monitored host's reach-address was recorded from its own NLM
+ * connection (nfs_nlm.c), so a notify naming it from anywhere else is a
+ * spoof and is ignored.  A host with no monitor entry -- one whose locks are
+ * already gone, so the release is a no-op -- has no address to compare
+ * against and is left to the caller's exact-match path. */
+static int
+nsm_notify_src_ok(
+    struct chimera_server_nfs_thread *thread,
+    const char                       *host,
+    const char                       *src)
+{
+    struct nsm_state   *nsm = &thread->shared->nsm_state;
+    struct nsm_monitor *mon;
+    int                 ok;
+
+    pthread_mutex_lock(&nsm->mutex);
+    HASH_FIND_STR(nsm->monitors, host, mon);
+    ok = (mon == NULL) || (strcmp(mon->addr, src) == 0);
+    pthread_mutex_unlock(&nsm->mutex);
+
+    return ok;
+} /* nsm_notify_src_ok */
+
 /* Release every NLM lock held by `host` (the NLMPROC4_FREE_ALL sequence).
  * Returns 1 if a matching client was found.  Takes nlm_state.mutex internally
  * and no other lock, so it is safe to call after dropping nsm_state.mutex. */
@@ -744,6 +771,7 @@ chimera_nfs_sm_notify(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     char                              host[SM_MAXSTRLEN + 1];
+    char                              src[80];
     size_t                            hn_len;
     int                               rc;
 
@@ -753,6 +781,18 @@ chimera_nfs_sm_notify(
     hn_len = args->mon_name.len < SM_MAXSTRLEN ? args->mon_name.len : SM_MAXSTRLEN;
     memcpy(host, args->mon_name.str, hn_len);
     host[hn_len] = '\0';
+
+    nsm_conn_peer_addr(conn, src, sizeof(src));
+
+    /* A notify naming a host we monitor at a different address did not come
+     * from that host: dropping its locks on an arbitrary peer's say-so is a
+     * lock-release spoof, so ignore it (the reply is still sent -- SM_NOTIFY
+     * has no error status). */
+    if (!nsm_notify_src_ok(thread, host, src)) {
+        chimera_nfs_info("NSM SM_NOTIFY for '%s' from %s ignored: not the "
+                         "address that host is monitored at", host, src);
+        goto reply;
+    }
 
     chimera_nfs_info("NSM SM_NOTIFY: host '%s' restarted (state %d); releasing its locks",
                      host, args->state);
@@ -764,12 +804,9 @@ chimera_nfs_sm_notify(
          * the caller_name it used for NLM.  Match monitored hosts by the
          * notify's source IP instead.  Collect matches under nsm_state.mutex,
          * then release outside it (nsm before nlm lock ordering). */
-        char                src[80];
         char                matched[NSM_NOTIFY_FALLBACK_MAX][SM_MAXSTRLEN + 1];
         struct nsm_monitor *mon, *tmp;
         int                 n = 0, truncated = 0, i;
-
-        nsm_conn_peer_addr(conn, src, sizeof(src));
 
         pthread_mutex_lock(&shared->nsm_state.mutex);
         HASH_ITER(hh, shared->nsm_state.monitors, mon, tmp)
@@ -797,6 +834,8 @@ chimera_nfs_sm_notify(
             nsm_unmonitor(thread, matched[i]);
         }
     }
+
+ reply:
 
     /* SM_NOTIFY is a void procedure (no reply body), but the RPC layer still
      * expects an accepted-reply ack. */
