@@ -788,8 +788,24 @@ jobs:
                 echo "::notice::category $CATEGORY selected no tests on ${{ matrix.arch }}"
                 exit 0
               fi
+              mkdir -p /workspace/ctest-results
               /workspace/scripts/cap_ctest_output.sh \
-              ctest -C extended $SEL --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)"'
+              ctest -C extended $SEL --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)" \
+                    --output-junit /workspace/ctest-results/$CATEGORY.xml'
+
+      # A shard that fails is a shard someone has to diagnose, and the console
+      # log caps per-test output at 64 KB -- which is how a timeout arrives with
+      # its own reason truncated away.  The JUnit carries the full per-test
+      # record.  if: always() because a failing shard is exactly the one whose
+      # results are worth keeping.
+      - name: Upload ctest results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.category }}
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 7
 
 
   # macOS: the extended tier on a GitHub-hosted arm64 runner.  Nothing here is
