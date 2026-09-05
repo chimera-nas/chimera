@@ -1030,6 +1030,10 @@ struct chimera_smb_request {
             int                             sd_pending;
             uint8_t                         sd_acl_storage[sizeof(struct chimera_acl) +
                                                            64 * sizeof(struct chimera_ace)];
+            /* The stored native owner / group SIDs, copied out with the rest
+             * (len 0 = none stored). */
+            struct chimera_sid              sd_owner_sid;
+            struct chimera_sid              sd_group_sid;
             /* FileStreamInformation: the packed VFS list_streams records are
              * held here from the list_streams callback until the reply builder
              * emits them as MS-FSCC FILE_STREAM_INFORMATION entries.

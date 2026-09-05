@@ -459,12 +459,22 @@ chimera_smb_sd_to_acl(
  */
 static int
 chimera_smb_emit_owner_sid(
-    uint8_t            *out,
-    int                 cap,
-    struct chimera_vfs *vfs,
-    uint32_t            uid)
+    uint8_t                  *out,
+    int                       cap,
+    struct chimera_vfs       *vfs,
+    uint32_t                  uid,
+    const struct chimera_sid *stored)
 {
     char sidstr[CHIMERA_IDMAP_SID_MAX];
+
+    /* The native SID the owner was set with, verbatim. */
+    if (chimera_sid_present(stored)) {
+        if (cap < stored->len) {
+            return -1;
+        }
+        memcpy(out, stored->data, stored->len);
+        return stored->len;
+    }
 
     if (vfs &&
         chimera_vfs_identity_uid_to_sid(vfs, uid, sidstr, sizeof(sidstr)) > 0) {
@@ -490,12 +500,21 @@ chimera_smb_emit_owner_sid(
  */
 static int
 chimera_smb_emit_group_sid(
-    uint8_t            *out,
-    int                 cap,
-    struct chimera_vfs *vfs,
-    uint32_t            gid)
+    uint8_t                  *out,
+    int                       cap,
+    struct chimera_vfs       *vfs,
+    uint32_t                  gid,
+    const struct chimera_sid *stored)
 {
     char sidstr[CHIMERA_IDMAP_SID_MAX];
+
+    if (chimera_sid_present(stored)) {
+        if (cap < stored->len) {
+            return -1;
+        }
+        memcpy(out, stored->data, stored->len);
+        return stored->len;
+    }
 
     if (vfs &&
         chimera_vfs_identity_gid_to_sid(vfs, gid, sidstr, sizeof(sidstr)) > 0) {
@@ -509,12 +528,14 @@ chimera_smb_emit_group_sid(
     return SID_UNIX_SIZE;
 } /* chimera_smb_emit_group_sid */
 
-static int
+int
 chimera_smb_acl_to_sd(
     uint32_t                  uid,
     uint32_t                  gid,
     uint32_t                  mode,
     const struct chimera_acl *acl,
+    const struct chimera_sid *owner_sid,
+    const struct chimera_sid *group_sid,
     int                       has_owner,
     int                       has_group,
     int                       has_dacl,
@@ -538,7 +559,8 @@ chimera_smb_acl_to_sd(
      * DACL-first layout is then misparsed (the DACL bytes are read as the owner
      * SID), so the owner/group SIDs must precede the DACL here. */
     if (has_owner) {
-        int n = chimera_smb_emit_owner_sid(&out[offset], cap - offset, vfs, uid);
+        int n = chimera_smb_emit_owner_sid(&out[offset], cap - offset, vfs, uid,
+                                           owner_sid);
 
         if (n < 0) {
             return -1;
@@ -548,7 +570,8 @@ chimera_smb_acl_to_sd(
     }
 
     if (has_group) {
-        int n = chimera_smb_emit_group_sid(&out[offset], cap - offset, vfs, gid);
+        int n = chimera_smb_emit_group_sid(&out[offset], cap - offset, vfs, gid,
+                                           group_sid);
 
         if (n < 0) {
             return -1;
@@ -588,38 +611,62 @@ chimera_smb_acl_to_sd(
                 uint16_t                  ace_size;
 
                 /* OWNER@/GROUP@ denote the object's current owner/group: emit
-                 * the concrete owner/group SID rather than a special SID. */
+                 * the concrete owner/group SID rather than a special SID --
+                 * the stored native one when there is one, so the ACE agrees
+                 * with the descriptor's owner/group fields. */
                 if (who.type == CHIMERA_PRINCIPAL_SPECIAL) {
                     if (who.special == CHIMERA_WHO_OWNER) {
                         who.type = CHIMERA_PRINCIPAL_USER;
                         who.id   = uid;
+                        if (chimera_sid_present(owner_sid)) {
+                            who.sid = *owner_sid;
+                        }
                     } else if (who.special == CHIMERA_WHO_GROUP) {
                         who.type = CHIMERA_PRINCIPAL_GROUP;
                         who.id   = gid;
+                        if (chimera_sid_present(group_sid)) {
+                            who.sid = *group_sid;
+                        }
                     }
                 }
 
-                /* Prefer the principal's real (cached) SID so AD users and
-                 * groups alike round trip; fall back to the algorithmic idmap
-                 * SID. */
-                if (who.type == CHIMERA_PRINCIPAL_USER && vfs &&
-                    chimera_vfs_identity_uid_to_sid(vfs, who.id, sidstr,
-                                                    sizeof(sidstr)) > 0) {
-                    /* sidstr holds the real SID */
-                } else if (who.type == CHIMERA_PRINCIPAL_GROUP && vfs &&
-                           chimera_vfs_identity_gid_to_sid(vfs, who.id, sidstr,
-                                                           sizeof(sidstr)) > 0) {
-                    /* sidstr holds the real group SID */
-                } else if (chimera_idmap_principal_to_sid(&who, sidstr,
-                                                          sizeof(sidstr)) < 0) {
-                    continue;
-                }
                 if (ace_pos + 8 > cap) {
                     return -1;
                 }
-                sidlen = chimera_sid_str_to_bin(sidstr, out + ace_pos + 8, cap - ace_pos - 8);
-                if (sidlen < 0) {
-                    return -1;
+
+                if (chimera_sid_present(&who.sid)) {
+                    /* The native SID the principal was set with -- a resolved
+                     * domain user/group or an opaque unmappable SID -- is
+                     * emitted verbatim; no cache lookup can improve on it. */
+                    if (cap - ace_pos - 8 < who.sid.len) {
+                        return -1;
+                    }
+                    memcpy(out + ace_pos + 8, who.sid.data, who.sid.len);
+                    sidlen = who.sid.len;
+                } else if (who.type == CHIMERA_PRINCIPAL_SID) {
+                    /* An opaque principal with no SID bytes is unrepresentable. */
+                    continue;
+                } else {
+                    /* Prefer the principal's real (cached) SID so AD users and
+                     * groups alike round trip; fall back to the algorithmic
+                     * idmap SID. */
+                    if (who.type == CHIMERA_PRINCIPAL_USER && vfs &&
+                        chimera_vfs_identity_uid_to_sid(vfs, who.id, sidstr,
+                                                        sizeof(sidstr)) > 0) {
+                        /* sidstr holds the real SID */
+                    } else if (who.type == CHIMERA_PRINCIPAL_GROUP && vfs &&
+                               chimera_vfs_identity_gid_to_sid(vfs, who.id, sidstr,
+                                                               sizeof(sidstr)) > 0) {
+                        /* sidstr holds the real group SID */
+                    } else if (chimera_idmap_principal_to_sid(&who, sidstr,
+                                                              sizeof(sidstr)) < 0) {
+                        continue;
+                    }
+                    sidlen = chimera_sid_str_to_bin(sidstr, out + ace_pos + 8,
+                                                    cap - ace_pos - 8);
+                    if (sidlen < 0) {
+                        return -1;
+                    }
                 }
                 ace_size = 8 + sidlen;
 
@@ -985,13 +1032,15 @@ chimera_smb_query_emit_sd(
     uint32_t                    uid,
     uint32_t                    gid,
     uint32_t                    mode,
-    const struct chimera_acl   *acl)
+    const struct chimera_acl   *acl,
+    const struct chimera_sid   *owner_sid,
+    const struct chimera_sid   *group_sid)
 {
     uint32_t addl_info = request->query_info.addl_info;
     int      sd_len;
 
     sd_len = chimera_smb_acl_to_sd(
-        uid, gid, mode & (S_IFMT | 07777), acl,
+        uid, gid, mode & (S_IFMT | 07777), acl, owner_sid, group_sid,
         !!(addl_info & OWNER_SECURITY_INFORMATION),
         !!(addl_info & GROUP_SECURITY_INFORMATION),
         !!(addl_info & DACL_SECURITY_INFORMATION),
@@ -1039,7 +1088,9 @@ chimera_smb_query_resolve_decr(struct chimera_smb_request *request)
                               request->query_info.sd_uid,
                               request->query_info.sd_gid,
                               request->query_info.sd_mode,
-                              acl);
+                              acl,
+                              &request->query_info.sd_owner_sid,
+                              &request->query_info.sd_group_sid);
 } /* chimera_smb_query_resolve_decr */
 
 static void
@@ -1061,6 +1112,8 @@ chimera_smb_query_security_getattr_callback(
     struct chimera_vfs_thread  *thread  = request->compound->thread->vfs_thread;
     struct chimera_vfs         *vfs     = request->compound->thread->shared->vfs;
     const struct chimera_acl   *acl;
+    const struct chimera_sid   *owner_sid;
+    const struct chimera_sid   *group_sid;
     unsigned                    i;
     int                         nmiss = 0;
     int                         acl_fits;
@@ -1081,19 +1134,32 @@ chimera_smb_query_security_getattr_callback(
         acl = NULL;
     }
 
+    /* The stored native owner / group SIDs, when the backend has them; an
+     * identity that already carries its SID needs no resolution. */
+    owner_sid = (attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) ?
+        attr->va_owner_sid : NULL;
+    group_sid = (attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) ?
+        attr->va_group_sid : NULL;
+
     /* The owner and group SIDs and any USER/GROUP ACE need a real SID; count
      * the principals not yet in the cache (those would block) so we know
-     * whether to resolve. */
-    if (!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+     * whether to resolve.  Principals with a stored native SID are skipped:
+     * it is emitted verbatim. */
+    if (!chimera_sid_present(owner_sid) &&
+        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
                                      attr->va_uid, NULL)) {
         nmiss++;
     }
-    if (!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
+    if (!chimera_sid_present(group_sid) &&
+        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
                                      attr->va_gid, NULL)) {
         nmiss++;
     }
     if (acl) {
         for (i = 0; i < acl->num_aces; i++) {
+            if (acl->aces[i].who.sid.len) {
+                continue;
+            }
             if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_USER &&
                 !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
                                              acl->aces[i].who.id, NULL)) {
@@ -1113,7 +1179,7 @@ chimera_smb_query_security_getattr_callback(
      * the SD inline from the live attrs, exactly as before. */
     if (nmiss == 0 || !acl_fits) {
         chimera_smb_query_emit_sd(request, attr->va_uid, attr->va_gid,
-                                  attr->va_mode, acl);
+                                  attr->va_mode, acl, owner_sid, group_sid);
         return;
     }
 
@@ -1130,17 +1196,29 @@ chimera_smb_query_security_getattr_callback(
     } else {
         request->query_info.sd_has_acl = 0;
     }
+    if (chimera_sid_present(owner_sid)) {
+        request->query_info.sd_owner_sid = *owner_sid;
+    } else {
+        request->query_info.sd_owner_sid.len = 0;
+    }
+    if (chimera_sid_present(group_sid)) {
+        request->query_info.sd_group_sid = *group_sid;
+    } else {
+        request->query_info.sd_group_sid.len = 0;
+    }
 
     request->query_info.sd_pending = 1; /* guard until all resolves are issued */
 
-    if (!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+    if (!chimera_sid_present(owner_sid) &&
+        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
                                      attr->va_uid, NULL)) {
         request->query_info.sd_pending++;
         chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
                                      attr->va_uid, NULL,
                                      chimera_smb_query_resolve_cb, request);
     }
-    if (!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
+    if (!chimera_sid_present(group_sid) &&
+        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
                                      attr->va_gid, NULL)) {
         request->query_info.sd_pending++;
         chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_GID,
@@ -1149,6 +1227,9 @@ chimera_smb_query_security_getattr_callback(
     }
     if (acl) {
         for (i = 0; i < acl->num_aces; i++) {
+            if (acl->aces[i].who.sid.len) {
+                continue;
+            }
             if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_USER &&
                 !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
                                              acl->aces[i].who.id, NULL)) {
@@ -1182,7 +1263,8 @@ chimera_smb_query_security(struct chimera_smb_request *request)
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
         request->query_info.open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
+        CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID,
         chimera_smb_query_security_getattr_callback,
         request);
 } /* chimera_smb_query_security */
