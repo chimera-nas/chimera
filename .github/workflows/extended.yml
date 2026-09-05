@@ -370,39 +370,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # devcontainer. KVM is required ON for amd64, where the suites
-          # actually run, so a regression in availability fails the build
-          # rather than silently skipping. The devcontainer ships only x86
-          # qemu (qemu-system-x86), so KVM acceleration is unavailable on
-          # arm64 -- the suites never ran there, so keep them explicitly OFF.
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-            arch: amd64
-            build_type: Release
-            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=ON"
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-            arch: amd64
-            build_type: Debug
-            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=ON"
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-            build_type: Release
-            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=OFF"
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-            build_type: Debug
-            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=OFF"
+          # The devcontainer image is NOT in this combined matrix: its extended
+          # run is sharded by test category in the test-dev job below.  See there
+          # for why.
           # ubuntu 26 (no KVM here; disable explicitly so a missing /dev/kvm
           # does not get silently auto-detected)
           - platform: linux/amd64
@@ -609,6 +579,197 @@ jobs:
               ccache --show-stats || true
               /workspace/scripts/cap_ctest_output.sh \
               ctest -C extended --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)"'
+
+
+  # Devcontainer extended run: build once per cell, then shard the tests by
+  # category.
+  #
+  # This is the shape build-test.yml carried before the quick/extended tier
+  # split collapsed it (0ec73987, "split the devcontainer into build +
+  # per-category test shards").  It is worth restoring because the runners
+  # changed underneath it: the devcontainer carries by far the widest test set
+  # -- it is the only image with pynfs, smbtorture, wpts, the KVM guests and
+  # the full quint corpus -- and running all of it in one job on a four-vCPU
+  # hosted runner takes hours of wall clock, serialised behind itself.
+  #
+  # The shards do not rebuild.  Rebuilding per category would multiply the
+  # compile by the number of shards, which on a capped concurrency budget costs
+  # more than the serialisation it removes, so build-dev tars the tree once per
+  # (arch, build_type) and each shard unpacks it.  Retention is a day: these
+  # artifacts exist only to cross the job boundary.
+  build-dev:
+    name: Build devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
+    needs: [build-devcontainer]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04,     build_type: Release, kvm_cmake: "-DKVM_TESTING=ON"  }
+          - { arch: amd64, runner: ubuntu-24.04,     build_type: Debug,   kvm_cmake: "-DKVM_TESTING=ON"  }
+          - { arch: arm64, runner: ubuntu-24.04-arm, build_type: Release, kvm_cmake: "-DKVM_TESTING=OFF" }
+          - { arch: arm64, runner: ubuntu-24.04-arm, build_type: Debug,   kvm_cmake: "-DKVM_TESTING=OFF" }
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch oras CLI
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Restore the ccache directory
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-v2-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v2-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-
+
+      - name: Configure and build inside the container
+        run: |
+          docker run --rm --privileged \
+            -e CCACHE_DIR=/ccache \
+            -e CCACHE_MAXSIZE \
+            -v "${{ runner.temp }}/ccache:/ccache" \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
+            bash -euxc '
+              ccache -z > /dev/null
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON ${{ matrix.kvm_cmake }} /workspace
+              ninja
+              ccache --show-stats || true
+              # Ship the build tree to the test shards (minus the local ccache;
+              # KVM guest images live under /kvm, outside /build, so they are
+              # already excluded).
+              tar -C /build --exclude=./ccache -czf /workspace/build-dev.tar.gz .'
+
+      - name: Upload build tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-dev-${{ matrix.arch }}-${{ matrix.build_type }}
+          path: build-dev.tar.gz
+          retention-days: 1
+
+  test-dev:
+    name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }} ${{ matrix.category }}
+    needs: [build-dev]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        build_type: [Release, Debug]
+        # One shard per label family.  `rest` is the complement of the others,
+        # so every extended test lands in exactly one shard and nothing is
+        # silently dropped when a family is added -- a new label with no shard
+        # of its own still runs, in `rest`.
+        category: [pynfs, smbtorture, wpts, pjd, posix, s3, quint, pnfs, kvm, rest]
+        include:
+          - { arch: amd64, runner: ubuntu-24.04     }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+        exclude:
+          # The devcontainer ships only qemu-system-x86, so KVM acceleration
+          # is unavailable on arm64 and the guests never ran there.
+          - { arch: arm64, category: kvm }
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The KVM shard fetches guest images from GHCR with oras; the others do
+      # not, but the mount is uniform so the command below stays one shape.
+      - name: Fetch oras CLI
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Download build tree
+        uses: actions/download-artifact@v4
+        with:
+          name: build-dev-${{ matrix.arch }}-${{ matrix.build_type }}
+
+      - name: Unpack and run the category
+        run: |
+          docker run --rm --privileged \
+            -e CATEGORY=${{ matrix.category }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
+            bash -euxc '
+              tar -C /build -xzf /workspace/build-dev.tar.gz
+              # ctest -L takes a REGEX, not a literal label, so every
+              # selector here is anchored.  Unanchored, "-L posix" also matches
+              # posix_mbt and "-L s3" matches s3_mbt -- the quint corpus -- so
+              # those tests would run in two shards and be excluded from `rest`
+              # twice over.  Measured on a real configure: -L posix selected 11
+              # tests, -L "^posix$" selected 0.
+              #
+              # EXCL is the same anchored set, so `rest` is exactly the
+              # complement: every extended test lands in one shard, and a label
+              # that does not exist on this platform simply leaves its shard
+              # empty without stranding anything -- the -LE cannot exclude what
+              # is not there.
+              EXCL="^pynfs$|^smbtorture$|^wpts$|^pjdfstest$|^posix$|^s3$|^quint$|^pnfs$|^kvm$"
+              case "$CATEGORY" in
+                pynfs)      SEL="-L ^pynfs$" ;;
+                smbtorture) SEL="-L ^smbtorture$" ;;
+                wpts)       SEL="-L ^wpts$" ;;
+                pjd)        SEL="-L ^pjdfstest$" ;;
+                # pjd tests carry both labels; keep them in one shard only.
+                posix)      SEL="-L ^posix$ -LE ^pjdfstest$" ;;
+                s3)         SEL="-L ^s3$" ;;
+                # The pnfs MBT batches carry `quint` too, and the KVM pnfs
+                # guests carry `kvm`; peel them off in a fixed order so each
+                # test lands in exactly one shard: kvm wins over pnfs, pnfs
+                # wins over quint.
+                quint)      SEL="-L ^quint$ -LE ^pnfs$" ;;
+                pnfs)       SEL="-L ^pnfs$ -LE ^kvm$" ;;
+                kvm)        SEL="-L ^kvm$" ;;
+                rest)       SEL="-LE $EXCL" ;;
+                *)          echo "unknown category $CATEGORY" >&2; exit 1 ;;
+              esac
+              # An empty shard is reported, not failed.  It means the label is
+              # absent on this platform (pynfs and the KVM guests are not built
+              # everywhere), and `rest` picks up anything unlabelled anyway, so
+              # nothing is lost -- but a shard that silently runs zero tests is
+              # worth seeing in the log.
+              if [ "$(ctest -C extended -N $SEL | tail -1 | grep -oE "[0-9]+" | tail -1)" = "0" ]; then
+                echo "::notice::category $CATEGORY selected no tests on ${{ matrix.arch }}"
+                exit 0
+              fi
+              /workspace/scripts/cap_ctest_output.sh \
+              ctest -C extended $SEL --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)"'
 
 
   # macOS: the extended tier on a GitHub-hosted arm64 runner.  Nothing here is
