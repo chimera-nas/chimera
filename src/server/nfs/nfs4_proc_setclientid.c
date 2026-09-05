@@ -61,17 +61,21 @@ chimera_nfs4_setclientid(
     }
 
     /* RFC 7530 §16.33: capture the callback path (cb_client4) so the server
-     * can deliver CB_RECALL once it grants a delegation.  Only meaningful when
-     * delegations are enabled; harmless to record otherwise. */
-    nfs4_client_set_cb_path(&shared->nfs4_shared_clients,
-                            scid.clientid,
-                            args->callback.cb_program,
-                            args->callback_ident,
-                            0,
-                            args->callback.cb_location.na_r_netid.str,
-                            args->callback.cb_location.na_r_netid.len,
-                            args->callback.cb_location.na_r_addr.str,
-                            args->callback.cb_location.na_r_addr.len);
+     * can deliver CB_RECALL once it grants a delegation.  Staged, not applied:
+     * §16.33.5 says the update "is only confirmed if followed up by a
+     * SETCLIENTID_CONFIRM", which is why the RFC can call a stray SETCLIENTID
+     * carrying stale callback info harmless.  Applying it here let an
+     * unconfirmed (or replayed) request retarget a confirmed client's callback
+     * path and tear down its working back-channel; the confirm handler commits
+     * it instead. */
+    nfs4_client_stage_cb_path(&shared->nfs4_shared_clients,
+                              scid.clientid,
+                              args->callback.cb_program,
+                              args->callback_ident,
+                              args->callback.cb_location.na_r_netid.str,
+                              args->callback.cb_location.na_r_netid.len,
+                              args->callback.cb_location.na_r_addr.str,
+                              args->callback.cb_location.na_r_addr.len);
 
     res->status          = NFS4_OK;
     res->resok4.clientid = scid.clientid;
