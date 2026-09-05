@@ -150,6 +150,11 @@ struct chimera_io_uring_shared {
     struct chimera_io_uring_range_file *range_files;
     struct chimera_io_uring_range      *ranges;
     uint64_t                            range_next_token;
+
+    /* Mount roots handed out as mount_private, so destroy can free the ones
+     * no UMOUNT reclaimed.  See chimera_linux_mount_root. */
+    pthread_mutex_t                     mount_lock;
+    struct chimera_linux_mount_root    *mount_roots;
 };
 
 /*
@@ -274,6 +279,7 @@ chimera_io_uring_init(
     }
 
     pthread_mutex_init(&shared->range_lock, NULL);
+    pthread_mutex_init(&shared->mount_lock, NULL);
 
     if (cfgdata && cfgdata[0] != '\0') {
         json_error_t json_error;
@@ -299,6 +305,12 @@ chimera_io_uring_destroy(void *private_data)
     struct chimera_io_uring_shared     *shared = private_data;
     struct chimera_io_uring_range_file *file;
     struct chimera_io_uring_range      *range;
+    struct chimera_linux_mount_root    *root;
+
+    while ((root = shared->mount_roots)) {
+        LL_DELETE(shared->mount_roots, root);
+        free(root);
+    }
 
     while ((range = shared->ranges)) {
         LL_DELETE(shared->ranges, range);
@@ -1429,9 +1441,15 @@ chimera_io_uring_mount(
 
         if (fstat(mount_fd, &st) == 0 &&
             (root = calloc(1, sizeof(*root))) != NULL) {
+            struct chimera_io_uring_thread *thread = private_data;
+
             root->dev                      = st.st_dev;
             root->ino                      = st.st_ino;
             request->mount.r_mount_private = root;
+
+            pthread_mutex_lock(&thread->shared->mount_lock);
+            LL_PREPEND(thread->shared->mount_roots, root);
+            pthread_mutex_unlock(&thread->shared->mount_lock);
         }
     }
 
@@ -1447,7 +1465,15 @@ chimera_io_uring_umount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    free(request->umount.mount_private);
+    struct chimera_io_uring_thread  *thread = private_data;
+    struct chimera_linux_mount_root *root   = request->umount.mount_private;
+
+    if (root) {
+        pthread_mutex_lock(&thread->shared->mount_lock);
+        LL_DELETE(thread->shared->mount_roots, root);
+        pthread_mutex_unlock(&thread->shared->mount_lock);
+        free(root);
+    }
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_io_uring_umount */

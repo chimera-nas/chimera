@@ -373,10 +373,24 @@ linux_mount_table_destroy(struct chimera_linux_mount_table *mount_table)
 
 /* Identity of a chimera mount's backing (root) directory, allocated at MOUNT
  * and handed back as mount_private, so per-op code can recognize the mount
- * root without holding an fd. */
+ * root without holding an fd.
+ *
+ * UMOUNT frees it, but a process that exits with the mount still up never
+ * issues one: chimera_vfs_destroy tears the delegation threads down before the
+ * mount table, so no request can be dispatched by then, and
+ * chimera_vfs_mount_table_destroy frees the mount without touching the
+ * module-owned mount_private (it cannot -- the shape is the module's).  So
+ * every mount left standing at teardown leaked this.  The other backends do
+ * not: their mount_private points at a filesystem object owned by the module's
+ * own registry, not at an allocation the mount alone owns.
+ *
+ * `next` threads them onto the module's shared list so module destroy can
+ * sweep whatever UMOUNT did not, the same way it already sweeps ranges and
+ * range_files. */
 struct chimera_linux_mount_root {
-    dev_t dev;
-    ino_t ino;
+    dev_t                            dev;
+    ino_t                            ino;
+    struct chimera_linux_mount_root *next;
 };
 
 /* True when `name` is ".." and `parent_fd` is the mount's root directory:
