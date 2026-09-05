@@ -957,7 +957,7 @@
           },
           "password": {
             "type": "string",
-            "description": "Password (optional)"
+            "description": "crypt(3) password hash for REST login, e.g. \"$6$salt$hash\" (optional). The value is stored verbatim and verified with crypt(3), so a plaintext password here can never authenticate."
           },
           "smbpasswd": {
             "type": "string",

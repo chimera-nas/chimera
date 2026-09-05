@@ -129,7 +129,7 @@ POST /api/v1/users
 | Field       | Type           | Required | Description                                              |
 |-------------|----------------|----------|----------------------------------------------------------|
 | `username`  | string         | yes      | User login name                                          |
-| `password`  | string         | no       | User password                                            |
+| `password`  | string         | no       | crypt(3) password hash for REST login, e.g. `$6$salt$hash` (stored verbatim and verified with crypt(3), so a plaintext value here can never authenticate) |
 | `smbpasswd` | string         | no       | SMB/NTLM password hash                                   |
 | `uid`       | integer        | no       | User ID (defaults to `0` if omitted)                     |
 | `gid`       | integer        | no       | Primary group ID (defaults to `0` if omitted)            |
