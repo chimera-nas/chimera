@@ -99,6 +99,18 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/zerorange_cairn COMMAND vfs_zerorange_test cairn)
 endif()
 
+# Compound contract-semantics test: begin/bind/eject/end lifecycle, the
+# enlisted/ejected/inflight counters, and end-callback synchronicity, with a
+# CAP_COMPOUND backend (cairn) and a non-capable one (memfs) mounted in one
+# process.  The conflict path (ECOMPOUND_CONFLICT/EXHAUSTED) needs cross-thread
+# contention on the engine and is out of scope here.
+if(CAIRN_ENABLED)
+    add_executable(vfs_compound_contract_test vfs_compound_contract_test.c)
+    target_link_libraries(vfs_compound_contract_test chimera_vfs chimera_vfs_memfs
+        chimera_vfs_cairn chimera_vfs_memkv evpl)
+    add_test(chimera/vfs/compound_contract_test vfs_compound_contract_test)
+endif()
+
 # Tag every test registered above with the 'vfs' label so the suite can be run
 # independently via `ctest -L vfs`.
 get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
