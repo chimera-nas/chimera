@@ -105,6 +105,14 @@ chimera_nfs3_readdirplus_complete(
 
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
+    /* RFC 1813 3.3.17: if maxcount/dircount were too small to hold even a
+     * single entry (dircount == 0 being the degenerate case) and we are not at
+     * end-of-directory, report TOOSMALL rather than an empty, non-eof reply
+     * that a paging client would retry forever. */
+    if (res->status == NFS3_OK && !eof && cursor->entries == NULL) {
+        res->status = NFS3ERR_TOOSMALL;
+    }
+
     if (res->status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res->resok.dir_attributes, dir_attr);
         res->resok.reply.eof     = !!eof;
