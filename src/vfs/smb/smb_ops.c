@@ -1129,6 +1129,28 @@ smb_create_follow_shim(
                                                 &relative, &unparsed);
         int  newlen;
 
+        /* A FINAL-component symlink (unparsed==0) with an ABSOLUTE target cannot
+         * be resolved here: the stored target is a client-namespace path (the
+         * mount prefix baked in, e.g. "/test/b"), and this backend resolves only
+         * within the share (root == the mount point), so splicing it would climb
+         * to "/test/test/b" -> ENOENT.  Hand the link node back to the core
+         * instead -- re-open the reparse point itself (metadata only; op_complete
+         * reads the link and re-resolves the absolute target from the vfs-
+         * namespace root, crossing the mount correctly).  A relative or mid-path
+         * (unparsed>0) target stays share-local and is spliced below. */
+        if (tlen > 0 && !relative && unparsed == 0) {
+            smb_send_create_ex(conn, request, fc->path, fc->path_len,
+                               SMB2_FILE_READ_ATTRIBUTES | SMB2_DELETE |
+                               SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER,
+                               fc->share_access, fc->disposition,
+                               fc->options | SMB2_FILE_OPEN_REPARSE_POINT,
+                               fc->cctx_len ? fc->cctx : NULL,
+                               (uint32_t) fc->cctx_len,
+                               fc->real_cb, request);
+            free(fc);
+            return;
+        }
+
         if (tlen > 0 &&
             (newlen = smb_splice_symlink_target(fc->path, fc->path_len, target,
                                                 tlen, relative, unparsed)) >= 0) {
