@@ -522,7 +522,19 @@ chimera_vfs_open(
         request->open.set_attr                     = &request->open.scratch_set_attr;
     }
 
-    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+    /* An O_PATH-style resolution (chmod/chown/utimes/statfs/readlink by path)
+     * takes no data access, so the engine's open gate requires nothing of it --
+     * route it through the FOLLOW/NOFOLLOW lookup path below (like an FH-relative
+     * backend) so a path-only mount's final symlink is followed and typed by the
+     * shared lookup machinery, rather than by open_at + op_complete (whose
+     * synthesized attrs cannot tell a symlink from a special file).  A data open
+     * (O_RDONLY/O_WRONLY/O_RDWR) keeps the direct open_at dispatch so its DAC
+     * stays with the remote server. */
+    unsigned int pathonly_metadata = (flags & CHIMERA_VFS_OPEN_PATH) &&
+        !(flags & (CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_NOFOLLOW));
+
+    if ((request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
+        !pathonly_metadata) {
         int i;
 
         request->open.name_offset = 0;
@@ -561,7 +573,7 @@ chimera_vfs_open(
                                                  request->open.parent_fh,
                                                  &request->open.parent_fh_len);
 
-        if (rebase >= 0 && rebase < request->open.pathlen) {
+        if (rebase >= 0 && rebase < request->open.pathlen && !pathonly_metadata) {
             const char *rslash = strrchr(request->open.path, '/');
 
             request->open.name_offset = rebase;
