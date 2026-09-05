@@ -773,6 +773,10 @@ nfs_server_destroy(void *data)
     free(shared->nlm_v4.rpc2.metrics);
     free(shared->nsm_v1.rpc2.metrics);
 
+    /* Drain any export removed at runtime whose free is still queued behind a
+     * grace period (see chimera_nfs_remove_export). */
+    rcu_barrier();
+
     while (shared->exports) {
         export = shared->exports;
         LL_DELETE(shared->exports, export);
@@ -1229,6 +1233,12 @@ chimera_nfs_get_export_by_id(
 } /* chimera_nfs_get_export_by_id */
 
 
+static void
+chimera_nfs_export_free_rcu(struct rcu_head *head)
+{
+    free(container_of(head, struct chimera_nfs_export, rcu));
+} /* chimera_nfs_export_free_rcu */
+
 SYMBOL_EXPORT int
 chimera_nfs_remove_export(
     void       *nfs_shared,
@@ -1252,7 +1262,13 @@ chimera_nfs_remove_export(
             LL_DELETE(shared->exports, export);
             shared->num_exports--;
             chimera_nfs_abort_if(shared->num_exports < 0, "num_exports went negative");
-            free(export);
+            /* Request threads resolve exports_by_id[] locklessly and then read
+             * the export's sec/squash policy, so freeing here (this runs on the
+             * REST thread) would let an in-flight request touch freed memory,
+             * or a recycled id hand it another export's policy.  Defer the free
+             * to a grace period: the evpl loops report their quiescent state
+             * between requests, never inside one. */
+            call_rcu(&export->rcu, chimera_nfs_export_free_rcu);
             found = 1;
             break;
         }
