@@ -1055,7 +1055,7 @@ check_eofpage(
          should_be_zero < last_page + page_size;
          should_be_zero++) {
         if (*(char *) should_be_zero) {
-            prt("Mapped %s: non-zero data past EOF (0x%llx) page offset 0x%x is 0x%04x\n",
+            prt("Mapped %s: non-zero data past EOF (0x%llx) page offset 0x%lx is 0x%04x\n",
                 s, file_size - 1, should_be_zero & page_mask,
                 short_at(should_be_zero));
             report_failure(205);
