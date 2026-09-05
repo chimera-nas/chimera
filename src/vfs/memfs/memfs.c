@@ -21,6 +21,7 @@
 #include "vfs/sdk/chimera_vfs_sdk.h"
 #include "vfs/sdk/vfs_fh.h"
 #include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_sid.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_xattr_name.h"
 #include "vfs/vfs_clock.h"
@@ -195,6 +196,11 @@ struct memfs_inode {
     uint64_t                   rdev;
     uint32_t                   dos_attributes;
     struct chimera_acl        *acl; /* NULL => mode-derived; CAP_ACL_NATIVE storage */
+    /* Native Windows SIDs of the owner / owning group, the companions to
+     * uid / gid (len 0 = none known).  Kept in step with uid/gid by
+     * memfs_apply_attrs: a chown that does not restate the SID drops it. */
+    struct chimera_sid         owner_sid;
+    struct chimera_sid         group_sid;
     struct timespec            atime;
     struct timespec            mtime;
     struct timespec            ctime;
@@ -810,6 +816,8 @@ memfs_inode_alloc(
     inode->change         = 0;
     inode->dos_attributes = 0;
     inode->acl            = NULL;
+    inode->owner_sid.len  = 0;
+    inode->group_sid.len  = 0;
     inode->xattrs         = NULL;
     inode->remote         = NULL;
     inode->streams        = NULL;
@@ -1665,6 +1673,25 @@ memfs_map_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
     }
 
+    /* Native owner / group SIDs: reported only when one is stored, from a
+     * per-thread scratch for the same lock-release reason as the ACL. */
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
+        chimera_sid_present(&inode->owner_sid)) {
+        static __thread struct chimera_sid owner_scratch;
+
+        owner_scratch      = inode->owner_sid;
+        attr->va_owner_sid = &owner_scratch;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_OWNER_SID;
+    }
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_GROUP_SID) &&
+        chimera_sid_present(&inode->group_sid)) {
+        static __thread struct chimera_sid group_scratch;
+
+        group_scratch      = inode->group_sid;
+        attr->va_group_sid = &group_scratch;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
+    }
+
     /* Birth time is optional and lives outside MASK_STAT, so report it under
      * its own request bit. */
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) {
@@ -1924,6 +1951,32 @@ memfs_apply_attrs(
         } else {
             free(tmp);
         }
+    }
+
+    /* Native owner / group SID coherence.  An explicit OWNER_SID set stores
+     * (or, with no SID supplied, clears) the companion; a bare UID set is a
+     * chown to an identity whose SID we were not told, so the stored SID no
+     * longer describes the owner and is dropped.  Group mirrors owner. */
+    if (set_mask & CHIMERA_VFS_ATTR_OWNER_SID) {
+        if (chimera_sid_present(attr->va_owner_sid)) {
+            inode->owner_sid = *attr->va_owner_sid;
+        } else {
+            inode->owner_sid.len = 0;
+        }
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_OWNER_SID;
+    } else if (set_mask & CHIMERA_VFS_ATTR_UID) {
+        inode->owner_sid.len = 0;
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_GROUP_SID) {
+        if (chimera_sid_present(attr->va_group_sid)) {
+            inode->group_sid = *attr->va_group_sid;
+        } else {
+            inode->group_sid.len = 0;
+        }
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
+    } else if (set_mask & CHIMERA_VFS_ATTR_GID) {
+        inode->group_sid.len = 0;
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
