@@ -80,7 +80,7 @@ chimera_io_uring_dispatch(
 #define chimera_io_uring_abort_if(cond, ...) \
         chimera_abort_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
 
-#define CHIMERA_IO_URING_STATX_MASK STATX_BASIC_STATS
+#define CHIMERA_IO_URING_STATX_MASK CHIMERA_LINUX_STATX_MASK
 
 /*
  * CHIMERA_VFS_CAP_CLAIM_RANGE registry, mirroring the linux backend's.
@@ -3293,7 +3293,7 @@ chimera_io_uring_set_xattr(
     char                           *scratch = (char *) request->plugin_data;
     int                             flags   = 0;
     int                             rc;
-    struct stat                     st;
+    struct statx                    stx;
 
     --thread->inflight;
 
@@ -3303,12 +3303,13 @@ chimera_io_uring_set_xattr(
         flags = XATTR_REPLACE;
     }
 
-    if (fstat(fd, &st) < 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
-    chimera_linux_stat_to_attr(&request->set_xattr.r_pre_attr, &st);
+    chimera_linux_statx_to_attr(&request->set_xattr.r_pre_attr, &stx);
 
     TERM_STR(name, request->set_xattr.name, request->set_xattr.namelen, scratch);
 
@@ -3317,10 +3318,11 @@ chimera_io_uring_set_xattr(
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
-    } else if (fstat(fd, &st) < 0) {
+    } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                     CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
     } else {
-        chimera_linux_stat_to_attr(&request->set_xattr.r_post_attr, &st);
+        chimera_linux_statx_to_attr(&request->set_xattr.r_post_attr, &stx);
         request->status = CHIMERA_VFS_OK;
     }
 
@@ -3376,16 +3378,17 @@ chimera_io_uring_remove_xattr(
     int                             fd      = (int) request->remove_xattr.handle->vfs_private;
     char                           *scratch = (char *) request->plugin_data;
     int                             rc;
-    struct stat                     st;
+    struct statx                    stx;
 
     --thread->inflight;
 
-    if (fstat(fd, &st) < 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
-    chimera_linux_stat_to_attr(&request->remove_xattr.r_pre_attr, &st);
+    chimera_linux_statx_to_attr(&request->remove_xattr.r_pre_attr, &stx);
 
     TERM_STR(name, request->remove_xattr.name, request->remove_xattr.namelen, scratch);
 
@@ -3393,10 +3396,11 @@ chimera_io_uring_remove_xattr(
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
-    } else if (fstat(fd, &st) < 0) {
+    } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                     CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
     } else {
-        chimera_linux_stat_to_attr(&request->remove_xattr.r_post_attr, &st);
+        chimera_linux_statx_to_attr(&request->remove_xattr.r_post_attr, &stx);
         request->status = CHIMERA_VFS_OK;
     }
 
