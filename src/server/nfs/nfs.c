@@ -94,7 +94,20 @@ nfs_fh_key_init(
         return;
     }
 
-    if (hexkey && strlen(hexkey) == 32) {
+    if (hexkey && *hexkey) {
+        /* A configured key that is not exactly 32 hex chars is a typo, not a
+         * request to fall back: silently ignoring it would leave each node
+         * with its own persisted/random key, so handles minted on one node
+         * fail verification on another.  Fail the same way a bad hex digit
+         * does, loudly and with signing off. */
+        if (strlen(hexkey) != 32) {
+            chimera_nfs_error("nfs_fh_key must be 32 hex chars (128-bit key), "
+                              "got %zu; disabling FH signing",
+                              strlen(hexkey));
+            shared->fh_sign = 0;
+            return;
+        }
+
         for (i = 0; i < 16; i++) {
             unsigned int byte;
             if (sscanf(hexkey + i * 2, "%2x", &byte) != 1) {
