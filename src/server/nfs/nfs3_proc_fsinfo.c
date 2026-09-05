@@ -21,7 +21,7 @@ chimera_nfs3_fsinfo_complete(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
     struct FSINFO3res                 res;
-    uint64_t                          max_xfer = 1024 * 1024;
+    uint64_t                          max_xfer = CHIMERA_NFS3_MAX_XFER;
     int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);

@@ -7,6 +7,14 @@
 #include "nfs_common.h"
 
 /*
+ * Largest payload chimera will move in a single NFSv3 READ or WRITE.  FSINFO
+ * advertises this as rtmax/rtpref and wtmax/wtpref, and READ and WRITE clamp
+ * the wire count to it, so the advertised limit and the enforced limit cannot
+ * drift apart.  RFC 1813 3.3.6/3.3.7 permit the resulting short read or write.
+ */
+#define CHIMERA_NFS3_MAX_XFER (1024 * 1024)
+
+/*
  * Decode a wire NFSv3 filehandle into req->fh and translate a decode failure to
  * the appropriate NFSv3 status.  A security-policy rejection -- the request's
  * RPC auth flavor is not permitted by the target export's sec= list -- maps to

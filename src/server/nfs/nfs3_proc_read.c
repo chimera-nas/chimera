@@ -125,6 +125,14 @@ chimera_nfs3_read(
         return;
     }
 
+    /* RFC 1813 3.3.6: a count above rtmax is served as a short read rather than
+     * an error.  The clamp is load-bearing -- the read dispatch sizes its iovec
+     * allocation from this count and aborts if the allocation fails, so an
+     * unclamped wire count would take the daemon down. */
+    if (args->count > CHIMERA_NFS3_MAX_XFER) {
+        args->count = CHIMERA_NFS3_MAX_XFER;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh,
                         req->fhlen,
