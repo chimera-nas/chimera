@@ -814,7 +814,8 @@ check_asyncs(
     json_t        *op,
     struct mism   *m)
 {
-    struct mbt_aux *a      = mbt_aux(o->env);
+    struct mbt_aux *a = mbt_aux(o->env);
+
     json_t         *asyncs = itf_seq(op_field(op, "asyncs"));
     size_t          want   = asyncs ? json_array_size(asyncs) : 0;
     int             taken[MBT_AUX_MAX_ASYNC];
@@ -1513,7 +1514,8 @@ check_state(
     struct mism   *m)
 {
     static const uint8_t probe_oh[] = { 0xff, 0xff };
-    json_t              *held       = NULL;
+
+    json_t              *held = NULL;
     const char          *k;
     json_t              *v;
     size_t               fi, oi, li;
@@ -1557,6 +1559,7 @@ static json_t *
 state_lastop(json_t *state)
 {
     const char *k;
+
     json_t     *v;
 
     json_object_foreach(state, k, v)
@@ -1582,6 +1585,7 @@ run_trace(
     int             dry_run)
 {
     json_error_t   jerr;
+
     json_t        *root;
     json_t        *states;
     json_t        *state;
@@ -1697,31 +1701,34 @@ main(
     char **argv)
 {
     static struct option long_options[] = {
-        { "trace",          required_argument,          0,
+        { "trace",          required_argument,            0,
           't'                                                                   },
-        { "trace-dir",      required_argument,          0,
+        { "trace-dir",      required_argument,            0,
           'D'                                                                                             },
-        { "exclude-prefix", required_argument,          0,
+        { "exclude-prefix", required_argument,            0,
           'X'                                                                                                                      },
-        { "dry-run",        no_argument,                0,
+        { "dry-run",        no_argument,                  0,
           'n'                                                                                                                                               },
-        { "verbose",        no_argument,                0,
+        { "verbose",        no_argument,                  0,
           'v'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        },
-        { "paranoid",       no_argument,                0,
+        { "paranoid",       no_argument,                  0,
           'p'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 },
-        { "backend",        required_argument,          0,
+        { "backend",        required_argument,            0,
           'B'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          },
-        { "rdma",           no_argument,                0,
+        { "rdma",           no_argument,                  0,
           'R'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          },
-        { 0,                0,                          0,                         0 },
+        { "sec",            required_argument,            0,
+          'S'                                                                           },
+        { 0,                0,                            0,                           0 },
     };
     char               **traces;
-    int                  ntraces  = 0;
-    int                  dry_run  = 0;
-    int                  verbose  = 0;
-    const char          *backend  = "memfs";
-    int                  rdma     = 0;
-    int                  failures = 0;
+    int                  ntraces    = 0;
+    int                  dry_run    = 0;
+    int                  verbose    = 0;
+    const char          *backend    = "memfs";
+    int                  rdma       = 0;
+    int                  sec_flavor = MBT_SEC_SYS;
+    int                  failures   = 0;
     int                  c, i;
     struct mbt_env       env;
     struct mbt_env_opts  opts;
@@ -1738,7 +1745,7 @@ main(
 
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:nvpB:R", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:nvpB:RS:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1760,6 +1767,18 @@ main(
             case 'R':
                 rdma = 1;
                 break;
+            case 'S': {
+                int sec = mbt_sec_parse(optarg);
+
+                if (sec < 0) {
+                    fprintf(stderr, "%s: unknown security flavor '%s'\n",
+                            argv[0], optarg);
+                    return 2;
+                }
+
+                sec_flavor = sec;
+                break;
+            }
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
@@ -1780,6 +1799,7 @@ main(
 
     if (!dry_run) {
         memset(&opts, 0, sizeof(opts));
+        opts.sec    = sec_flavor;
         opts.module = backend;
         opts.rdma   = rdma;
         /* The universal addresses rpcbind reports are built from this rather

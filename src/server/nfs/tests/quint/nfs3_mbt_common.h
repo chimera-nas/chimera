@@ -44,6 +44,9 @@
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
+#include "evpl/evpl_rpc2_gss.h"
+
+#include "krb5_local.h"
 
 #define MBT_MAX_ENTRIES   512   /* readdir entries copied out per reply */
 #define MBT_NAME_MAX      256
@@ -73,6 +76,121 @@
  * the MDS's own services above. */
 #define MBT_MAX_DS        4
 #define MBT_DS_PORT_BASE  12050
+
+/*
+ * The security flavor the client half calls under.
+ *
+ * AUTH_SYS is what every suite used before this: the credential names a uid
+ * and the server believes it.  The krb5 flavors run every call under a real
+ * RPCSEC_GSS context instead, established against the server's own acceptor
+ * with a mechanism (krb5_local) whose realm lives entirely in this process --
+ * no KDC, no keytab file, no network.  What each adds over the last is what
+ * rides on the wire: krb5 authenticates the caller, krb5i signs the arguments
+ * and results, krb5p seals them.
+ *
+ * The identity is then the principal's, not the credential's, which is why a
+ * trace that varies uid per operation cannot be replayed under one of these
+ * (see mbt_sec_allows_cred).
+ */
+enum mbt_sec {
+    MBT_SEC_SYS = 0,
+    MBT_SEC_KRB5,
+    MBT_SEC_KRB5I,
+    MBT_SEC_KRB5P,
+};
+
+/* The MEMORY: keytab krb5_local populates.  MIT krb5 keys these by name
+ * within a process, so naming the same one here is what lets the server's own
+ * acceptor resolve the key the test's realm minted. */
+#define MBT_KRB5_KEYTAB    "MEMORY:evpl_krb5_local"
+
+/* A two-component principal, which chimera's NFS server maps to root -- the
+ * identity every trace's default credential already assumes.  A one-component
+ * name would squash to anonymous and no trace would pass. */
+#define MBT_KRB5_PRINCIPAL "nfs/localhost"
+
+static inline const char *
+mbt_sec_name(enum mbt_sec sec)
+{
+    switch (sec) {
+        case MBT_SEC_KRB5:  return "krb5";
+        case MBT_SEC_KRB5I: return "krb5i";
+        case MBT_SEC_KRB5P: return "krb5p";
+        default:            return "sys";
+    } /* switch */
+} /* mbt_sec_name */
+
+/* Parse a --sec= value; -1 for one this harness does not know. */
+static inline int
+mbt_sec_parse(const char *name)
+{
+    if (!name || !strcmp(name, "sys") || !strcmp(name, "auth_sys")) {
+        return MBT_SEC_SYS;
+    }
+    if (!strcmp(name, "krb5")) {
+        return MBT_SEC_KRB5;
+    }
+    if (!strcmp(name, "krb5i")) {
+        return MBT_SEC_KRB5I;
+    }
+    if (!strcmp(name, "krb5p")) {
+        return MBT_SEC_KRB5P;
+    }
+    return -1;
+} /* mbt_sec_parse */
+
+/*
+ * Pick "--sec <flavor>" out of a probe's argv.
+ *
+ * The probes parse their few options by hand rather than through getopt, so
+ * this is a scan rather than an option table; it exits on a name it does not
+ * know, because silently running AUTH_SYS when the cell asked for krb5p would
+ * report coverage the run never had.
+ */
+static inline int
+mbt_sec_scan_argv(
+    int    argc,
+    char **argv)
+{
+    int i, sec;
+
+    for (i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--sec") && strcmp(argv[i], "-S")) {
+            continue;
+        }
+
+        sec = mbt_sec_parse(argv[i + 1]);
+
+        if (sec < 0) {
+            fprintf(stderr, "%s: unknown security flavor '%s'\n", argv[0],
+                    argv[i + 1]);
+            exit(2);
+        }
+
+        return sec;
+    }
+
+    return MBT_SEC_SYS;
+} /* mbt_sec_scan_argv */
+
+static inline uint32_t
+mbt_sec_service(enum mbt_sec sec)
+{
+    switch (sec) {
+        case MBT_SEC_KRB5I: return EVPL_RPC2_GSS_SVC_INTEGRITY;
+        case MBT_SEC_KRB5P: return EVPL_RPC2_GSS_SVC_PRIVACY;
+        default:            return EVPL_RPC2_GSS_SVC_NONE;
+    } /* switch */
+} /* mbt_sec_service */
+
+/* Connections a suite opens beyond the env's own; see mbt_env.conn_creds. */
+#define MBT_MAX_CONN_CREDS 32
+
+struct mbt_conn_cred {
+    struct evpl_rpc2_conn       *conn;
+    struct evpl_rpc2_gss_client *gss;
+    struct evpl_rpc2_cred        cred;
+};
 
 struct mbt_fh {
     int      has;
@@ -189,6 +307,10 @@ struct mbt_env_opts {
      * (1s).  A suite that unmounts often wants this short, because the wait
      * is per attempt and the handles are dropped by an asynchronous sweep. */
     int         umount_timeout_ms;
+    /* The client's security flavor (see enum mbt_sec).  AUTH_SYS by default;
+     * anything else stands a Kerberos realm up in this process and runs every
+     * call under a context established against the server's own acceptor. */
+    int         sec;
     /* server.nfs3_drc: the NFSv3 duplicate-request cache.  Off by default in
      * the server and here; the DRC suite is the only caller that turns it on.
      * The NFSv4.0 cache needs no flag -- it is always installed. */
@@ -196,60 +318,81 @@ struct mbt_env_opts {
 };
 
 struct mbt_env {
-    struct chimera_server     *server;
-    struct prometheus_metrics *metrics;
+    struct chimera_server       *server;
+    struct prometheus_metrics   *metrics;
     /* The scrape endpoint, when mbt_env_opts.metrics_port asks for one.  It
      * owns the registry in that case (chimera_metrics_init creates one on its
      * own thread), so the server must be handed THAT registry or every metric
      * would read zero over HTTP. */
-    struct chimera_metrics    *metrics_server;
+    struct chimera_metrics      *metrics_server;
     /* HTTP agent for the control-plane suite's REST client, created by that
      * harness on this env's evpl (see server/rest/tests/quint/ctl_http.h) and
      * kept here so a replayer can open connections from anywhere.  NULL for
      * every other suite. */
-    struct evpl_http_agent    *rest_agent;
-    const char                *module;   /* backend for mkfs/mount/rmfs */
+    struct evpl_http_agent      *rest_agent;
+    const char                  *module; /* backend for mkfs/mount/rmfs */
 
-    int                        rdma;     /* NFS carried over RPC-over-RDMA */
+    int                          rdma;   /* NFS carried over RPC-over-RDMA */
 
-    struct evpl               *evpl;
-    struct evpl_rpc2_thread   *rpc2_thread;
-    struct evpl_rpc2_conn     *nfs_conn;
-    struct evpl_rpc2_conn     *mount_conn;
-    struct NFS_V3              nfs_v3;
-    struct NFS_MOUNT_V3        mount_v3;
-    struct NFS_V4              nfs_v4;
-    struct NFS_V4_CB           nfs_v4_cb;
-    struct evpl_rpc2_cred      cred;
+    struct evpl                 *evpl;
+    struct evpl_rpc2_thread     *rpc2_thread;
+    struct evpl_rpc2_conn       *nfs_conn;
+    struct evpl_rpc2_conn       *mount_conn;
+    struct NFS_V3                nfs_v3;
+    struct NFS_MOUNT_V3          mount_v3;
+    struct NFS_V4                nfs_v4;
+    struct NFS_V4_CB             nfs_v4_cb;
+    struct evpl_rpc2_cred        cred;
+    /* MOUNT and the auxiliary services call on connections of their own.  A
+     * GSS context belongs to one connection, so MOUNT gets its own credential
+     * naming its own context; portmap/NLM/NSM are not part of what a security
+     * flavor covers here and stay on AUTH_SYS. */
+    struct evpl_rpc2_cred        mount_cred;
+    struct evpl_rpc2_cred        aux_cred;
+
+    /* Credentials for connections the suites open themselves.  Under AUTH_SYS
+     * one credential serves every connection; a GSS context belongs to the
+     * connection it was established on, so each needs its own.  The NFSv4
+     * suite gives every model client a connection, which is what this is for. */
+    struct mbt_conn_cred         conn_creds[MBT_MAX_CONN_CREDS];
+    int                          num_conn_creds;
+
+    /* Kerberos, when opts.sec asked for it.  The realm outlives the server it
+     * authenticates for: its MEMORY: keytab has to be populated before the
+     * server's acceptor registers that identity at start-up. */
+    int                          sec;
+    struct krb5_local           *krb5;
+    struct evpl_rpc2_gss_client *nfs_gss;
+    struct evpl_rpc2_gss_client *mount_gss;
 
     /* Auxiliary services, connected only when mbt_env_opts.aux is set.  The
      * programs are registered on the client rpc2 thread either way, which
      * costs nothing and lets the server call back into this process (NLM's
      * *_RES messages ride the same connection the *_MSG arrived on). */
-    struct evpl_rpc2_conn     *portmap_conn;
-    struct evpl_rpc2_conn     *nlm_conn;
-    struct evpl_rpc2_conn     *nsm_conn;
-    struct PORTMAP_V2          pm_v2;
-    struct PORTMAP_V3          pm_v3;
-    struct PORTMAP_V4          pm_v4;
-    struct NLM_V4              nlm_v4;
-    struct SM_INTER_V1         nsm_v1;
+    struct evpl_rpc2_conn       *portmap_conn;
+    struct evpl_rpc2_conn       *nlm_conn;
+    struct evpl_rpc2_conn       *nsm_conn;
+    struct PORTMAP_V2            pm_v2;
+    struct PORTMAP_V3            pm_v3;
+    struct PORTMAP_V4            pm_v4;
+    struct NLM_V4                nlm_v4;
+    struct SM_INTER_V1           nsm_v1;
     /* struct mbt_aux_result *, owned by nfs_aux_mbt_common.h. */
-    void                      *aux;
+    void                        *aux;
 
-    char                       session_dir[256];
-    char                       pt_root[256]; /* passthrough backing root
-                                              * (linux/io_uring); empty otherwise */
-    uint8_t                   *data_buf;   /* READ copy-out scratch */
+    char                         session_dir[256];
+    char                         pt_root[256]; /* passthrough backing root
+                                                * (linux/io_uring); empty otherwise */
+    uint8_t                     *data_buf; /* READ copy-out scratch */
 
     /* pNFS data servers: separate chimera servers in this same process,
     * reached by the MDS over the inproc transport through the nfs client
     * module (mounted at /ds<i>).  Empty unless opts.pnfs_num_ds > 0. */
-    int                        num_ds;
-    struct chimera_server     *ds_server[MBT_MAX_DS];
-    struct prometheus_metrics *ds_metrics[MBT_MAX_DS];
+    int                          num_ds;
+    struct chimera_server       *ds_server[MBT_MAX_DS];
+    struct prometheus_metrics   *ds_metrics[MBT_MAX_DS];
 
-    struct mbt_result          res;
+    struct mbt_result            res;
 };
 
 /* Set the uid (and gid) every subsequent call is made under.  The AUTH_SYS
@@ -330,6 +473,133 @@ mbt_module_is_passthrough(const char *module)
  * The DS exports "/ds_export"; the MDS mounts that through the nfs client
  * module and creates one backing file per pNFS file under it.
  */
+/* Context establishment, pumped to completion.
+ *
+ * evpl_rpc2_gss_client_create() is asynchronous -- the handshake is RPCs on
+ * the program's NULL procedure -- but everything else in this harness is
+ * synchronous, so it is driven to a conclusion here and the caller sees only
+ * the finished context.
+ */
+struct mbt_gss_wait {
+    struct evpl_rpc2_gss_client *client;
+    int                          done;
+};
+
+static inline void
+mbt_gss_ready(
+    struct evpl_rpc2_gss_client *client,
+    int                          status,
+    void                        *private_data)
+{
+    struct mbt_gss_wait *w = private_data;
+
+    w->client = status ? NULL : client;
+    w->done   = 1;
+} /* mbt_gss_ready */
+
+static inline struct evpl_rpc2_gss_client *
+mbt_gss_establish(
+    struct mbt_env           *env,
+    struct evpl_rpc2_program *program,
+    struct evpl_rpc2_conn    *conn,
+    const char               *what)
+{
+    struct mbt_gss_wait w = { 0 };
+    int                 spins;
+
+    evpl_rpc2_gss_client_create(env->evpl, program, conn,
+                                krb5_local_initiator_provider(),
+                                krb5_local_arg(env->krb5),
+                                mbt_sec_service(env->sec),
+                                MBT_KRB5_PRINCIPAL, mbt_gss_ready, &w);
+
+    /* Bounded: a handshake that never completes is a failure to report, not a
+     * reason to hang the suite. */
+    for (spins = 0; !w.done && spins < 100000; spins++) {
+        evpl_continue(env->evpl);
+    }
+
+    if (!w.client) {
+        fprintf(stderr, "%s: failed to establish a %s context\n",
+                mbt_sec_name(env->sec), what);
+        exit(1);
+    }
+
+    return w.client;
+} /* mbt_gss_establish */
+
+/*
+ * The credential for a call on `conn`.
+ *
+ * Under AUTH_SYS this is always the env's own: one credential describes the
+ * caller wherever it calls from.  Under a Kerberos flavor it is not, because a
+ * context is established on a connection and means nothing on another -- so a
+ * suite that opens connections of its own (the NFSv4 replayer gives every
+ * model client one, as a real client would) gets a context per connection,
+ * established on first use.
+ */
+static inline struct evpl_rpc2_cred *
+mbt_cred_for(
+    struct mbt_env           *env,
+    struct evpl_rpc2_conn    *conn,
+    struct evpl_rpc2_program *program)
+{
+    struct mbt_conn_cred *cc;
+    int                   i;
+
+    if (env->sec == MBT_SEC_SYS || conn == env->nfs_conn) {
+        return &env->cred;
+    }
+
+    for (i = 0; i < env->num_conn_creds; i++) {
+        if (env->conn_creds[i].conn == conn) {
+            return &env->conn_creds[i].cred;
+        }
+    }
+
+    if (env->num_conn_creds == MBT_MAX_CONN_CREDS) {
+        fprintf(stderr, "%s: more than %d connections want contexts\n",
+                mbt_sec_name(env->sec), MBT_MAX_CONN_CREDS);
+        exit(1);
+    }
+
+    cc       = &env->conn_creds[env->num_conn_creds++];
+    cc->conn = conn;
+    cc->gss  = mbt_gss_establish(env, program, conn, "connection");
+
+    cc->cred.flavor      = EVPL_RPC2_AUTH_RPCSEC_GSS;
+    cc->cred.gss.service = mbt_sec_service(env->sec);
+    cc->cred.gss.client  = cc->gss;
+
+    return &cc->cred;
+} /* mbt_cred_for */
+
+/*
+ * Retire whatever context a suite's own connection carried, before the
+ * connection itself goes.  A context outliving its connection has nowhere to
+ * send its DESTROY.
+ */
+static inline void
+mbt_conn_release(
+    struct mbt_env        *env,
+    struct evpl_rpc2_conn *conn)
+{
+    int i;
+
+    for (i = 0; i < env->num_conn_creds; i++) {
+        if (env->conn_creds[i].conn != conn) {
+            continue;
+        }
+
+        if (env->conn_creds[i].gss) {
+            evpl_rpc2_gss_client_destroy(env->evpl, env->conn_creds[i].gss);
+        }
+
+        env->conn_creds[i] = env->conn_creds[--env->num_conn_creds];
+        return;
+    }
+} /* mbt_conn_release */
+
 static inline void
 mbt_pnfs_ds_start(
     struct mbt_env *env,
@@ -435,10 +705,36 @@ mbt_env_open_opts(
         mbt_pnfs_ds_start(env, i, ds_module);
     }
 
+    /* The realm has to exist before the server does: chimera registers the
+     * acceptor identity when its NFS service starts, and there would be no key
+     * under that name yet. */
+    env->sec = opts ? opts->sec : MBT_SEC_SYS;
+
+    if (env->sec != MBT_SEC_SYS) {
+        const char *why = NULL;
+
+        env->krb5 = krb5_local_create_as(MBT_KRB5_PRINCIPAL, &why);
+
+        if (!env->krb5) {
+            /* Skip rather than fail, as every other krb5-dependent test in
+             * this tree does: a host without a usable MIT krb5 cannot run
+             * these cells and has not failed them. */
+            fprintf(stderr, "%s: skipping: %s\n", mbt_sec_name(env->sec),
+                    why ? why : "krb5 unavailable");
+            exit(77);
+        }
+    }
+
     config = chimera_server_config_init();
     chimera_server_config_set_state_dir(config, env->session_dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);
+
+    if (env->sec != MBT_SEC_SYS) {
+        chimera_server_config_set_nfs_kerberos_enabled(config, 1);
+        chimera_server_config_set_nfs_kerberos_keytab(config,
+                                                      MBT_KRB5_KEYTAB);
+    }
 
     /* The RDMA listener is additional, not instead: the server keeps its
      * stream endpoint, and the client below chooses which one to use. */
@@ -627,7 +923,20 @@ mbt_env_open_opts(
 
     /* Client half: its own evpl loop; the reply callbacks run inside
      * evpl_continue() on this (the only) test thread. */
-    env->evpl = evpl_create(NULL);
+    /* Under a Kerberos flavor the loop is pumped at points where nothing is
+     * outstanding -- flushing a context's DESTROY before its connection goes,
+     * for one -- and the default (-1) parks evpl_continue in the poller until
+     * something happens, which there never will.  A bounded wait makes those
+     * pumps return.  AUTH_SYS keeps the default: every pump it does is waiting
+     * on a reply that is genuinely coming. */
+    if (env->sec != MBT_SEC_SYS) {
+        struct evpl_thread_config *tcfg = evpl_thread_config_init();
+
+        evpl_thread_config_set_wait_ms(tcfg, 1);
+        env->evpl = evpl_create(tcfg);
+    } else {
+        env->evpl = evpl_create(NULL);
+    }
 
     NFS_V3_init(&env->nfs_v3);
     NFS_MOUNT_V3_init(&env->mount_v3);
@@ -719,6 +1028,27 @@ mbt_env_open_opts(
     env->cred.authsys.gids            = NULL;
     env->cred.authsys.machinename     = "quintmbt";
     env->cred.authsys.machinename_len = 8;
+
+    env->mount_cred = env->cred;
+    env->aux_cred   = env->cred;
+
+    /* ...unless a Kerberos flavor was asked for, in which case the identity
+     * comes from the principal instead and the credential names the context.
+     * MOUNT gets its own: a context belongs to one connection. */
+    if (env->sec != MBT_SEC_SYS) {
+        env->nfs_gss = mbt_gss_establish(env, &env->nfs_v3.rpc2,
+                                         env->nfs_conn, "NFS");
+        env->mount_gss = mbt_gss_establish(env, &env->mount_v3.rpc2,
+                                           env->mount_conn, "MOUNT");
+
+        env->cred.flavor      = EVPL_RPC2_AUTH_RPCSEC_GSS;
+        env->cred.gss.service = mbt_sec_service(env->sec);
+        env->cred.gss.client  = env->nfs_gss;
+
+        env->mount_cred.flavor      = EVPL_RPC2_AUTH_RPCSEC_GSS;
+        env->mount_cred.gss.service = mbt_sec_service(env->sec);
+        env->mount_cred.gss.client  = env->mount_gss;
+    }
 
     env->data_buf = malloc(MBT_MAX_DATA);
 } /* mbt_env_open_opts */
@@ -934,6 +1264,18 @@ mbt_env_stop(struct mbt_env *env)
     if (env->nsm_conn) {
         evpl_rpc2_client_disconnect(env->rpc2_thread, env->nsm_conn);
     }
+    /* Before the connections they were established on: destroy sends a
+     * DESTROY down each one so the server drops its half now rather than at
+     * expiry. */
+    if (env->nfs_gss) {
+        evpl_rpc2_gss_client_destroy(env->evpl, env->nfs_gss);
+        env->nfs_gss = NULL;
+    }
+    if (env->mount_gss) {
+        evpl_rpc2_gss_client_destroy(env->evpl, env->mount_gss);
+        env->mount_gss = NULL;
+    }
+
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->nfs_conn);
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->mount_conn);
     evpl_rpc2_thread_destroy(env->rpc2_thread);
@@ -955,6 +1297,11 @@ mbt_env_stop(struct mbt_env *env)
     for (i = 0; i < env->num_ds; i++) {
         chimera_server_destroy(env->ds_server[i]);
         prometheus_metrics_destroy(env->ds_metrics[i]);
+    }
+
+    if (env->krb5) {
+        krb5_local_destroy(env->krb5);
+        env->krb5 = NULL;
     }
 
     free(env->data_buf);
@@ -1039,7 +1386,7 @@ mbt_mnt(
     mbt_call_begin(env);
     xdr_set_str_static(&args, path, path, (uint32_t) strlen(path));
     env->mount_v3.send_call_MOUNTPROC3_MNT(&env->mount_v3.rpc2, env->evpl,
-                                           env->mount_conn, &env->cred, &args,
+                                           env->mount_conn, &env->mount_cred, &args,
                                            0, 0, NULL, 0, 0, mbt_mnt_cb, env);
     mbt_call_wait(env);
     return &env->res;

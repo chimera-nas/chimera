@@ -493,6 +493,7 @@ main(
     umask(0);
 
     memset(&opts, 0, sizeof(opts));
+    opts.sec            = mbt_sec_scan_argv(argc, argv);
     opts.nfs3_drc       = 1;
     opts.disable_caches = no_caches;
 

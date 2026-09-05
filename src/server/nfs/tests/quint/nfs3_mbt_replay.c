@@ -1445,7 +1445,23 @@ find_handler(const char *tag)
  */
 static uint32_t mbt_cred_gids[64];
 
-static void
+/* Traces abandoned because the flavor in force cannot express them (see
+ * mbt_set_cred).  Reported at the end so a run that covered less than the
+ * corpus says so rather than looking complete. */
+static int      g_traces_skipped;
+
+/*
+ * Returns 0 when the operation can be replayed under the harness's security
+ * flavor, and -1 when it cannot.
+ *
+ * Under RPCSEC_GSS the caller's identity is the authenticated principal, not
+ * a field of the credential, so an operation that asks to be made as some
+ * other uid has no expression: there is one context and it is root's.  Rather
+ * than replay it as root and compare against an oracle that expected a
+ * different identity -- which would turn a DAC trace into a false pass -- the
+ * trace is abandoned and counted as not applicable to this flavor.
+ */
+static int
 mbt_set_cred(
     struct mbt_env *env,
     json_t         *op)
@@ -1454,6 +1470,13 @@ mbt_set_cred(
     json_t *gids;
     size_t  n, i, cap = sizeof(mbt_cred_gids) / sizeof(mbt_cred_gids[0]);
 
+    if (env->sec != MBT_SEC_SYS) {
+        /* The default credential is root's, which is who the principal maps
+         * to, so a trace that never names one replays unchanged. */
+        return (!cred || (op_i64(cred, "uid") == 0 && op_i64(cred, "gid") == 0))
+               ? 0 : -1;
+    }
+
     env->cred.flavor = EVPL_RPC2_AUTH_SYS;
 
     if (!cred) {
@@ -1461,7 +1484,7 @@ mbt_set_cred(
         env->cred.authsys.gid      = 0;
         env->cred.authsys.num_gids = 0;
         env->cred.authsys.gids     = NULL;
-        return;
+        return 0;
     }
 
     env->cred.authsys.uid = (uint32_t) op_i64(cred, "uid");
@@ -1481,6 +1504,7 @@ mbt_set_cred(
     }
     env->cred.authsys.num_gids = (uint32_t) n;
     env->cred.authsys.gids     = n ? mbt_cred_gids : NULL;
+    return 0;
 } /* mbt_set_cred */
 
 /* ---- replay driver -------------------------------------------------------- */
@@ -1568,7 +1592,8 @@ run_trace(
     struct oracle *o;
     size_t         idx;
     size_t         nstates;
-    int            failed = 0;
+    int            failed  = 0;
+    int            skipped = 0;
     double         rate;
     int            total;
     struct mism    m;
@@ -1648,7 +1673,16 @@ run_trace(
 
         memset(&m, 0, sizeof(m));
         mbt_watchdog_at(trace_path, (int) idx, tag);
-        mbt_set_cred(env, op);
+
+        if (mbt_set_cred(env, op)) {
+            if (verbose) {
+                printf("  [%4zu] %s -> skipped: identity is the principal's "
+                       "under %s\n", idx, tag, mbt_sec_name(env->sec));
+            }
+            skipped = 1;
+            goto out;
+        }
+
         fn(o, op, fs, &m);
         history_push(o, (int) idx, tag, op, env->res.status);
         if (verbose) {
@@ -1676,6 +1710,10 @@ run_trace(
            trace_path, nstates - 1, o->attr_checks, o->attr_skips);
 
  out:
+    if (skipped) {
+        g_traces_skipped++;
+    }
+
     mbt_env_fs_teardown(env, fsname);
     while (o->nhist) {
         free(o->history[--o->nhist].op_dump);
@@ -1696,25 +1734,27 @@ main(
     char **argv)
 {
     static struct option long_options[] = {
-        { "trace",              required_argument,              0,
+        { "trace",              required_argument,                0,
           't'                                                                           },
-        { "trace-dir",          required_argument,              0,
+        { "trace-dir",          required_argument,                0,
           'D'                                                                           },
-        { "exclude-prefix",     required_argument,              0,
+        { "exclude-prefix",     required_argument,                0,
           'X'                                                                           },
-        { "block-size",         required_argument,              0,
+        { "block-size",         required_argument,                0,
           'b'                                                                                                         },
-        { "max-attr-skip-rate", required_argument,              0,
+        { "max-attr-skip-rate", required_argument,                0,
           'r'                                                                                                                                      },
-        { "dry-run",            no_argument,                    0,
+        { "dry-run",            no_argument,                      0,
           'n'                                                                                                                                                                   },
-        { "verbose",            no_argument,                    0,
+        { "verbose",            no_argument,                      0,
           'v'                                                                                                                                                                                                },
-        { "backend",            required_argument,              0,
+        { "backend",            required_argument,                0,
           'B'                                                                           },
-        { "rdma",               no_argument,                    0,
+        { "rdma",               no_argument,                      0,
           'R'                                                                           },
-        { 0,                    0,                              0,                             0 },
+        { "sec",                required_argument,                0,
+          'S'                                                                           },
+        { 0,                    0,                                0,                               0 },
     };
     char               **traces;
     int                  ntraces            = 0;
@@ -1722,6 +1762,7 @@ main(
     double               max_attr_skip_rate = 0.1;
     int                  dry_run            = 0;
     int                  verbose            = 0;
+    int                  sec                = MBT_SEC_SYS;
     const char          *backend            = "memfs";
     int                  rdma               = 0;
     int                  failures           = 0;
@@ -1749,7 +1790,7 @@ main(
      * error, and skips them here (the 't'/'D'/'X' cases). */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:R", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:RS:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1774,11 +1815,21 @@ main(
             case 'R':
                 rdma = 1;
                 break;
+            case 'S':
+                sec = mbt_sec_parse(optarg);
+                if (sec < 0) {
+                    fprintf(stderr, "%s: unknown security flavor '%s'\n",
+                            argv[0], optarg);
+                    mbt_free_traces(traces, ntraces);
+                    return 2;
+                }
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
+                        "[--sec sys|krb5|krb5i|krb5p] "
                         "[--rdma] [--dry-run] [--verbose]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
@@ -1797,7 +1848,8 @@ main(
      * isolation.  A single-fs backend (linux/io_uring) would instead clear the
      * backing directory between traces. */
     if (!dry_run) {
-        struct mbt_env_opts opts = { .module = backend, .rdma = rdma };
+        struct mbt_env_opts opts = { .module = backend, .rdma = rdma,
+                                     .sec    = sec };
         mbt_env_open_opts(&env, &opts);
     }
 
@@ -1811,6 +1863,12 @@ main(
 
     if (!dry_run) {
         mbt_env_stop(&env);
+    }
+
+    if (g_traces_skipped) {
+        printf("%d of %d traces not applicable under %s (identity is the "
+               "principal's)\n", g_traces_skipped, (int) ntraces,
+               mbt_sec_name(sec));
     }
 
     mbt_free_traces(traces, ntraces);

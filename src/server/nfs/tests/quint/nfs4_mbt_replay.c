@@ -3933,7 +3933,9 @@ run_compound(
         o->arena_used = 0;
         o->env->nfs_v4.send_call_NFSPROC4_COMPOUND(&o->env->nfs_v4.rpc2,
                                                    o->env->evpl, conn,
-                                                   &o->env->cred, &args,
+                                                   mbt_cred_for(o->env, conn,
+                                                                &o->env->nfs_v4.rpc2),
+                                                   &args,
                                                    cd_ddp, cd_wchunk,
                                                    NULL, 0, 0,
                                                    v4_compound_cb, &cctx);
@@ -4230,7 +4232,9 @@ v4_send_raw(
     o->arena_used = 0;
     o->env->nfs_v4.send_call_NFSPROC4_COMPOUND(&o->env->nfs_v4.rpc2,
                                                o->env->evpl, conn,
-                                               &o->env->cred, &args,
+                                               mbt_cred_for(o->env, conn,
+                                                            &o->env->nfs_v4.rpc2),
+                                               &args,
                                                0, 0, NULL, 0, 0,
                                                v4_compound_cb, &cctx);
     while (!rep->done) {
@@ -4268,6 +4272,7 @@ v4_model_cs_seq(
     int     client)
 {
     size_t  i;
+
     json_t *pair;
 
     if (!clients_map) {
@@ -4724,6 +4729,25 @@ run_trace(
         v4_close_dangling_opens(o, json_array_get(states, sweep_idx));
     }
     v4_destroy_leftover_clients(o);
+    /* Retire every context first, then let the loop put the DESTROYs on the
+     * wire, and only then drop the connections underneath them.  Tearing a
+     * connection down with its own DESTROY still queued leaves the server
+     * holding a context nothing will ever retire. */
+    for (c = 0; c < V4_MAX_CLIENTS; c++) {
+        if (o->conns[c]) {
+            mbt_conn_release(env, o->conns[c]);
+        }
+    }
+
+    /* Only under a Kerberos flavor: AUTH_SYS queues nothing here, and its loop
+     * has no bounded wait, so a pump with nothing outstanding would park in
+     * the poller and never come back. */
+    if (env->sec != MBT_SEC_SYS) {
+        for (c = 0; c < 4; c++) {
+            evpl_continue(env->evpl);
+        }
+    }
+
     for (c = 0; c < V4_MAX_CLIENTS; c++) {
         if (o->conns[c]) {
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);
@@ -4756,6 +4780,7 @@ main(
         { "pnfs",           required_argument, 0, 'p' },
         { "delegations",    no_argument,       0, 'g' },
         { "rdma",           no_argument,       0, 'R' },
+        { "sec",            required_argument, 0, 'S' },
         { "dry-run",        no_argument,       0, 'n' },
         { "verbose",        no_argument,       0, 'v' },
         { 0,                0,                 0, 0   },
@@ -4795,7 +4820,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnvR", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnvRS:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -4838,6 +4863,18 @@ main(
             case 'R':
                 opts.rdma = 1;
                 break;
+            case 'S': {
+                int sec = mbt_sec_parse(optarg);
+
+                if (sec < 0) {
+                    fprintf(stderr, "%s: unknown security flavor '%s'\n",
+                            argv[0], optarg);
+                    return 2;
+                }
+
+                opts.sec = sec;
+                break;
+            }
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "

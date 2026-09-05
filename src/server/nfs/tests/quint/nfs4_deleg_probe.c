@@ -497,7 +497,9 @@ dt_name(uint32_t t)
 } /* dt_name */
 
 int
-main(void)
+main(
+    int    argc,
+    char **argv)
 {
     struct mbt_env_opts opts = {
         .nfs4_delegations = 1,
@@ -511,6 +513,8 @@ main(void)
     struct stateid4     a_f7_deleg;
     char                buf[128];
     int                 i;
+
+    opts.sec = mbt_sec_scan_argv(argc, argv);
 
     setvbuf(stdout, NULL, _IONBF, 0);
     mbt_watchdog_arm(60);
