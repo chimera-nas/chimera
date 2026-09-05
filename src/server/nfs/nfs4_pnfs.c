@@ -1059,6 +1059,18 @@ chimera_nfs4_layoutget(
         return;
     }
 
+    /* LAYOUTIOMODE4_ANY is legal only for LAYOUTRETURN and CB_LAYOUTRECALL
+     * (RFC 8881 §3.3.20), and the returned lo_iomode MUST be READ or RW
+     * (§18.43.3).  Reject anything else here rather than echo an illegal
+     * iomode back -- it would also mis-derive the per-iomode ff_layout
+     * principal, handing a write layout the read principal. */
+    if (args->loga_iomode != LAYOUTIOMODE4_READ &&
+        args->loga_iomode != LAYOUTIOMODE4_RW) {
+        res->logr_status = NFS4ERR_BADIOMODE;
+        chimera_nfs4_compound_complete(req, res->logr_status);
+        return;
+    }
+
     if (req->fhlen == 0) {
         res->logr_status = NFS4ERR_NOFILEHANDLE;
         chimera_nfs4_compound_complete(req, res->logr_status);
