@@ -46,8 +46,10 @@ chimera_nfs4_bind_conn_to_session(
     channel_dir_from_server4          reply_dir;
 
     /* BIND_CONN_TO_SESSION MUST be the only operation in the COMPOUND
-     * (RFC 8881 §18.34.3, §15.1.3.3); it is never preceded by SEQUENCE. */
-    if (!req->seen_sequence && req->args_compound->num_argarray != 1) {
+     * (RFC 8881 §18.34.3, §15.1.3.3).  The rule is unconditional, so a
+     * SEQUENCE-prefixed compound is rejected too -- SEQUENCE itself already
+     * makes num_argarray > 1. */
+    if (req->args_compound->num_argarray != 1) {
         res->bctsr_status = NFS4ERR_NOT_ONLY_OP;
         chimera_nfs4_compound_complete(req, NFS4ERR_NOT_ONLY_OP);
         return;
