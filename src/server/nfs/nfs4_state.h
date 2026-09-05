@@ -140,6 +140,10 @@ struct nfs4_replay_cache {
     uint32_t        op;        /* nfs_opnum4 of the cached op  */
     nfsstat4        status;
     struct stateid4 stateid;   /* for OPEN/CLOSE/LOCK/LOCKU/etc. responses */
+    /* OPEN4_RESULT_* of a cached OPEN reply.  OPEN4_RESULT_CONFIRM is the one
+     * bit a client may act on, so replaying it verbatim matters; zeroed by
+     * nfs4_replay_record and filled in by the OPEN completion path. */
+    uint32_t        rflags;
     uint8_t         valid;
 };
 
@@ -191,6 +195,7 @@ nfs4_replay_record(
     replay->seqid  = seqid;
     replay->op     = op;
     replay->status = status;
+    replay->rflags = 0;
     if (stateid) {
         replay->stateid = *stateid;
     } else {
