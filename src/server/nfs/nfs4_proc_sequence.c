@@ -43,6 +43,20 @@ nfs4_sequence_fill_resok(
                              memory_order_acquire) > 0) {
         res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
     }
+
+    /* RFC 8881 §18.46.3: SEQ4_STATUS_CB_PATH_DOWN tells the client the server
+     * has no usable callback path to it, so it re-establishes one (in 4.1 via
+     * BIND_CONN_TO_SESSION on a fresh connection).  4.0 signals the same
+     * condition with NFS4ERR_CB_PATH_DOWN from RENEW (nfs4_proc_renew.c); 4.1
+     * has no RENEW, so without this bit a client whose backchannel died was
+     * never told, and delegation recall stayed broken silently.  cb_state
+     * returns to UNINIT when the backchannel is rebound, which clears the bit
+     * on the next SEQUENCE. */
+    if (session->client_unified &&
+        atomic_load_explicit(&session->client_unified->cb_path.cb_state,
+                             memory_order_acquire) == NFS4_CB_DOWN) {
+        res->sr_resok4.sr_status_flags |= SEQ4_STATUS_CB_PATH_DOWN;
+    }
 } /* nfs4_sequence_fill_resok */
 
 void
