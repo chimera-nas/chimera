@@ -167,3 +167,25 @@ nfs_layout_table_recall_prepare(
     pthread_mutex_unlock(&shard->lock);
     return n;
 } /* nfs_layout_table_recall_prepare */
+
+bool
+nfs_layout_table_recall_active(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
+    struct nfs_layout_entry *e;
+    bool                     active;
+
+    pthread_mutex_lock(&shard->lock);
+
+    /* The entry carries waiters only between recall_prepare and the last
+     * holder's deregistration, which frees the entry -- so a non-empty waiter
+     * list is exactly "a recall is outstanding on this file". */
+    HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
+    active = (e && e->waiters);
+
+    pthread_mutex_unlock(&shard->lock);
+    return active;
+} /* nfs_layout_table_recall_active */

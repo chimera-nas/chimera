@@ -1119,6 +1119,21 @@ chimera_nfs4_layoutget(
         }
     }
 
+    /* RFC 8881 §18.43.3 / §12.5.5.2: a LAYOUTGET that overlaps a recall in
+     * progress MUST be rejected with NFS4ERR_RECALLCONFLICT.  The recall
+     * snapshots the holders it will call back at recall_prepare time, so a
+     * layout granted after that point would never be recalled: the client
+     * would keep writing through a range the deferred operation (e.g. a
+     * SETATTR truncate) is about to change, and that operation would stall
+     * until the new layout's lease lapsed.  The client retries once the
+     * recall completes. */
+    if (nfs_layout_table_recall_active(&thread->shared->nfs4_layout_table,
+                                       req->fh, (uint16_t) req->fhlen)) {
+        res->logr_status = NFS4ERR_RECALLCONFLICT;
+        chimera_nfs4_compound_complete(req, res->logr_status);
+        return;
+    }
+
     ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
     chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
     memset(ctx, 0, sizeof(*ctx));

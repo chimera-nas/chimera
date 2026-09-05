@@ -5,6 +5,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <uthash.h>
 
@@ -88,3 +89,15 @@ int nfs_layout_table_recall_prepare(
     struct nfs_layout_recall_waiter *waiter,
     struct nfs_layout_state        **out_holders,
     int                              max_holders);
+
+/*
+ * True while a recall started by nfs_layout_table_recall_prepare is still
+ * outstanding for fh (i.e. the file has deferred operations waiting for every
+ * holder to return).  LAYOUTGET consults this so it does not hand out a layout
+ * the in-progress recall has already snapshotted past
+ * (RFC 8881 §12.5.5.2 / §18.43.3: NFS4ERR_RECALLCONFLICT).
+ */
+bool nfs_layout_table_recall_active(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
