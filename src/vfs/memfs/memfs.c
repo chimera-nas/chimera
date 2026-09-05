@@ -4142,9 +4142,14 @@ memfs_write(
         left            -= block_len;
     }
 
+    /* Storage is allocated and charged a whole memfs block at a time, so the
+     * reported allocation rounds to the configured block size.  A fixed 4 KiB
+     * rounding understated the charge and disagreed with the truncate path
+     * (num_blocks * block_size), so va_space_used changed across a no-op
+     * truncate. */
     if (*p_size < request->write.offset + request->write.length) {
         *p_size       = request->write.offset + request->write.length;
-        *p_space_used = (*p_size + 4095) & ~4095;
+        *p_space_used = (*p_size + block_mask) & ~(uint64_t) block_mask;
     }
 
     inode->mtime = now;
@@ -5554,9 +5559,10 @@ memfs_write_same(
         block_offset = 0;
     }
 
+    /* Round the reported allocation to the block size, as memfs_write does. */
     if (*p_size < offset + total) {
         *p_size       = offset + total;
-        *p_space_used = (*p_size + 4095) & ~4095;
+        *p_space_used = (*p_size + block_mask) & ~(uint64_t) block_mask;
     }
 
     inode->mtime = now;

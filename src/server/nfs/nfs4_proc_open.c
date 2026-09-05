@@ -16,6 +16,7 @@
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
+#include "vfs/vfs_idmap.h"
 
 /*
  * Acquire a cross-protocol SHARE reservation in the claim core for a freshly
@@ -151,7 +152,9 @@ chimera_nfs4_open_grant_delegation(
     bool                              exists = false;
     uint8_t                           deleg_type;
     struct nfsace4                   *perms;
-    static const char                 everyone[] = "EVERYONE@";
+    struct chimera_principal          who;
+    char                             *who_str;
+    int                               who_len;
 
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
@@ -299,11 +302,35 @@ chimera_nfs4_open_grant_delegation(
         perms                               = &res->resok4.delegation.read.permissions;
     }
 
+    /* RFC 7530 §16.16: the permissions ACE names the users that may open the
+     * delegated file without an ACCESS call.  It therefore has to name the
+     * principal this delegation was handed to and carry the rights the
+     * delegation actually conveys: an EVERYONE@ ACE invites the client to skip
+     * the server's per-user check for every other local user, and READ_DATA on
+     * a write delegation sends the holder back for an ACCESS round trip to
+     * write -- the very round trip the field exists to eliminate.  The who
+     * string is rendered like FATTR4_OWNER (numeric form, no domain) and lives
+     * in the reply's dbuf so it outlives this frame. */
+    who     = chimera_idmap_uid_principal(req->cred.uid);
+    who_str = xdr_dbuf_alloc_space(CHIMERA_IDMAP_WHO_MAX,
+                                   req->encoding->dbuf);
+    chimera_nfs_abort_if(who_str == NULL, "Failed to allocate space");
+    who_len = chimera_idmap_principal_to_who(&who, NULL, who_str,
+                                             CHIMERA_IDMAP_WHO_MAX);
+
     perms->type        = ACE4_ACCESS_ALLOWED_ACE_TYPE;
     perms->flag        = 0;
-    perms->access_mask = ACE4_READ_DATA;
-    perms->who.len     = sizeof(everyone) - 1;
-    perms->who.data    = (void *) everyone;
+    perms->access_mask = ACE4_GENERIC_READ;
+
+    if (deleg_type == OPEN_DELEGATE_WRITE) {
+        /* The data/attribute rights a write delegation conveys; not WRITE_ACL
+         * or WRITE_OWNER, which it does not. */
+        perms->access_mask |= ACE4_WRITE_DATA | ACE4_APPEND_DATA |
+            ACE4_WRITE_ATTRIBUTES;
+    }
+
+    perms->who.len  = who_len > 0 ? who_len : 0;
+    perms->who.data = who_str;
     return false;
 } /* chimera_nfs4_open_grant_delegation */
 
@@ -1104,6 +1131,44 @@ chimera_nfs4_open_claim_fh_complete(
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_claim_fh_complete */
 
+/*
+ * Validate the delegate_stateid an OPEN with CLAIM_DELEGATE_CUR cites (RFC
+ * 7530 §16.16 / §10.4.3).  The claim asserts the caller already holds a
+ * delegation on the file, so the stateid has to resolve to a live delegation
+ * of this very client; a stateid that designates no such state is
+ * NFS4ERR_BAD_STATEID (or STALE_STATEID/EXPIRED, as the table decides) rather
+ * than something to quietly serve as an ordinary open.
+ */
+static nfsstat4
+chimera_nfs4_open_check_delegate_cur(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct OPEN4args                 *args   = &req->args_compound->argarray[req->index].opopen;
+    struct nfs_state_table           *table  = &thread->shared->nfs4_state_table;
+    void                             *state_void;
+    uint8_t                           state_type;
+    nfsstat4                          status;
+
+    status = nfs_state_table_acquire(table,
+                                     &args->claim.delegate_cur_info.delegate_stateid,
+                                     NFS4_SLOT_TYPE_DELEG,
+                                     &state_void,
+                                     &state_type);
+
+    if (status != NFS4_OK) {
+        return status;
+    }
+
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+
+    nfs_state_table_release(table, state_void, state_type,
+                            thread->vfs_thread);
+
+    return status;
+} /* chimera_nfs4_open_check_delegate_cur */
+
 static void
 chimera_nfs4_open_parent_complete(
     enum chimera_vfs_error          error_code,
@@ -1337,8 +1402,8 @@ chimera_nfs4_open_parent_complete(
             /* RFC 7530 §16.16: open of a file the client already holds a
              * delegation on, identified by name within the current FH's
              * directory.  Treat like CLAIM_NULL using the name carried in
-             * delegate_cur_info; the delegation the client cites is its own,
-             * so no recall is needed. */
+             * delegate_cur_info; the delegation the client cites must be its
+             * own -- verified below -- so no recall is needed. */
             status = chimera_nfs4_validate_name(&args->claim.delegate_cur_info.file);
             if (status != NFS4_OK) {
                 struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
@@ -1347,6 +1412,16 @@ chimera_nfs4_open_parent_complete(
                 chimera_nfs4_open_complete(req, status);
                 return;
             }
+
+            status = chimera_nfs4_open_check_delegate_cur(req);
+            if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                res->status = status;
+                chimera_nfs4_open_complete(req, status);
+                return;
+            }
+
             if (args->openhow.opentype == OPEN4_NOCREATE) {
                 struct nfs4_open_lookup_regular_ctx *ctx;
 

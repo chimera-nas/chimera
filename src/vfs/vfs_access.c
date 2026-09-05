@@ -23,7 +23,10 @@ chimera_vfs_access_check(
     int                       is_dir;
 
     /* AUTH_NONE means the caller did not establish an identity; treat as a
-     * full grant (the protocol layer is responsible for export-level policy). */
+     * full grant (the protocol layer is responsible for export-level policy).
+     * Anonymous access is therefore an export-level decision only: an
+     * ANONYMOUS@ ACE on an object is never consulted for such a caller, so a
+     * DENY ANONYMOUS@ ACE cannot restrict one. */
     if (cred->flavor == CHIMERA_VFS_AUTH_NONE) {
         return requested;
     }

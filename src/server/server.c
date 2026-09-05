@@ -118,7 +118,10 @@ struct chimera_server_config {
     uint32_t                              anongid;
     uint32_t                              nfs_max_exports;   /* concurrent-export count cap */
     int                                   nfs_fh_sign;       /* sign wire file handles (default on) */
-    char                                  nfs_fh_key[33];    /* optional 32-hex-char (128-bit) signing key */
+    /* Optional 32-hex-char (128-bit) signing key.  Held with room to spare so
+     * an over-long key is not truncated into a well-formed one: NFS init
+     * validates the length and reports the mistake. */
+    char                                  nfs_fh_key[65];
     enum chimera_tcp_flavor               tcp_flavor;
     char                                  nfs_rdma_hostname[256];
     char                                  kv_module[64];

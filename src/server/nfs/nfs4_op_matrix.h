@@ -227,6 +227,14 @@ nfs4_op_check_minor(
         return NFS4ERR_OP_ILLEGAL;
     }
 
+    /* RFC 7530 16.2: in a v4.0 COMPOUND an opnum past the last legal v4.0 op
+     * must be reported OP_ILLEGAL.  This has to precede the "in range but not
+     * in the matrix" NOTSUPP below, which would otherwise claim the 4.1+ ops
+     * we deliberately leave unimplemented (GET_DIR_DELEGATION, WANT_DELEGATION). */
+    if (minor == 0 && op > OP_RELEASE_LOCKOWNER) {
+        return NFS4ERR_OP_ILLEGAL;
+    }
+
     info = &nfs4_op_support[op];
 
     if (info->minors == 0) {

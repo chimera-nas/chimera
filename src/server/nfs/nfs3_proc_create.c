@@ -75,8 +75,11 @@ chimera_nfs3_create_exclusive_verify(
     uint32_t            verf_atime, verf_mtime;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_create_reply(req, CHIMERA_VFS_EEXIST,
-                                  NULL, NULL, NULL, NULL);
+        /* Report what the re-open actually hit rather than collapsing an
+         * EIO/ESTALE into a create conflict, and still return dir_wcc: RFC 1813
+         * 3.3.8 requires full wcc_data even when the CREATE fails. */
+        chimera_nfs3_create_reply(req, error_code,
+                                  NULL, NULL, dir_pre_attr, dir_post_attr);
         return;
     }
 
@@ -90,7 +93,7 @@ chimera_nfs3_create_exclusive_verify(
     } else {
         chimera_vfs_release(req->thread->vfs_thread, handle);
         chimera_nfs3_create_reply(req, CHIMERA_VFS_EEXIST,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, dir_pre_attr, dir_post_attr);
     }
 } /* chimera_nfs3_create_exclusive_verify */
 
