@@ -318,6 +318,22 @@ chimera_nfs4_lock(
         open_state = state_void;
         client     = open_state->owner->client;
 
+        /* RFC 8881 §8.2.2: a stateid presented on a session designates state
+         * owned by that session's client, so an open stateid belonging to a
+         * different client cannot anchor a lock here.  The 4.0 clientid test
+         * below covers only the wire clientid; this is the same check the
+         * I/O operations already make. */
+        status = nfs_state_check_client(open_state, NFS4_SLOT_TYPE_OPEN,
+                                        req->session ?
+                                        req->session->client_unified : NULL);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = status;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
+
         /* RFC 7530 §9.1.4: the new lock-owner's clientid must be the client
          * that holds the open being locked.  A mismatched (e.g. stale)
          * clientid is a bad stateid. */
@@ -572,6 +588,20 @@ chimera_nfs4_lock(
             chimera_nfs4_lock_finish(req, res->status);
             return;
         }
+        /* RFC 8881 §8.2.2: the lock stateid must designate state owned by the
+         * client issuing the request; another client's lock stateid designates
+         * no state for this one. */
+        status = nfs_state_check_client(state_void, NFS4_SLOT_TYPE_LOCK,
+                                        req->session ?
+                                        req->session->client_unified : NULL);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, state_void, NFS4_SLOT_TYPE_LOCK,
+                                    thread->vfs_thread);
+            res->status = status;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
+
         lock_state          = state_void;
         handle              = lock_state->handle;
         req->nfs_state_ref  = lock_state;
