@@ -12,8 +12,9 @@
  *
  * RFC 8881 Section 2.10.6.1.1 requires this reply to be cached, and permits a
  * replier to recompute the slot-usage fields rather than store them; that is
- * what this does, which is also why the uncached-retry path can call it to
- * reconstruct the reply the client should have received.
+ * what this does, which is also why the uncached-retry path can be answered
+ * from it: the reply the client should have received is reconstructible from
+ * the session and the args alone.
  */
 static void
 nfs4_sequence_fill_resok(
@@ -83,6 +84,51 @@ chimera_nfs4_sequence(
 
     req->session = session;
 
+    /*
+     * The COMPOUND-shape limits are checked before the slot is touched.
+     *
+     * RFC 8881 §2.10.6.1.2 and §18.46.3: when SEQUENCE returns an error "the
+     * sequence ID of the slot MUST NOT change" and the replier "MUST NOT
+     * modify the reply cache entry for the slot".  Checking these after
+     * nfs4_replay_slot_acquire left the slot CAS-advanced to the new seqid and
+     * finalized as COMPLETED with no cached bytes, so the client's retry at the
+     * old seqid was answered NFS4ERR_RETRY_UNCACHED_REP forever -- one
+     * over-large COMPOUND permanently wedged the slot.  None of these limits
+     * depend on slot state, so they can simply be evaluated first.
+     */
+    if (session->nfs4_session_fore_attrs.ca_maxrequestsize &&
+        marshall_length_COMPOUND4args(req->args_compound) >
+        (int) session->nfs4_session_fore_attrs.ca_maxrequestsize) {
+        res->sr_status = NFS4ERR_REQ_TOO_BIG;
+        chimera_nfs4_compound_complete(req, NFS4ERR_REQ_TOO_BIG);
+        return;
+    }
+
+    /* RFC 8881 §2.10.6.4: a COMPOUND with more operations than the session's
+     * negotiated fore-channel ca_maxoperations (SEQUENCE counts as one) is
+     * rejected with NFS4ERR_TOO_MANY_OPS. */
+    if (session->nfs4_session_fore_attrs.ca_maxoperations &&
+        req->args_compound->num_argarray >
+        session->nfs4_session_fore_attrs.ca_maxoperations) {
+        res->sr_status = NFS4ERR_TOO_MANY_OPS;
+        chimera_nfs4_compound_complete(req, NFS4ERR_TOO_MANY_OPS);
+        return;
+    }
+
+    /* The reply is reconstructible from the session and the args alone, so it
+     * can be built before the slot is claimed; that is what lets the
+     * cacheability check below also run without disturbing the slot. */
+    nfs4_sequence_fill_resok(res, session, args);
+
+    if (args->sa_cachethis &&
+        session->nfs4_session_fore_attrs.ca_maxresponsesize_cached &&
+        marshall_length_nfs_resop4(resop) >
+        (int) session->nfs4_session_fore_attrs.ca_maxresponsesize_cached) {
+        res->sr_status = NFS4ERR_REP_TOO_BIG_TO_CACHE;
+        chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+        return;
+    }
+
     status = nfs4_replay_slot_acquire(session,
                                       args->sa_slotid,
                                       args->sa_sequenceid,
@@ -109,8 +155,7 @@ chimera_nfs4_sequence(
      * to cache, so the cached success is the whole answer.
      */
     if (status == NFS4ERR_RETRY_UNCACHED_REP) {
-        nfs4_sequence_fill_resok(res, session, args);
-
+        /* res already carries the reconstructed SEQUENCE reply. */
         if (req->args_compound->num_argarray > 1) {
             req->index = 1;
             nfs4_fail_undispatched_op(thread,
@@ -137,36 +182,6 @@ chimera_nfs4_sequence(
          * returns NFS4ERR_RETRY_UNCACHED_REP instead. */
         nfs_client_touch(session->client_unified);
         chimera_nfs4_compound_complete(req, NFS4_OK);
-        return;
-    }
-
-    if (session->nfs4_session_fore_attrs.ca_maxrequestsize &&
-        marshall_length_COMPOUND4args(req->args_compound) >
-        (int) session->nfs4_session_fore_attrs.ca_maxrequestsize) {
-        res->sr_status = NFS4ERR_REQ_TOO_BIG;
-        chimera_nfs4_compound_complete(req, NFS4ERR_REQ_TOO_BIG);
-        return;
-    }
-
-    /* RFC 8881 §2.10.6.4: a COMPOUND with more operations than the session's
-     * negotiated fore-channel ca_maxoperations (SEQUENCE counts as one) is
-     * rejected with NFS4ERR_TOO_MANY_OPS. */
-    if (session->nfs4_session_fore_attrs.ca_maxoperations &&
-        req->args_compound->num_argarray >
-        session->nfs4_session_fore_attrs.ca_maxoperations) {
-        res->sr_status = NFS4ERR_TOO_MANY_OPS;
-        chimera_nfs4_compound_complete(req, NFS4ERR_TOO_MANY_OPS);
-        return;
-    }
-
-    nfs4_sequence_fill_resok(res, session, args);
-
-    if (args->sa_cachethis &&
-        session->nfs4_session_fore_attrs.ca_maxresponsesize_cached &&
-        marshall_length_nfs_resop4(resop) >
-        (int) session->nfs4_session_fore_attrs.ca_maxresponsesize_cached) {
-        res->sr_status = NFS4ERR_REP_TOO_BIG_TO_CACHE;
-        chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG_TO_CACHE);
         return;
     }
 
