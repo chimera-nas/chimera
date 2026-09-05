@@ -110,16 +110,13 @@ chimera_remove_at_lookup_complete(
 
         if (((request->remove.flags & CHIMERA_VFS_REMOVE_ISDIR) && !is_dir) ||
             ((request->remove.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && is_dir)) {
-            chimera_remove_callback_t callback       = request->remove.callback;
-            void                     *callback_arg   = request->remove.private_data;
-            int                       heap_allocated = request->heap_allocated;
-
-            if (heap_allocated) {
-                chimera_client_request_free(thread, request);
-            }
-            callback(thread,
-                     is_dir ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR,
-                     callback_arg);
+            /* Fail the operation through the txn driver like any other op
+             * error: finish aborts the begun backend transaction (dropping
+             * its locks) and chimera_remove_reply then delivers this same
+             * status to the user callback and frees the request. */
+            chimera_client_txn_finish(thread, request,
+                                      is_dir ? CHIMERA_VFS_EISDIR :
+                                      CHIMERA_VFS_ENOTDIR);
             return;
         }
     }
