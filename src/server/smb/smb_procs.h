@@ -231,7 +231,7 @@ void chimera_smb_parse_sd_to_attrs(
     struct chimera_vfs_attrs *attrs);
 
 /* Collects real (non-algorithmic) SID strings a decode pass could not resolve,
- * so the SET_SECURITY handler can resolve them off the event loop and retry. */
+* so the SET_SECURITY handler can resolve them off the event loop and retry. */
 #define SMB_MAX_UNRES_SIDS 16
 struct smb_unres_sids {
     char sids[SMB_MAX_UNRES_SIDS][CHIMERA_IDMAP_SID_MAX];
