@@ -20,6 +20,7 @@
 #include "common/evpl_iovec_cursor.h"
 #include "server/smb/smb_internal.h"
 #include "server/smb/smb_procs.h"
+#include "server/smb/smb_ntlm.h"
 
 static int passed = 0;
 static int failed = 0;
@@ -340,6 +341,80 @@ test_create_ctx_name_overflow(void)
           "CREATE ctx: oversized NameLength rejected");
 } /* test_create_ctx_name_overflow */
 
+/* ------------------------------------------------------------------ *
+*  NTLM AUTHENTICATE *Fields bounds                                   *
+* ------------------------------------------------------------------ */
+
+/* Build an NTLM *Fields descriptor (Len, MaxLen, BufferOffset) at off. */
+static void
+put_ntlm_field(
+    uint8_t *buf,
+    uint32_t off,
+    uint16_t len,
+    uint32_t buf_offset)
+{
+    put_le16(buf, off, len);
+    put_le16(buf, off + 2, len);
+    put_le32(buf, off + 4, buf_offset);
+} /* put_ntlm_field */
+
+/* A BufferOffset near UINT32_MAX must not wrap the (offset + len) bounds check.
+ * The descriptor offset is a full 32-bit wire field while Len is 16-bit, so
+ * computing the sum in uint32_t wraps to a small value that passes the check --
+ * and the field payload is then read from far outside the message.  This is
+ * reachable pre-authentication, from the AUTHENTICATE username/domain/
+ * workstation fields. */
+static void
+test_ntlm_field_offset_uint32_overflow(void)
+{
+    uint8_t buf[128] = { 0 };
+    char   *result;
+
+    /* offset + len wraps: 0xFFFFFFFE + 4 == 2 (mod 2^32), which is <= buf_len. */
+    put_ntlm_field(buf, 36, 4, 0xFFFFFFFE);
+
+    result = smb_ntlm_parse_utf16_field(buf, sizeof(buf), 36);
+
+    CHECK(result == NULL, "NTLM field: UINT32-overflow BufferOffset rejected (no OOB)");
+    free(result);
+} /* test_ntlm_field_offset_uint32_overflow */
+
+/* A descriptor that runs past the end of the message without wrapping must also
+ * be rejected -- the plain in-bounds case the wrap above bypasses. */
+static void
+test_ntlm_field_offset_past_end(void)
+{
+    uint8_t buf[128] = { 0 };
+    char   *result;
+
+    put_ntlm_field(buf, 36, 64, sizeof(buf) - 8);
+
+    result = smb_ntlm_parse_utf16_field(buf, sizeof(buf), 36);
+
+    CHECK(result == NULL, "NTLM field: offset+len past end rejected");
+    free(result);
+} /* test_ntlm_field_offset_past_end */
+
+/* A well-formed descriptor must still decode, so the bounds fix cannot have
+ * turned every AUTHENTICATE into a rejection. */
+static void
+test_ntlm_field_valid_decodes(void)
+{
+    uint8_t buf[128] = { 0 };
+    char   *result;
+
+    /* "ab" as UTF-16LE at offset 64. */
+    buf[64] = 'a';
+    buf[66] = 'b';
+    put_ntlm_field(buf, 36, 4, 64);
+
+    result = smb_ntlm_parse_utf16_field(buf, sizeof(buf), 36);
+
+    CHECK(result != NULL && strcmp(result, "ab") == 0,
+          "NTLM field: in-bounds descriptor still decodes");
+    free(result);
+} /* test_ntlm_field_valid_decodes */
+
 int
 main(
     int   argc,
@@ -368,6 +443,11 @@ main(
     test_create_ctx_datalen_uint32_overflow();
     test_create_ctx_next_uint32_overflow();
     test_create_ctx_name_overflow();
+
+    fprintf(stderr, "=== SMB parse hardening: NTLM AUTHENTICATE field bounds ===\n");
+    test_ntlm_field_offset_uint32_overflow();
+    test_ntlm_field_offset_past_end();
+    test_ntlm_field_valid_decodes();
 
     fprintf(stderr, "\nTotal: %d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

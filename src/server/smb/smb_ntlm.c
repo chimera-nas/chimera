@@ -18,6 +18,7 @@
 #include "smb_wbclient.h"
 #include "smb_internal.h"
 #include "common/logging.h"
+#include "common/macros.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_user_cache.h"
 
@@ -374,9 +375,10 @@ compute_ntlmv2_hash(
     return 0;
 } /* compute_ntlmv2_hash */
 
-// Parse UTF-16LE field from NTLM message
-static char *
-parse_ntlm_utf16_field(
+// Parse UTF-16LE field from NTLM message.
+/* Exposed for unit tests in tests/smb_harden_test.c. */
+SYMBOL_EXPORT char *
+smb_ntlm_parse_utf16_field(
     const uint8_t *buf,
     size_t         buf_len,
     size_t         field_offset)
@@ -397,7 +399,12 @@ parse_ntlm_utf16_field(
         return strdup("");
     }
 
-    if (offset + len > buf_len) {
+    /* offset is a full 32-bit wire field and len is 16-bit, so the sum must be
+     * widened before the comparison: computed in uint32_t it wraps, and an
+     * offset near UINT32_MAX would pass this check and then read far out of
+     * bounds below.  The LM/NT response and session-key checks widen the same
+     * way. */
+    if ((size_t) offset + len > buf_len) {
         return NULL;
     }
 
@@ -413,7 +420,7 @@ parse_ntlm_utf16_field(
     result[len / 2] = '\0';
 
     return result;
-} /* parse_ntlm_utf16_field */
+} /* smb_ntlm_parse_utf16_field */
 
 // Get message type from NTLM blob
 static int
@@ -871,21 +878,21 @@ validate_authenticate(
     }
 
     // Parse username (offset 36)
-    username = parse_ntlm_utf16_field(buf, buf_len, 36);
+    username = smb_ntlm_parse_utf16_field(buf, buf_len, 36);
     if (!username) {
         smb_ntlm_error("Failed to parse NTLM username");
         goto cleanup;
     }
 
     // Parse domain (offset 28)
-    domain = parse_ntlm_utf16_field(buf, buf_len, 28);
+    domain = smb_ntlm_parse_utf16_field(buf, buf_len, 28);
     if (!domain) {
         smb_ntlm_error("Failed to parse NTLM domain");
         goto cleanup;
     }
 
     // Parse workstation (offset 44)
-    workstation = parse_ntlm_utf16_field(buf, buf_len, 44);
+    workstation = smb_ntlm_parse_utf16_field(buf, buf_len, 44);
 
     smb_ntlm_debug("NTLM auth: user='%s' domain='%s' workstation='%s'",
                    username, domain, workstation ? workstation : "");

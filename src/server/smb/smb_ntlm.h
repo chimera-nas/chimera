@@ -42,6 +42,19 @@
 struct chimera_vfs;
 struct chimera_smb_auth_config;
 
+/*
+ * Decode one NTLM *Fields descriptor (Len/MaxLen/BufferOffset) at field_offset
+ * in an AUTHENTICATE message and return its UTF-16LE payload as a NUL-terminated
+ * ASCII string the caller must free, or NULL if the descriptor does not lie
+ * wholly within buf_len.  Exposed for the hardening tests, which drive it with
+ * adversarial offsets; production callers reach it through smb_ntlm_process().
+ */
+char *
+smb_ntlm_parse_utf16_field(
+    const uint8_t *buf,
+    size_t         buf_len,
+    size_t         field_offset);
+
 /* Names the server advertises in the CHALLENGE target info.  Domain
  * controllers validate the target info echoed back inside the client's NTLMv2
  * response against the machine account on the netlogon channel (NTLM relay
