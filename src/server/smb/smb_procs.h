@@ -228,6 +228,28 @@ void chimera_smb_parse_sd_to_attrs(
     struct chimera_vfs_attrs *attrs);
 
 /*
+ * Build a self-relative security descriptor from owner/group ids, their
+ * optional native-SID companions, and a canonical ACL into `out` (capacity
+ * `cap`).  A stored native SID (owner_sid / group_sid / an ACE principal's
+ * sid) is emitted verbatim; otherwise the identity cache is consulted and the
+ * algorithmic modefromsid SID is the last resort.  Returns the SD length, or
+ * -1 if it does not fit.  Exported for the SMB unit tests.
+ */
+int chimera_smb_acl_to_sd(
+    uint32_t                  uid,
+    uint32_t                  gid,
+    uint32_t                  mode,
+    const struct chimera_acl *acl,
+    const struct chimera_sid *owner_sid,
+    const struct chimera_sid *group_sid,
+    int                       has_owner,
+    int                       has_group,
+    int                       has_dacl,
+    uint8_t                  *out,
+    uint32_t                  cap,
+    struct chimera_vfs       *vfs);
+
+/*
  * Decode a self-relative security descriptor into owner/group/mode AND a full
  * canonical DACL.  The decoded ACL is written into `acl_buf` (capacity
  * `acl_buf_len` bytes) and, when non-empty, attrs->va_acl is pointed at it with
