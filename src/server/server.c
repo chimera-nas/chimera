@@ -29,6 +29,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/sdk/vfs_cred.h"
+#include "vfs/vfs_user_cache.h"
 #include "vfs/vfs_release.h"
 #include "common/macros.h"
 #include "common/chimera_tracing.h"
@@ -62,6 +63,10 @@ struct chimera_server_config {
     int                                   nfs_nsm_port;
     int                                   nfs_port;
     int                                   s3_port;
+    /* Identity an S3 access key acts as when its configuration binds it to no
+     * user.  Defaults to nobody/nogroup so an unbound key is unprivileged. */
+    uint32_t                              s3_anon_uid;
+    uint32_t                              s3_anon_gid;
     int                                   smb_port;
     int                                   nfs_enabled;
     int                                   smb_enabled;
@@ -322,6 +327,8 @@ chimera_server_config_init(void)
      * service so a pNFS data server can coexist with an MDS on one host. */
     config->nfs_port        = 2049;
     config->s3_port         = 5000;
+    config->s3_anon_uid     = CHIMERA_S3_ANON_UID;
+    config->s3_anon_gid     = CHIMERA_S3_ANON_GID;
     config->smb_port        = 445;
     config->nfs_data_server = 0;
 
@@ -963,6 +970,28 @@ chimera_server_config_get_s3_port(const struct chimera_server_config *config)
 {
     return config->s3_port;
 } /* chimera_server_config_get_s3_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_s3_anon_ids(
+    struct chimera_server_config *config,
+    uint32_t                      uid,
+    uint32_t                      gid)
+{
+    config->s3_anon_uid = uid;
+    config->s3_anon_gid = gid;
+} /* chimera_server_config_set_s3_anon_ids */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_s3_anon_uid(const struct chimera_server_config *config)
+{
+    return config->s3_anon_uid;
+} /* chimera_server_config_get_s3_anon_uid */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_s3_anon_gid(const struct chimera_server_config *config)
+{
+    return config->s3_anon_gid;
+} /* chimera_server_config_get_s3_anon_gid */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_port(
@@ -3160,13 +3189,44 @@ chimera_server_add_s3_cred(
     struct chimera_server *server,
     const char            *access_key,
     const char            *secret_key,
+    const char            *username,
     int                    pinned)
 {
+    const struct chimera_vfs_user *user;
+    uint32_t                       uid = 0, gid = 0, gids[CHIMERA_VFS_CRED_MAX_GIDS];
+    uint32_t                       ngids        = 0;
+    int                            has_identity = 0;
+
     if (!server->s3_shared) {
         return -1;
     }
 
-    return chimera_s3_add_cred(server->s3_shared, access_key, secret_key, pinned);
+    /* Resolve the key's user through the same identity store the other
+     * protocols authenticate against, so an S3 key and an SMB or NFS login for
+     * the same person act as one uid.  An unresolvable name is a configuration
+     * error and must not silently fall back to a privileged identity, so it is
+     * reported and left unbound (anonymous). */
+    if (username && *username) {
+        user = chimera_server_get_user(server, username);
+
+        if (user) {
+            uid   = user->uid;
+            gid   = user->gid;
+            ngids = user->ngids;
+            if (ngids > CHIMERA_VFS_CRED_MAX_GIDS) {
+                ngids = CHIMERA_VFS_CRED_MAX_GIDS;
+            }
+            memcpy(gids, user->gids, ngids * sizeof(*gids));
+            has_identity = 1;
+        } else {
+            chimera_server_error(
+                "S3 access key %s names unknown user \"%s\"; leaving it unbound",
+                access_key, username);
+        }
+    }
+
+    return chimera_s3_add_cred(server->s3_shared, access_key, secret_key,
+                               has_identity, uid, gid, ngids, gids, pinned);
 } /* chimera_server_add_s3_cred */
 
 SYMBOL_EXPORT int
