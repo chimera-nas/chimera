@@ -174,17 +174,23 @@ struct chimera_vfs {
      * reporting EBUSY (microseconds).  0 waits only as long as the closes it
      * issues itself take. */
     uint64_t                              umount_timeout_us;
+    /* Allocation size of the pooled per-thread compound blobs: the maximum
+     * compound_size over every registered CHIMERA_VFS_CAP_COMPOUND module,
+     * floored at the bare core header so an unbound compound always fits.
+     * Tracked in chimera_vfs_register; every module registers before any
+     * vfs thread allocates a compound. */
+    uint32_t                              max_compound_size;
     int                                   machine_name_len;
     char                                  machine_name[256];
 };
 
-/* Transaction priority (`core.ts`) layout: the high bits carry a per-thread,
- * TSC-anchored, strictly-increasing counter (age order -> a longer-lived txn
+/* Compound priority (`core.ts`) layout: the high bits carry a per-thread,
+ * TSC-anchored, strictly-increasing counter (age order -> a longer-lived compound
  * outranks a newcomer, which keeps WFG victim selection starvation-free), and
- * the low CHIMERA_VFS_TXN_THREAD_BITS carry the allocating thread's dense id so
+ * the low CHIMERA_VFS_COMPOUND_THREAD_BITS carry the allocating thread's dense id so
  * values are globally unique without a shared atomic.  See
- * chimera_vfs_txn_alloc_ts(). */
-#define CHIMERA_VFS_TXN_THREAD_BITS 16
+ * chimera_vfs_compound_alloc_ts(). */
+#define CHIMERA_VFS_COMPOUND_THREAD_BITS 16
 
 struct chimera_vfs_thread {
     struct evpl                         *evpl;
@@ -197,6 +203,16 @@ struct chimera_vfs_thread {
     struct chimera_vfs_request          *active_requests;
     uint64_t                             num_active_requests;
     struct chimera_vfs_open_handle      *free_synth_handles;
+
+    /* Explicit-compound machinery (vfs_proc_compound_begin.c / _end.c):
+     * the registry of live compounds this thread began (a DL list; any
+     * survivor at thread destroy is a consumer bug), the pool of fixed-size
+     * compound blobs (each vfs->max_compound_size bytes), and the per-thread
+     * LOOSE singleton chimera_vfs_compound_loose() hands out (allocated at
+     * thread init, never registered, never recycled). */
+    struct chimera_vfs_compound         *active_compounds;
+    struct chimera_vfs_compound         *free_compounds;
+    struct chimera_vfs_compound         *loose_compound;
 
     struct chimera_vfs_request          *pending_complete_requests;
     struct chimera_vfs_request          *unblocked_requests;
@@ -217,12 +233,12 @@ struct chimera_vfs_thread {
      * so a forgotten set drops the child span rather than misattributing it. */
     struct otel_span                    *otel_parent;
 
-    /* Transaction-priority allocation (chimera_vfs_txn_alloc_ts): a dense thread
+    /* Compound-priority allocation (chimera_vfs_compound_alloc_ts): a dense thread
      * id assigned once at thread init (low bits of every ts -> global
      * uniqueness) plus the last high-part handed out (kept strictly increasing
      * for per-thread uniqueness within a TSC tick).  No shared atomic. */
-    uint32_t                             txn_thread_id;
-    uint64_t                             txn_ts_hi;
+    uint32_t                             compound_thread_id;
+    uint64_t                             compound_ts_hi;
 
     struct chimera_vfs_thread_metrics    metrics;
 };

@@ -560,6 +560,12 @@ chimera_vfs_init(
      * overrides it from common.umount_timeout_ms. */
     vfs->umount_timeout_us = (uint64_t) CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT * 1000;
 
+    /* Floor for the pooled compound blobs: even with no compound-capable
+     * module registered, begin hands out (unbound) core headers.
+     * chimera_vfs_register raises this to the largest CAP_COMPOUND module's
+     * compound_size. */
+    vfs->max_compound_size = sizeof(struct chimera_vfs_compound);
+
     /* Synthesize machine name for identification */
     chimera_vfs_synthesize_machine_name(vfs);
 
@@ -1210,17 +1216,24 @@ chimera_vfs_thread_init(
         }
     }
 
-    /* Dense per-thread id for transaction-priority uniqueness (low bits of every
+    /* Dense per-thread id for compound-priority uniqueness (low bits of every
      * core.ts this thread hands out).  Assigned once; one relaxed atomic per
      * thread creation, never on a request path. */
     {
-        static uint32_t txn_thread_seq;
-        thread->txn_thread_id = __atomic_fetch_add(&txn_thread_seq, 1, __ATOMIC_RELAXED)
-            & ((1u << CHIMERA_VFS_TXN_THREAD_BITS) - 1);
+        static uint32_t compound_thread_seq;
+        thread->compound_thread_id = __atomic_fetch_add(&compound_thread_seq, 1, __ATOMIC_RELAXED)
+            & ((1u << CHIMERA_VFS_COMPOUND_THREAD_BITS) - 1);
         /* Seed >0 so the first allocated ts is never 0 (which means autocommit),
         * even for thread id 0 within the first TSC tick after the clock zero. */
-        thread->txn_ts_hi = 1;
+        thread->compound_ts_hi = 1;
     }
+
+    /* Per-thread LOOSE compound singleton (chimera_vfs_compound_loose): a
+     * bare core header is enough -- it never binds, so no backend state ever
+     * lives behind it.  It joins neither the active registry nor the pool;
+     * end on it is a synchronous no-op and thread destroy frees it here. */
+    thread->loose_compound        = calloc(1, sizeof(struct chimera_vfs_compound));
+    thread->loose_compound->flags = CHIMERA_VFS_COMPOUND_LOOSE;
 
     if (vfs->metrics.metrics) {
         thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_instance *));
@@ -1267,9 +1280,35 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     struct chimera_vfs_request     *request;
     struct chimera_vfs_open_handle *handle;
     struct chimera_vfs_find_result *find_result;
+    struct chimera_vfs_compound    *compound;
+    int                             leaked_compounds = 0;
     int                             i;
 
     evpl_remove_doorbell(thread->evpl, &thread->doorbell);
+
+    /* Any compound still in the active registry is a consumer bug: every
+     * begin must be paired with an end on the beginning thread before that
+     * thread is torn down.  Report each survivor (with its owner while the
+     * module structs are still valid), reclaim the blobs so a release build
+     * limps on without a leak report, and abort in debug builds. */
+    while (thread->active_compounds) {
+        compound = thread->active_compounds;
+        chimera_vfs_error(
+            "compound %p leaked at thread destroy: module %s, enlisted %u ejected %u inflight %u",
+            (void *) compound,
+            compound->module ? compound->module->name : "(unbound)",
+            compound->enlisted_ops,
+            compound->ejected_ops,
+            compound->inflight_ops);
+        DL_DELETE(thread->active_compounds, compound);
+        free(compound);
+        leaked_compounds++;
+    }
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(leaked_compounds,
+                         "%d compound(s) leaked at thread destroy", leaked_compounds);
+#endif /* ifdef CHIMERA_SANITIZE */
+    (void) leaked_compounds;
 
     for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = thread->vfs->modules[i];
@@ -1303,6 +1342,14 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         free(request->plugin_data);
         free(request);
     }
+
+    while (thread->free_compounds) {
+        compound = thread->free_compounds;
+        LL_DELETE(thread->free_compounds, compound);
+        free(compound);
+    }
+
+    free(thread->loose_compound);
 
     if (thread->metrics.op_latency_series) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
@@ -1340,15 +1387,22 @@ chimera_vfs_register(
                          "module %s was built against VFS SDK version %u; this chimera provides version %u",
                          module->name, module->sdk_version, CHIMERA_VFS_SDK_VERSION);
 
-    /* A transactional module's txn_size is the allocation size for its
-     * per-transaction object, whose first member is the core-owned
-     * struct chimera_vfs_transaction header; a smaller (or unset) txn_size
-     * would make chimera_vfs_begin_transaction allocate too few bytes and
+    /* A compound-capable module's compound_size is the allocation size for its
+     * per-compound object, whose first member is the core-owned
+     * struct chimera_vfs_compound header; a smaller (or unset) compound_size
+     * would make chimera_vfs_compound_begin allocate too few bytes and
      * the core's header stores would overflow the heap. */
-    chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_CAP_TRANSACTIONAL) &&
-                         module->txn_size < sizeof(struct chimera_vfs_transaction),
-                         "module %s declares CHIMERA_VFS_CAP_TRANSACTIONAL with txn_size %u; at least %zu bytes are required",
-                         module->name, module->txn_size, sizeof(struct chimera_vfs_transaction));
+    chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_CAP_COMPOUND) &&
+                         module->compound_size < sizeof(struct chimera_vfs_compound),
+                         "module %s declares CHIMERA_VFS_CAP_COMPOUND with compound_size %u; at least %zu bytes are required",
+                         module->name, module->compound_size, sizeof(struct chimera_vfs_compound));
+
+    /* Compound blobs are pooled per thread at one fixed size, so any blob can
+    * later lazy-bind to any compound-capable module: track the global max. */
+    if ((module->capabilities & CHIMERA_VFS_CAP_COMPOUND) &&
+        module->compound_size > vfs->max_compound_size) {
+        vfs->max_compound_size = module->compound_size;
+    }
 
     vfs->modules[module->fh_magic] = module;
 

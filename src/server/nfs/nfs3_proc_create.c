@@ -14,7 +14,7 @@
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 
-/* See nfs3_proc_write.c: bound on transaction conflict replays. */
+/* See nfs3_proc_write.c: bound on compound conflict replays. */
 
 static void chimera_nfs3_create_begin_attempt(
     struct nfs_request *req);
@@ -22,7 +22,7 @@ static void chimera_nfs3_create_begin_attempt(
 static void
 chimera_nfs3_create_retry(struct nfs_request *req)
 {
-    if (++req->txn_attempt > CHIMERA_NFS3_TXN_MAX_RETRIES) {
+    if (++req->compound_attempt > CHIMERA_NFS3_COMPOUND_MAX_RETRIES) {
         struct chimera_server_nfs_thread *thread = req->thread;
         struct CREATE3res                 res;
         int                               rc;
@@ -52,7 +52,7 @@ chimera_nfs3_create_send(struct nfs_request *req)
     nfs_request_free(thread, req);
 } /* chimera_nfs3_create_send */
 
-/* EndTransaction(ABORT) completion: conflict -> replay, logical error -> send
+/* compound_end(ABORT) completion: conflict -> replay, logical error -> send
  * the (already-built) error reply. */
 static void
 chimera_nfs3_create_aborted(
@@ -63,14 +63,14 @@ chimera_nfs3_create_aborted(
 
     (void) error_code;
 
-    if (req->txn_op_status == CHIMERA_VFS_ETXN_CONFLICT) {
+    if (req->compound_op_status == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
         chimera_nfs3_create_retry(req);
     } else {
         chimera_nfs3_create_send(req);
     }
 } /* chimera_nfs3_create_aborted */
 
-/* EndTransaction(COMMIT) completion: the durable point.  A commit-time conflict
+/* compound_end(COMMIT) completion: the durable point.  A commit-time conflict
  * (cairn) replays; otherwise send the built reply. */
 static void
 chimera_nfs3_create_committed(
@@ -79,7 +79,7 @@ chimera_nfs3_create_committed(
 {
     struct nfs_request *req = private_data;
 
-    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
+    if (error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
         chimera_nfs3_create_retry(req);
         return;
     }
@@ -92,7 +92,7 @@ chimera_nfs3_create_committed(
 /*
  * Single terminal step for every CREATE outcome.  Copies the result into
  * req->res_create (so the VFS attr/handle pointers need not survive), releases
- * the handles opened this attempt, then resolves the transaction:
+ * the handles opened this attempt, then resolves the compound:
  *   - conflict  -> abort + replay from the top
  *   - success   -> commit (durable) then reply
  *   - logical error -> abort then reply
@@ -110,7 +110,7 @@ chimera_nfs3_create_terminate(
     struct CREATE3res                *res    = &req->res_create;
     int                               rc;
 
-    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
+    if (error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
         if (handle) {
             chimera_vfs_release(thread->vfs_thread, handle);
         }
@@ -118,10 +118,10 @@ chimera_nfs3_create_terminate(
             chimera_vfs_release(thread->vfs_thread, req->handle);
             req->handle = NULL;
         }
-        req->txn_op_status = error_code;
-        chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                    CHIMERA_VFS_TXN_ABORT,
-                                    chimera_nfs3_create_aborted, req);
+        req->compound_op_status = error_code;
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                                 CHIMERA_VFS_COMPOUND_ABORT,
+                                 chimera_nfs3_create_aborted, req);
         return;
     }
 
@@ -160,15 +160,15 @@ chimera_nfs3_create_terminate(
     }
 
     if (error_code == CHIMERA_VFS_OK) {
-        chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                    CHIMERA_VFS_TXN_COMMIT_SYNC,
-                                    chimera_nfs3_create_committed, req);
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                                 CHIMERA_VFS_COMPOUND_COMMIT_DURABLE,
+                                 chimera_nfs3_create_committed, req);
     } else {
         /* Nothing durable to keep; abort, then send the error reply. */
-        req->txn_op_status = error_code;
-        chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                    CHIMERA_VFS_TXN_ABORT,
-                                    chimera_nfs3_create_aborted, req);
+        req->compound_op_status = error_code;
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                                 CHIMERA_VFS_COMPOUND_ABORT,
+                                 chimera_nfs3_create_aborted, req);
     }
 } /* chimera_nfs3_create_terminate */
 
@@ -188,7 +188,7 @@ chimera_nfs3_create_exclusive_verify(
 
     (void) set_attr;
 
-    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
+    if (error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
         chimera_nfs3_create_terminate(req, error_code, NULL, NULL, NULL, NULL);
         return;
     }
@@ -232,7 +232,7 @@ chimera_nfs3_create_open_at_complete(
          * Request the directory WCC masks too: an idempotent EXCLUSIVE retry
          * still owes the caller dir_wcc (RFC 1813 3.3.8), even though the
          * directory is unchanged (before == after). */
-        chimera_vfs_open_at(thread->vfs_thread, &req->cred, req->txn,
+        chimera_vfs_open_at(thread->vfs_thread, &req->cred, req->compound,
                             req->handle,
                             args->where.name.str,
                             args->where.name.len,
@@ -313,7 +313,7 @@ chimera_nfs3_create_open_at_parent_complete(
             break;
     } /* switch */
 
-    chimera_vfs_open_at(thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_at(thread->vfs_thread, &req->cred, req->compound,
                         parent_handle,
                         args->where.name.str,
                         args->where.name.len,
@@ -331,17 +331,20 @@ chimera_nfs3_create_begin_attempt(struct nfs_request *req)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
 
-    /* Begin is local and synchronous (NULL handle => non-transactional backend,
-     * autocommit); it cannot conflict, so go straight to opening the parent.
-     * req->fh is the decoded parent-dir handle (set by chimera_nfs3_decode_fh
-     * in the entry). */
-    req->txn = chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
-                                             req->fh,
-                                             req->fhlen,
-                                             CHIMERA_VFS_TXN_WRITE,
-                                             req->txn_ts);
+    /* Begin is local, synchronous, and never NULL (on a non-compound backend
+     * the handle is unbound and every op ejects -> autocommit, as before);
+     * it cannot conflict, so go straight to opening the parent.  RETRYABLE:
+     * this driver replays the whole op on ECOMPOUND_CONFLICT with the stable
+     * ts.  req->fh is the decoded parent-dir handle (set by
+     * chimera_nfs3_decode_fh in the entry). */
+    req->compound = chimera_vfs_compound_begin(thread->vfs_thread, &req->cred,
+                                               req->fh,
+                                               req->fhlen,
+                                               CHIMERA_VFS_COMPOUND_WRITE,
+                                               req->compound_ts,
+                                               CHIMERA_VFS_COMPOUND_RETRYABLE);
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -387,8 +390,8 @@ chimera_nfs3_create(
         return;
     }
 
-    req->txn_ts      = chimera_vfs_txn_alloc_ts(thread->vfs_thread);
-    req->txn_attempt = 0;
+    req->compound_ts      = chimera_vfs_compound_alloc_ts(thread->vfs_thread);
+    req->compound_attempt = 0;
 
     chimera_nfs3_create_begin_attempt(req);
 } /* chimera_nfs3_create */

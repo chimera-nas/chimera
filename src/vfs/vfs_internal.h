@@ -372,9 +372,11 @@ chimera_vfs_request_alloc_common(
     request->io_handle            = NULL;
     request->io_owns_lease_ref    = 0;
 
-    /* Default to autocommit; transaction-aware proc entry points overwrite this
-     * with their explicit `txn` argument right after allocation. */
-    request->transaction = NULL;
+    /* Default to autocommit; compound-aware proc entry points overwrite this
+     * with their explicit `compound` argument right after allocation.  The
+     * enlisted mark is owned by the dispatch guard alone. */
+    request->compound          = NULL;
+    request->compound_enlisted = 0;
 
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);
@@ -532,6 +534,40 @@ static inline void
 chimera_vfs_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread *thread = request->thread;
+
+    /* Enlisted-op completion bookkeeping.  Keyed on the enlisted mark the
+     * dispatch guard stamped -- request->compound alone over-identifies: a
+     * request can fail in core layers (claim-layer EACCES, dispatch-time
+     * ESTALE/EROFS) still carrying the consumer's compound pointer without
+     * ever having been enlisted, and the compound control ops carry it
+     * purely for routing/recovery.  Runs on the beginning thread (delegated
+     * completions are drained back onto it before the op completion runs),
+     * so the counters need no atomics.  The mark is consumed so the
+     * decrement fires exactly once per enlisted request.
+     *
+     * Conflict suppression: a member op may itself deliver
+     * ECOMPOUND_CONFLICT.  If the compound lost any op to ejection, or its
+     * consumer did not opt into replay (RETRYABLE), a replay is forbidden --
+     * rewrite to the retriable-but-never-replayed ECOMPOUND_EXHAUSTED here,
+     * in the core, rather than trusting drivers to honor the rule. */
+    if (request->compound_enlisted) {
+        struct chimera_vfs_compound *compound = request->compound;
+
+        request->compound_enlisted = 0;
+
+#ifdef CHIMERA_SANITIZE
+        chimera_vfs_abort_if(compound->inflight_ops == 0,
+                             "enlisted op %s completing with no inflight op accounted",
+                             chimera_vfs_op_name(request->opcode));
+#endif /* ifdef CHIMERA_SANITIZE */
+        compound->inflight_ops--;
+
+        if (request->status == CHIMERA_VFS_ECOMPOUND_CONFLICT &&
+            (compound->ejected_mutating_ops > 0 ||
+             !(compound->flags & CHIMERA_VFS_COMPOUND_RETRYABLE))) {
+            request->status = CHIMERA_VFS_ECOMPOUND_EXHAUSTED;
+        }
+    }
 
     request->elapsed_ns = prometheus_stopwatch_elapsed_ns(&request->start_time);
 
@@ -695,6 +731,22 @@ void
 chimera_vfs_notify_gate_install(
     struct chimera_vfs_request *request);
 
+/* vfs_proc_compound_begin.c: construct and dispatch the fire-and-forget
+ * backend OP_COMPOUND_BEGIN for a compound whose owner {module,
+ * mount_private, route_hash} is already stamped, so the backend initializes
+ * its per-compound state ahead of the first enlisted op (dispatch FIFO order
+ * on the compound's route).  Shared by the eager-bind path in
+ * chimera_vfs_compound_begin and the lazy-bind arm of chimera_vfs_dispatch;
+ * safe to call from inside dispatch because the begin opcode is exempt from
+ * the enlistment guard, so the recursion terminates. */
+void
+chimera_vfs_compound_dispatch_begin(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
+    const void                    *fh,
+    int                            fhlen);
+
 static inline void
 chimera_vfs_dispatch(struct chimera_vfs_request *request)
 {
@@ -711,6 +763,17 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     chimera_vfs_notify_gate_install(request);
 
     if (!module || !thread->module_private[module->fh_magic]) {
+        /* Failing in the core, before any backend saw the op: detach it from
+         * any compound.  It neither enlists (no enlisted mark, so completion
+         * bookkeeping skips it) nor ejects (it never executed anywhere, so
+         * it cannot invalidate a replay).  The compound control ops keep
+         * theirs: their completions recover the compound object from
+         * request->compound. */
+        if (request->compound &&
+            request->opcode != CHIMERA_VFS_OP_COMPOUND_BEGIN &&
+            request->opcode != CHIMERA_VFS_OP_COMPOUND_END) {
+            request->compound = NULL;
+        }
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
@@ -720,30 +783,109 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
      * reach the backend (or a delegation thread). */
     if (chimera_vfs_op_is_mutating(request) &&
         chimera_vfs_mount_is_readonly(request)) {
-        request->status = CHIMERA_VFS_EROFS;
+        /* Same core-level failure as above: detach without enlist/eject
+         * accounting.  (Mutating ops are never the compound control ops.) */
+        request->compound = NULL;
+        request->status   = CHIMERA_VFS_EROFS;
         request->complete(request);
         return;
     }
 
-    /* Ejection guard: enlistment requires the op's {module, mount_private} to
-     * match the transaction's owner (stamped at begin).  On mismatch -- e.g. a
-     * path walk carried the caller's transaction across a mount/junction
-     * boundary -- the op is EJECTED: it runs standalone (autocommit), routes by
-     * its own fh_hash below, and its effects are independent of the
-     * transaction's commit/abort.  This is deliberate best-effort semantics,
-     * and it is also the memory-safety barrier: a backend recovers its own txn
-     * object by casting request->transaction, so a foreign backend must never
-     * see another backend's transaction object. */
-    if (request->transaction &&
-        (request->module != request->transaction->module ||
-         request->mount_private != request->transaction->mount_private)) {
-        request->transaction = NULL;
+    /* Enlistment guard: lazy bind, enlist, or eject.  The compound control
+     * ops (OP_COMPOUND_BEGIN/_END) are exempt -- they ARE the machinery and
+     * carry request->compound purely for routing and object recovery.
+     *
+     *   - LOOSE compound: never binds; every op runs standalone.
+     *
+     *   - Unbound compound (module == NULL): the first op on a
+     *     compound-capable mount BINDS it -- stamp the owner {module,
+     *     mount_private} and pin route_hash to this op's own fh_hash, then
+     *     dispatch the backend OP_COMPOUND_BEGIN *first* (fire-and-forget,
+     *     with this op's cred, routed identically, so dispatch FIFO order
+     *     puts the backend's state setup ahead of this op; the recursion
+     *     into chimera_vfs_dispatch is safe because the begin opcode is
+     *     exempt from this guard) -- and then enlist this op.  An op on a
+     *     non-capable mount is ejected instead, leaving the compound
+     *     unbound for a later capable op.
+     *
+     *   - Bound compound: enlistment requires the op's {module,
+     *     mount_private} to match the owner.  On mismatch -- e.g. a path
+     *     walk carried the caller's compound across a mount/junction
+     *     boundary -- the op is EJECTED: it runs standalone (autocommit),
+     *     routes by its own fh_hash below, and its effects are independent
+     *     of the compound's commit/abort.  This is deliberate best-effort
+     *     semantics, and it is also the memory-safety barrier: a backend
+     *     recovers its own compound object by casting request->compound, so
+     *     a foreign backend must never see another backend's compound
+     *     object.
+     *
+     * Every ejection is counted; a MUTATING ejection additionally forfeits
+     * the compound's replay right (an ejected mutation commits standalone,
+     * so a from-the-top replay would double-execute it -- the
+     * conflict-suppression rewrite in chimera_vfs_complete / the end
+     * completion enforces that).  Read-only ejections -- e.g. the
+     * root-module resolution hop every path walk starts with -- are
+     * harmless to re-execute and only bump the observability counter. */
+    if (request->compound &&
+        request->opcode != CHIMERA_VFS_OP_COMPOUND_BEGIN &&
+        request->opcode != CHIMERA_VFS_OP_COMPOUND_END) {
+        struct chimera_vfs_compound *compound = request->compound;
+
+        if (compound->flags & CHIMERA_VFS_COMPOUND_LOOSE) {
+            request->compound = NULL;
+            compound->ejected_ops++;
+            if (chimera_vfs_op_is_mutating(request)) {
+                compound->ejected_mutating_ops++;
+            }
+        } else if (!compound->module) {
+            if (module->capabilities & CHIMERA_VFS_CAP_COMPOUND) {
+                /* Lazy bind. */
+                compound->module        = module;
+                compound->mount_private = request->mount_private;
+                compound->route_hash    = request->fh_hash;
+
+                chimera_vfs_compound_dispatch_begin(thread, request->cred,
+                                                    compound,
+                                                    request->fh,
+                                                    request->fh_len);
+
+#ifdef CHIMERA_SANITIZE
+                chimera_vfs_abort_if(compound->inflight_ops != 0,
+                                     "compound op %s issued with %u enlisted op(s) still in flight",
+                                     chimera_vfs_op_name(request->opcode),
+                                     compound->inflight_ops);
+#endif /* ifdef CHIMERA_SANITIZE */
+                request->compound_enlisted = 1;
+                compound->enlisted_ops++;
+                compound->inflight_ops++;
+            } else {
+                request->compound = NULL;
+                compound->ejected_ops++;
+            }
+        } else if (module == compound->module &&
+                   request->mount_private == compound->mount_private) {
+#ifdef CHIMERA_SANITIZE
+            chimera_vfs_abort_if(compound->inflight_ops != 0,
+                                 "compound op %s issued with %u enlisted op(s) still in flight",
+                                 chimera_vfs_op_name(request->opcode),
+                                 compound->inflight_ops);
+#endif /* ifdef CHIMERA_SANITIZE */
+            request->compound_enlisted = 1;
+            compound->enlisted_ops++;
+            compound->inflight_ops++;
+        } else {
+            request->compound = NULL;
+            compound->ejected_ops++;
+            if (chimera_vfs_op_is_mutating(request)) {
+                compound->ejected_mutating_ops++;
+            }
+        }
     }
 
-    /* A transaction lives on one backend thread (thread-local backend state); an
+    /* A compound lives on one backend thread (thread-local backend state); an
      * enlisted op (or the end op) must run on the thread the begin ran on, so
-     * route by the transaction's affinity key rather than this op's own fh_hash. */
-    uint64_t route_hash = request->transaction ? request->transaction->route_hash
+     * route by the compound's affinity key rather than this op's own fh_hash. */
+    uint64_t route_hash = request->compound ? request->compound->route_hash
                                                : request->fh_hash;
 
     if ((module->capabilities & CHIMERA_VFS_CAP_BLOCKING) &&

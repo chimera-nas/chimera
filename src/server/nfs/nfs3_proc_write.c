@@ -18,7 +18,7 @@ static void chimera_nfs3_write_begin_attempt(
 
 /*
  * Terminal error path: release the write iovecs (taken from the RPC message)
- * and send a WRITE3res carrying `vfs_error`.  Used when the transaction
+ * and send a WRITE3res carrying `vfs_error`.  Used when the compound
  * could not begin, an op failed logically, or the retry budget is exhausted.
  */
 static void
@@ -46,20 +46,20 @@ chimera_nfs3_write_finish_error(
     nfs_request_free(thread, req);
 } /* chimera_nfs3_write_finish_error */
 
-/* Conflict path: replay the whole op from BeginTransaction (reusing the stable
- * txn_ts so wait-die can't starve it), or give up after the retry budget. */
+/* Conflict path: replay the whole op from compound_begin (reusing the stable
+ * compound_ts so wait-die can't starve it), or give up after the retry budget. */
 static void
 chimera_nfs3_write_retry(struct nfs_request *req)
 {
-    if (++req->txn_attempt > CHIMERA_NFS3_TXN_MAX_RETRIES) {
+    if (++req->compound_attempt > CHIMERA_NFS3_COMPOUND_MAX_RETRIES) {
         chimera_nfs3_write_finish_error(req, CHIMERA_VFS_OK, NFS3ERR_JUKEBOX);
         return;
     }
     chimera_nfs3_write_begin_attempt(req);
 } /* chimera_nfs3_write_retry */
 
-/* EndTransaction(ABORT) completion after an op failure or a mid-op conflict.
- * Abort always succeeds; decide retry-vs-error from the saved op status. */
+/* compound_end(ABORT) completion after an op failure or a mid-op conflict.
+* Abort always succeeds; decide retry-vs-error from the saved op status. */
 static void
 chimera_nfs3_write_aborted(
     enum chimera_vfs_error error_code,
@@ -69,14 +69,14 @@ chimera_nfs3_write_aborted(
 
     (void) error_code;
 
-    if (req->txn_op_status == CHIMERA_VFS_ETXN_CONFLICT) {
+    if (req->compound_op_status == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
         chimera_nfs3_write_retry(req);
     } else {
-        chimera_nfs3_write_finish_error(req, req->txn_op_status, 0);
+        chimera_nfs3_write_finish_error(req, req->compound_op_status, 0);
     }
 } /* chimera_nfs3_write_aborted */
 
-/* EndTransaction(COMMIT) completion: the durable point.  The client is ACKed
+/* compound_end(COMMIT) completion: the durable point.  The client is ACKed
  * only here.  A commit-time conflict (cairn optimistic validation) replays. */
 static void
 chimera_nfs3_write_committed(
@@ -90,8 +90,8 @@ chimera_nfs3_write_committed(
     struct WRITE3args                *args   = req->args_write;
     int                               rc;
 
-    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
-        /* Already rolled back by EndTransaction; drop the handle and replay. */
+    if (error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
+        /* Already rolled back by compound_end; drop the handle and replay. */
         chimera_vfs_release(thread->vfs_thread, req->handle);
         req->handle = NULL;
         chimera_nfs3_write_retry(req);
@@ -124,30 +124,30 @@ chimera_nfs3_write_op_complete(
     struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct WRITE3args                *args   = req->args_write;
-    enum chimera_vfs_txn_end          end_flag;
+    enum chimera_vfs_compound_end     end_flag;
 
     (void) sync;
 
-    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
-        /* wait-die abort mid-op: drop the handle, abort the txn, then replay.
+    if (error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
+        /* wait-die abort mid-op: drop the handle, abort the compound, then replay.
          * The write iovecs are NOT released -- the replay re-issues the write. */
-        req->txn_op_status = error_code;
+        req->compound_op_status = error_code;
         chimera_vfs_release(thread->vfs_thread, req->handle);
         req->handle = NULL;
-        chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                    CHIMERA_VFS_TXN_ABORT,
-                                    chimera_nfs3_write_aborted, req);
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                                 CHIMERA_VFS_COMPOUND_ABORT,
+                                 chimera_nfs3_write_aborted, req);
         return;
     }
 
     if (error_code != CHIMERA_VFS_OK) {
-        /* Logical failure: one NFS3 op == one txn, so abort it, then reply. */
-        req->txn_op_status = error_code;
+        /* Logical failure: one NFS3 op == one compound, so abort it, then reply. */
+        req->compound_op_status = error_code;
         chimera_vfs_release(thread->vfs_thread, req->handle);
         req->handle = NULL;
-        chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                    CHIMERA_VFS_TXN_ABORT,
-                                    chimera_nfs3_write_aborted, req);
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                                 CHIMERA_VFS_COMPOUND_ABORT,
+                                 chimera_nfs3_write_aborted, req);
         return;
     }
 
@@ -156,19 +156,19 @@ chimera_nfs3_write_op_complete(
      * is acknowledged only once the commit is durable.  Honor the requested
      * stability via the commit flag. */
     end_flag = (args->stable == CHIMERA_VFS_WRITE_UNSTABLE)
-               ? CHIMERA_VFS_TXN_COMMIT_ASYNC : CHIMERA_VFS_TXN_COMMIT_SYNC;
+               ? CHIMERA_VFS_COMPOUND_COMMIT : CHIMERA_VFS_COMPOUND_COMMIT_DURABLE;
 
     req->res_write.status          = NFS3_OK;
     req->res_write.resok.count     = length;
-    req->res_write.resok.committed = (end_flag == CHIMERA_VFS_TXN_COMMIT_SYNC)
+    req->res_write.resok.committed = (end_flag == CHIMERA_VFS_COMPOUND_COMMIT_DURABLE)
                                        ? CHIMERA_VFS_WRITE_FILESYNC
                                        : CHIMERA_VFS_WRITE_UNSTABLE;
     memcpy(req->res_write.resok.verf, &thread->shared->nfs_verifier,
            sizeof(req->res_write.resok.verf));
     chimera_nfs3_set_wcc_data(&req->res_write.resok.file_wcc, pre_attr, post_attr);
 
-    chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                end_flag, chimera_nfs3_write_committed, req);
+    chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                             end_flag, chimera_nfs3_write_committed, req);
 } /* chimera_nfs3_write_op_complete */
 
 static void
@@ -183,16 +183,16 @@ chimera_nfs3_write_open_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         /* open_fh failed (possibly a wait-die conflict): abort + retry/error. */
-        req->txn_op_status = error_code;
-        chimera_vfs_end_transaction(thread->vfs_thread, &req->cred, req->txn,
-                                    CHIMERA_VFS_TXN_ABORT,
-                                    chimera_nfs3_write_aborted, req);
+        req->compound_op_status = error_code;
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred, req->compound,
+                                 CHIMERA_VFS_COMPOUND_ABORT,
+                                 chimera_nfs3_write_aborted, req);
         return;
     }
 
     req->handle = handle;
 
-    chimera_vfs_write(thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_write(thread->vfs_thread, &req->cred, req->compound,
                       handle,
                       args->offset,
                       args->count,
@@ -210,16 +210,20 @@ chimera_nfs3_write_begin_attempt(struct nfs_request *req)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
 
-    /* Begin is local and synchronous (NULL handle => non-transactional backend,
-     * autocommit); it cannot conflict, so go straight to the open.  req->fh is
-     * the decoded file handle (set by chimera_nfs3_decode_fh in the entry). */
-    req->txn = chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
-                                             req->fh,
-                                             req->fhlen,
-                                             CHIMERA_VFS_TXN_WRITE,
-                                             req->txn_ts);
+    /* Begin is local, synchronous, and never NULL (on a non-compound backend
+     * the handle is unbound and every op ejects -> autocommit, as before);
+     * it cannot conflict, so go straight to the open.  RETRYABLE: this
+     * driver replays the whole op on ECOMPOUND_CONFLICT with the stable ts.
+     * req->fh is the decoded file handle (set by chimera_nfs3_decode_fh in
+     * the entry). */
+    req->compound = chimera_vfs_compound_begin(thread->vfs_thread, &req->cred,
+                                               req->fh,
+                                               req->fhlen,
+                                               CHIMERA_VFS_COMPOUND_WRITE,
+                                               req->compound_ts,
+                                               CHIMERA_VFS_COMPOUND_RETRYABLE);
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -281,8 +285,8 @@ chimera_nfs3_write(
 
     /* One stable wait-die priority for the life of this op, reused across every
      * retry so the op can't starve. */
-    req->txn_ts      = chimera_vfs_txn_alloc_ts(thread->vfs_thread);
-    req->txn_attempt = 0;
+    req->compound_ts      = chimera_vfs_compound_alloc_ts(thread->vfs_thread);
+    req->compound_attempt = 0;
 
     chimera_nfs3_write_begin_attempt(req);
 } /* chimera_nfs3_write */

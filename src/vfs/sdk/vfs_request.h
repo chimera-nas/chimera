@@ -115,8 +115,8 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_CLAIM_RELEASE            43
 #define CHIMERA_VFS_OP_READ_PLUS                44
 #define CHIMERA_VFS_OP_WRITE_SAME               45
-#define CHIMERA_VFS_OP_BEGIN_TRANSACTION        46
-#define CHIMERA_VFS_OP_END_TRANSACTION          47
+#define CHIMERA_VFS_OP_COMPOUND_BEGIN           46
+#define CHIMERA_VFS_OP_COMPOUND_END             47
 #define CHIMERA_VFS_OP_NUM                      48
 
 #define CHIMERA_VFS_OPEN_CREATE                 (1U << 0)
@@ -457,48 +457,147 @@ struct chimera_vfs_stream_entry {
 
 struct chimera_vfs_notify_gate;
 
-/* Explicit multi-operation transactions (CHIMERA_VFS_CAP_TRANSACTIONAL).
+/* Explicit multi-operation compounds (CHIMERA_VFS_CAP_COMPOUND).
  *
- * chimera_vfs_begin_transaction() returns a handle which the caller attaches to
- * every subsequent op via request->transaction; the backend enlists the op in
- * that transaction and defers durability until chimera_vfs_end_transaction().
- * One client request (an NFS3 op, an S3 request, later an NFS4/SMB2 compound)
- * is run under one transaction so the backend amortises a single intent-log FUA
- * / RocksDB commit over the whole sequence and commits it before the client is
- * ACKed.
+ * A compound is a GROUPING TOKEN, not a transaction.  chimera_vfs_compound_begin()
+ * returns a handle which the caller attaches to every subsequent op via
+ * request->compound; the portable obligation is only "keep these operations
+ * together as well as the owning backend can manage" -- best-effort, never
+ * all-or-nothing.  One client request (an NFS3 op, an S3 request, an NFS4/SMB2
+ * compound) runs under one compound so an engine backend can amortise a single
+ * intent-log FUA / RocksDB commit over the whole sequence.
+ *
+ * Ownership and ejection: a compound is owned by exactly one {module, mount}.
+ * An enlisted op that resolves elsewhere (a path walk crossing a mount or
+ * junction) is EJECTED: it runs standalone (autocommit), routed by its own
+ * fh_hash, and its effects are independent of the compound's commit/abort.
+ *
+ * Ordering: only the consumer's own issue-after-completion chaining orders
+ * member ops.  An enlisted op may be issued only after all previously enlisted
+ * completions were observed, and the end op only after all of them.
+ *
+ * Visibility and isolation: none promised.  The system observation layer (the
+ * shared attr/name caches, change-notify, the open-handle cache) publishes each
+ * op's effects immediately, enlisted or not.  A backend MAY provide
+ * read-your-writes inside a compound; consumers must not rely on it, and no
+ * compound -- read-only included -- is promised a consistent snapshot.
+ *
+ * Atomicity: permitted, never promised.  An engine MAY apply a compound
+ * atomically.  ABORT means best-effort discard: a backend MAY discard staged
+ * effects, but effects already applied, observed, or ejected survive.  A failed
+ * member op never poisons the compound; ending with COMMIT after member
+ * failures keeps what ran (NFS4/SMB wire semantics require this).
+ *
+ * Conflicts and retry: only an engine backend may fail with
+ * CHIMERA_VFS_ECOMPOUND_CONFLICT, which obligates a consumer that opted into
+ * replay to re-run the whole compound with the same wait-die ts.  A compound
+ * that had any op ejected must never be replayed (the ejected op already
+ * committed standalone; a replay would double-execute it) -- it is completed
+ * with the retriable CHIMERA_VFS_ECOMPOUND_EXHAUSTED instead.
+ *
+ * End flags: ABORT / COMMIT / COMMIT_DURABLE.  COMMIT_DURABLE makes the
+ * compound's effects durable before the end callback as far as the backend can
+ * promise (engine sync commit; a proxy may flush dirtied files; elsewhere a
+ * no-op).  COMMIT commits without the durability barrier.
+ *
+ * Liveness: a backend must never let an operation block indefinitely on state
+ * held by an idle compound (one whose consumer is waiting in userspace); it
+ * must fail such contention as a conflict/retriable error (optimistic
+ * validation, no-wait/wait-die, or embrace detection).  The core, in turn, must
+ * not park an enlisted op in core layers (claim/lease waits, notify gates)
+ * while the compound holds backend state -- such parks eject the op, or the
+ * consumer ends the compound before parking.
+ *
+ * Lifecycle: begin never fails (an unbound header binds lazily at the first op
+ * on a capable mount, and a compound may end without ever binding at zero
+ * backend cost).  Ops exempt by class (mount/umount/mkfs/rmfs, close/release,
+ * claim/recall) are contractually outside compounds.
  *
  * The handle is largely backend-private, but it begins with a small core-owned
  * header the VFS core reads directly: `ts` is the wait-die priority (lower =
- * older = wins; assigned once by the caller and reused across retries so a
- * conflicting transaction never starves), and `route_hash` pins every enlisted
+ * older = wins; assigned once by the caller and reused across replays so a
+ * conflicting compound never starves), and `route_hash` pins every enlisted
  * op + the end op to the same backend thread the begin ran on (mandatory for
- * thread-local backend transaction state).  A transactional backend embeds this
- * header as the first member of its own (pooled) transaction object and returns
- * a pointer to it, so an enlisted op recovers the backend object by casting
- * request->transaction back to the backend type. */
-enum chimera_vfs_txn_mode {
-    CHIMERA_VFS_TXN_READ,          /* read-only: consistent snapshot, no durability */
-    CHIMERA_VFS_TXN_WRITE,         /* may mutate */
+ * thread-local backend compound state).  A compound-capable backend embeds this
+ * header as the first member of its own (pooled) compound object, so an
+ * enlisted op recovers the backend object by casting request->compound back to
+ * the backend type. */
+enum chimera_vfs_compound_mode {
+    CHIMERA_VFS_COMPOUND_READ,          /* no member op will mutate */
+    CHIMERA_VFS_COMPOUND_WRITE,         /* may mutate */
 };
 
-enum chimera_vfs_txn_end {
-    CHIMERA_VFS_TXN_ABORT,         /* discard all enlisted effects */
-    CHIMERA_VFS_TXN_COMMIT_ASYNC, /* commit, no FUA/fsync (UNSTABLE) */
-    CHIMERA_VFS_TXN_COMMIT_SYNC,  /* commit durably (FUA/fsync) */
+enum chimera_vfs_compound_end {
+    CHIMERA_VFS_COMPOUND_ABORT,         /* best-effort discard of staged effects */
+    CHIMERA_VFS_COMPOUND_COMMIT,        /* commit, no durability barrier */
+    CHIMERA_VFS_COMPOUND_COMMIT_DURABLE, /* commit; durable before the end
+                                          * callback, as far as the backend
+                                          * can promise */
 };
 
-struct chimera_vfs_transaction {
-    uint64_t                   ts; /* wait-die priority (core-owned) */
-    uint64_t                   route_hash; /* dispatch affinity key (core-owned) */
-    enum chimera_vfs_txn_mode mode;        /* core-owned */
-    struct chimera_vfs_module *module;     /* core-owned */
-    /* The named filesystem the hint FH belongs to, captured at begin so the
-     * end op can be routed with the same context (core-owned). */
-    void                      *mount_private;
+/* Compound flags (chimera_vfs_compound_begin / chimera_vfs_compound.flags).
+ *
+ * RETRYABLE: the consumer opted into whole-compound replay -- on
+ * ECOMPOUND_CONFLICT it re-runs every member op from the top with the same
+ * wait-die ts.  Without it the core rewrites a delivered conflict into the
+ * retriable-but-never-replayed ECOMPOUND_EXHAUSTED, so a backend conflict
+ * never obligates a consumer that cannot replay.
+ *
+ * LOOSE: the compound never binds to a backend; every op attached to it is
+ * ejected and runs standalone (autocommit).  chimera_vfs_compound_loose()
+ * returns a per-thread LOOSE singleton for callers that want a
+ * compound-shaped handle with pure autocommit semantics at zero cost. */
+#define CHIMERA_VFS_COMPOUND_RETRYABLE (1U << 0)
+#define CHIMERA_VFS_COMPOUND_LOOSE     (1U << 1)
+
+struct chimera_vfs_compound {
+    uint64_t ts;                   /* wait-die priority (core-owned) */
+    uint64_t route_hash;                   /* dispatch affinity key (core-owned) */
+    enum chimera_vfs_compound_mode mode;        /* core-owned */
+    uint32_t flags;                        /* CHIMERA_VFS_COMPOUND_* (core-owned) */
+
+    /* Op accounting (core-owned).  Single-thread-owned by the beginning
+     * thread -- the contract requires every member op and the end to be
+     * issued from it -- so plain (non-atomic) fields suffice.  enlisted and
+     * ejected count dispatch decisions over the compound's life; inflight is
+     * the number of enlisted ops issued but not yet completed, which the
+     * serial issue-after-completion contract keeps at 0 or 1.  Only
+     * ejected_mutating_ops != 0 vetoes replay: the core rewrites
+     * ECOMPOUND_CONFLICT to ECOMPOUND_EXHAUSTED for such a compound (an
+     * ejected MUTATING op already committed standalone; a replay would
+     * double-execute it).  Ejected read-only ops -- e.g. the root-module
+     * resolution hop every path walk starts with -- are counted in
+     * ejected_ops but are harmless to re-execute and do not forfeit the
+     * replay right.  For the per-thread LOOSE singleton
+     * (chimera_vfs_compound_loose) the counters are meaningless -- it is
+     * shared by every caller on the thread and never consulted at end. */
+    uint32_t                     enlisted_ops;
+    uint32_t                     ejected_ops;
+    uint32_t                     ejected_mutating_ops;
+    uint32_t                     inflight_ops;
+
+    /* The owning backend.  NULL = unbound: a compound is BOUND iff module is
+     * non-NULL.  An unbound compound binds lazily at the first enlisted op
+     * whose module is compound-capable (or ends without ever binding, at
+     * zero backend cost). */
+    struct chimera_vfs_module   *module;   /* core-owned */
+    /* The named filesystem the binding FH belongs to, captured at bind so
+     * every enlisted op and the end op are routed with the same context
+     * (core-owned). */
+    void                        *mount_private;
+
+    /* Core-owned linkage: the beginning thread's active-compound registry (a
+     * DL list, walked at thread destroy) while the compound is live, its
+     * free pool (an LL list) between uses.  The LOOSE singleton is on
+     * neither. */
+    struct chimera_vfs_compound *prev;
+    struct chimera_vfs_compound *next;
 };
 
-typedef void (*chimera_vfs_end_txn_callback_t)(
-    enum chimera_vfs_error error_code,     /* ETXN_CONFLICT => retry from the top */
+typedef void (*chimera_vfs_compound_end_callback_t)(
+    enum chimera_vfs_error error_code,     /* ECOMPOUND_CONFLICT => replay the whole
+                                            * compound (same ts); ECOMPOUND_EXHAUSTED
+                                            * => retriable, do not replay */
     void                  *private_data);
 
 struct chimera_vfs_request {
@@ -630,11 +729,20 @@ struct chimera_vfs_request {
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
 
-    /* Non-NULL when this op is enlisted in an explicit transaction
-     * (CHIMERA_VFS_CAP_TRANSACTIONAL).  The backend recovers its transaction
+    /* Non-NULL when this op is enlisted in an explicit compound
+     * (CHIMERA_VFS_CAP_COMPOUND).  The backend recovers its compound
      * object from here and must NOT commit at op end; commit happens only at
-     * CHIMERA_VFS_OP_END_TRANSACTION.  NULL = legacy autocommit-per-op. */
-    struct chimera_vfs_transaction    *transaction;
+     * CHIMERA_VFS_OP_COMPOUND_END.  NULL = legacy autocommit-per-op. */
+    struct chimera_vfs_compound       *compound;
+    /* Core-only: set by the dispatch enlistment guard when this request was
+     * actually ENLISTED (counted in the compound's enlisted/inflight
+     * counters); consumed by chimera_vfs_complete() to decrement inflight
+     * exactly once.  request->compound alone cannot identify enlistment at
+     * completion: a request may fail in core layers (claim-layer EACCES,
+     * dispatch-time ESTALE/EROFS) after the consumer attached the compound
+     * but before the guard ever ran, and the compound control ops carry
+     * request->compound purely for routing/recovery. */
+    uint8_t                            compound_enlisted;
 
     union {
         /*
@@ -1447,12 +1555,12 @@ struct chimera_vfs_request {
         struct {
             /* begin carries nothing: the core stamps the handle (ts/mode/
              * route_hash/module) at local alloc and links it via
-             * request->transaction, so the backend's fire-and-forget begin
+             * request->compound, so the backend's fire-and-forget begin
              * handler just initializes its in-place state.  end carries the
              * commit/abort disposition and the caller's completion. */
-            enum chimera_vfs_txn_end end_flag;           /* end: commit/abort */
-            chimera_vfs_end_txn_callback_t end_callback;
-            void                          *private_data;
-        } transaction_op;
+            enum chimera_vfs_compound_end end_flag;           /* end: commit/abort */
+            chimera_vfs_compound_end_callback_t end_callback;
+            void                               *private_data;
+        } compound_op;
     };
 };
