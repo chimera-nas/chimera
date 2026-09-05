@@ -65,8 +65,8 @@ chimera_nfs3_readdir_reply(struct nfs_request *req)
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    if (req->txn_op_status != CHIMERA_VFS_OK) {
-        req->res_readdir.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_readdir.status = chimera_vfs_error_to_nfsstat3(req->compound_op_status);
     }
 
     if (req->handle) {
@@ -106,7 +106,7 @@ chimera_nfs3_readdir_complete(
         chimera_nfs3_set_post_op_attr(&res->resfail.dir_attributes, dir_attr);
     }
 
-    chimera_nfs3_txn_finish(req, error_code);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_readdir_complete */
 
 static void
@@ -120,14 +120,19 @@ chimera_nfs3_readdir_open_callback(
     uint64_t             cookieverf;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs3_txn_finish(req, error_code);
+        /* The request slot recycles unzeroed: initialize the failure post-op
+        * attr here just as the readdir completion does, or the error reply
+        * XDR-encodes stale attribute bytes (diskfs is the one backend whose
+        * directory open can fail here, via OPEN_FILE_REQUIRED + ENOTDIR). */
+        chimera_nfs3_set_post_op_attr(&req->res_readdir.resfail.dir_attributes, NULL);
+        chimera_nfs3_compound_finish(req, error_code);
         return;
     }
 
     req->handle = handle;
 
     memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred, req->compound,
                         handle,
                         0,
                         CHIMERA_NFS3_ATTR_MASK,
@@ -153,7 +158,7 @@ chimera_nfs3_readdir_start(struct nfs_request *req)
 
     req->res_readdir.resok.reply.entries = NULL;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->txn,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -183,7 +188,7 @@ chimera_nfs3_readdir(
     req->args_readdir = args;
 
     /* Decode the directory handle up front so the request export/squash and
-     * routing hint are set before the transaction begins.  The per-attempt
+     * routing hint are set before the compound begins.  The per-attempt
      * cursor/reply reset lives in chimera_nfs3_readdir_start so a conflict
      * replay cannot duplicate entries. */
     res         = &req->res_readdir;
@@ -199,7 +204,7 @@ chimera_nfs3_readdir(
         return;
     }
 
-    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
-                         CHIMERA_VFS_TXN_READ,
-                         chimera_nfs3_readdir_start, chimera_nfs3_readdir_reply);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_READ,
+                              chimera_nfs3_readdir_start, chimera_nfs3_readdir_reply);
 } /* chimera_nfs3_readdir */
