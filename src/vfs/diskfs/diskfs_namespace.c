@@ -871,6 +871,14 @@ diskfs_mkdir_at_check_cb(
         return;
     }
 
+    /* An explicit create-time ACL that does not fit one b+tree record is
+     * refused before the inode is allocated, while there is nothing to roll
+     * back (the txn abort does not undo in-memory state). */
+    if (!diskfs_acl_rec_fits(request->mkdir_at.set_attr)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EFBIG);
+        return;
+    }
+
     diskfs_inode_alloc_async(thread, p->txn, p->fs, diskfs_mkdir_at_alloc_cb, request);
 } /* diskfs_mkdir_at_check_cb */
 
@@ -2024,6 +2032,14 @@ diskfs_open_at_check_cb(
             !diskfs_inode_access(thread, p->inode_stash[0], request->cred,
                                  CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE)) {
             diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
+            return;
+        }
+
+        /* An explicit create-time ACL that does not fit one b+tree record is
+         * refused before the inode is allocated, while there is nothing to
+         * roll back (the txn abort does not undo in-memory state). */
+        if (!diskfs_acl_rec_fits(request->open_at.set_attr)) {
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EFBIG);
             return;
         }
 

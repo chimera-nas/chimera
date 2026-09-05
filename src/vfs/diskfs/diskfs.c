@@ -200,7 +200,10 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
         CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
-        CHIMERA_VFS_CAP_CLONE_RANGE,
+        CHIMERA_VFS_CAP_CLONE_RANGE |
+        /* diskfs persists the canonical ACL (DISKFS_REC_ACL) and the native
+         * owner/group SIDs (DISKFS_REC_SID); advertise it like memfs/cairn. */
+        CHIMERA_VFS_CAP_ACL_NATIVE,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,
