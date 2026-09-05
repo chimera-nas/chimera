@@ -507,9 +507,9 @@ chimera_nfs4_marshall_attrs(
                                             (1 << FATTR4_FILES_TOTAL) |
                                             /* fs_locations */
                                             /* hidden */
-                                            /* homogeneous */
-                                            /* maxfilesize */
-                                            /* maxlink */
+                                            (1 << FATTR4_HOMOGENEOUS) |
+                                            (1 << FATTR4_MAXFILESIZE) |
+                                            (1 << FATTR4_MAXLINK) |
                                             (1 << FATTR4_MAXNAME) |
                                             (1 << FATTR4_MAXREAD) |
                                             (1 << FATTR4_MAXWRITE));
@@ -817,6 +817,32 @@ chimera_nfs4_marshall_attrs(
             *num_rsp_mask = 1;
 
             chimera_nfs4_attr_append_uint64(&attrs, attr->va_fs_files_total);
+        }
+
+        /* The three fs-wide limits below carry the same answers the NFSv3 side
+         * of this server already gives for the same filesystem: FSF3_HOMOGENEOUS
+         * and maxfilesize UINT64_MAX from FSINFO, linkmax UINT32_MAX from
+         * PATHCONF.  Values are packed in ascending attribute order, so they
+         * precede maxname (29). */
+        if (req_mask[0] & (1 << FATTR4_HOMOGENEOUS)) {
+            rsp_mask[0]  |= (1 << FATTR4_HOMOGENEOUS);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, 1);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_MAXFILESIZE)) {
+            rsp_mask[0]  |= (1 << FATTR4_MAXFILESIZE);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint64(&attrs, UINT64_MAX);
+        }
+
+        if (req_mask[0] & (1 << FATTR4_MAXLINK)) {
+            rsp_mask[0]  |= (1 << FATTR4_MAXLINK);
+            *num_rsp_mask = 1;
+
+            chimera_nfs4_attr_append_uint32(&attrs, UINT32_MAX);
         }
 
         if (req_mask[0] & (1 << FATTR4_MAXNAME)) {
@@ -1381,7 +1407,10 @@ chimera_nfs4_validate_createattrs(
         (1 << FATTR4_FILES_AVAIL) |
         (1 << FATTR4_FILES_FREE) |
         (1 << FATTR4_FILES_TOTAL) |
-        /* no fs_locations=24, hidden=25, homogeneous=26, maxfilesize=27, maxlink=28 */
+        /* no fs_locations=24, hidden=25 */
+        (1 << FATTR4_HOMOGENEOUS) |
+        (1 << FATTR4_MAXFILESIZE) |
+        (1 << FATTR4_MAXLINK) |
         (1 << FATTR4_MAXNAME) |
         (1 << FATTR4_MAXREAD) |
         (1U << FATTR4_MAXWRITE);

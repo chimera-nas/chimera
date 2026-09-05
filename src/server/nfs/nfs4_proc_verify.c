@@ -169,8 +169,10 @@ verify_validate_mask(
         (1 << FATTR4_CASE_PRESERVING) | (1 << FATTR4_CHOWN_RESTRICTED) |
         (1 << FATTR4_FILEHANDLE)      | (1 << FATTR4_FILEID) |
         (1 << FATTR4_FILES_AVAIL)     | (1 << FATTR4_FILES_FREE) |
-        (1 << FATTR4_FILES_TOTAL)     | (1 << FATTR4_MAXNAME) |
-        (1 << FATTR4_MAXREAD)         | (1U << FATTR4_MAXWRITE);
+        (1 << FATTR4_FILES_TOTAL)     | (1 << FATTR4_HOMOGENEOUS) |
+        (1 << FATTR4_MAXFILESIZE)     | (1 << FATTR4_MAXLINK) |
+        (1 << FATTR4_MAXNAME)         | (1 << FATTR4_MAXREAD) |
+        (1U << FATTR4_MAXWRITE);
     static const uint32_t supported_word1 =
         (1U << (FATTR4_MODE - 32))         | (1U << (FATTR4_NUMLINKS - 32)) |
         (1U << (FATTR4_OWNER - 32))        | (1U << (FATTR4_OWNER_GROUP - 32)) |
