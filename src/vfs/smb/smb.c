@@ -424,6 +424,31 @@ chimera_smb_client_thread_init(
     return thread;
 } /* chimera_smb_client_thread_init */
 
+/*
+ * Release this connection's lazily-allocated transform scratch.
+ *
+ * Both contexts hang off the conn, so every path that ends a conn has to
+ * release them, and there are two: thread teardown, which detaches the conns
+ * it still owns, and the DISCONNECTED notify, which frees a conn that dropped
+ * while its thread was still running.  Either can come first -- a conn that
+ * disconnects mid-run never reaches the teardown loop, and one still up at
+ * teardown is freed by its notify afterwards -- so this is idempotent and both
+ * orders end with exactly one release.
+ */
+static void
+chimera_smb_client_conn_release_transform(struct chimera_smb_client_conn *conn)
+{
+    if (conn->enc_ctx) {
+        chimera_smb_encrypt_ctx_destroy(conn->enc_ctx);
+        conn->enc_ctx = NULL;
+    }
+
+    if (conn->cmp_ctx) {
+        chimera_smb_compress_ctx_destroy(conn->cmp_ctx);
+        conn->cmp_ctx = NULL;
+    }
+} /* chimera_smb_client_conn_release_transform */
+
 static void
 chimera_smb_client_thread_destroy(void *private_data)
 {
@@ -435,14 +460,7 @@ chimera_smb_client_thread_destroy(void *private_data)
      * is delivered later by evpl_destroy, after this thread struct is gone -- so
      * we null conn->thread to keep that notify from dereferencing freed state. */
     for (conn = thread->conns_list; conn; conn = conn->list_next) {
-        if (conn->enc_ctx) {
-            chimera_smb_encrypt_ctx_destroy(conn->enc_ctx);
-            conn->enc_ctx = NULL;
-        }
-        if (conn->cmp_ctx) {
-            chimera_smb_compress_ctx_destroy(conn->cmp_ctx);
-            conn->cmp_ctx = NULL;
-        }
+        chimera_smb_client_conn_release_transform(conn);
         conn->thread = NULL;
         if (conn->bind && !conn->closing) {
             conn->closing = 1;
@@ -1054,6 +1072,8 @@ chimera_smb_client_notify(
                     thread->conns[conn->server->index] = NULL;
                 }
             }
+
+            chimera_smb_client_conn_release_transform(conn);
 
             free(conn);
             break;
