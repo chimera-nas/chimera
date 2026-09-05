@@ -22,6 +22,23 @@
  * transports are already gone.
  */
 
+/*
+ * DESTROY_CLIENTID can arrive while this client's own CLOSEs are still in
+ * flight, and the server must refuse it then: RFC 8881 s18.50.3 makes
+ * NFS4ERR_CLIENTID_BUSY a MUST while opens remain on the lease.  That refusal
+ * is transient -- the opens being counted are ones this client has already
+ * closed, whose CLOSEs have not yet been processed -- so retry briefly rather
+ * than accept it.
+ *
+ * Accepting it is expensive out of all proportion to the window.  Giving up
+ * leaves the clientid, and every VFS handle behind its opens, held until the
+ * lease expires (90s by default), which is exactly the "cannot unmount the
+ * export" state the comment above says this teardown exists to prevent.  The
+ * cost of getting it wrong is 90 seconds; the cost of waiting is milliseconds.
+ */
+#define NFS4_UMOUNT_DESTROY_RETRY_US     50000    /* 50ms between attempts */
+#define NFS4_UMOUNT_DESTROY_MAX_ATTEMPTS 40       /* ~2s, well under the lease */
+
 struct chimera_nfs4_umount_teardown {
     struct chimera_nfs_thread          *thread;
     struct chimera_nfs_shared          *shared;
@@ -29,10 +46,27 @@ struct chimera_nfs4_umount_teardown {
     struct chimera_nfs_client_server   *server;
     struct chimera_nfs4_client_session *session;
     struct evpl_rpc2_conn              *conn;
+    struct evpl_timer                   retry_timer;
+    int                                 destroy_attempts;
 };
 
 static void chimera_nfs4_umount_send_destroy_session(
     struct chimera_nfs4_umount_teardown *td);
+static void chimera_nfs4_umount_send_destroy_clientid(
+    struct chimera_nfs4_umount_teardown *td);
+
+static void
+chimera_nfs4_umount_destroy_retry_timer(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_nfs4_umount_teardown *td =
+        container_of(timer, struct chimera_nfs4_umount_teardown, retry_timer);
+
+    (void) evpl;
+
+    chimera_nfs4_umount_send_destroy_clientid(td);
+} /* chimera_nfs4_umount_destroy_retry_timer */
 
 static void
 chimera_nfs4_umount_teardown_done(struct chimera_nfs4_umount_teardown *td)
@@ -62,11 +96,27 @@ chimera_nfs4_umount_destroy_clientid_callback(
     (void) evpl;
     (void) verf;
 
+    /* Transient: our own CLOSEs have not landed yet.  Wait for them rather
+     * than stranding the clientid -- and every handle behind its opens --
+     * for the rest of the lease. */
+    if (!status && res && res->status == NFS4ERR_CLIENTID_BUSY &&
+        ++td->destroy_attempts < NFS4_UMOUNT_DESTROY_MAX_ATTEMPTS) {
+        evpl_add_oneshot_timer(td->thread->evpl, &td->retry_timer,
+                               chimera_nfs4_umount_destroy_retry_timer,
+                               NFS4_UMOUNT_DESTROY_RETRY_US);
+        return;
+    }
+
     if (status || !res || res->status != NFS4_OK) {
-        chimera_nfsclient_debug(
-            "NFS4 DESTROY_CLIENTID to %s did not succeed (rpc %d, nfs %d); "
-            "the server will expire the clientid with the lease",
-            td->server->hostname, status, res ? res->status : -1);
+        /* Error, not debug: reaching here means the export cannot be
+         * unmounted until the lease expires, which is a minute and a half of
+         * EBUSY that otherwise has to be inferred from its symptoms. */
+        chimera_nfsclient_error(
+            "NFS4 DESTROY_CLIENTID to %s did not succeed after %d attempt(s) "
+            "(rpc %d, nfs %d); the server will expire the clientid with the "
+            "lease, and the export stays busy until it does",
+            td->server->hostname, td->destroy_attempts + 1, status,
+            res ? res->status : -1);
     }
 
     chimera_nfs4_umount_teardown_done(td);
