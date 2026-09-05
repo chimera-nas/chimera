@@ -202,14 +202,8 @@ expand_generic_mask(uint32_t m)
  * translated ACE-by-ACE.  Falls back to recognising the modefromsid encoding
  * (S-1-5-88-3-<mode>) to recover a POSIX mode.  Returns 0 on success.
  */
-/* Collects real (non-algorithmic) SID strings a decode pass could not resolve,
-* so the SET_SECURITY handler can resolve them off the event loop and retry. */
-#define SMB_MAX_UNRES_SIDS 16
-struct smb_unres_sids {
-    char sids[SMB_MAX_UNRES_SIDS][CHIMERA_IDMAP_SID_MAX];
-    int  count;
-};
-
+/* struct smb_unres_sids is declared in smb_procs.h (the decoder is exported
+ * for the unit tests); this records one SID in it, deduplicated. */
 static void
 smb_unres_record(
     struct smb_unres_sids *unres,
@@ -229,7 +223,7 @@ smb_unres_record(
     unres->count++;
 } /* smb_unres_record */
 
-static int
+SYMBOL_EXPORT int
 chimera_smb_sd_to_acl(
     const uint8_t            *sd_buf,
     uint32_t                  sd_len,
@@ -528,7 +522,7 @@ chimera_smb_emit_group_sid(
     return SID_UNIX_SIZE;
 } /* chimera_smb_emit_group_sid */
 
-int
+SYMBOL_EXPORT int
 chimera_smb_acl_to_sd(
     uint32_t                  uid,
     uint32_t                  gid,
@@ -840,7 +834,7 @@ chimera_smb_parse_sd_to_attrs(
     }
 } /* chimera_smb_parse_sd_to_attrs */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_parse_sd_to_acl(
     const uint8_t            *sd_buf,
     uint32_t                  sd_len,

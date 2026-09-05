@@ -56,6 +56,16 @@ target_include_directories(phase0_contexts_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/phase0_contexts_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/phase0_contexts_test)
 
+# Security-descriptor native-SID round trip: the SD decoder and
+# emitter driven directly, with and without an identity authority.
+add_executable(smb_sd_sid_test smb_sd_sid_test.c)
+target_link_libraries(smb_sd_sid_test chimera_server chimera_smb chimera_vfs
+    chimera_vfs_memfs chimera_vfs_memkv evpl)
+target_include_directories(smb_sd_sid_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/sd_sid_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_sd_sid_test)
+
 # SMB2 request-parse hardening: checked cursor primitives, safe seek, and
 # CREATE-context bounds arithmetic against malformed/adversarial input.
 add_executable(smb_harden_test smb_harden_test.c)

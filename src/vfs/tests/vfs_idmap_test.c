@@ -94,8 +94,16 @@ test_sid_roundtrip(void)
     assert(chimera_idmap_sid_to_principal("S-1-22-2-200", &q) == 0);
     assert(q.type == CHIMERA_PRINCIPAL_GROUP && q.id == 200);
 
-    /* unrecognised SID is rejected */
+    /* a real domain SID is not algorithmic: the idmap rejects it, and it is
+     * the SMB layer that keeps it on the principal (see smb_sd_sid_test) */
     assert(chimera_idmap_sid_to_principal("S-1-5-21-1-2-3-4", &q) == -1);
+
+    /* the constructors build SID-less principals: an algorithmic identity
+     * carries no stored native SID */
+    p = chimera_idmap_uid_principal(1234);
+    assert(!chimera_sid_present(&p.sid));
+    p = chimera_idmap_special_principal(CHIMERA_WHO_EVERYONE);
+    assert(!chimera_sid_present(&p.sid));
 
     TEST_PASS("Windows SID strings round-trip (special + numeric + interop)");
 } /* test_sid_roundtrip */
