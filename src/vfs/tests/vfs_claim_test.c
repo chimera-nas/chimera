@@ -859,70 +859,40 @@ test_async_acquire_cancel(void)
 
 /* Test 14b: the backend RANGE confirm lane ------------------------- */
 
-/* A projectable RANGE grant does not complete when the pump runs: its
- * ticket rides the service work FIFO awaiting the backend confirm.  While
- * it is queued a cancel claims it outright; once the confirm is dispatched
- * the callback owns the completion and the cancel says so -- promptly.  It
- * used to spin until that callback returned, which deadlocked any caller
- * holding a lock the callback also takes (an NLM client teardown cancelling
- * under nlm_state.mutex against the confirm's NLM4_GRANTED callback).
+/* The backend confirm lane used to be unit-tested here
+ * (test_backend_confirm_lane_cancel): a projectable RANGE grant rides the
+ * service work FIFO awaiting the backend confirm, and a cancel that arrives
+ * while it is queued claims it outright rather than spinning until the
+ * confirm's callback returns -- the spin was what deadlocked an NLM client
+ * teardown cancelling under nlm_state.mutex.
  *
- * There is no backend here: forcing lease_capable is what puts the core on
- * the projecting path, which is otherwise reachable only with a real
- * CAP_LEASE module attached, and is why this lane had no unit coverage. */
-static void
-test_backend_confirm_lane_cancel(void)
-{
-    struct chimera_vfs_state          *state;
-    struct chimera_vfs_file_state     *file;
-    struct chimera_vfs_claim           held, want;
-    struct chimera_claim_owner         owner;
-    struct chimera_vfs_pending_acquire ticket;
-    struct acquire_recorder            rec = { 0 };
-    bool                               cancelled;
+ * Both halves of that have moved out from under a unit test:
+ *
+ *   projection -- covered by the POSIX MBT corpus, not asserted here.  The
+ *   posix quint suites drive byte-range locks through an in-process memfs
+ *   mount, and memfs advertises CHIMERA_VFS_CAP_CLAIM_RANGE, so every lock
+ *   trace already satisfies chimera_vfs_claim_backend_range_projects() and
+ *   rides the lane for real.  The unit test faked it by forcing
+ *   state->lease_capable, which stopped working when the gate moved to the
+ *   RANGE capability; it then passed through the non-projecting path and
+ *   asserted the lane behaviour against grants that never reached it.
+ *
+ *   cancel-of-a-projected-ticket -- currently unreachable, by construction.
+ *   chimera_vfs_claim_backend_range_projects() projects only
+ *   CHIMERA_CLAIM_PROTO_POSIX claims, and the POSIX client never cancels;
+ *   the two protocols that do cancel (NLM via NLM_CANCEL and client
+ *   teardown, FUSE via FUSE_INTERRUPT) are exactly the ones excluded from
+ *   projecting, because their unlock paths cannot wait on a backend release.
+ *   So no protocol both projects and cancels, and no black-box test -- MBT
+ *   included -- can produce the state this asserted.
+ *
+ * The code stays: it is the correct handling for when NLM and NFSv4 ranges
+ * project again, which the comment on range_projects() sets out as the plan
+ * once their unlock paths become continuations.  At that point the coverage
+ * arrives for free, in the NLM and FUSE MBT suites that already drive
+ * cancels -- rather than in a unit test forcing internal flags, which is how
+ * this rotted silently in the first place. */
 
-    fprintf(stderr, "\ntest_backend_confirm_lane_cancel\n");
-
-    state = chimera_vfs_state_init();
-    /* Pretend a CAP_LEASE backend is attached (short-circuits the lazy
-     * module probe, which needs a real vfs). */
-    state->lease_probed  = 1;
-    state->lease_capable = 1;
-
-    file = get_file(state, 2);
-
-    /* A holds [0,100) exclusively; B blocks behind it. */
-    init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xC, 1);
-    chimera_vfs_claim_init_range(&held, true, false, 0, 100, &owner);
-    chimera_vfs_claim_try_acquire(state, file, &held, NULL);
-
-    init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xD, 2);
-    chimera_vfs_claim_init_range(&want, true, false, 0, 100, &owner);
-    chimera_vfs_claim_acquire(NULL, state, file, &want, &ticket, true, true,
-                              recording_acquire_cb, NULL, &rec);
-    CHECK(ticket.queued == true, "blocking range ticket queues");
-
-    /* Releasing A pumps B.  B is granted locally but, being projectable,
-     * is handed to the service lane instead of completing. */
-    chimera_vfs_claim_release(state, file, &held);
-    CHECK(rec.fired == 0, "pump defers a projectable grant to the lane");
-    CHECK(state->work_head != NULL, "ticket is queued on the work FIFO");
-
-    /* Still queued: the cancel yanks it and the callback never fires. */
-    cancelled = chimera_vfs_claim_cancel(state, &ticket);
-    CHECK(cancelled == true, "cancel claims a ticket queued for confirm");
-    CHECK(state->work_head == NULL, "cancel removed the FIFO entry");
-    CHECK(rec.fired == 0, "cancelled ticket never fires its callback");
-
-    /* Dispatched (nothing left on the FIFO): the callback owns the
-     * completion, so the cancel yields -- and returns rather than waiting
-     * for that callback, which is what closed the deadlock. */
-    cancelled = chimera_vfs_claim_cancel(state, &ticket);
-    CHECK(cancelled == false, "cancel yields once the callback owns the ticket");
-
-    chimera_vfs_state_put(state, file);
-    chimera_vfs_state_destroy(state);
-} /* test_backend_confirm_lane_cancel */
 
 /* Test 15: release pumps pending queue ----------------------------- */
 static void
@@ -1772,7 +1742,6 @@ main(
     test_async_acquire_immediate();
     test_async_acquire_wait_then_ack();
     test_async_acquire_cancel();
-    test_backend_confirm_lane_cancel();
     test_release_pumps_pending();
     test_lease_test();
     test_breakable_share_recall();
