@@ -1482,6 +1482,29 @@ nfs_layout_state_destroy(
     pthread_mutex_unlock(&client->lock);
 } /* nfs_layout_state_destroy */
 
+void
+nfs_layout_state_destroy_all(
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    pthread_mutex_lock(&client->lock);
+
+    /* The uthash delete-during-iteration idiom trips scan-build's
+     * use-after-free checker; guard it the way the client teardown above
+     * guards the identical loop. */
+#ifndef __clang_analyzer__
+    struct nfs_layout_state *ly, *ly_tmp;
+
+    HASH_ITER(hh, client->layouts_by_fh, ly, ly_tmp)
+    {
+        layout_state_destroy_locked(client, ly, table, vfs_thread);
+    }
+#endif /* ifndef __clang_analyzer__ */
+
+    pthread_mutex_unlock(&client->lock);
+} /* nfs_layout_state_destroy_all */
+
 struct nfs_lock_owner *
 nfs_lock_owner_find_or_create(
     struct nfs_client *client,
