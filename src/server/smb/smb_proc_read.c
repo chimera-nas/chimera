@@ -242,10 +242,16 @@ chimera_smb_read(struct chimera_smb_request *request)
      * is NOT a parameter error: the read proceeds and the callback returns
      * END_OF_FILE when fewer than MinimumCount bytes are read.  Because the
      * first clause bounds offset to INT64_MAX, the offset+length sum cannot
-     * overflow uint64. */
+     * overflow uint64.
+     *
+     * MaxReadSize is this connection's negotiated value, not the largest the
+     * server ever advertises: without SMB2_GLOBAL_CAP_LARGE_MTU it is 64 KiB,
+     * and the 8 MiB literal this used to compare against accepted reads 128x
+     * over the advertised limit. */
     if (request->read.offset > 0x7FFFFFFFFFFFFFFFULL ||
         request->read.offset + request->read.length > 0x7FFFFFFFFFFFFFFFULL ||
-        request->read.length > (8 * 1024 * 1024)) {
+        request->read.length >
+        chimera_smb_max_rw_size(request->compound->conn)) {
         chimera_smb_open_file_release(request, request->read.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
