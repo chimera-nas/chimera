@@ -145,6 +145,17 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 return;
             }
 
+            /* Only named-pipe opens carry a transceive handler; a normal file
+             * open leaves it NULL.  MS-SMB2 3.3.5.15 wants an FSCTL that is
+             * invalid for the file type rejected rather than dispatched, which
+             * is also what the ncacn_np READ and WRITE paths do. */
+            if (unlikely(open_file->type != CHIMERA_SMB_OPEN_FILE_TYPE_PIPE)) {
+                chimera_smb_open_file_release(request, open_file);
+                evpl_iovecs_release(thread->evpl, request->ioctl.input_iov, request->ioctl.input_niov);
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
+                return;
+            }
+
             evpl_iovec_alloc(
                 thread->evpl,
                 65535,
