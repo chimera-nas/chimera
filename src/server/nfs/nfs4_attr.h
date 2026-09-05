@@ -241,8 +241,6 @@ chimera_nfs4_mask2attr(
     uint32_t                 *req_mask,
     uint32_t                 *rsp_mask)
 {
-    int max_word_used = 0;
-
     /*
      * num_req_mask is the client-supplied request bitmap length and is
      * unbounded (the XDR decoder does not cap it).  This routine only ever
@@ -259,32 +257,57 @@ chimera_nfs4_mask2attr(
     if (num_req_mask >= 2 &&
         (req_mask[1] & (1 << (FATTR4_MODE - 32))) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-        rsp_mask[1]  |= (1 << (FATTR4_MODE - 32));
-        max_word_used = 2;
+        rsp_mask[1] |= (1 << (FATTR4_MODE - 32));
     }
 
     if (num_req_mask >= 1 &&
         (req_mask[0] & (1 << FATTR4_SIZE)) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
-        rsp_mask[0]  |= (1 << FATTR4_SIZE);
-        max_word_used = 1;
+        rsp_mask[0] |= (1 << FATTR4_SIZE);
+    }
+
+    if (num_req_mask >= 1 &&
+        (req_mask[0] & (1 << FATTR4_ACL)) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)) {
+        rsp_mask[0] |= (1 << FATTR4_ACL);
+    }
+
+    if (num_req_mask >= 2 &&
+        (req_mask[1] & (1 << (FATTR4_OWNER - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_UID)) {
+        rsp_mask[1] |= (1 << (FATTR4_OWNER - 32));
+    }
+
+    if (num_req_mask >= 2 &&
+        (req_mask[1] & (1 << (FATTR4_OWNER_GROUP - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_GID)) {
+        rsp_mask[1] |= (1 << (FATTR4_OWNER_GROUP - 32));
     }
 
     if (num_req_mask >= 2 &&
         (req_mask[1] & (1 << (FATTR4_TIME_ACCESS_SET - 32))) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME)) {
-        rsp_mask[1]  |= (1 << (FATTR4_TIME_ACCESS_SET - 32));
-        max_word_used = 2;
+        rsp_mask[1] |= (1 << (FATTR4_TIME_ACCESS_SET - 32));
     }
 
     if (num_req_mask >= 2 &&
         (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
-        rsp_mask[1]  |= (1 << (FATTR4_TIME_MODIFY_SET - 32));
-        max_word_used = 2;
+        rsp_mask[1] |= (1 << (FATTR4_TIME_MODIFY_SET - 32));
     }
 
-    return max_word_used;
+    /*
+     * Derive the reply bitmap length from the words actually set rather than
+     * tracking it as each block runs: a per-block assignment is order
+     * dependent, and a word-0 attribute reported after a word-1 one (SIZE after
+     * MODE, say) would shorten the bitmap back to one word and drop the word-1
+     * attributes the client just set.
+     */
+    if (rsp_mask[1]) {
+        return 2;
+    }
+
+    return rsp_mask[0] ? 1 : 0;
 } /* chimera_nfs4_mask2attr */
 
 static inline void
