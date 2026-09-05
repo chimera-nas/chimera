@@ -410,6 +410,26 @@ chimera_server_config_set_s3_port(
     struct chimera_server_config *config,
     int                           port);
 
+/* Identity an S3 access key acts as when its configuration binds it to no
+ * user: nobody/nogroup, the conventional unprivileged pair.  An unbound key
+ * must not inherit privilege by omission. */
+#define CHIMERA_S3_ANON_UID 65534
+#define CHIMERA_S3_ANON_GID 65534
+
+void
+chimera_server_config_set_s3_anon_ids(
+    struct chimera_server_config *config,
+    uint32_t                      uid,
+    uint32_t                      gid);
+
+uint32_t
+chimera_server_config_get_s3_anon_uid(
+    const struct chimera_server_config *config);
+
+uint32_t
+chimera_server_config_get_s3_anon_gid(
+    const struct chimera_server_config *config);
+
 int
 chimera_server_config_get_s3_port(
     const struct chimera_server_config *config);
@@ -967,6 +987,7 @@ chimera_server_add_s3_cred(
     struct chimera_server *server,
     const char            *access_key,
     const char            *secret_key,
+    const char            *username,
     int                    pinned);
 
 int

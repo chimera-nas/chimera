@@ -55,10 +55,15 @@ chimera_s3_bucket_get_path(
 
 int
 chimera_s3_add_cred(
-    void       *s3_shared,
-    const char *access_key,
-    const char *secret_key,
-    int         pinned);
+    void           *s3_shared,
+    const char     *access_key,
+    const char     *secret_key,
+    int             has_identity,
+    uint32_t        uid,
+    uint32_t        gid,
+    uint32_t        ngids,
+    const uint32_t *gids,
+    int             pinned);
 
 int
 chimera_s3_remove_cred(

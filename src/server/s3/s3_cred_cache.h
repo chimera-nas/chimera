@@ -11,6 +11,8 @@
 #include <urcu/urcu-qsbr.h>
 #include <xxhash.h>
 
+#include "vfs/sdk/vfs_cred.h"
+
 #define CHIMERA_S3_ACCESS_KEY_MAX 128
 #define CHIMERA_S3_SECRET_KEY_MAX 256
 
@@ -18,6 +20,16 @@ struct chimera_s3_cred {
     int                     access_key_len;
     struct timespec         expiration;
     int                     pinned;
+    /* POSIX identity this access key acts as.  Every VFS operation an
+     * authenticated request issues runs under these ids, so the store's own
+     * ownership and mode bits are what separates one key's data from another's;
+     * the S3 layer performs no authorization of its own.  A key configured
+     * without an identity is mapped to the server's anonymous ids rather than
+     * to root. */
+    uint32_t                uid;
+    uint32_t                gid;
+    uint32_t                ngids;
+    uint32_t                gids[CHIMERA_VFS_CRED_MAX_GIDS];
     struct rcu_head         rcu;
     struct chimera_s3_cred *next;
     char                    access_key[CHIMERA_S3_ACCESS_KEY_MAX];
@@ -235,6 +247,10 @@ chimera_s3_cred_cache_add(
     struct chimera_s3_cred_cache *cache,
     const char                   *access_key,
     const char                   *secret_key,
+    uint32_t                      uid,
+    uint32_t                      gid,
+    uint32_t                      ngids,
+    const uint32_t               *gids,
     int                           pinned)
 {
     struct chimera_s3_cred *cred, *existing;
@@ -251,6 +267,16 @@ chimera_s3_cred_cache_add(
     strncpy(cred->secret_key, secret_key, sizeof(cred->secret_key) - 1);
     cred->access_key_len = access_key_len;
     cred->pinned         = pinned;
+    cred->uid            = uid;
+    cred->gid            = gid;
+
+    if (ngids > CHIMERA_VFS_CRED_MAX_GIDS) {
+        ngids = CHIMERA_VFS_CRED_MAX_GIDS;
+    }
+    cred->ngids = ngids;
+    if (ngids && gids) {
+        memcpy(cred->gids, gids, ngids * sizeof(*gids));
+    }
 
     if (!pinned) {
         chimera_s3_cred_cache_now(cache, &now);

@@ -66,7 +66,7 @@ chimera_s3_get_send_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_s3_io_free(thread, io);
         request->io_pending--;
@@ -122,7 +122,7 @@ chimera_s3_get_send(
     request->io_pending++;
 
     chimera_vfs_read(request->thread->vfs,
-                     &request->thread->shared->cred,
+                     &request->cred,
                      request->file_handle,
                      request->file_cur_offset,
                      left,
@@ -192,7 +192,7 @@ chimera_s3_get_open_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -220,7 +220,7 @@ chimera_s3_get_lookup_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -324,7 +324,7 @@ chimera_s3_get_lookup_callback(
      * the object is open. The body is only streamed for GET. */
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &request->cred,
                         attr->va_fh,
                         attr->va_fh_len,
                         0,
@@ -342,7 +342,7 @@ chimera_s3_get(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &request->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,
@@ -376,7 +376,7 @@ chimera_s3_get_object_attributes_lookup_callback(
     char                            *bp, *body_start;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -446,7 +446,7 @@ chimera_s3_get_object_attributes(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &request->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,

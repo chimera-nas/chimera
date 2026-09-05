@@ -24,7 +24,7 @@ chimera_s3_delete_remove_callback(
     chimera_vfs_release(thread->vfs, request->dir_handle);
 
     if (error_code) {
-        request->status = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
     }
 
     request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
@@ -46,7 +46,7 @@ chimera_s3_delete_open_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -59,7 +59,7 @@ chimera_s3_delete_open_callback(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred,
+    chimera_vfs_remove_at(thread->vfs, &request->cred,
                           oh,
                           request->name,
                           request->name_len,
@@ -85,7 +85,7 @@ chimera_s3_get_lookup_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(thread->evpl, request);
@@ -97,7 +97,7 @@ chimera_s3_get_lookup_callback(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &request->cred,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -141,7 +141,7 @@ chimera_s3_delete(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &request->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        dirpath,

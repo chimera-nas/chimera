@@ -997,6 +997,17 @@ main(
         }
     }
 
+    json_t *s3_anon = json_object_get(config, "s3_anon");
+    if (s3_anon && json_is_object(s3_anon)) {
+        json_t *anon_uid = json_object_get(s3_anon, "uid");
+        json_t *anon_gid = json_object_get(s3_anon, "gid");
+
+        chimera_server_config_set_s3_anon_ids(
+            server_config,
+            anon_uid ? (uint32_t) json_integer_value(anon_uid) : CHIMERA_S3_ANON_UID,
+            anon_gid ? (uint32_t) json_integer_value(anon_gid) : CHIMERA_S3_ANON_GID);
+    }
+
     server = chimera_server_init(server_config, chimera_metrics_get(metrics));
 
     json_t *users = json_object_get(config, "users");
@@ -1049,14 +1060,16 @@ main(
         {
             const char *access_key = json_string_value(json_object_get(key_entry, "access_key"));
             const char *secret_key = json_string_value(json_object_get(key_entry, "secret_key"));
+            const char *key_user   = json_string_value(json_object_get(key_entry, "username"));
 
             if (!access_key || !secret_key) {
                 chimera_server_error("S3 access key entry missing access_key or secret_key, skipping");
                 continue;
             }
 
-            chimera_server_info("Adding S3 access key %s", access_key);
-            chimera_server_add_s3_cred(server, access_key, secret_key, 1);
+            chimera_server_info("Adding S3 access key %s (user %s)", access_key,
+                                key_user ? key_user : "<unbound>");
+            chimera_server_add_s3_cred(server, access_key, secret_key, key_user, 1);
         }
     }
 

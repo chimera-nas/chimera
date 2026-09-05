@@ -13,6 +13,10 @@
 struct evpl;
 
 struct chimera_s3_part {
+    /* Identity that staged this part.  The part's temporary file is removed
+     * asynchronously, long after the request is gone, so the cleanup has to
+     * carry its own credential rather than borrow a privileged one. */
+    struct chimera_vfs_cred         cred;
     int                             part_number;
     int                             tmp_name_len;
     int                             dir_fhlen;
