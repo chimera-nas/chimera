@@ -88,6 +88,19 @@ chimera_nfs4_free_stateid(
         return;
     }
 
+    /* A layout stateid names a struct nfs_layout_state, not a lock state, and
+     * a layout still held is returned via LAYOUTRETURN.  Anything else the
+     * table can hand back is likewise not a lock state; treating it as one
+     * would type-pun the slot's object. */
+    if (state_type != NFS4_SLOT_TYPE_LOCK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->fsr_status = (state_type == NFS4_SLOT_TYPE_LAYOUT)
+                          ? NFS4ERR_LOCKS_HELD : NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, res->fsr_status);
+        return;
+    }
+
     lock_state = state_void;
 
     /* A lock stateid that still owns byte-range locks cannot be freed. */
