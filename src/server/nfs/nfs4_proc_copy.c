@@ -575,6 +575,18 @@ chimera_nfs4_copy(
             chimera_nfs4_copy_fail(refs, status);
             return;
         }
+
+        /* The source stateid must name a read-capable open of the saved
+         * filehandle (RFC 7862 §15.2.3; the open-mode rule is RFC 8881
+         * §9.1.2, the same one READ enforces).  Without it a read-denied
+         * open -- or an open of some altogether different object -- could
+         * source the copy. */
+        status = nfs_state_check_read_for_fh(refs->src_state, refs->src_type,
+                                             req->saved_fh, req->saved_fhlen);
+        if (status != NFS4_OK) {
+            chimera_nfs4_copy_fail(refs, status);
+            return;
+        }
     }
 
     if (!refs->dst_special) {

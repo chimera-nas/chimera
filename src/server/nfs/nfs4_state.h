@@ -668,18 +668,18 @@ nfs_open_state_check_principal(
 } /* nfs_open_state_check_principal */
 
 /*
- * Validate a stateid that authorizes a mutation of the current filehandle.
+ * Validate a stateid that authorizes I/O against a given filehandle.
  *
  * Returns NFS4ERR_BAD_STATEID unless `state` names an open (directly, or the
- * open a lock state is anchored to) of the object that is the current
- * filehandle -- required by RFC 7530 sec 9.1.4.3 / RFC 8881 sec 8.2.4 -- and
- * NFS4ERR_OPENMODE if that open does not carry write access.
+ * open a lock state is anchored to) of the object `fh` names -- required by
+ * RFC 7530 sec 9.1.4.3 / RFC 8881 sec 8.2.4 -- and NFS4ERR_OPENMODE if that
+ * open does not carry `want_access` (an OPEN4_SHARE_ACCESS_* bit).
  *
- * The current-filehandle half matters beyond conformance: any access check the
- * server makes against the current filehandle is only meaningful if the
- * operation actually acts on that filehandle.  An op that instead mutated some
- * other handle carried by its stateid would slip past such a check entirely.
- * The per-export read-only gate (nfs4_rofs_gate) is exactly such a check, and
+ * The filehandle half matters beyond conformance: any access check the server
+ * makes against the current filehandle is only meaningful if the operation
+ * actually acts on that filehandle.  An op that instead mutated some other
+ * handle carried by its stateid would slip past such a check entirely.  The
+ * per-export read-only gate (nfs4_rofs_gate) is exactly such a check, and
  * relies on this one to stay a dispatch-time decision.
  *
  * Delegation and layout stateids are rejected rather than misinterpreted:
@@ -687,11 +687,12 @@ nfs_open_state_check_principal(
  * must handle them before calling this.
  */
 static inline nfsstat4
-nfs_state_check_write_for_fh(
+nfs_state_check_access_for_fh(
     void          *state,
     uint8_t        type,
     const uint8_t *fh,
-    uint32_t       fh_len)
+    uint32_t       fh_len,
+    uint32_t       want_access)
 {
     const struct nfs_open_state *open_state;
 
@@ -712,12 +713,37 @@ nfs_state_check_write_for_fh(
         return NFS4ERR_BAD_STATEID;
     }
 
-    if ((open_state->share_access & OPEN4_SHARE_ACCESS_WRITE) == 0) {
+    if ((open_state->share_access & want_access) == 0) {
         return NFS4ERR_OPENMODE;
     }
 
     return NFS4_OK;
+} /* nfs_state_check_access_for_fh */
+
+/* A stateid that authorizes a mutation of the current filehandle. */
+static inline nfsstat4
+nfs_state_check_write_for_fh(
+    void          *state,
+    uint8_t        type,
+    const uint8_t *fh,
+    uint32_t       fh_len)
+{
+    return nfs_state_check_access_for_fh(state, type, fh, fh_len,
+                                         OPEN4_SHARE_ACCESS_WRITE);
 } /* nfs_state_check_write_for_fh */
+
+/* A stateid that authorizes reading a given filehandle -- COPY's source, which
+ * is the SAVED filehandle rather than the current one. */
+static inline nfsstat4
+nfs_state_check_read_for_fh(
+    void          *state,
+    uint8_t        type,
+    const uint8_t *fh,
+    uint32_t       fh_len)
+{
+    return nfs_state_check_access_for_fh(state, type, fh, fh_len,
+                                         OPEN4_SHARE_ACCESS_READ);
+} /* nfs_state_check_read_for_fh */
 
 /*
  * Public API.
