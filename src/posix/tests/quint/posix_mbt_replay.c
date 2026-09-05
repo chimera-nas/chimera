@@ -3746,6 +3746,16 @@ main(
     int         ntraces = 0;
     int         i, ran = 0, failures = 0, bad = 0;
 
+    /* Line-buffer stdout so a crash cannot swallow the progress output.
+     * These drivers print one line per trace, and both that and chimera's log
+     * (which defaults to stdout) are block-buffered when stdout is a pipe --
+     * which it always is under ctest.  glibc's abort() does not flush stdio,
+     * so on Linux an aborting run loses everything since the last 4 KB
+     * boundary, including the line naming the trace that was executing and
+     * the fatal log message itself.  That is exactly what made a CI abort
+     * here undiagnosable from its artifacts. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
             backend = argv[++i];

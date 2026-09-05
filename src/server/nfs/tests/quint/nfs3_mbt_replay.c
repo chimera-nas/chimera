@@ -1732,6 +1732,16 @@ main(
     /* Neutralize the host umask so passthrough backends (linux/io_uring) apply
      * client-sent modes verbatim and the export root keeps its 0777.  The mkfs
      * backends store modes directly and are unaffected. */
+    /* Line-buffer stdout so a crash cannot swallow the progress output.
+     * These drivers print one line per trace, and both that and chimera's log
+     * (which defaults to stdout) are block-buffered when stdout is a pipe --
+     * which it always is under ctest.  glibc's abort() does not flush stdio,
+     * so on Linux an aborting run loses everything since the last 4 KB
+     * boundary, including the line naming the trace that was executing and
+     * the fatal log message itself.  That is exactly what made a CI abort
+     * here undiagnosable from its artifacts. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     umask(0);
 
     /* --trace/--trace-dir/--exclude-prefix are gathered from the raw argv by
