@@ -977,7 +977,8 @@ host_to_linux(int e)
 /* ---- known-deviation registry (mirror of posix_deviations.py) ------------ */
 
 #define DEV_ANY (-1)
-enum devctx { CTX_ALWAYS, CTX_DFD, CTX_SLASH, CTX_NLONG, CTX_ACCW, CTX_SMB };
+enum devctx { CTX_ALWAYS, CTX_DFD, CTX_SLASH, CTX_NLONG, CTX_ACCW, CTX_SMB,
+              CTX_SMB_DFD };
 
 struct deviation {
     const char *id;
@@ -1224,6 +1225,20 @@ static const struct deviation KNOWN_DEVIATIONS[] = {
      * is what a Windows client would do (SMB has no POSIX device semantics);
      * the divergence is a property of the specfile-over-reparse mapping. */
     { "SD-SPECIAL", { "ROpen", 0 }, 6 /* ENXIO */, 22 /* EINVAL */, CTX_SMB },
+    /* SD-DFD-REUSE: a path-only mount (SMB, like cifs.ko) resolves a dirfd-
+     * relative op through the dirfd's interned PATH, not its inode.  When the
+     * dirfd names a directory that was removed while it stayed open and whose
+     * name was then reused for a non-directory, the path resolves to that
+     * non-directory and the op fails ENOTDIR -- where the model, resolving
+     * against the still-open (removed) directory inode, sees no such child and
+     * fails ENOENT.  A real CIFS mount cannot create relative to a server-side-
+     * deleted directory either; it is inherent to resolving by path.  Gated on a
+     * dirfd being present so a plain-path op (whose ENOTDIR is genuine and the
+     * model shares) is never masked. */
+    { "SD-DFD-REUSE",
+        { "RMkdir", "RRmdir", "RUnlink", "RSymlink", "RMknod", "ROpen",
+          "RStat", "RChmod", "RChown", "RTruncate", 0 },
+        2 /* ENOENT */, 20 /* ENOTDIR */, CTX_SMB_DFD },
 };
 
 static int
@@ -1257,6 +1272,8 @@ dev_ctx_ok(
         }
         case CTX_SMB:
             return g_smb;
+        case CTX_SMB_DFD:
+            return g_smb && tf_field(rv, "dfd") != -1;
     } /* switch */
     return 0;
 } /* dev_ctx_ok */
