@@ -1340,6 +1340,16 @@ chimera_vfs_register(
                          "module %s was built against VFS SDK version %u; this chimera provides version %u",
                          module->name, module->sdk_version, CHIMERA_VFS_SDK_VERSION);
 
+    /* A transactional module's txn_size is the allocation size for its
+     * per-transaction object, whose first member is the core-owned
+     * struct chimera_vfs_transaction header; a smaller (or unset) txn_size
+     * would make chimera_vfs_begin_transaction allocate too few bytes and
+     * the core's header stores would overflow the heap. */
+    chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_CAP_TRANSACTIONAL) &&
+                         module->txn_size < sizeof(struct chimera_vfs_transaction),
+                         "module %s declares CHIMERA_VFS_CAP_TRANSACTIONAL with txn_size %u; at least %zu bytes are required",
+                         module->name, module->txn_size, sizeof(struct chimera_vfs_transaction));
+
     vfs->modules[module->fh_magic] = module;
 
     vfs->module_private[module->fh_magic] = module->init(cfgdata, vfs->metrics.metrics);
