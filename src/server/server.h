@@ -954,7 +954,7 @@ chimera_server_get_export(
 
 typedef int (*chimera_server_export_iterate_cb)(
     const struct chimera_nfs_export *export,
-    void                            *data);
+    void *data);
 
 void
 chimera_server_iterate_exports(

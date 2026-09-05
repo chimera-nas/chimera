@@ -990,6 +990,7 @@ struct deviation {
 
 /* Reconcilable entries only, in posix_deviations.py order (reconcile returns
  * the first match, so order is significant). */
+/* *INDENT-OFF* */
 static const struct deviation KNOWN_DEVIATIONS[] = {
     { "PD1",
         {
@@ -1240,6 +1241,7 @@ static const struct deviation KNOWN_DEVIATIONS[] = {
           "RStat", "RChmod", "RChown", "RTruncate", 0 },
         2 /* ENOENT */, 20 /* ENOTDIR */, CTX_SMB_DFD },
 };
+/* *INDENT-ON* */
 
 static int
 dev_ctx_ok(
