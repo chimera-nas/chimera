@@ -99,3 +99,26 @@ chimera_nfs4_data_nonreg_status(mode_t mode)
     }
     return NFS4ERR_INVAL;
 } /* chimera_nfs4_data_nonreg_status */
+
+/*
+ * Status for an RFC 7862 sparse op -- ALLOCATE, DEALLOCATE, SEEK -- whose
+ * current filehandle is not a regular file.
+ *
+ * These are NFSv4.2-only, so there is no 4.0 minor version to be bug-compatible
+ * with, and RFC 7862 §15.1.3/§15.4.3 make a non-regular CURRENT_FH
+ * NFS4ERR_WRONG_TYPE.  A directory still answers NFS4ERR_ISDIR and a symlink
+ * NFS4ERR_SYMLINK, the more specific errors both the RFC error tables and the
+ * quint model predict; WRONG_TYPE covers the fifos, sockets and devices where
+ * chimera_nfs4_data_nonreg_status has to keep saying INVAL for pynfs's sake.
+ */
+static inline nfsstat4
+chimera_nfs4_sparse_nonreg_status(mode_t mode)
+{
+    if (S_ISDIR(mode)) {
+        return NFS4ERR_ISDIR;
+    }
+    if (S_ISLNK(mode)) {
+        return NFS4ERR_SYMLINK;
+    }
+    return NFS4ERR_WRONG_TYPE;
+} /* chimera_nfs4_sparse_nonreg_status */

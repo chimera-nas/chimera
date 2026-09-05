@@ -86,7 +86,7 @@ chimera_nfs4_seek_typecheck_complete(
 
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
         !S_ISREG(attr->va_mode)) {
-        res->sa_status = chimera_nfs4_data_nonreg_status(attr->va_mode);
+        res->sa_status = chimera_nfs4_sparse_nonreg_status(attr->va_mode);
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
         req->handle = NULL;
         chimera_nfs4_compound_complete(req, res->sa_status);
