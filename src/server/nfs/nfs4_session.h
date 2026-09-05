@@ -209,6 +209,20 @@ struct nfs4_client {
     uint8_t               nfs4_client_scid_confirm[NFS4_VERIFIER_SIZE];
     uint8_t               nfs4_client_scid_confirm_valid;
     uint64_t              nfs4_client_scid_pending_id;
+    /* Callback path (cb_client4) carried by a SETCLIENTID that has not been
+     * confirmed yet.  RFC 7530 §16.33.5: the update "is only confirmed if
+     * followed up by a SETCLIENTID_CONFIRM", so it is staged here instead of
+     * being applied to the live unified record -- a stray or never-confirmed
+     * SETCLIENTID must not disturb a confirmed client's working back-channel.
+     * Committed and cleared by nfs4_client_commit_cb_path.  The two buffers
+     * are sized to match nfs4_cb_path's cb_netid/cb_addr. */
+    uint8_t               nfs4_client_scid_cb_valid;
+    uint32_t              nfs4_client_scid_cb_program;
+    uint32_t              nfs4_client_scid_cb_ident;
+    uint32_t              nfs4_client_scid_cb_netid_len;
+    uint32_t              nfs4_client_scid_cb_addr_len;
+    char                  nfs4_client_scid_cb_netid[8];
+    char                  nfs4_client_scid_cb_addr[64];
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
@@ -590,6 +604,27 @@ nfs4_client_set_cb_path(
     int                       netid_len,
     const char               *addr,
     int                       addr_len);
+
+/* Stage a 4.0 SETCLIENTID's callback path on the client record without
+ * touching the live one, and commit a staged path once the matching
+ * SETCLIENTID_CONFIRM lands (RFC 7530 §16.33.5/§16.34.5).  Committing is a
+ * one-shot: a retransmitted SETCLIENTID_CONFIRM finds nothing staged and
+ * leaves the path (and any channel already built on it) alone. */
+void
+nfs4_client_stage_cb_path(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint32_t                  cb_ident,
+    const char               *netid,
+    int                       netid_len,
+    const char               *addr,
+    int                       addr_len);
+
+void
+nfs4_client_commit_cb_path(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
 
 /* Record the callback-channel RPC auth (CREATE_SESSION csa_sec_parms /
  * BACKCHANNEL_CTL).  flavor is an ONC RPC flavor (AUTH_NONE=0, AUTH_SYS=1);

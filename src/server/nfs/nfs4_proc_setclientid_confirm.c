@@ -64,6 +64,12 @@ chimera_nfs4_setclientid_confirm(
         return;
     }
 
+    /* RFC 7530 §16.34.5: this is the step that modifies the recorded and
+     * confirmed callback information, so apply the path the matching
+     * SETCLIENTID staged.  One-shot -- a retransmitted confirm finds nothing
+     * staged and leaves the path (and any channel built on it) alone. */
+    nfs4_client_commit_cb_path(&shared->nfs4_shared_clients, args->clientid);
+
     /* The clientid is now confirmed and usable.  Ensure it has an implicit
      * (NFS4.0) session and bind it to this connection so subsequent
      * non-SEQUENCE operations resolve the client. */
@@ -87,10 +93,11 @@ chimera_nfs4_setclientid_confirm(
                                  &thread->shared->nfs4_recovery, uc);
 
             /* If the client re-registered a new callback address while holding
-             * delegations (RFC 7530 §16.33), its stale channel was torn down in
-             * nfs4_client_set_cb_path.  Rebuild a channel to the new address now,
-             * on this (the client's) thread, so a subsequent recall reaches the
-             * new callback server rather than being revoked for want of a path. */
+             * delegations (RFC 7530 §16.33), its stale channel was torn down
+             * by nfs4_client_commit_cb_path above.  Rebuild a channel to the
+             * new address now, on this (the client's) thread, so a subsequent
+             * recall reaches the new callback server rather than being revoked
+             * for want of a path. */
             if (uc->delegations) {
                 nfs4_cb_ensure_probe(thread, uc, req);
             }
