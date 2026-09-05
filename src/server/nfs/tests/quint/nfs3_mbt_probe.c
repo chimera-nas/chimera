@@ -117,6 +117,7 @@ main(
     mbt_watchdog_arm(60);
 
     memset(&opts, 0, sizeof(opts));
+    opts.sec    = mbt_sec_scan_argv(argc, argv);
     opts.module = backend;
     mbt_env_start_opts(env, &opts);
 

@@ -726,26 +726,33 @@ main(
 {
     /* *INDENT-OFF* -- uncrustify oscillates on this table's alignment. */
     static struct option long_options[] = {
-        { "dump", no_argument, 0, 'd' },
-        { 0,      0,           0, 0   },
+        { "dump", no_argument,       0, 'd' },
+        { "sec",  required_argument, 0, 'S' },
+        { 0,      0,                 0, 0   },
     };
     /* *INDENT-ON* */
     struct mbt_env      env;
     struct mbt_env_opts opts;
     int                 c;
 
-    while ((c = getopt_long(argc, argv, "d", long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "dS:", long_options, NULL)) != -1) {
         switch (c) {
             case 'd':
                 dump = 1;
                 break;
+            case 'S':
+                /* Read by mbt_sec_scan_argv below; accepted here so getopt
+                 * does not reject it. */
+                break;
             default:
-                fprintf(stderr, "usage: %s [--dump]\n", argv[0]);
+                fprintf(stderr, "usage: %s [--dump] "
+                        "[--sec sys|krb5|krb5i|krb5p]\n", argv[0]);
                 return 2;
         } /* switch */
     }
 
     memset(&opts, 0, sizeof(opts));
+    opts.sec              = mbt_sec_scan_argv(argc, argv);
     opts.portmap_hostname = PROBE_UADDR_HOST;
     opts.disable_caches   = 1;
 

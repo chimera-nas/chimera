@@ -42,54 +42,63 @@ target_include_directories(nfs3_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs3_mbt_replay
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs3_mbt_replay)
 
 add_executable(nfs3_mbt_probe nfs3_mbt_probe.c)
 target_include_directories(nfs3_mbt_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs3_mbt_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs3_mbt_probe)
 
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs4_deleg_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_deleg_probe)
 
 add_executable(nfs4_named_attr_probe nfs4_named_attr_probe.c)
 target_include_directories(nfs4_named_attr_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs4_named_attr_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_named_attr_probe)
 
 add_executable(nfs_aux_probe nfs_aux_probe.c)
 target_include_directories(nfs_aux_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_aux_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_aux_probe)
 
 add_executable(nfs_drc_probe nfs_drc_probe.c)
 target_include_directories(nfs_drc_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_drc_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_drc_probe)
 
 add_executable(nfs_aux_mbt_replay nfs_aux_mbt_replay.c)
 target_include_directories(nfs_aux_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_aux_mbt_replay
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_aux_mbt_replay)
 
 add_executable(nfs_drc_mbt_replay nfs_drc_mbt_replay.c)
 target_include_directories(nfs_drc_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_drc_mbt_replay
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_drc_mbt_replay)
 
 add_executable(nfs4_mbt_replay nfs4_mbt_replay.c)
 target_include_directories(nfs4_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs4_mbt_replay
     chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_mbt_replay)
 
 # Deviation probe: asserts each documented chimera deviation (DEVIATIONS.md)
 # still reproduces, and that the two fixed deadlocks (LINK/RENAME self-alias)
@@ -195,6 +204,70 @@ set_tests_properties(chimera/server/nfs/mbt4/named_attr_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_named_attr_probe_memfs"
     LABELS "quint;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
+# ---------------------------------------------------------------------------
+# The same ground truth again, called under Kerberos.
+#
+# What changes between these and the AUTH_SYS cells above is only how the call
+# travels: krb5 authenticates it, krb5i signs its arguments and results, krb5p
+# seals them.  What the probes assert is unchanged, which is the point -- an
+# NFS server whose answers depend on the security flavor carrying them has a
+# bug, and nothing else in this tree would notice.
+#
+# The probes rather than the trace corpora, because a trace names the uid each
+# operation is made as and under RPCSEC_GSS the identity is the authenticated
+# principal instead; the corpus cells that can run are registered separately
+# below.  Every cell self-skips (77) where the host has no usable MIT krb5.
+#
+# krb5p is in the default tier because it is the flavor that reframes the
+# payload -- it is where a size or an iovec is most likely to be got wrong --
+# and krb5/krb5i join it in the extended tier.
+foreach(sec krb5 krb5i krb5p)
+    if(sec STREQUAL "krb5p")
+        set(_sec_cfg "")
+    else()
+        set(_sec_cfg CONFIGURATIONS extended)
+    endif()
+
+    add_test(NAME chimera/server/nfs/mbt/deviation_probe_memfs_${sec}
+             ${_sec_cfg}
+             COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b memfs --sec ${sec})
+    set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs_${sec}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_deviation_probe_memfs_${sec}"
+        LABELS "quint;nfs3_mbt;memfs;gss"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120)
+
+    add_test(NAME chimera/server/nfs/mbtaux/probe_memfs_${sec}
+             ${_sec_cfg}
+             COMMAND $<TARGET_FILE:nfs_aux_probe> --sec ${sec})
+    set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs_${sec}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs_${sec}"
+        LABELS "quint;nfsaux_mbt;memfs;gss"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180)
+
+    add_test(NAME chimera/server/nfs/mbtdrc/probe_memfs_${sec}
+             ${_sec_cfg}
+             COMMAND $<TARGET_FILE:nfs_drc_probe> --sec ${sec})
+    set_tests_properties(chimera/server/nfs/mbtdrc/probe_memfs_${sec}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_memfs_${sec}"
+        LABELS "quint;nfsdrc_mbt;memfs;gss"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180)
+
+    add_test(NAME chimera/server/nfs/mbt4/deleg_probe_memfs_${sec}
+             ${_sec_cfg}
+             COMMAND $<TARGET_FILE:nfs4_deleg_probe> --sec ${sec})
+    set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs_${sec}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs_${sec}"
+        LABELS "quint;nfs4_mbt;multiproto;memfs;gss"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 150)
+endforeach()
 
 if(NOT SPECS_BUNDLE_AVAILABLE)
     message(STATUS "nfs MBT replay ctests skipped (no specs trace corpus)")
@@ -223,6 +296,25 @@ set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
 # its own mkdtemp session dir, so the batches still run fully parallel and clean
 # up with the temp dir.  diskfs takes whichever libevpl block backend the
 # platform has (CHIMERA_DISKFS_DEVICE_TYPE); cairn is gated on rocksdb.
+# The NFS3 corpus under krb5p.  Only the traces that never name a uid can run:
+# under RPCSEC_GSS the identity is the authenticated principal, so an operation
+# asking to be made as some other user has no expression, and the replayer
+# reports how many traces it set aside for that reason rather than replaying
+# them as root against an oracle that expected otherwise.
+#
+# The applicable subset is thin -- this corpus is DAC-heavy -- so what this
+# cell adds over the probes is the protocol surface a random walk reaches,
+# carried under a sealed payload.  A fixed-identity profile on the specs side
+# would widen it; see DEVIATIONS-NFS.md.
+add_test(NAME chimera/server/nfs/mbt/batch_memfs_krb5p
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+            --sec krb5p)
+set_tests_properties(chimera/server/nfs/mbt/batch_memfs_krb5p PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_memfs_krb5p"
+    LABELS "quint;nfs3_mbt;memfs;gss"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+
 add_test(NAME chimera/server/nfs/mbt/batch_diskfs
     COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
             --backend diskfs)
@@ -330,6 +422,19 @@ endforeach()
 # rather than staying invisible until some later collision.  The passthrough
 # pair replays the corpus whole (42/42, no capability skips): nothing in it
 # reaches the host semantics the nfs3/nfs4 corpora need gates for.
+# The auxiliary corpus under krb5p.  It carries no per-operation credential, so
+# unlike the NFS3 corpus every trace in it runs.  MOUNT travels under a context
+# of its own; portmap, NLM and NSM stay on AUTH_SYS, which is what a real
+# deployment does with them.
+add_test(NAME chimera/server/nfs/mbtaux/batch_memfs_krb5p
+    COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
+            --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux --sec krb5p)
+set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs_krb5p PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_memfs_krb5p"
+    LABELS "quint;nfsaux_mbt;memfs;gss"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
+
 foreach(aback memfs diskfs cairn linux io_uring)
     if(aback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
         continue()

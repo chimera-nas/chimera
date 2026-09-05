@@ -195,7 +195,7 @@ mbt_pm_null(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->pm_v2.send_call_PMAPPROC_NULL(&env->pm_v2.rpc2, env->evpl,
-                                       env->portmap_conn, &env->cred,
+                                       env->portmap_conn, &env->aux_cred,
                                        0, 0, NULL, 0, 0, mbt_pm_null_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -233,7 +233,7 @@ mbt_pm_getport(
     args.prot = prot;
     args.port = 0;
     env->pm_v2.send_call_PMAPPROC_GETPORT(&env->pm_v2.rpc2, env->evpl,
-                                          env->portmap_conn, &env->cred, &args,
+                                          env->portmap_conn, &env->aux_cred, &args,
                                           0, 0, NULL, 0, 0, mbt_pm_getport_cb,
                                           env);
     mbt_call_wait_soft(env);
@@ -277,12 +277,12 @@ mbt_pm_set(
     args.port = port;
     if (unset) {
         env->pm_v2.send_call_PMAPPROC_UNSET(&env->pm_v2.rpc2, env->evpl,
-                                            env->portmap_conn, &env->cred,
+                                            env->portmap_conn, &env->aux_cred,
                                             &args, 0, 0, NULL, 0, 0,
                                             mbt_pm_set_cb, env);
     } else {
         env->pm_v2.send_call_PMAPPROC_SET(&env->pm_v2.rpc2, env->evpl,
-                                          env->portmap_conn, &env->cred, &args,
+                                          env->portmap_conn, &env->aux_cred, &args,
                                           0, 0, NULL, 0, 0, mbt_pm_set_cb, env);
     }
     mbt_call_wait_soft(env);
@@ -320,7 +320,7 @@ mbt_pm_dump(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->pm_v2.send_call_PMAPPROC_DUMP(&env->pm_v2.rpc2, env->evpl,
-                                       env->portmap_conn, &env->cred,
+                                       env->portmap_conn, &env->aux_cred,
                                        0, 0, NULL, 0, 0, mbt_pm_dump_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -360,7 +360,7 @@ mbt_pm_callit(
     args.args.len  = 0;
     args.args.data = NULL;
     env->pm_v2.send_call_PMAPPROC_CALLIT(&env->pm_v2.rpc2, env->evpl,
-                                         env->portmap_conn, &env->cred, &args,
+                                         env->portmap_conn, &env->aux_cred, &args,
                                          0, 0, NULL, 0, 0, mbt_pm_callit_cb,
                                          env);
     mbt_call_wait_soft(env);
@@ -410,12 +410,12 @@ mbt_rb_getaddr(
 
     if (vers == 3) {
         env->pm_v3.send_call_rpcbproc_getaddr(&env->pm_v3.rpc2, env->evpl,
-                                              env->portmap_conn, &env->cred,
+                                              env->portmap_conn, &env->aux_cred,
                                               &args, 0, 0, NULL, 0, 0,
                                               mbt_rb_getaddr_cb, env);
     } else {
         env->pm_v4.send_call_RPCBPROC_GETADDR(&env->pm_v4.rpc2, env->evpl,
-                                              env->portmap_conn, &env->cred,
+                                              env->portmap_conn, &env->aux_cred,
                                               &args, 0, 0, NULL, 0, 0,
                                               mbt_rb_getaddr_cb, env);
     }
@@ -460,12 +460,12 @@ mbt_rb_dump(
     mbt_aux_begin(env);
     if (vers == 3) {
         env->pm_v3.send_call_rpcbproc_dump(&env->pm_v3.rpc2, env->evpl,
-                                           env->portmap_conn, &env->cred,
+                                           env->portmap_conn, &env->aux_cred,
                                            0, 0, NULL, 0, 0, mbt_rb_dump_cb,
                                            env);
     } else {
         env->pm_v4.send_call_RPCBPROC_DUMP(&env->pm_v4.rpc2, env->evpl,
-                                           env->portmap_conn, &env->cred,
+                                           env->portmap_conn, &env->aux_cred,
                                            0, 0, NULL, 0, 0, mbt_rb_dump_cb,
                                            env);
     }
@@ -499,12 +499,12 @@ mbt_rb_gettime(
     mbt_aux_begin(env);
     if (vers == 3) {
         env->pm_v3.send_call_rpcbproc_gettime(&env->pm_v3.rpc2, env->evpl,
-                                              env->portmap_conn, &env->cred,
+                                              env->portmap_conn, &env->aux_cred,
                                               0, 0, NULL, 0, 0,
                                               mbt_rb_gettime_cb, env);
     } else {
         env->pm_v4.send_call_RPCBPROC_GETTIME(&env->pm_v4.rpc2, env->evpl,
-                                              env->portmap_conn, &env->cred,
+                                              env->portmap_conn, &env->aux_cred,
                                               0, 0, NULL, 0, 0,
                                               mbt_rb_gettime_cb, env);
     }
@@ -529,7 +529,7 @@ mbt_rb_getversaddr(
     xdr_set_str_static(&args, r_addr, "", 0);
     xdr_set_str_static(&args, r_owner, "", 0);
     env->pm_v4.send_call_RPCBPROC_GETVERSADDR(&env->pm_v4.rpc2, env->evpl,
-                                              env->portmap_conn, &env->cred,
+                                              env->portmap_conn, &env->aux_cred,
                                               &args, 0, 0, NULL, 0, 0,
                                               mbt_rb_getaddr_cb, env);
     mbt_call_wait_soft(env);
@@ -581,7 +581,7 @@ mbt_mount_mnt(
     mbt_aux_begin(env);
     xdr_set_str_static(&args, path, path, (uint32_t) strlen(path));
     env->mount_v3.send_call_MOUNTPROC3_MNT(&env->mount_v3.rpc2, env->evpl,
-                                           env->mount_conn, &env->cred, &args,
+                                           env->mount_conn, &env->mount_cred, &args,
                                            0, 0, NULL, 0, 0, mbt_aux_mnt_cb,
                                            env);
     mbt_call_wait_soft(env);
@@ -606,7 +606,7 @@ mbt_mount_null(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->mount_v3.send_call_MOUNTPROC3_NULL(&env->mount_v3.rpc2, env->evpl,
-                                            env->mount_conn, &env->cred,
+                                            env->mount_conn, &env->mount_cred,
                                             0, 0, NULL, 0, 0, mbt_void_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -643,7 +643,7 @@ mbt_mount_dump(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->mount_v3.send_call_MOUNTPROC3_DUMP(&env->mount_v3.rpc2, env->evpl,
-                                            env->mount_conn, &env->cred,
+                                            env->mount_conn, &env->mount_cred,
                                             0, 0, NULL, 0, 0, mbt_mount_dump_cb,
                                             env);
     mbt_call_wait_soft(env);
@@ -660,7 +660,7 @@ mbt_mount_umnt(
     mbt_aux_begin(env);
     xdr_set_str_static(&args, path, path, (uint32_t) strlen(path));
     env->mount_v3.send_call_MOUNTPROC3_UMNT(&env->mount_v3.rpc2, env->evpl,
-                                            env->mount_conn, &env->cred, &args,
+                                            env->mount_conn, &env->mount_cred, &args,
                                             0, 0, NULL, 0, 0, mbt_void_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -671,7 +671,7 @@ mbt_mount_umntall(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->mount_v3.send_call_MOUNTPROC3_UMNTALL(&env->mount_v3.rpc2, env->evpl,
-                                               env->mount_conn, &env->cred,
+                                               env->mount_conn, &env->mount_cred,
                                                0, 0, NULL, 0, 0, mbt_void_cb,
                                                env);
     mbt_call_wait_soft(env);
@@ -714,7 +714,7 @@ mbt_mount_export(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->mount_v3.send_call_MOUNTPROC3_EXPORT(&env->mount_v3.rpc2, env->evpl,
-                                              env->mount_conn, &env->cred,
+                                              env->mount_conn, &env->mount_cred,
                                               0, 0, NULL, 0, 0,
                                               mbt_mount_export_cb, env);
     mbt_call_wait_soft(env);
@@ -853,7 +853,7 @@ mbt_nlm_null(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->nlm_v4.send_call_NLMPROC4_NULL(&env->nlm_v4.rpc2, env->evpl,
-                                        env->nlm_conn, &env->cred,
+                                        env->nlm_conn, &env->aux_cred,
                                         0, 0, NULL, 0, 0, mbt_void_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -886,12 +886,12 @@ mbt_nlm_test(
 
     if (msg) {
         env->nlm_v4.send_call_NLMPROC4_TEST_MSG(&env->nlm_v4.rpc2, env->evpl,
-                                                env->nlm_conn, &env->cred,
+                                                env->nlm_conn, &env->aux_cred,
                                                 &args, 0, 0, NULL, 0, 0,
                                                 mbt_void_cb, env);
     } else {
         env->nlm_v4.send_call_NLMPROC4_TEST(&env->nlm_v4.rpc2, env->evpl,
-                                            env->nlm_conn, &env->cred, &args,
+                                            env->nlm_conn, &env->aux_cred, &args,
                                             0, 0, NULL, 0, 0,
                                             mbt_nlm_testres_cb, env);
     }
@@ -932,17 +932,17 @@ mbt_nlm_lock(
 
     if (proc == 7) {
         env->nlm_v4.send_call_NLMPROC4_LOCK_MSG(&env->nlm_v4.rpc2, env->evpl,
-                                                env->nlm_conn, &env->cred,
+                                                env->nlm_conn, &env->aux_cred,
                                                 &args, 0, 0, NULL, 0, 0,
                                                 mbt_void_cb, env);
     } else if (proc == 22) {
         env->nlm_v4.send_call_NLMPROC4_NM_LOCK(&env->nlm_v4.rpc2, env->evpl,
-                                               env->nlm_conn, &env->cred,
+                                               env->nlm_conn, &env->aux_cred,
                                                &args, 0, 0, NULL, 0, 0,
                                                mbt_nlm_res_cb, env);
     } else {
         env->nlm_v4.send_call_NLMPROC4_LOCK(&env->nlm_v4.rpc2, env->evpl,
-                                            env->nlm_conn, &env->cred, &args,
+                                            env->nlm_conn, &env->aux_cred, &args,
                                             0, 0, NULL, 0, 0, mbt_nlm_res_cb,
                                             env);
     }
@@ -979,12 +979,12 @@ mbt_nlm_cancel(
 
     if (msg) {
         env->nlm_v4.send_call_NLMPROC4_CANCEL_MSG(&env->nlm_v4.rpc2, env->evpl,
-                                                  env->nlm_conn, &env->cred,
+                                                  env->nlm_conn, &env->aux_cred,
                                                   &args, 0, 0, NULL, 0, 0,
                                                   mbt_void_cb, env);
     } else {
         env->nlm_v4.send_call_NLMPROC4_CANCEL(&env->nlm_v4.rpc2, env->evpl,
-                                              env->nlm_conn, &env->cred, &args,
+                                              env->nlm_conn, &env->aux_cred, &args,
                                               0, 0, NULL, 0, 0, mbt_nlm_res_cb,
                                               env);
     }
@@ -1017,12 +1017,12 @@ mbt_nlm_unlock(
 
     if (msg) {
         env->nlm_v4.send_call_NLMPROC4_UNLOCK_MSG(&env->nlm_v4.rpc2, env->evpl,
-                                                  env->nlm_conn, &env->cred,
+                                                  env->nlm_conn, &env->aux_cred,
                                                   &args, 0, 0, NULL, 0, 0,
                                                   mbt_void_cb, env);
     } else {
         env->nlm_v4.send_call_NLMPROC4_UNLOCK(&env->nlm_v4.rpc2, env->evpl,
-                                              env->nlm_conn, &env->cred, &args,
+                                              env->nlm_conn, &env->aux_cred, &args,
                                               0, 0, NULL, 0, 0, mbt_nlm_res_cb,
                                               env);
     }
@@ -1058,12 +1058,12 @@ mbt_nlm_granted(
 
     if (msg) {
         env->nlm_v4.send_call_NLMPROC4_GRANTED_MSG(&env->nlm_v4.rpc2, env->evpl,
-                                                   env->nlm_conn, &env->cred,
+                                                   env->nlm_conn, &env->aux_cred,
                                                    &args, 0, 0, NULL, 0, 0,
                                                    mbt_void_cb, env);
     } else {
         env->nlm_v4.send_call_NLMPROC4_GRANTED(&env->nlm_v4.rpc2, env->evpl,
-                                               env->nlm_conn, &env->cred,
+                                               env->nlm_conn, &env->aux_cred,
                                                &args, 0, 0, NULL, 0, 0,
                                                mbt_nlm_res_cb, env);
     }
@@ -1105,7 +1105,7 @@ mbt_nlm_send_res(
             tres.test_stat.holder.l_len     = 0;
         }
         env->nlm_v4.send_call_NLMPROC4_TEST_RES(&env->nlm_v4.rpc2, env->evpl,
-                                                env->nlm_conn, &env->cred,
+                                                env->nlm_conn, &env->aux_cred,
                                                 &tres, 0, 0, NULL, 0, 0,
                                                 mbt_void_cb, env);
         mbt_call_wait_soft(env);
@@ -1228,12 +1228,12 @@ mbt_nlm_share(
 
     if (unshare) {
         env->nlm_v4.send_call_NLMPROC4_UNSHARE(&env->nlm_v4.rpc2, env->evpl,
-                                               env->nlm_conn, &env->cred,
+                                               env->nlm_conn, &env->aux_cred,
                                                &args, 0, 0, NULL, 0, 0,
                                                mbt_nlm_shareres_cb, env);
     } else {
         env->nlm_v4.send_call_NLMPROC4_SHARE(&env->nlm_v4.rpc2, env->evpl,
-                                             env->nlm_conn, &env->cred, &args,
+                                             env->nlm_conn, &env->aux_cred, &args,
                                              0, 0, NULL, 0, 0,
                                              mbt_nlm_shareres_cb, env);
     }
@@ -1257,7 +1257,7 @@ mbt_nlm_free_all(
                        (uint32_t) strlen(scratch.caller));
     args.state = state;
     env->nlm_v4.send_call_NLMPROC4_FREE_ALL(&env->nlm_v4.rpc2, env->evpl,
-                                            env->nlm_conn, &env->cred, &args,
+                                            env->nlm_conn, &env->aux_cred, &args,
                                             0, 0, NULL, 0, 0, mbt_void_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -1531,7 +1531,7 @@ mbt_sm_unmon_all(
     args.my_proc = 24;
 
     env->nsm_v1.send_call_SM_UNMON_ALL(&env->nsm_v1.rpc2, env->evpl,
-                                       env->nsm_conn, &env->cred, &args,
+                                       env->nsm_conn, &env->aux_cred, &args,
                                        0, 0, NULL, 0, 0, mbt_sm_stat_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;
@@ -1542,7 +1542,7 @@ mbt_sm_simu_crash(struct mbt_env *env)
 {
     mbt_aux_begin(env);
     env->nsm_v1.send_call_SM_SIMU_CRASH(&env->nsm_v1.rpc2, env->evpl,
-                                        env->nsm_conn, &env->cred,
+                                        env->nsm_conn, &env->aux_cred,
                                         0, 0, NULL, 0, 0, mbt_void_cb, env);
     mbt_call_wait_soft(env);
     return &mbt_aux(env)->r;

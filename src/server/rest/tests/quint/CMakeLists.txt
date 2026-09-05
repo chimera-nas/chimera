@@ -62,6 +62,7 @@ target_include_directories(ctl_proto_probe PRIVATE
     ${JANSSON_INCLUDE_DIRS})
 target_link_libraries(ctl_proto_probe
     chimera_server chimera_nfs_common chimera_metrics ${JANSSON_LIBRARIES})
+mbt_add_krb5(ctl_proto_probe)
 
 add_test(NAME chimera/server/rest/ctl/proto_probe
     COMMAND $<TARGET_FILE:ctl_proto_probe>)
@@ -80,6 +81,7 @@ target_include_directories(ctl_mbt_replay PRIVATE
     ${JANSSON_INCLUDE_DIRS})
 target_link_libraries(ctl_mbt_replay
     chimera_server chimera_nfs_common chimera_metrics ${JANSSON_LIBRARIES})
+mbt_add_krb5(ctl_mbt_replay)
 
 # ---------------------------------------------------------------------------
 # Trace corpus
