@@ -68,8 +68,14 @@ chimera_nfs4_access4_to_mask(uint32_t access)
     if (access & ACCESS4_EXTEND) {
         mask |= CHIMERA_ACE_APPEND_DATA;
     }
+    /* ACCESS4_DELETE is "delete an existing directory entry" and is meaningful
+     * only on a directory, so it asks about the entries *in* the queried
+     * directory -- POSIX write+execute on it, i.e. DELETE_CHILD.  Plain
+     * CHIMERA_ACE_DELETE would instead ask whether the directory itself may be
+     * unlinked from its parent, which ACCESS cannot see.  Same mapping as the
+     * NFSv3 handler. */
     if (access & ACCESS4_DELETE) {
-        mask |= CHIMERA_ACE_DELETE;
+        mask |= CHIMERA_ACE_DELETE_CHILD;
     }
     if (access & ACCESS4_EXECUTE) {
         mask |= CHIMERA_ACE_EXECUTE;
@@ -109,7 +115,7 @@ chimera_nfs4_access_from_granted(
     if ((requested & ACCESS4_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
         access |= ACCESS4_EXTEND;
     }
-    if ((requested & ACCESS4_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
+    if ((requested & ACCESS4_DELETE) && (granted & CHIMERA_ACE_DELETE_CHILD)) {
         access |= ACCESS4_DELETE;
     }
     if ((requested & ACCESS4_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {

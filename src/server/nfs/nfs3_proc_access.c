@@ -32,8 +32,15 @@ chimera_nfs3_access3_to_mask(uint32_t access)
     if (access & ACCESS3_EXTEND) {
         mask |= CHIMERA_ACE_APPEND_DATA;
     }
+    /* RFC 1813 §3.3.4: ACCESS3_DELETE is "delete an existing directory entry",
+     * a property of the directory being queried -- not of deleting that
+     * directory itself.  POSIX governs it with write+execute on the directory,
+     * which the engine exposes as DELETE_CHILD (CHIMERA_ACE_DELETE would ask
+     * whether the caller may unlink the directory from *its* parent, which an
+     * ACCESS on the directory cannot answer).  Matches knfsd's NFSD_MAY_REMOVE
+     * mapping in its nfs3_diraccess table. */
     if (access & ACCESS3_DELETE) {
-        mask |= CHIMERA_ACE_DELETE;
+        mask |= CHIMERA_ACE_DELETE_CHILD;
     }
     if (access & ACCESS3_EXECUTE) {
         mask |= CHIMERA_ACE_EXECUTE;
@@ -100,7 +107,7 @@ chimera_nfs3_access_complete(
         if ((access & ACCESS3_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
             res.resok.access |= ACCESS3_EXTEND;
         }
-        if ((access & ACCESS3_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
+        if ((access & ACCESS3_DELETE) && (granted & CHIMERA_ACE_DELETE_CHILD)) {
             res.resok.access |= ACCESS3_DELETE;
         }
         if ((access & ACCESS3_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
