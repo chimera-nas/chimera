@@ -110,6 +110,52 @@ chimera_nfs4_open_acquire_share(
 } /* chimera_nfs4_open_acquire_share */
 
 /*
+ * Report a declined delegation.  RFC 8881 §18.16: a server that supports the
+ * OPEN4_SHARE_ACCESS_WANT_* flags (chimera advertises WANT_ANY_DELEG and
+ * WANT_NO_DELEG in supported_attrs' open_arguments) MUST answer an OPEN that
+ * carried one of them with OPEN_DELEGATE_NONE_EXT and a reason, so the client
+ * can tell contention from resource exhaustion.  A 4.0 client, or a 4.1 client
+ * that expressed no preference, keeps the bare OPEN_DELEGATE_NONE.
+ *
+ * Always returns false, so decline sites can `return
+ * chimera_nfs4_open_deleg_none(...)` in place of a bare `return false`.
+ */
+static bool
+chimera_nfs4_open_deleg_none(
+    struct nfs_request *req,
+    struct OPEN4res    *res,
+    uint32_t            why)
+{
+    struct OPEN4args *args = &req->args_compound->argarray[req->index].opopen;
+    uint32_t          want = args->share_access & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK;
+
+    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+
+    if (req->minorversion < 1 || want == OPEN4_SHARE_ACCESS_WANT_NO_PREFERENCE) {
+        return false;
+    }
+
+    /* A want that only asked to cancel an outstanding registration is not a
+     * failure to delegate; report it as such. */
+    if (want == OPEN4_SHARE_ACCESS_WANT_CANCEL) {
+        why = WND4_CANCELLED;
+    }
+
+    res->resok4.delegation.delegation_type    = OPEN_DELEGATE_NONE_EXT;
+    res->resok4.delegation.od_whynone.ond_why = why;
+
+    /* The union arm is selected by ond_why; chimera never registers a want, so
+     * it promises neither a push nor a signal. */
+    if (why == WND4_CONTENTION) {
+        res->resok4.delegation.od_whynone.ond_server_will_push_deleg = 0;
+    } else if (why == WND4_RESOURCE) {
+        res->resok4.delegation.od_whynone.ond_server_will_signal_avail = 0;
+    }
+
+    return false;
+} /* chimera_nfs4_open_deleg_none */
+
+/*
  * Decide whether to grant an OPEN delegation and, if so, mint it and populate
  * the OPEN response.  A read open is offered an OPEN_DELEGATE_READ; an open
  * that requests write access is offered an OPEN_DELEGATE_WRITE.  A delegation
@@ -120,7 +166,8 @@ chimera_nfs4_open_acquire_share(
  *   - no conflicting access is present on the file (a write delegation also
  *     requires no other reader/writer; conflicts are surfaced by the CACHING
  *     lease conflict matrix).
- * Otherwise the response carries OPEN_DELEGATE_NONE.  Must be called on the
+ * Otherwise the response carries a decline built by
+ * chimera_nfs4_open_deleg_none().  Must be called on the
  * client's connection thread (it may kick a CB_NULL probe).
  *
  * Returns true when the OPEN's response has been parked on the cb_path's
@@ -150,31 +197,30 @@ chimera_nfs4_open_grant_delegation(
     uint64_t                          fh_hash;
     bool                              exists = false;
     uint8_t                           deleg_type;
+    uint32_t                          want;
     struct nfsace4                   *perms;
     static const char                 everyone[] = "EVERYONE@";
 
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
     if (!chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
     if (!client) {
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
     if (args->claim.claim != CLAIM_NULL && args->claim.claim != CLAIM_FH) {
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
 
-    /* RFC 8881 §18.16: honor an explicit "no delegation wanted" request.  On
-    * 4.1+ this is reported as OPEN_DELEGATE_NONE_EXT with WND4_NOT_WANTED;
-    * 4.0 has no such extension, so the default OPEN_DELEGATE_NONE stands. */
-    if (args->share_access & OPEN4_SHARE_ACCESS_WANT_NO_DELEG) {
-        if (req->minorversion >= 1) {
-            res->resok4.delegation.delegation_type                       = OPEN_DELEGATE_NONE_EXT;
-            res->resok4.delegation.od_whynone.ond_why                    = WND4_NOT_WANTED;
-            res->resok4.delegation.od_whynone.ond_server_will_push_deleg = 0;
-        }
-        return false;
+    /* RFC 8881 §18.16: honor an explicit "no delegation wanted" request.  The
+     * WANT_ values are a field in share_access, not independent bits, so they
+     * have to be compared under the mask; WANT_CANCEL also means "no
+     * delegation" (and reports WND4_CANCELLED instead). */
+    want = args->share_access & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK;
+    if (want == OPEN4_SHARE_ACCESS_WANT_NO_DELEG ||
+        want == OPEN4_SHARE_ACCESS_WANT_CANCEL) {
+        return chimera_nfs4_open_deleg_none(req, res, WND4_NOT_WANTED);
     }
 
     /* A write open earns a write delegation; otherwise a pure-read open earns
@@ -184,7 +230,7 @@ chimera_nfs4_open_grant_delegation(
     } else if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
         deleg_type = OPEN_DELEGATE_READ;
     } else {
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
 
     /* Tri-state probe gate.  PATH_UP grants below; NO_PATH is the historical
@@ -200,7 +246,7 @@ chimera_nfs4_open_grant_delegation(
         case NFS4_CB_GRANT_PATH_UP:
             break;
         case NFS4_CB_GRANT_NO_PATH:
-            return false;
+            return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
         case NFS4_CB_GRANT_DEFER:
             nfs4_cb_probe_park(client, req);
             return true;
@@ -236,7 +282,7 @@ chimera_nfs4_open_grant_delegation(
     }
     pthread_mutex_unlock(&client->lock);
     if (exists) {
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
 
     deleg = nfs_delegation_create(client, deleg_type,
@@ -267,7 +313,7 @@ chimera_nfs4_open_grant_delegation(
     if (!file_state) {
         nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
                                thread->vfs_thread);
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
     deleg->file_state = file_state;
 
@@ -279,7 +325,7 @@ chimera_nfs4_open_grant_delegation(
         deleg->file_state = NULL;
         nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
                                thread->vfs_thread);
-        return false;
+        return chimera_nfs4_open_deleg_none(req, res, WND4_CONTENTION);
     }
     deleg->lease_held = true;
 
