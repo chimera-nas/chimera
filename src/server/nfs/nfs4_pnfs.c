@@ -1100,8 +1100,24 @@ chimera_nfs4_layoutreturn(
 
     client = req->session ? req->session->client_unified : NULL;
 
+    /* RFC 8881 §18.44.3: a LAYOUTRETURN4_ALL makes the client believe every
+     * layout it held is gone, so the server has to forget them all.  Keeping
+     * them registered left the server-wide recall barrier standing for files
+     * the client had already given up, and a later conflicting op then parked
+     * behind a CB_LAYOUTRECALL to a client that was usually on its way out
+     * (RETURN ALL is what an unmount sends) until the recall deadline or the
+     * lease expired.  FSID stays a no-op: the fsid is a backend attribute the
+     * layout record does not carry, so selecting by it needs a getattr per
+     * record that this synchronous path cannot make. */
+    if (client &&
+        args->lora_layoutreturn.lr_returntype == LAYOUTRETURN4_ALL) {
+        nfs_layout_state_destroy_all(client,
+                                     &thread->shared->nfs4_state_table,
+                                     thread->vfs_thread);
+    }
+
     /* v1 tracks a single whole-file layout per file, so a FILE return drops
-     * the record entirely.  FSID/ALL returns are accepted as no-ops. */
+     * the record entirely. */
     if (client &&
         args->lora_layoutreturn.lr_returntype == LAYOUTRETURN4_FILE) {
         struct nfs_layout_state *layout =

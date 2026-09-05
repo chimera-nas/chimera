@@ -1129,6 +1129,13 @@ nfs_layout_state_destroy(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 
+/* Tear down every layout_state a client holds (LAYOUTRETURN4_ALL). */
+SYMBOL_EXPORT void
+nfs_layout_state_destroy_all(
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 /* Touch a client's lease.  Cheap relaxed store; called from any op that
  * counts as renewal evidence (state acquire, SEQUENCE, RENEW).  Phase 3. */
 static inline void
