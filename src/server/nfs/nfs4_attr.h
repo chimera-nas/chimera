@@ -596,7 +596,14 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, FH4_PERSISTENT);
         }
 
-        if (req_mask[0] & (1 << FATTR4_CHANGE)) {
+        /* change is REQUIRED, but so are type and size, and both are dropped
+         * from the reply when the backend did not supply their source.  Doing
+         * the same here matters more, not less: with neither a native counter
+         * nor a ctime to derive from, the fallback below would read unset
+         * fields and hand every object the same change value, which defeats
+         * the cache validation the attribute exists for (RFC 7530 §5.8.1.4). */
+        if (req_mask[0] & (1 << FATTR4_CHANGE) &&
+            (attr->va_set_mask & (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME))) {
             rsp_mask[0]  |= (1 << FATTR4_CHANGE);
             *num_rsp_mask = 1;
 
