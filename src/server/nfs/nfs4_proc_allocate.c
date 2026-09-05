@@ -162,6 +162,18 @@ chimera_nfs4_allocate(
         return;
     }
 
+    /* RFC 7862 §15.1 describes the reservation as the byte range
+     * [aa_offset, aa_offset + aa_length); a range whose end does not fit in a
+     * uint64 names no such interval.  Reject it here rather than handing a
+     * wrapped end to the backends, where it becomes a tiny (or absurd) block
+     * range in memfs and an out-of-range fallocate() elsewhere. */
+    if (args->aa_length &&
+        args->aa_offset > UINT64_MAX - args->aa_length) {
+        res->ar_status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->ar_status);
+        return;
+    }
+
     /*
      * RFC 8881 §8.2.3 requires ALLOCATE to honor the special stateids.  These
      * carry no state-table entry, so open the current FH on the fly instead of
