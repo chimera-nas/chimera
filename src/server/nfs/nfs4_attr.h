@@ -53,6 +53,22 @@ chimera_nfs4_change_from_attrs(const struct chimera_vfs_attrs *attr)
 #define OPEN_ARGS_OPEN_CLAIM_PREVIOUS                1
 #define OPEN_ARGS_OPEN_CLAIM_DELEGATE_CUR            2
 #define OPEN_ARGS_OPEN_CLAIM_FH                      4
+
+/*
+ * suppattr_exclcreat (RFC 8881 5.8.1.14): the attributes this server can
+ * honour in an EXCLUSIVE4_1 cva_attrs.  time_access_set/time_modify_set are
+ * deliberately absent because the create verifier is stored in atime/mtime
+ * (the Linux nfsd strategy), so a client value for them could not survive the
+ * create.  Defined here so the advertisement (chimera_nfs4_marshall_attrs) and
+ * the cva_attrs check (chimera_nfs4_validate_exclcreat_attrs) cannot drift
+ * apart -- RFC 8881 18.16.3 requires the second to be exactly the first.
+ */
+#define CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD0        (1U << FATTR4_SIZE)
+#define CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD1        ( \
+            (1U << (FATTR4_MODE - 32)) | \
+            (1U << (FATTR4_OWNER - 32)) | \
+            (1U << (FATTR4_OWNER_GROUP - 32)))
+
 /*
  * The single pNFS layouttype4 this file's backend supports, for FATTR4
  * advertisement: LAYOUT4_FLEX_FILES (0x4) for an orchestrated backend
@@ -1041,11 +1057,9 @@ chimera_nfs4_marshall_attrs(
             * encodes the verifier into atime/mtime (same as Linux nfsd). */
             chimera_nfs4_attr_append_uint32(&attrs, 2);
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            (1 << FATTR4_SIZE));
+                                            CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD0);
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            (1UL << (FATTR4_MODE - 32)) |
-                                            (1UL << (FATTR4_OWNER - 32)) |
-                                            (1UL << (FATTR4_OWNER_GROUP - 32)));
+                                            CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD1);
         }
 
         if ((req_mask[2] & (1 << (FATTR4_CHANGE_ATTR_TYPE - 64))) &&
@@ -1463,6 +1477,35 @@ chimera_nfs4_validate_createattrs(
 
     return NFS4_OK;
 } /* chimera_nfs4_validate_createattrs */
+
+/*
+ * EXCLUSIVE4_1 create attributes.  RFC 8881 §18.16.3: "If the client attempts
+ * to set in cva_attrs an attribute that is not in suppattr_exclcreat, the
+ * server MUST return NFS4ERR_INVAL."  Run in addition to (after)
+ * chimera_nfs4_validate_createattrs, which keeps reporting NFS4ERR_ATTRNOTSUPP
+ * for attributes the server does not implement at all.
+ */
+static inline nfsstat4
+chimera_nfs4_validate_exclcreat_attrs(
+    uint32_t        num_attrmask,
+    const uint32_t *attrmask)
+{
+    if (num_attrmask >= 1 &&
+        (attrmask[0] & ~CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD0)) {
+        return NFS4ERR_INVAL;
+    }
+
+    if (num_attrmask >= 2 &&
+        (attrmask[1] & ~CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD1)) {
+        return NFS4ERR_INVAL;
+    }
+
+    if (num_attrmask >= 3 && attrmask[2] != 0) {
+        return NFS4ERR_INVAL;
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_validate_exclcreat_attrs */
 
 /* GETATTR: requested attrs must be supported and readable. The "*_set"
  * attributes (FATTR4_TIME_ACCESS_SET, FATTR4_TIME_MODIFY_SET) are write-only

@@ -1315,6 +1315,16 @@ chimera_nfs4_open_parent_complete(
                 status = chimera_nfs4_validate_createattrs(
                     args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
                     args->openhow.how.ch_createboth.cva_attrs.attrmask);
+                if (status == NFS4_OK) {
+                    /* RFC 8881 18.16.3: an attribute in cva_attrs that is not
+                     * in suppattr_exclcreat MUST be rejected with
+                     * NFS4ERR_INVAL.  Without this the server unmarshalled
+                     * time_access_set/time_modify_set and then silently
+                     * clobbered them with the verifier below. */
+                    status = chimera_nfs4_validate_exclcreat_attrs(
+                        args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                        args->openhow.how.ch_createboth.cva_attrs.attrmask);
+                }
                 if (status != NFS4_OK) {
                     struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
                     chimera_vfs_release(req->thread->vfs_thread, parent_handle);
