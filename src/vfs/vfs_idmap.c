@@ -90,7 +90,14 @@ chimera_idmap_principal_to_who(
         const char *s = special_to_who_string(p->special);
 
         if (!s) {
-            return -1;
+            /* SYSTEM, CREATOR_OWNER, CREATOR_GROUP and OWNER_RIGHTS have no
+             * NFSv4 special identifier (RFC 8881 section 6.2.1.5 Table 5), so
+             * emit their well-known SID as the who string.  Naming them by SID
+             * keeps the ACE distinct and round-trips through the decoder;
+             * folding them onto any real principal would present an ACL that
+             * grants access the server does not enforce, which section 6.2.1
+             * forbids. */
+            return chimera_idmap_principal_to_sid(p, buf, buflen);
         }
         len = (int) strlen(s);
         if (len + 1 > buflen) {
@@ -177,6 +184,22 @@ chimera_idmap_who_to_principal(
         p->special = (uint8_t) special;
         p->id      = 0;
         return 0;
+    }
+
+    /* A SID string, as principal_to_who emits for the specials that have no
+     * NFSv4 identifier; decoding it back keeps a client read-modify-write of
+     * such an ACL lossless. */
+    if (len > 4 && memcmp(who, "S-1-", 4) == 0 &&
+        memchr(who, '@', len) == NULL) {
+        char sid[CHIMERA_IDMAP_SID_MAX];
+
+        if (len >= (int) sizeof(sid)) {
+            return -1;
+        }
+        memcpy(sid, who, len);
+        sid[len] = '\0';
+
+        return chimera_idmap_sid_to_principal(sid, p);
     }
 
     /* Pure numeric id. */

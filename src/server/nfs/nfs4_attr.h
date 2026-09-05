@@ -393,7 +393,9 @@ chimera_nfs4_attr_append_acl(
     const struct chimera_acl *acl,
     const char               *domain)
 {
-    uint32_t num = acl ? acl->num_aces : 0;
+    uint32_t num     = acl ? acl->num_aces : 0;
+    void    *countp  = *attrs;
+    uint32_t emitted = 0;
 
     chimera_nfs4_attr_append_uint32(attrs, num);
 
@@ -418,14 +420,23 @@ chimera_nfs4_attr_append_acl(
         wholen = chimera_idmap_principal_to_who(&ace->who, domain,
                                                 who, sizeof(who));
         if (wholen < 0) {
-            /* Should not happen; emit EVERYONE@ as a safe fallback. */
-            wholen = snprintf(who, sizeof(who), "EVERYONE@");
+            /* Nameless principals are dropped, not renamed: substituting a
+             * real who (EVERYONE@, as this used to) presents an ACL granting
+             * access the server never enforces, and a client read-modify-write
+             * then turns that fiction into a genuine grant.  RFC 7530 §6.2.1
+             * forbids reporting more access than is enforced. */
+            continue;
         }
 
         chimera_nfs4_attr_append_uint32(attrs, ace->type);
         chimera_nfs4_attr_append_uint32(attrs, flag);
         chimera_nfs4_attr_append_uint32(attrs, ace->access_mask);
         chimera_nfs4_attr_append_utf8str(attrs, who, wholen);
+        emitted++;
+    }
+
+    if (emitted != num) {
+        *(uint32_t *) countp = chimera_nfs_hton32(emitted);
     }
 } /* chimera_nfs4_attr_append_acl */
 
