@@ -2184,6 +2184,14 @@ struct diskfs_redo_ctx {
      * The commit thread sets durable_wm = end_txn_id at in-order retire; the
      * apply thread sets applied_wm = end_txn_id once its deltas are applied. */
     uint64_t                  end_txn_id;
+    /* Where this record's journal write went, snapshotted at submit so the
+     * stall watchdog can name the I/O that never completed.  Copied rather
+     * than read back through ctx->rec: the push thread owns the record
+     * concurrently (see ctx->seq above, which exists for the same reason), and
+     * the watchdog must not reach into it. */
+    uint64_t                  wr_offset;
+    uint64_t                  wr_bytes;
+    int                       wr_segments; /* chunk count at submit; ->segments counts down */
     struct diskfs_redo_ctx   *free_next;
 };
 
