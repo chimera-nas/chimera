@@ -4348,6 +4348,15 @@ memfs_allocate(
                                                EVPL_IOVEC_FLAG_SHARED, block->iov);
                 memset(block->iov[0].data, 0, block_size);
                 fork->blocks[bi] = block;
+
+                /* RFC 7862 §15.1.3: ALLOCATE increases space_used by the bytes
+                 * reserved, "unless they were previously reserved or written
+                 * and not shared" -- so charge only the blocks this call
+                 * materialized, which is exactly the ones the skip above let
+                 * through.  Without it a GETATTR after ALLOCATE still reported
+                 * the pre-ALLOCATE value even though the blocks (and the
+                 * filesystem-wide charge) were real. */
+                *p_space_used += block_size;
             }
         }
 
