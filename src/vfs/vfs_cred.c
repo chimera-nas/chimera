@@ -112,15 +112,29 @@ chimera_vfs_cred_init_attr(
     uint32_t                 ngids,
     const uint32_t          *gids)
 {
-    (void) ngids;
-    (void) gids;
-
     cred->flavor = CHIMERA_VFS_AUTH_ATTR;
     cred->uid    = uid;
     cred->gid    = gid;
-    cred->ngids  = 0;
     cred->origin = NULL;
     cred->flags  = 0;
+
+    /* The caller's whole group set matters to the access decision, not just
+     * its primary group: MS-DTYP 2.5.2 evaluates every group SID in the token,
+     * and cred_in_group() (the ACL engine's GROUP@/named-group test, and the
+     * POSIX group class behind it) can only see what is carried here.  Dropping
+     * them denied an SMB caller whose membership is supplementary -- the normal
+     * AD case -- access that the same identity is granted over NFS, where
+     * cred_init_unix keeps the list. */
+    if (ngids > CHIMERA_VFS_CRED_MAX_GIDS) {
+        ngids = CHIMERA_VFS_CRED_MAX_GIDS;
+    }
+
+    cred->ngids = ngids;
+    if (ngids > 0 && gids) {
+        memcpy(cred->gids, gids, ngids * sizeof(uint32_t));
+    } else {
+        cred->ngids = 0;
+    }
 } /* chimera_vfs_cred_init_attr */
 
 SYMBOL_EXPORT int
