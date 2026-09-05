@@ -99,8 +99,11 @@ if(ELBENCHO_BIN)
     endif()
 
     # In Debug builds the plugin .so is ASan-instrumented but the elbencho host
-    # is not, so preload the ASan runtime (the netns wrapper restores LD_PRELOAD
-    # for the test process only). Mirrors src/fio/tests.
+    # is not, so preload the ASan runtime.  CHIMERA_TEST_LD_PRELOAD rather than
+    # LD_PRELOAD: the wrapper applies it to the test process alone and never
+    # loads it into its own shell, which would otherwise report bash's parser
+    # allocations as leaks.  Masked here today by detect_leaks=0, but the same
+    # hazard as src/fio/tests, where it is not.  Mirrors src/fio/tests.
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
             set(ASAN_LIB_DIRS "/usr/lib/aarch64-linux-gnu" "/usr/lib64")
@@ -119,7 +122,7 @@ if(ELBENCHO_BIN)
         if(ASAN_LIB)
             set_tests_properties(${ELBENCHO_TEST_NAMES}
                 PROPERTIES ENVIRONMENT
-                "LD_PRELOAD=${ASAN_LIB};ASAN_OPTIONS=detect_leaks=0")
+                "CHIMERA_TEST_LD_PRELOAD=${ASAN_LIB};ASAN_OPTIONS=detect_leaks=0")
         endif()
     endif()
 endif()

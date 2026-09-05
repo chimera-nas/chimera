@@ -41,18 +41,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     endif()
 
     set_tests_properties(chimera/fio/fio_memfs_basic PROPERTIES
-        ENVIRONMENT "LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
+        ENVIRONMENT "CHIMERA_TEST_LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
     )
 
     if(IO_URING_ENABLED)
         set_tests_properties(chimera/fio/fio_diskfs_io_uring_basic PROPERTIES
-            ENVIRONMENT "LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
+            ENVIRONMENT "CHIMERA_TEST_LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
         )
     endif()
 
     if(HAVE_LIBAIO)
         set_tests_properties(chimera/fio/fio_diskfs_aio_basic PROPERTIES
-            ENVIRONMENT "LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
+            ENVIRONMENT "CHIMERA_TEST_LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
         )
     endif()
 endif()
