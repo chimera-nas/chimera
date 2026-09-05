@@ -255,10 +255,10 @@ chimera_vfs_lookup_at(
         gate->callback      = callback;
         gate->private_data  = private_data;
 
-        chimera_vfs_gate_fh_prefix(&gate->gate_ctx, thread, cred,
-                                   handle->fh, handle->fh_len,
-                                   CHIMERA_ACE_EXECUTE,
-                                   chimera_vfs_lookup_at_gate_complete, gate);
+        chimera_vfs_gate_handle_prefix(&gate->gate_ctx, thread, cred,
+                                       handle,
+                                       CHIMERA_ACE_EXECUTE,
+                                       chimera_vfs_lookup_at_gate_complete, gate);
         return;
     }
 
