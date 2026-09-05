@@ -277,6 +277,77 @@ test_serialize_roundtrip(void)
     /* truncated input is rejected */
     assert(chimera_acl_deserialize(buf, 3, back, 8) == -1);
 
+    /* v2: an ACE carrying a native SID round-trips byte-for-byte, and the
+     * presence of any SID selects the version-2 encoding. */
+    {
+        struct chimera_sid sid;
+
+        memset(acl_storage, 0, sizeof(acl_storage));
+        memset(back_storage, 0, sizeof(back_storage));
+        assert(chimera_sid_from_str(&sid, "S-1-5-21-7-8-9-1001") == 0);
+        acl->num_aces            = 2;
+        acl->ctrl_flags          = CHIMERA_ACL_CTRL_AUTO_INHERITED;
+        acl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+        acl->aces[0].flags       = CHIMERA_ACE_FLAG_FILE_INHERIT;
+        acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA;
+        acl->aces[0].who.type    = CHIMERA_PRINCIPAL_SID;
+        acl->aces[0].who.sid     = sid;
+        acl->aces[1].type        = CHIMERA_ACE_DENIED;
+        acl->aces[1].flags       = 0;
+        acl->aces[1].access_mask = CHIMERA_ACE_WRITE_DATA;
+        acl->aces[1].who.type    = CHIMERA_PRINCIPAL_USER;
+        acl->aces[1].who.id      = 4000;
+        acl->aces[1].who.sid     = sid;
+
+        len = chimera_acl_serialize(acl, buf, sizeof(buf));
+        assert(len > 0);
+        assert((size_t) len == chimera_acl_serialized_size(acl));
+        assert(buf[0] == 2); /* version 2 because a SID is present */
+        n = chimera_acl_deserialize(buf, len, back, 8);
+        assert(n == 2);
+        assert(back->ctrl_flags == acl->ctrl_flags);
+        assert(memcmp(acl->aces, back->aces, 2 * sizeof(struct chimera_ace)) == 0);
+        /* a truncated SID trailer is rejected */
+        assert(chimera_acl_deserialize(buf, len - 1, back, 8) == -1);
+    }
+
+    /* v1 is still emitted when no ACE carries a SID, so an older binary
+     * reading a volume written by this one sees what it always did. */
+    memset(acl_storage, 0, sizeof(acl_storage));
+    memset(back_storage, 0, sizeof(back_storage));
+    chimera_acl_from_mode(0644, acl, 8);
+    len = chimera_acl_serialize(acl, buf, sizeof(buf));
+    assert(len > 0);
+    assert(buf[0] == 1);
+    assert((size_t) len == chimera_acl_serialized_size(acl));
+    assert(chimera_acl_deserialize(buf, len, back, 8) == acl->num_aces);
+    assert(memcmp(acl->aces, back->aces,
+                  acl->num_aces * sizeof(struct chimera_ace)) == 0);
+
+    /* A hand-built v1 blob (as persisted by pre-SID releases) decodes with
+     * the SID absent on every ACE. */
+    {
+        static const uint8_t v1[] = {
+            1,                      /* version                              */
+            0x01, 0x00,             /* ctrl_flags = PROTECTED               */
+            0x01, 0x00,             /* num_aces = 1                         */
+            0x00, 0x00,             /* type = ALLOWED                       */
+            0x00, 0x00,             /* flags                                */
+            0x01, 0x00, 0x00, 0x00, /* access_mask = READ_DATA              */
+            0x00,                   /* principal type = USER                */
+            0x00,                   /* special                              */
+            0xe8, 0x03, 0x00, 0x00, /* id = 1000                            */
+        };
+
+        memset(back_storage, 0, sizeof(back_storage));
+        n = chimera_acl_deserialize(v1, sizeof(v1), back, 8);
+        assert(n == 1);
+        assert(back->ctrl_flags == CHIMERA_ACL_CTRL_PROTECTED);
+        assert(back->aces[0].who.type == CHIMERA_PRINCIPAL_USER);
+        assert(back->aces[0].who.id == 1000);
+        assert(!chimera_sid_present(&back->aces[0].who.sid));
+    }
+
     TEST_PASS("serialize/deserialize round-trips, rejects bad input");
 } /* test_serialize_roundtrip */
 

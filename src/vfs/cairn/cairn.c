@@ -888,9 +888,10 @@ cairn_map_pnfs(
     rocksdb_pinnableslice_destroy(slice);
 } /* cairn_map_pnfs */
 
-/* Scratch big enough to (de)serialize the largest permitted ACL. */
+/* Scratch big enough to (de)serialize the largest permitted ACL, every ACE
+ * carrying a maximum-length native SID (the v2 encoding is variable). */
 #define CAIRN_ACL_SCRATCH        (CHIMERA_ACL_SERIAL_HDR + \
-                                  CHIMERA_ACL_MAX_ACES * CHIMERA_ACL_SERIAL_ACE)
+                                  CHIMERA_ACL_MAX_ACES * CHIMERA_ACL_SERIAL_ACE_MAX)
 #define CAIRN_ACL_STRUCT_SCRATCH (sizeof(struct chimera_acl) + \
                                   CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace))
 
