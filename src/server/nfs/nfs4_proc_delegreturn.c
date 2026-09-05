@@ -42,6 +42,20 @@ chimera_nfs4_delegreturn(
         return;
     }
 
+    /* A delegation stateid designates state held only by the client it was
+     * granted to, so presenting it from another client names no valid state
+     * and must not tear the delegation down (RFC 7530 §9.1.4 / §16.6). */
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = status;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     deleg = state_void;
 
     /* Release the claim now so a conflicting open/IO awaiting the recall can
