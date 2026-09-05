@@ -445,7 +445,8 @@ diskfs_inherit_acl_async(
 
         if (len >= 0) {
             if (derive_mode) {
-                child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(store);
+                child->mode = (child->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                    chimera_acl_to_mode(store);
             }
             diskfs_acl_serial_install(child, sbuf, len);
             /* The child is brand new, so there is no existing record to
@@ -982,7 +983,8 @@ diskfs_setattr_inode_cb(
         int                       slen = -1;
 
         if (acl && acl->num_aces) {
-            inode->mode = (inode->mode & S_IFMT) | chimera_acl_to_mode(acl);
+            inode->mode = (inode->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                chimera_acl_to_mode(acl);
         }
         if (acl && acl->num_aces && acl->num_aces <= DISKFS_ACL_REC_MAX_ACES) {
             slen = chimera_acl_serialize(acl, sbuf, sizeof(sbuf));

@@ -1030,7 +1030,8 @@ cairn_inherit_acl(
      * always set ATTR_ACL (e.g., NFS3 creates). */
     if (new_acl && new_acl->num_aces) {
         cairn_put_acl(thread, child->inum, new_acl);
-        child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(new_acl);
+        child->mode = (child->mode & CHIMERA_MODE_ACL_PRESERVE) |
+            chimera_acl_to_mode(new_acl);
         return;
     }
 
@@ -1052,7 +1053,8 @@ cairn_inherit_acl(
 
             if (n > 0) {
                 cairn_put_acl(thread, child->inum, tmp);
-                child->mode = (child->mode & S_IFMT) | chimera_acl_to_mode(tmp);
+                child->mode = (child->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                    chimera_acl_to_mode(tmp);
                 free(tmp);
                 return;
             }
@@ -2192,7 +2194,7 @@ cairn_setattr(
         if (orig_set_mask & CHIMERA_VFS_ATTR_ACL) {
             if (sa->va_acl && sa->va_acl->num_aces) {
                 cairn_put_acl(thread, inode->inum, sa->va_acl);
-                inode->mode = (inode->mode & S_IFMT) |
+                inode->mode = (inode->mode & CHIMERA_MODE_ACL_PRESERVE) |
                     chimera_acl_to_mode(sa->va_acl);
             } else {
                 cairn_remove_acl(thread, inode->inum);

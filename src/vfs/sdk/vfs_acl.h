@@ -21,8 +21,22 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/stat.h>
 
 struct chimera_vfs_cred;
+
+/*
+ * Mode bits that survive a re-derivation of the mode from an ACL.
+ *
+ * chimera_acl_to_mode projects only the nine rwx bits, so a backend that
+ * recomputes an object's mode after a SETATTR(acl) or a create-time inherit
+ * must carry the rest over from the stored mode: the file type, and the three
+ * high-order bits.  RFC 7530 6.4.1.2 -- "the three high-order bits of the mode
+ * (MODE4_SUID, MODE4_SGID, MODE4_SVTX) SHOULD remain unchanged" -- setuid,
+ * setgid and sticky are not expressible in an ACL, so setting or inheriting one
+ * must leave them alone rather than project them away.
+ */
+#define CHIMERA_MODE_ACL_PRESERVE          (S_IFMT | S_ISUID | S_ISGID | S_ISVTX)
 
 /* ---- ACE types (match nfsace4 type and the NT ACE type family) ---------- */
 #define CHIMERA_ACE_ALLOWED                0
