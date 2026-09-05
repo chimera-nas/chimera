@@ -1660,7 +1660,10 @@ chimera_nfs4_open(
      *   2. Per-client reclaim completion (RFC 8881 §18.51.3): once a 4.1+
      *      client establishes a new client ID it MUST send RECLAIM_COMPLETE
      *      before performing any non-reclaim locking operation.  Until it does,
-     *      a non-reclaim OPEN is refused with NFS4ERR_GRACE.  This is a
+     *      a non-reclaim OPEN is refused with NFS4ERR_GRACE.  Symmetrically,
+     *      once it has sent RECLAIM_COMPLETE the client may no longer reclaim:
+     *      a further CLAIM_PREVIOUS is NFS4ERR_NO_GRACE even while the
+     *      server-wide window is still open for other clients.  This is a
      *      per-client obligation independent of the server-wide grace window,
      *      so it is enforced whether or not in_grace is set. */
     {
@@ -1676,12 +1679,22 @@ chimera_nfs4_open(
             return;
         }
 
-        if (req->minorversion > 0 && !is_reclaim && req->session &&
-            !nfs4_client_reclaim_complete(&thread->shared->nfs4_shared_clients,
-                                          req->session->nfs4_session_clientid)) {
-            res->status = NFS4ERR_GRACE;
-            chimera_nfs4_open_complete(req, res->status);
-            return;
+        if (req->minorversion > 0 && req->session) {
+            bool done = nfs4_client_reclaim_complete(
+                &thread->shared->nfs4_shared_clients,
+                req->session->nfs4_session_clientid);
+
+            if (is_reclaim && done) {
+                res->status = NFS4ERR_NO_GRACE;
+                chimera_nfs4_open_complete(req, res->status);
+                return;
+            }
+
+            if (!is_reclaim && !done) {
+                res->status = NFS4ERR_GRACE;
+                chimera_nfs4_open_complete(req, res->status);
+                return;
+            }
         }
     }
 

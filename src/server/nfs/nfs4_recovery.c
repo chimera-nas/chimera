@@ -567,14 +567,25 @@ nfs_recovery_open_check(
      * this leg is unreachable on the default memkv backend. */
     if (in_grace && is_reclaim && load_ready && client) {
         struct nfs_recovery_record *r;
+        bool                        reclaimed;
 
         pthread_mutex_lock(&rec->lock);
         HASH_FIND(hh, rec->to_reclaim, client->owner_string,
                   client->owner_len, r);
+        reclaimed = r && r->reclaimed;
         pthread_mutex_unlock(&rec->lock);
 
         if (!r) {
             return NFS4ERR_RECLAIM_BAD;
+        }
+
+        /* RFC 8881 §18.51.3: once this client has declared reclaim complete
+         * the server MUST NOT let it reclaim any more state, even though the
+         * server-wide grace window is still open because some *other* client
+         * has not finished.  Grace is a per-client obligation that this client
+         * has already retired. */
+        if (reclaimed) {
+            return NFS4ERR_NO_GRACE;
         }
     }
 
