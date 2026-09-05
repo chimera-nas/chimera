@@ -618,19 +618,23 @@ test_oversize_name_clamp(void)
 } /* test_oversize_name_clamp */
 
 /* ------------------------------------------------------------------ */
-/* Test 12: watch_tree transition forces ring purge + overflow flag    */
+/* Test 12: a watch_tree transition keeps the events already queued    */
 /* ------------------------------------------------------------------ */
 /*
- * Ring entries do not carry a per-event tag for whether they were
- * enqueued under watch_tree mode (paths like "sub/dir/file") or
- * exact-watch mode (bare filenames).  When the SMB client reuses a
- * directory handle and flips WATCH_TREE between requests, leaving
- * old-mode events in the ring would deliver a path-style name to a
- * non-tree consumer or vice versa.  watch_update must therefore reset
- * the ring and force an overflow so the client rescans.
+ * Flipping WATCH_TREE used to purge the ring and raise overflow, on the
+ * reasoning that a subtree event names its object by a relative path while an
+ * exact-mode event names it by a bare filename, and the ring carries no
+ * per-event tag saying which produced it.
+ *
+ * That argument is about this implementation's event representation, not the
+ * protocol: MS-SMB2 mandates no purge, a client that narrows its recursion has
+ * not asked to lose the changes it was already waiting for, and Samba delivers
+ * them across the flip.  So the events survive and no overflow is forced --
+ * if the names ever do become ambiguous in practice the answer is to tag the
+ * events, not to discard the client's changes.
  */
 static void
-test_watch_tree_transition_clears_ring(void)
+test_watch_tree_transition_keeps_ring(void)
 {
     struct chimera_vfs_notify       *notify;
     struct chimera_vfs_notify_watch *watch;
@@ -639,7 +643,7 @@ test_watch_tree_transition_clears_ring(void)
     int                              n;
     uint8_t                          fh[CHIMERA_VFS_FH_SIZE];
 
-    fprintf(stderr, "\ntest_watch_tree_transition_clears_ring\n");
+    fprintf(stderr, "\ntest_watch_tree_transition_keeps_ring\n");
 
     notify = notify_new();
     make_fh(fh, 1);
@@ -652,16 +656,17 @@ test_watch_tree_transition_clears_ring(void)
                             CHIMERA_VFS_NOTIFY_FILE_ADDED,
                             "before.txt", 10, NULL, 0);
 
-    /* Flip watch_tree on.  Any event queued under the old mode must be
-     * dropped — the ring has no per-event mode tag to filter selectively. */
+    /* Flip watch_tree on.  The event queued under the old mode is the
+     * client's to receive; widening the recursion is not a request to lose
+     * it. */
     chimera_vfs_notify_watch_update(notify, watch, 0xFFFFFFFF, 1);
 
     n = chimera_vfs_notify_drain(watch, events, 4, &overflowed);
-    CHECK(n == 0, "ring cleared on watch_tree transition");
-    CHECK(overflowed == 1, "overflow flag set on watch_tree transition");
+    CHECK(n == 1, "queued event survives the watch_tree transition");
+    CHECK(overflowed == 0, "no overflow forced by the transition");
 
-    /* Subsequent drain after enqueueing a fresh event in the new mode
-     * delivers normally, and the overflow flag stays cleared. */
+    /* A fresh event in the new mode still delivers normally, and the
+     * overflow flag stays cleared. */
     chimera_vfs_notify_emit(notify, fh, sizeof(fh),
                             CHIMERA_VFS_NOTIFY_FILE_ADDED,
                             "after.txt", 9, NULL, 0);
@@ -671,17 +676,15 @@ test_watch_tree_transition_clears_ring(void)
 
     chimera_vfs_notify_watch_destroy(notify, watch);
     chimera_vfs_notify_destroy(notify);
-} /* test_watch_tree_transition_clears_ring */
+} /* test_watch_tree_transition_keeps_ring */
 
 /* ------------------------------------------------------------------ */
 /* Test 13: WATCH_TREE flip the other way (tree -> non-tree)           */
 /* ------------------------------------------------------------------ */
 /*
- * Mirror image of test_watch_tree_transition_clears_ring — when a
- * client narrows from WATCH_TREE back to exact-only, queued subtree
- * events ("a/b/c" path-prefixed) must be purged from the ring with
- * overflow set so the client rescans rather than receiving paths it
- * cannot interpret in non-tree mode.
+ * Mirror image of test_watch_tree_transition_keeps_ring: narrowing from
+ * WATCH_TREE back to exact-only keeps the queued events too.  The direction of
+ * the flip does not change whose changes these are.
  */
 static void
 test_watch_tree_transition_tree_to_nontree(void)
@@ -706,13 +709,12 @@ test_watch_tree_transition_tree_to_nontree(void)
                             CHIMERA_VFS_NOTIFY_FILE_ADDED,
                             "tree.txt", 8, NULL, 0);
 
-    /* Flip OFF.  Even ring entries that happen to have bare names get
-     * purged: there is no per-event mode tag to distinguish them. */
+    /* Flip OFF.  The queued entry is delivered, not discarded. */
     chimera_vfs_notify_watch_update(notify, watch, 0xFFFFFFFF, 0);
 
     n = chimera_vfs_notify_drain(watch, events, 4, &overflowed);
-    CHECK(n == 0, "ring cleared on tree -> non-tree transition");
-    CHECK(overflowed == 1, "overflow flag set on tree -> non-tree transition");
+    CHECK(n == 1, "queued event survives the tree -> non-tree transition");
+    CHECK(overflowed == 0, "no overflow forced by the tree -> non-tree flip");
 
     chimera_vfs_notify_watch_destroy(notify, watch);
     chimera_vfs_notify_destroy(notify);
@@ -1162,7 +1164,7 @@ main(
     test_rpl_cache_cross_shard_invalidate();
     test_rpl_cache_slot_distribution();
     test_oversize_name_clamp();
-    test_watch_tree_transition_clears_ring();
+    test_watch_tree_transition_keeps_ring();
     test_watch_tree_transition_tree_to_nontree();
     test_subtree_no_rpl_overflows();
     test_subtree_rpl_max_pending_overflows();
