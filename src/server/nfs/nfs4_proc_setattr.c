@@ -196,6 +196,23 @@ chimera_nfs4_setattr(
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->stateid);
 
+    /* RFC 7530 §9.6.2: a size-changing SETATTR is a write (§9.1.4.3), so it
+     * is refused with NFS4ERR_GRACE while the server-reboot grace window is
+     * open -- the byte-range lock it would truncate through may not have been
+     * reclaimed yet.  Attribute-only SETATTRs conflict with no reclaim and
+     * are left alone. */
+    if (args->obj_attributes.num_attrmask >= 1 &&
+        (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE))) {
+        nfsstat4 g_status = nfs_recovery_io_check(
+            &thread->shared->nfs4_recovery);
+
+        if (g_status != NFS4_OK) {
+            res->status = g_status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+    }
+
     /* RFC 7530 §16.32.3: when SETATTR carries FATTR4_SIZE the supplied
      * stateid must identify an open with write access.  Special stateids
      * (all-zero / all-ones) are exempt -- treated as anonymous, like the
