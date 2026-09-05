@@ -175,6 +175,12 @@ struct chimera_posix_utimensat_ctx {
     uint8_t                         start_fh[CHIMERA_VFS_FH_SIZE + 16];
     char                            path[CHIMERA_VFS_PATH_MAX];
     int                             path_len;
+    /* When the path is resolved relative to a real dirfd, the fd's live open
+     * handle: a non-directory dirfd is ENOTDIR (checked against the live inode,
+     * so an unlinked-while-open non-dir answers correctly rather than the
+     * ENOENT re-opening its stale path via start_fh would give).  NULL for
+     * AT_FDCWD / an absolute path. */
+    struct chimera_vfs_open_handle *dir_handle;
 };
 
 static void
@@ -249,14 +255,13 @@ chimera_posix_utimensat_lookup_complete(
 } /* chimera_posix_utimensat_lookup_complete */
 
 static void
-chimera_posix_utimensat_exec(
-    struct chimera_client_thread  *thread,
+chimera_posix_utimensat_lookup(
     struct chimera_client_request *request)
 {
     struct chimera_posix_utimensat_ctx *ctx = request->setattr.private_data;
 
     chimera_vfs_lookup(
-        thread->vfs_thread,
+        request->thread->vfs_thread,
         chimera_client_req_cred(request),
         ctx->start_fh,
         ctx->start_fh_len,
@@ -266,6 +271,51 @@ chimera_posix_utimensat_exec(
         ctx->lookup_flags,
         chimera_posix_utimensat_lookup_complete,
         ctx);
+} /* chimera_posix_utimensat_lookup */
+
+/* Resolving a relative path under a non-directory dirfd is ENOTDIR; a directory
+ * (even one whose name was unlinked while the fd stayed open) proceeds to the
+ * path resolution below, which yields the natural ENOENT for a removed dir. */
+static void
+chimera_posix_utimensat_dircheck_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_posix_utimensat_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_posix_complete(&ctx->comp, error_code);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISDIR(attr->va_mode)) {
+        chimera_posix_complete(&ctx->comp, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    chimera_posix_utimensat_lookup(ctx->comp.request);
+} /* chimera_posix_utimensat_dircheck_complete */
+
+static void
+chimera_posix_utimensat_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_posix_utimensat_ctx *ctx = request->setattr.private_data;
+
+    if (ctx->dir_handle) {
+        chimera_vfs_getattr(
+            thread->vfs_thread,
+            chimera_client_req_cred(request),
+            ctx->dir_handle,
+            CHIMERA_VFS_ATTR_MASK_STAT,
+            chimera_posix_utimensat_dircheck_complete,
+            ctx);
+        return;
+    }
+
+    chimera_posix_utimensat_lookup(request);
 } /* chimera_posix_utimensat_exec */
 
 SYMBOL_EXPORT int
@@ -298,6 +348,7 @@ chimera_posix_utimensat(
 
         memcpy(ctx.start_fh, client->root_fh, client->root_fh_len);
         ctx.start_fh_len = client->root_fh_len;
+        ctx.dir_handle   = NULL;
     } else {
         dir_entry = chimera_posix_fd_acquire(posix, dirfd, 0);
         if (!dir_entry) {
@@ -308,6 +359,7 @@ chimera_posix_utimensat(
 
         memcpy(ctx.start_fh, dir_entry->handle->fh, dir_entry->handle->fh_len);
         ctx.start_fh_len = dir_entry->handle->fh_len;
+        ctx.dir_handle   = dir_entry->handle;
     }
 
     ctx.path_len = strlen(pathname);
