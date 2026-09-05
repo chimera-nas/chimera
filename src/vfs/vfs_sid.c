@@ -182,10 +182,13 @@ chimera_sid_from_bin(
     int len = chimera_sid_bin_len(buf, avail);
 
     if (len < 0) {
-        sid->len = 0;
+        memset(sid, 0, sizeof(*sid));
         return -1;
     }
+    /* Fully define the struct: zero the tail past the SID so a chimera_sid
+     * (and any ACE carrying one) is byte-deterministic and safe to memcmp. */
     memcpy(sid->data, buf, len);
+    memset(sid->data + len, 0, CHIMERA_SID_MAX_LEN - len);
     sid->len = (uint8_t) len;
     return len;
 } /* chimera_sid_from_bin */
@@ -213,9 +216,10 @@ chimera_sid_from_str(
     int len = chimera_sid_str_to_bin(str, sid->data, CHIMERA_SID_MAX_LEN);
 
     if (len < 0) {
-        sid->len = 0;
+        memset(sid, 0, sizeof(*sid));
         return -1;
     }
+    memset(sid->data + len, 0, CHIMERA_SID_MAX_LEN - len);
     sid->len = (uint8_t) len;
     return 0;
 } /* chimera_sid_from_str */
