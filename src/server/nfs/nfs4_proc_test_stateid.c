@@ -24,6 +24,17 @@ chimera_nfs4_test_stateid(
         sizeof(nfsstat4) * args->num_ts_stateids,
         req->encoding->dbuf);
 
+    /* ts_stateids<> is unbounded on the wire, so a large enough array does not
+     * fit the remaining response buffer.  Report that as REP_TOO_BIG (RFC 8881
+     * §18.48.3; NFS4ERR_RESOURCE is not a 4.1 error) rather than writing the
+     * per-stateid results through a NULL pointer. */
+    if (resok->tsr_status_codes == NULL) {
+        resok->num_tsr_status_codes = 0;
+        res->tsr_status             = NFS4ERR_REP_TOO_BIG;
+        chimera_nfs4_compound_complete(req, res->tsr_status);
+        return;
+    }
+
     for (i = 0; i < args->num_ts_stateids; i++) {
         nfsstat4 st = nfs_state_table_validate(table, &args->ts_stateids[i]);
 
