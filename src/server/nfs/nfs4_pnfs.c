@@ -290,7 +290,11 @@ chimera_nfs4_encode_ff_layout(
      * §5.1).  ffds_group is constant across iomodes. */
     const char   *ffds_user = (iomode == LAYOUTIOMODE4_RW) ? "0" : "1";
 
-    pnfs_put_u64(&p, NFS4_PNFS_STRIPE_UNIT);          /* ffl_stripe_unit       */
+    /* One mirror holding the whole segment on one data server is a stripe
+     * count of one, and RFC 8435 §5.1 requires ffl_stripe_unit to default to
+     * zero in that case; a non-zero unit would let a strict client compute a
+     * data-server index the layout does not have. */
+    pnfs_put_u64(&p, 0);                              /* ffl_stripe_unit       */
 
     pnfs_put_u32(&p, 1);                              /* ffl_mirrors<> count   */
     pnfs_put_u32(&p, 1);                              /* ffm_data_servers<>    */
