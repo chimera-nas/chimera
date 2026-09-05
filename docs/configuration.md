@@ -37,7 +37,8 @@ reads the file:
 | `buckets` | object | server | S3 buckets. |
 | `fuse_mounts` | object | server | Local kernel FUSE mounts (Linux only). |
 | `users` | array | server + client | Built-in user accounts (uid/gid, passwords). |
-| `s3_access_keys` | array | server | S3 access/secret key pairs. |
+| `s3_access_keys` | array | server | S3 access/secret key pairs, each bound to a user. |
+| `s3_anon` | object | server | Identity an S3 key with no user binding acts as. |
 | `config` | object | client | Client-library settings (the client's analogue of `server`). |
 
 A typical server config wires a **mount** (a VFS backend) and then publishes it
@@ -335,12 +336,46 @@ An **array** of built-in accounts (used by NFS/SMB auth and ownership mapping).
 
 ### `s3_access_keys`
 
-An **array** of S3 credentials. Both keys are required per entry.
+An **array** of S3 credentials. `access_key` and `secret_key` are required per
+entry.
 
 | Key | Type | Description |
 |---|---|---|
 | `access_key` | string | S3 access key ID. |
 | `secret_key` | string | S3 secret access key. |
+| `username` | string | Name of a `users` entry this key acts as. |
+
+Every request authenticated with a key runs against the store as that user's
+uid/gid, and objects and buckets it creates are owned by them. Authorization is
+therefore the store's own ownership and mode bits — the same ones NFS and SMB
+enforce — so a key can only reach what its user could reach over any other
+protocol. Give two tenants two keys bound to two users and neither can read or
+write the other's buckets.
+
+```json
+"users": [
+    { "username": "alice", "uid": 1001, "gid": 1001 },
+    { "username": "bob",   "uid": 1002, "gid": 1002 }
+],
+"s3_access_keys": [
+    { "access_key": "AKIAALICE", "secret_key": "...", "username": "alice" },
+    { "access_key": "AKIABOB",   "secret_key": "...", "username": "bob" }
+]
+```
+
+A key with no `username` — or one naming a user that does not exist — is
+**unbound**: it acts as the anonymous identity below rather than as root, and is
+logged at startup. Such a key authenticates successfully but will be denied
+anything the anonymous user may not do, so bind every key you expect to work.
+
+### `s3_anon`
+
+Identity an unbound S3 access key acts as. Defaults to nobody/nogroup.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `uid` | int | `65534` | POSIX user ID for unbound keys. |
+| `gid` | int | `65534` | POSIX group ID for unbound keys. |
 
 ### Full server example
 
@@ -379,7 +414,7 @@ An **array** of S3 credentials. Both keys are required per entry.
         { "username": "alice", "password": "secret", "uid": 1000, "gid": 1000 }
     ],
     "s3_access_keys": [
-        { "access_key": "AKIDEXAMPLE", "secret_key": "wJalrXUtnFEMI..." }
+        { "access_key": "AKIDEXAMPLE", "secret_key": "wJalrXUtnFEMI...", "username": "alice" }
     ]
 }
 ```

@@ -616,7 +616,7 @@ main(
                                   .secret_key = "tempsecret" };
 
         CHECK(chimera_server_add_s3_cred(env.server, "tempaccess",
-                                         "tempsecret", 0) == 0,
+                                         "tempsecret", S3_MBT_USER, 0) == 0,
               "add unpinned cred failed");
 
         r = s3_mbt_call(&env, &req);
@@ -625,7 +625,7 @@ main(
 
         /* re-adding the same key replaces the entry (fresh TTL stamp) */
         CHECK(chimera_server_add_s3_cred(env.server, "tempaccess",
-                                         "tempsecret", 0) == 0,
+                                         "tempsecret", S3_MBT_USER, 0) == 0,
               "re-add unpinned cred failed");
         r = s3_mbt_call(&env, &req);
         CHECK(r->status == 200, "replaced-cred GET: got %d want 200",
@@ -652,7 +652,7 @@ main(
         /* a pinned extra credential survives any advance, and explicit
          * removal (not expiry) is what retires it */
         CHECK(chimera_server_add_s3_cred(env.server, "tempaccess",
-                                         "tempsecret", 1) == 0,
+                                         "tempsecret", S3_MBT_USER, 1) == 0,
               "add pinned cred failed");
         chimera_server_advance_s3_cred_clock(env.server, 100000);
         r = s3_mbt_call(&env, &req);

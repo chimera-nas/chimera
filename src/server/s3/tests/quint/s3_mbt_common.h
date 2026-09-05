@@ -52,6 +52,7 @@
 #define S3_MBT_BODY_MAX    (64 * 1024 * 1024)
 
 #define S3_MBT_ACCESS_KEY  "quintaccess"
+#define S3_MBT_USER        "quintuser"
 #define S3_MBT_SECRET_KEY  "quintsecret"
 
 /* Fixed signing date: the server never checks it for freshness, and a fixed
@@ -680,8 +681,16 @@ s3_mbt_env_open_module(
      * per-trace mount recreates /share, so the root stays valid across the
      * whole batch), and every request must be signed with a known cred. */
     chimera_server_set_s3_bucket_root(env->server, "/share");
+
+    /* Bind the harness key to a uid-0 user so the model keeps exercising the
+     * same reachable state it did when every key ran as root.  The identity
+     * mapping itself is covered by the s3_identity unit test; extending the
+     * model to a second, unprivileged tenant (and asserting cross-tenant
+     * denial) is follow-on work. */
+    chimera_server_add_user(env->server, S3_MBT_USER, "", "", NULL,
+                            0, 0, 0, NULL, 1);
     chimera_server_add_s3_cred(env->server, S3_MBT_ACCESS_KEY,
-                               S3_MBT_SECRET_KEY, 1);
+                               S3_MBT_SECRET_KEY, S3_MBT_USER, 1);
 
     /* Client half: its own evpl loop; the response callbacks run inside
      * evpl_continue() on this (the only) test thread.  The 1 ms wait bound
