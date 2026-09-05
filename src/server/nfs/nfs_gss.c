@@ -215,8 +215,9 @@ chimera_nfs_gss_wrap(
     void       *gss_ctx,
     const void *in,
     size_t      in_len,
-    void      **out,
-    size_t     *out_len)
+    void       *out,
+    size_t      out_cap,
+    size_t     *r_out_len)
 {
     OM_uint32       major, minor;
     int             conf_state;
@@ -224,8 +225,7 @@ chimera_nfs_gss_wrap(
     gss_buffer_desc o = GSS_C_EMPTY_BUFFER;
 
     (void) arg;
-    *out     = NULL;
-    *out_len = 0;
+    *r_out_len = 0;
 
     major = gss_wrap(&minor, (gss_ctx_id_t) gss_ctx, 1 /* conf_req */,
                      GSS_C_QOP_DEFAULT, &i, &conf_state, &o);
@@ -233,13 +233,18 @@ chimera_nfs_gss_wrap(
         return -1;
     }
 
-    *out = malloc(o.length);
-    if (!*out) {
+    /* The mechanism owns o and we own out, so this copy is the one the GSS
+     * interface makes unavoidable.  It used to be two: the result was copied
+     * into a malloc'd buffer here purely so rpc2 could free() it, and rpc2
+     * then copied that into the iovec it actually wanted.  rpc2 now hands
+     * down the destination, so the middle buffer is gone. */
+    if (o.length > out_cap) {
         gss_release_buffer(&minor, &o);
         return -1;
     }
-    memcpy(*out, o.value, o.length);
-    *out_len = o.length;
+
+    memcpy(out, o.value, o.length);
+    *r_out_len = o.length;
     gss_release_buffer(&minor, &o);
     return 0;
 } /* chimera_nfs_gss_wrap */
@@ -250,8 +255,9 @@ chimera_nfs_gss_unwrap(
     void       *gss_ctx,
     const void *in,
     size_t      in_len,
-    void      **out,
-    size_t     *out_len)
+    void       *out,
+    size_t      out_cap,
+    size_t     *r_out_len)
 {
     OM_uint32       major, minor;
     int             conf_state;
@@ -260,8 +266,7 @@ chimera_nfs_gss_unwrap(
     gss_buffer_desc o = GSS_C_EMPTY_BUFFER;
 
     (void) arg;
-    *out     = NULL;
-    *out_len = 0;
+    *r_out_len = 0;
 
     major = gss_unwrap(&minor, (gss_ctx_id_t) gss_ctx, &i, &o, &conf_state,
                        &qop);
@@ -269,13 +274,18 @@ chimera_nfs_gss_unwrap(
         return -1;
     }
 
-    *out = malloc(o.length);
-    if (!*out) {
+    /* The mechanism owns o and we own out, so this copy is the one the GSS
+     * interface makes unavoidable.  It used to be two: the result was copied
+     * into a malloc'd buffer here purely so rpc2 could free() it, and rpc2
+     * then copied that into the iovec it actually wanted.  rpc2 now hands
+     * down the destination, so the middle buffer is gone. */
+    if (o.length > out_cap) {
         gss_release_buffer(&minor, &o);
         return -1;
     }
-    memcpy(*out, o.value, o.length);
-    *out_len = o.length;
+
+    memcpy(out, o.value, o.length);
+    *r_out_len = o.length;
     gss_release_buffer(&minor, &o);
     return 0;
 } /* chimera_nfs_gss_unwrap */
