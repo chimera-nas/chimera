@@ -1412,7 +1412,14 @@ chimera_linux_write(
 
     fd = (int) request->write.handle->vfs_private;
 
-    if (request->write.sync) {
+    /* RFC 1813 3.3.7: DATA_SYNC needs the data (and only the metadata needed
+     * to retrieve it) durable, FILE_SYNC needs all metadata durable too.
+     * RWF_DSYNC/RWF_SYNC are exactly that distinction, so honor the level the
+     * client asked for instead of promoting DATA_SYNC to a full fsync -- the
+     * reply already reports the requested level back in r_sync. */
+    if (request->write.sync == CHIMERA_VFS_WRITE_DATASYNC) {
+        flags = RWF_DSYNC;
+    } else if (request->write.sync == CHIMERA_VFS_WRITE_FILESYNC) {
         flags = RWF_SYNC;
     }
 
