@@ -288,6 +288,28 @@ chimera_nfs4_lock(
         return;
     }
 
+    /* RFC 7530 §9.6.2/§9.6.3 (RFC 8881 §8.4.2): LOCK carries its own reclaim
+     * flag and takes part in the reboot-recovery state machine exactly as OPEN
+     * does.  Inside the grace window only reclaims are admitted (non-reclaim ->
+     * NFS4ERR_GRACE); outside it a reclaim has nothing left to reclaim
+     * (-> NFS4ERR_NO_GRACE), and a reclaim from a client with no persisted
+     * pre-restart record is NFS4ERR_RECLAIM_BAD.  Without this the byte-range
+     * half of recovery was unsound: stale reclaims were granted as fresh locks
+     * and ordinary locks taken during grace could conflict with a lock another
+     * client had not reclaimed yet. */
+    {
+        nfsstat4 g_status = nfs_recovery_open_check(
+            &thread->shared->nfs4_recovery,
+            req->session ? req->session->client_unified : NULL,
+            args->reclaim != 0);
+
+        if (g_status != NFS4_OK) {
+            res->status = g_status;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
+    }
+
     if (args->locktype == READ_LT || args->locktype == READW_LT) {
         lock_type = CHIMERA_VFS_LOCK_READ;
     } else {
