@@ -31,6 +31,12 @@ nfs4_root_getattr(
 
     memset(attr, 0, sizeof(*attr));
 
+    /* The FSID and statfs fills below are gated on va_req_mask, which the
+     * memset just cleared, so carry the caller's resolved mask into the attrs
+     * -- without it neither block ever runs and the pseudo-root answers a
+     * GETATTR for fsid (a REQUIRED attribute, RFC 7530 §5.6) or for any statfs
+     * attribute with the bit dropped from the returned bitmap. */
+    attr->va_req_mask = attr_mask;
     attr->va_set_mask = CHIMERA_VFS_ATTR_MASK_STAT;
 
     /* Synthetic root directory attribute */
