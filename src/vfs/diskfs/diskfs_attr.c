@@ -82,6 +82,22 @@ diskfs_setattr_acl_inserted_cb(
     void                *private_data);
 
 static void
+diskfs_setattr_sids(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_setattr_sid_insert(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_setattr_acl(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_setattr_records(
+    struct chimera_vfs_request *request);
+
+static void
 diskfs_setattr_acl_insert(
     struct chimera_vfs_request *request);
 
@@ -358,6 +374,113 @@ diskfs_acl_serial_install(
 
 
 /*
+ * Native owner / group SID record codec (DISKFS_REC_SID): u8 owner_len,
+ * owner bytes, u8 group_len, group bytes; a zero length means unknown.
+ * Encode returns the record length, or -1 when neither SID is present (then
+ * no record should exist).  Decode clears whichever SID is not recorded.
+ */
+int
+diskfs_sid_rec_encode(
+    const struct chimera_sid *owner,
+    const struct chimera_sid *group,
+    uint8_t                  *buf)
+{
+    int len = 0;
+
+    if (!chimera_sid_present(owner) && !chimera_sid_present(group)) {
+        return -1;
+    }
+    buf[len++] = chimera_sid_present(owner) ? owner->len : 0;
+    if (chimera_sid_present(owner)) {
+        memcpy(buf + len, owner->data, owner->len);
+        len += owner->len;
+    }
+    buf[len++] = chimera_sid_present(group) ? group->len : 0;
+    if (chimera_sid_present(group)) {
+        memcpy(buf + len, group->data, group->len);
+        len += group->len;
+    }
+    return len;
+} /* diskfs_sid_rec_encode */
+
+void
+diskfs_sid_rec_decode(
+    const uint8_t      *serial,
+    uint32_t            len,
+    struct chimera_sid *owner,
+    struct chimera_sid *group)
+{
+    uint32_t pos = 0;
+    uint8_t  olen, glen;
+
+    owner->len = 0;
+    group->len = 0;
+
+    if (!serial || len < 2) {
+        return;
+    }
+    olen = serial[pos++];
+    if (olen) {
+        if (pos + olen > len ||
+            chimera_sid_from_bin(owner, serial + pos, olen) != (int) olen) {
+            owner->len = 0;
+            return;
+        }
+        pos += olen;
+    }
+    if (pos >= len) {
+        return;
+    }
+    glen = serial[pos++];
+    if (glen && pos + glen <= len) {
+        chimera_sid_from_bin(group, serial + pos, glen);
+    }
+} /* diskfs_sid_rec_decode */
+
+/* Replace inode->sid_serial (mirror of the DISKFS_REC_SID record) with a
+ * copy of serial[0..len), or clear it when len < 0.  Caller holds the inode
+ * write lock. */
+void
+diskfs_sid_serial_install(
+    struct diskfs_inode *inode,
+    const uint8_t       *serial,
+    int                  len)
+{
+    free(inode->sid_serial);
+    inode->sid_serial     = NULL;
+    inode->sid_serial_len = 0;
+    if (len >= 0) {
+        inode->sid_serial = malloc(len);
+        memcpy(inode->sid_serial, serial, len);
+        inode->sid_serial_len = (uint32_t) len;
+    }
+} /* diskfs_sid_serial_install */
+
+/* Decode the SID record into per-thread scratch and point the requested
+ * attr companions at it (valid through the synchronous completion). */
+void
+diskfs_sid_decode_into(
+    struct chimera_vfs_attrs *attr,
+    const uint8_t            *serial,
+    uint32_t                  len)
+{
+    static __thread struct chimera_sid owner;
+    static __thread struct chimera_sid group;
+
+    diskfs_sid_rec_decode(serial, len, &owner, &group);
+
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_OWNER_SID) && owner.len) {
+        attr->va_owner_sid = &owner;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_OWNER_SID;
+    }
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_GROUP_SID) && group.len) {
+        attr->va_group_sid = &group;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
+    }
+} /* diskfs_sid_decode_into */
+
+
+/*
  * Seed a freshly-created child's ACL (mirrors memfs/cairn).  Precedence:
  *   1. an explicit ACL supplied at create (e.g. an SMB SD via SecD) -> store
  *      it and re-derive the child mode (the caller snapshots new_acl from
@@ -387,7 +510,11 @@ diskfs_inherit_acl_async(
     int                       is_dir = S_ISDIR(child->mode);
     uint16_t                  want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
-    uint8_t                   abuf[sizeof(struct chimera_acl) +
+    /* Per-thread scratch: an ACE now carries an inline SID, so these are
+     * too large to keep on the stack. */
+    static __thread uint8_t   abuf[sizeof(struct chimera_acl) +
+                                   DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    static __thread uint8_t   pbuf[sizeof(struct chimera_acl) +
                                    DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
     const struct chimera_acl *store       = NULL;
     int                       derive_mode = 0;
@@ -396,8 +523,6 @@ diskfs_inherit_acl_async(
         store       = new_acl;
         derive_mode = 1;
     } else {
-        uint8_t             pbuf[sizeof(struct chimera_acl) +
-                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
         struct chimera_acl *parent_acl = (struct chimera_acl *) pbuf;
         int                 has_inh    = 0;
 
@@ -439,23 +564,36 @@ diskfs_inherit_acl_async(
         }
     }
 
-    if (store && store->num_aces && store->num_aces <= DISKFS_ACL_REC_MAX_ACES) {
-        uint8_t sbuf[DISKFS_ACL_REC_MAX];
-        int     len = chimera_acl_serialize(store, sbuf, sizeof(sbuf));
+    if (store && store->num_aces) {
+        if (chimera_acl_serialized_size(store) <= DISKFS_ACL_REC_MAX) {
+            uint8_t sbuf[DISKFS_ACL_REC_MAX];
+            int     len = chimera_acl_serialize(store, sbuf, sizeof(sbuf));
 
-        if (len >= 0) {
-            if (derive_mode) {
-                child->mode = (child->mode & CHIMERA_MODE_ACL_PRESERVE) |
-                    chimera_acl_to_mode(store);
+            if (len >= 0) {
+                if (derive_mode) {
+                    child->mode = (child->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                        chimera_acl_to_mode(store);
+                }
+                diskfs_acl_serial_install(child, sbuf, len);
+                /* The child is brand new, so there is no existing record to
+                 * replace: a single insert suffices.  (It can still suspend --
+                 * the pre-descent split reservation may journal onto a cold
+                 * AG-log block.) */
+                return diskfs_bt_insert_async(op, thread, txn, child,
+                                              &diskfs_acl_key, sbuf, len,
+                                              cb, private_data);
             }
-            diskfs_acl_serial_install(child, sbuf, len);
-            /* The child is brand new, so there is no existing record to
-             * replace: a single insert suffices.  (It can still suspend --
-             * the pre-descent split reservation may journal onto a cold
-             * AG-log block.) */
-            return diskfs_bt_insert_async(op, thread, txn, child,
-                                          &diskfs_acl_key, sbuf, len,
-                                          cb, private_data);
+        } else {
+            /* An inherited ACL that outgrew the record must not make the new
+             * object unusable; it gets the mode-derived DACL, visibly.  (An
+             * explicit create-time ACL that does not fit is refused before
+             * the inode is allocated, in diskfs_namespace.c.) */
+            chimera_diskfs_error("inherited acl for inum %lu does not fit one "
+                                 "record (%zu > %zu bytes): storing the "
+                                 "mode-derived DACL instead",
+                                 (unsigned long) child->inum,
+                                 chimera_acl_serialized_size(store),
+                                 (size_t) DISKFS_ACL_REC_MAX);
         }
     }
 
@@ -509,15 +647,13 @@ diskfs_getattr(
 static void
 diskfs_setattr_trunc_done(struct chimera_vfs_request *request)
 {
-    struct diskfs_request_private *p      = request->plugin_data;
-    struct diskfs_thread          *thread = p->thread;
-    struct diskfs_inode           *inode  = p->inode_stash[0];
+    struct diskfs_request_private *p     = request->plugin_data;
+    struct diskfs_inode           *inode = p->inode_stash[0];
 
     /* POSIX: a successful (f)truncate marks the last data modification time.
      * Bump mtime unless the caller supplied an explicit mtime, or is an
      * AUTH_ATTR (SMB/Windows) caller managing the write time itself. */
-    int                            bump_mtime = !(request->setattr.set_attr->va_set_mask &
-                                                  CHIMERA_VFS_ATTR_MTIME) &&
+    int                            bump_mtime = !(p->setattr_mask & CHIMERA_VFS_ATTR_MTIME) &&
         request->cred->flavor != CHIMERA_VFS_AUTH_ATTR;
 
     diskfs_apply_attrs(inode, request->setattr.set_attr);
@@ -529,10 +665,13 @@ diskfs_setattr_trunc_done(struct chimera_vfs_request *request)
         inode->mtime_nsec = now.tv_nsec;
     }
 
-    diskfs_map_attrs(thread, &request->setattr.r_post_attr, inode);
-    chimera_diskfs_info("setattr trunc done inum=%lu new_size=%lu -> committing",
+    chimera_diskfs_info("setattr trunc done inum=%lu new_size=%lu -> records",
                         (unsigned long) inode->inum, (unsigned long) inode->size);
-    diskfs_op_ok(request, p->txn);
+    /* Same tail as the non-shrink path: SID mirror, then the pNFS, ACL and
+     * SID record replay, then the post attrs are mapped and the txn
+     * committed.  A shrink that also chowns or sets an ACL used to commit
+     * here directly and skip all of that. */
+    diskfs_setattr_records(request);
 } /* diskfs_setattr_trunc_done */
 
 
@@ -727,8 +866,9 @@ diskfs_setattr_finish(struct chimera_vfs_request *request)
 
 /*
  * Completion for a setattr that also persisted a pNFS layout blob: the
- * DISKFS_REC_PNFS record is now in the b+tree, so map the post attrs and
- * commit.
+ * DISKFS_REC_PNFS record is now in the b+tree; continue with the ACL and SID
+ * steps so a layout-carrying setattr gets the same coherence as any other,
+ * then the post attrs are mapped and the txn committed.
  */
 static void
 diskfs_setattr_pnfs_cb(
@@ -746,7 +886,7 @@ diskfs_setattr_pnfs_cb(
         return;
     }
 
-    diskfs_setattr_finish(request);
+    diskfs_setattr_acl(request);
 } /* diskfs_setattr_pnfs_cb */
 
 
@@ -800,7 +940,7 @@ diskfs_setattr_acl_inserted_cb(
 
     (void) result;
     diskfs_bt_op_free(p->thread, op);
-    diskfs_setattr_finish(request);
+    diskfs_setattr_sids(request);
 } /* diskfs_setattr_acl_inserted_cb */
 
 
@@ -813,7 +953,7 @@ diskfs_setattr_acl_insert(struct chimera_vfs_request *request)
 
     if (!inode->acl_serial) {
         /* Remove-only chain (revert to mode-derived). */
-        diskfs_setattr_finish(request);
+        diskfs_setattr_sids(request);
         return;
     }
 
@@ -839,6 +979,315 @@ diskfs_setattr_acl_removed_cb(
     diskfs_bt_op_free(p->thread, op);
     diskfs_setattr_acl_insert(request);
 } /* diskfs_setattr_acl_removed_cb */
+
+
+/*
+ * Native owner / group SID record replay (chain tail after the ACL steps):
+ * the inode's sid_serial mirror already holds the end state; replay it into
+ * the b+tree as decided by p->sid_action, then finish.  A b+tree error fails
+ * the request like the pNFS step does; note that, as for every step in this
+ * chain, the txn abort does not roll the in-memory mirror back, which is why
+ * anything that can be refused is refused before the mirrors are touched.
+ */
+static void
+diskfs_setattr_sid_inserted_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    diskfs_bt_op_free(p->thread, op);
+
+    if (unlikely(result < 0)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+        return;
+    }
+
+    diskfs_setattr_finish(request);
+} /* diskfs_setattr_sid_inserted_cb */
+
+
+static void
+diskfs_setattr_sid_insert(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p     = request->plugin_data;
+    struct diskfs_inode           *inode = p->inode_stash[0];
+    struct diskfs_bt_op           *op;
+
+    if (!inode->sid_serial) {
+        diskfs_setattr_finish(request);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(p->thread);
+    if (diskfs_bt_insert_async(op, p->thread, p->txn, inode, &diskfs_sid_key,
+                               inode->sid_serial, inode->sid_serial_len,
+                               diskfs_setattr_sid_inserted_cb, request)) {
+        diskfs_setattr_sid_inserted_cb(op, op->result, request);
+    }
+} /* diskfs_setattr_sid_insert */
+
+
+static void
+diskfs_setattr_sid_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    diskfs_bt_op_free(p->thread, op);
+
+    if (unlikely(result < 0)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+        return;
+    }
+    /* A remove that found no record (result 0) is not an error: for both
+     * REMOVE and REPLACE the end state asked for -- no record, or the one
+     * about to be inserted -- is unaffected by the tree having disagreed
+     * with the mirror. */
+
+    if (p->sid_action == DISKFS_SID_ACTION_REPLACE) {
+        diskfs_setattr_sid_insert(request);
+    } else {
+        diskfs_setattr_finish(request);
+    }
+} /* diskfs_setattr_sid_removed_cb */
+
+
+static void
+diskfs_setattr_sids(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p     = request->plugin_data;
+    struct diskfs_inode           *inode = p->inode_stash[0];
+    struct diskfs_bt_op           *op;
+
+    switch (p->sid_action) {
+        case DISKFS_SID_ACTION_INSERT:
+            diskfs_setattr_sid_insert(request);
+            return;
+        case DISKFS_SID_ACTION_REMOVE:
+        case DISKFS_SID_ACTION_REPLACE:
+            op = diskfs_bt_op_alloc(p->thread);
+            if (diskfs_bt_remove_async(op, p->thread, p->txn, inode,
+                                       &diskfs_sid_key,
+                                       diskfs_setattr_sid_removed_cb,
+                                       request)) {
+                diskfs_setattr_sid_removed_cb(op, op->result, request);
+            }
+            return;
+        default:
+            diskfs_setattr_finish(request);
+            return;
+    } /* switch */
+} /* diskfs_setattr_sids */
+
+
+/*
+ * ACL coherence step (mirrors memfs/cairn): an explicit ACL set is persisted
+ * and the mode re-derived; a bare chmod regenerates the special-who ACEs of
+ * any stored ACL while preserving named entries.  The new state is computed
+ * from the in-memory mirrors here and installed immediately; the async chain
+ * (remove the old record, insert the new one) replays it into the b+tree,
+ * then diskfs_setattr_sids replays the SID record and finishes.  Keys off
+ * p->setattr_mask: diskfs_apply_attrs has rewritten set_attr->va_set_mask.
+ */
+static void
+diskfs_setattr_acl(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_inode           *inode  = p->inode_stash[0];
+    uint64_t                       mask   = p->setattr_mask;
+    struct diskfs_bt_op           *op;
+
+    if (mask & CHIMERA_VFS_ATTR_ACL) {
+        const struct chimera_acl *acl     = request->setattr.set_attr->va_acl;
+        int                       had_old = inode->acl_serial != NULL;
+        uint8_t                   sbuf[DISKFS_ACL_REC_MAX];
+        int                       slen = -1;
+
+        if (acl && acl->num_aces) {
+            inode->mode = (inode->mode & CHIMERA_MODE_ACL_PRESERVE) |
+                chimera_acl_to_mode(acl);
+            /* Fits by construction: diskfs_acl_rec_fits was checked before
+             * anything was mutated. */
+            slen = chimera_acl_serialize(acl, sbuf, sizeof(sbuf));
+        }
+        diskfs_acl_serial_install(inode, sbuf, slen);
+
+        if (!had_old && slen < 0) {
+            /* No record before, none now: nothing to replay. */
+            diskfs_setattr_sids(request);
+            return;
+        }
+        if (had_old) {
+            op = diskfs_bt_op_alloc(thread);
+            if (diskfs_bt_remove_async(op, thread, p->txn, inode,
+                                       &diskfs_acl_key,
+                                       diskfs_setattr_acl_removed_cb,
+                                       request)) {
+                diskfs_setattr_acl_removed_cb(op, op->result, request);
+            }
+        } else {
+            diskfs_setattr_acl_insert(request);
+        }
+        return;
+    } else if ((mask & CHIMERA_VFS_ATTR_MODE) && inode->acl_serial) {
+        static __thread uint8_t obuf[sizeof(struct chimera_acl) +
+                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        static __thread uint8_t nbuf[sizeof(struct chimera_acl) +
+                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl *old_acl = (struct chimera_acl *) obuf;
+        struct chimera_acl *new_acl = (struct chimera_acl *) nbuf;
+        uint8_t             sbuf[DISKFS_ACL_REC_MAX];
+        int                 slen;
+
+        if (chimera_acl_deserialize((const char *) inode->acl_serial,
+                                    inode->acl_serial_len, old_acl,
+                                    DISKFS_ACL_REC_MAX_ACES) >= 0 &&
+            chimera_acl_chmod(old_acl, inode->mode, new_acl,
+                              DISKFS_ACL_REC_MAX_ACES) >= 0 &&
+            (slen = chimera_acl_serialize(new_acl, sbuf, sizeof(sbuf))) >= 0) {
+
+            diskfs_acl_serial_install(inode, sbuf, slen);
+
+            op = diskfs_bt_op_alloc(thread);
+            if (diskfs_bt_remove_async(op, thread, p->txn, inode,
+                                       &diskfs_acl_key,
+                                       diskfs_setattr_acl_removed_cb,
+                                       request)) {
+                diskfs_setattr_acl_removed_cb(op, op->result, request);
+            }
+            return;
+        }
+        /* Regeneration failed: leave the stored ACL untouched. */
+    }
+
+    diskfs_setattr_sids(request);
+} /* diskfs_setattr_acl */
+
+
+/*
+ * Common record tail, entered after diskfs_apply_attrs by every setattr path
+ * -- plain, shrink-after-extent-walk, and layout-carrying alike.  Updates the
+ * native owner/group SID mirror and decides its replay, then runs the pNFS ->
+ * ACL -> SID replay chain; diskfs_setattr_finish maps the post attrs and
+ * commits.  Keys off p->setattr_mask throughout, because set_attr->va_set_mask
+ * has already been rewritten to the scalar bits diskfs_apply_attrs applied.
+ */
+static void
+diskfs_setattr_records(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private  *p      = request->plugin_data;
+    struct diskfs_thread           *thread = p->thread;
+    struct diskfs_inode            *inode  = p->inode_stash[0];
+    const struct chimera_vfs_attrs *sa     = request->setattr.set_attr;
+    uint64_t                        mask   = p->setattr_mask;
+    struct diskfs_bt_op            *op;
+
+    /* Pooled request: never trust the previous life's value. */
+    p->sid_action = DISKFS_SID_ACTION_NONE;
+
+    /*
+     * Native owner / group SID coherence (mirrors memfs/cairn): an explicit
+     * OWNER_SID / GROUP_SID set stores (or clears) the companion; a bare chown
+     * or chgrp drops the stale one.  The mirror is updated here and the
+     * record replayed by diskfs_setattr_sids at the end of the chain, after
+     * the ACL steps, so both records are in the tree before post attrs map.
+     */
+    if (mask & (CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID |
+                CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+        struct chimera_sid owner, group;
+        int                had     = inode->sid_serial != NULL;
+        int                changed = 0;
+
+        diskfs_sid_rec_decode(inode->sid_serial, inode->sid_serial_len,
+                              &owner, &group);
+
+        if (mask & CHIMERA_VFS_ATTR_OWNER_SID) {
+            if (chimera_sid_present(sa->va_owner_sid)) {
+                owner   = *sa->va_owner_sid;
+                changed = 1;
+            } else if (owner.len) {
+                owner.len = 0;
+                changed   = 1;
+            }
+        } else if ((mask & CHIMERA_VFS_ATTR_UID) && owner.len) {
+            owner.len = 0;
+            changed   = 1;
+        }
+
+        if (mask & CHIMERA_VFS_ATTR_GROUP_SID) {
+            if (chimera_sid_present(sa->va_group_sid)) {
+                group   = *sa->va_group_sid;
+                changed = 1;
+            } else if (group.len) {
+                group.len = 0;
+                changed   = 1;
+            }
+        } else if ((mask & CHIMERA_VFS_ATTR_GID) && group.len) {
+            group.len = 0;
+            changed   = 1;
+        }
+
+        if (changed) {
+            uint8_t rec[DISKFS_SID_REC_MAX];
+            int     len = diskfs_sid_rec_encode(&owner, &group, rec);
+
+            diskfs_sid_serial_install(inode, rec, len);
+            if (len >= 0) {
+                p->sid_action = had ? DISKFS_SID_ACTION_REPLACE
+                                    : DISKFS_SID_ACTION_INSERT;
+            } else if (had) {
+                p->sid_action = DISKFS_SID_ACTION_REMOVE;
+            }
+        }
+    }
+
+    /* Persist the opaque pNFS layout blob as this inode's single PNFS record,
+     * replacing any previous one (the insert aborts on a duplicate key).  The
+     * in-memory mirror is installed up front; the chain replays it into the
+     * tree and then continues with the ACL and SID steps.
+     *
+     * p->setattr_mask, not set_attr->va_set_mask: diskfs_apply_attrs() has
+     * already rewritten the latter to what it applied, and it does not know
+     * about the pNFS blob -- so testing it silently dropped every blob a
+     * metadata server ever wrote.  A diskfs MDS then re-steered on each
+     * LAYOUTGET and handed the client a brand-new (empty) backing file,
+     * orphaning the data behind the previous one. */
+    if (mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
+        uint32_t blob_len = sa->va_pnfs_len;
+        int      had_old  = inode->pnfs_blob != NULL;
+
+        if (blob_len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
+            blob_len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
+        }
+
+        free(inode->pnfs_blob);
+        inode->pnfs_blob = malloc(blob_len);
+        memcpy(inode->pnfs_blob, sa->va_pnfs, blob_len);
+        inode->pnfs_blob_len = blob_len;
+
+        if (had_old) {
+            op = diskfs_bt_op_alloc(thread);
+            if (diskfs_bt_remove_async(op, thread, p->txn, inode,
+                                       &diskfs_pnfs_key,
+                                       diskfs_setattr_pnfs_removed_cb,
+                                       request)) {
+                diskfs_setattr_pnfs_removed_cb(op, op->result, request);
+            }
+        } else {
+            diskfs_setattr_pnfs_insert(request);
+        }
+        return;
+    }
+
+    diskfs_setattr_acl(request);
+} /* diskfs_setattr_records */
 
 
 static void
@@ -869,6 +1318,26 @@ diskfs_setattr_inode_cb(
         return;
     }
 
+    /* An ACL is stored as one b+tree record.  Refuse one that cannot fit
+     * BEFORE anything is mutated (mode, mirrors, extents): the txn abort does
+     * not roll the in-memory inode back, so the refusal has to happen while
+     * there is nothing to roll back.  EFBIG is what Linux nfsd returns for an
+     * over-limit ACL (NFS4ERR_FBIG). */
+    if (!diskfs_acl_rec_fits(request->setattr.set_attr)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EFBIG);
+        return;
+    }
+
+    /* Stashed for every step from here on: both the truncate chain and the
+     * record tail run after diskfs_apply_attrs has rewritten
+     * set_attr->va_set_mask, and both key off the caller's mask. */
+    p->setattr_mask   = orig_mask;
+    p->inode_stash[0] = inode;
+    /* Not carried over from the pooled request's previous life: the trunc
+     * walk's ext_release acquires the refcount inode lazily on the first
+     * reflink-shared extent it frees, keyed on this being NULL. */
+    p->inode_stash[2] = NULL;
+
     diskfs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
     /* POSIX kill-priv: truncation by an unprivileged caller clears
@@ -894,12 +1363,7 @@ diskfs_setattr_inode_cb(
         S_ISREG(inode->mode) &&
         request->setattr.set_attr->va_size < inode->size) {
 
-        p->inode_stash[0] = inode;
-        /* Not carried over from the pooled request's previous life: the trunc
-         * walk's ext_release acquires the refcount inode lazily on the first
-         * reflink-shared extent it frees, keyed on this being NULL. */
-        p->inode_stash[2] = NULL;
-        p->loop_off       = request->setattr.set_attr->va_size;
+        p->loop_off = request->setattr.set_attr->va_size;
 
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_floor_async(op, thread, inode, p->loop_off, p->rec_scratch,
@@ -927,119 +1391,7 @@ diskfs_setattr_inode_cb(
         inode->mtime_nsec = now.tv_nsec;
     }
 
-    p->inode_stash[0] = inode;
-    p->inode_stash[2] = NULL;   /* refcount inode (acquired lazily on shared free) */
-
-    /* Persist the opaque pNFS layout blob as this inode's single PNFS record,
-     * replacing any previous one (the insert aborts on a duplicate key).  The
-     * in-memory mirror is installed up front; the chain replays it into the
-     * tree.
-     *
-     * orig_mask, not set_attr->va_set_mask: diskfs_apply_attrs() has already
-     * rewritten the latter to what it applied, and it does not know about the
-     * pNFS blob -- so testing it silently dropped every blob a metadata server
-     * ever wrote.  A diskfs MDS then re-steered on each LAYOUTGET and handed
-     * the client a brand-new (empty) backing file, orphaning the data behind
-     * the previous one. */
-    if (orig_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
-        uint32_t blob_len = request->setattr.set_attr->va_pnfs_len;
-        int      had_old  = inode->pnfs_blob != NULL;
-
-        if (blob_len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
-            blob_len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
-        }
-
-        free(inode->pnfs_blob);
-        inode->pnfs_blob = malloc(blob_len);
-        memcpy(inode->pnfs_blob, request->setattr.set_attr->va_pnfs, blob_len);
-        inode->pnfs_blob_len = blob_len;
-
-        if (had_old) {
-            op = diskfs_bt_op_alloc(thread);
-            if (diskfs_bt_remove_async(op, thread, p->txn, inode,
-                                       &diskfs_pnfs_key,
-                                       diskfs_setattr_pnfs_removed_cb,
-                                       request)) {
-                diskfs_setattr_pnfs_removed_cb(op, op->result, request);
-            }
-        } else {
-            diskfs_setattr_pnfs_insert(request);
-        }
-        return;
-    }
-
-    /*
-     * ACL coherence (mirrors memfs/cairn): an explicit ACL set is persisted
-     * and the mode re-derived; a bare chmod regenerates the special-who ACEs
-     * of any stored ACL while preserving named entries.  The new state is
-     * computed from the in-memory mirrors here and installed immediately;
-     * the async chain (remove the old record, insert the new one) replays it
-     * into the b+tree before the post attrs are mapped.
-     */
-    if (orig_mask & CHIMERA_VFS_ATTR_ACL) {
-        const struct chimera_acl *acl     = request->setattr.set_attr->va_acl;
-        int                       had_old = inode->acl_serial != NULL;
-        uint8_t                   sbuf[DISKFS_ACL_REC_MAX];
-        int                       slen = -1;
-
-        if (acl && acl->num_aces) {
-            inode->mode = (inode->mode & CHIMERA_MODE_ACL_PRESERVE) |
-                chimera_acl_to_mode(acl);
-        }
-        if (acl && acl->num_aces && acl->num_aces <= DISKFS_ACL_REC_MAX_ACES) {
-            slen = chimera_acl_serialize(acl, sbuf, sizeof(sbuf));
-        }
-        diskfs_acl_serial_install(inode, sbuf, slen);
-
-        if (!had_old && slen < 0) {
-            /* No record before, none now: nothing to replay. */
-            diskfs_setattr_finish(request);
-            return;
-        }
-        if (had_old) {
-            op = diskfs_bt_op_alloc(thread);
-            if (diskfs_bt_remove_async(op, thread, p->txn, inode,
-                                       &diskfs_acl_key,
-                                       diskfs_setattr_acl_removed_cb,
-                                       request)) {
-                diskfs_setattr_acl_removed_cb(op, op->result, request);
-            }
-        } else {
-            diskfs_setattr_acl_insert(request);
-        }
-        return;
-    } else if ((orig_mask & CHIMERA_VFS_ATTR_MODE) && inode->acl_serial) {
-        uint8_t             obuf[sizeof(struct chimera_acl) +
-                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        uint8_t             nbuf[sizeof(struct chimera_acl) +
-                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        struct chimera_acl *old_acl = (struct chimera_acl *) obuf;
-        struct chimera_acl *new_acl = (struct chimera_acl *) nbuf;
-        uint8_t             sbuf[DISKFS_ACL_REC_MAX];
-        int                 slen;
-
-        if (chimera_acl_deserialize((const char *) inode->acl_serial,
-                                    inode->acl_serial_len, old_acl,
-                                    DISKFS_ACL_REC_MAX_ACES) >= 0 &&
-            chimera_acl_chmod(old_acl, inode->mode, new_acl,
-                              DISKFS_ACL_REC_MAX_ACES) >= 0 &&
-            (slen = chimera_acl_serialize(new_acl, sbuf, sizeof(sbuf))) >= 0) {
-
-            diskfs_acl_serial_install(inode, sbuf, slen);
-
-            op = diskfs_bt_op_alloc(thread);
-            if (diskfs_bt_remove_async(op, thread, p->txn, inode,
-                                       &diskfs_acl_key,
-                                       diskfs_setattr_acl_removed_cb,
-                                       request)) {
-                diskfs_setattr_acl_removed_cb(op, op->result, request);
-            }
-            return;
-        }
-        /* Regeneration failed: leave the stored ACL untouched. */
-    }
-
-    diskfs_setattr_finish(request);
+    diskfs_setattr_records(request);
 } /* diskfs_setattr_inode_cb */
 
 

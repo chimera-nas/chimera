@@ -752,6 +752,9 @@ diskfs_inode_load_recs_done(struct diskfs_inode_load_ctx *lc)
     if (lc->acl_len >= 0) {
         diskfs_acl_serial_install(inode, lc->acl_rec, lc->acl_len);
     }
+    if (lc->sid_len >= 0) {
+        diskfs_sid_serial_install(inode, lc->sid_rec, lc->sid_len);
+    }
     if (lc->pnfs_len >= 0) {
         inode->pnfs_blob = malloc(lc->pnfs_len);
         memcpy(inode->pnfs_blob, lc->pnfs_rec, lc->pnfs_len);
@@ -781,6 +784,27 @@ diskfs_inode_load_recs_pnfs_cb(
 
 
 static void
+diskfs_inode_load_recs_sid_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_inode_load_ctx *lc = private_data;
+
+    lc->sid_len = result;
+    diskfs_bt_op_free(lc->thread, op);
+
+    op = diskfs_bt_op_alloc(lc->thread);
+    if (diskfs_bt_lookup_async(op, lc->thread, lc->inode,
+                               DISKFS_BT_OP_LOOKUP_EXACT, &diskfs_pnfs_key,
+                               NULL, lc->pnfs_rec, sizeof(lc->pnfs_rec),
+                               diskfs_inode_load_recs_pnfs_cb, lc)) {
+        diskfs_inode_load_recs_pnfs_cb(op, op->result, lc);
+    }
+} /* diskfs_inode_load_recs_sid_cb */
+
+
+static void
 diskfs_inode_load_recs_acl_cb(
     struct diskfs_bt_op *op,
     int                  result,
@@ -793,10 +817,10 @@ diskfs_inode_load_recs_acl_cb(
 
     op = diskfs_bt_op_alloc(lc->thread);
     if (diskfs_bt_lookup_async(op, lc->thread, lc->inode,
-                               DISKFS_BT_OP_LOOKUP_EXACT, &diskfs_pnfs_key,
-                               NULL, lc->pnfs_rec, sizeof(lc->pnfs_rec),
-                               diskfs_inode_load_recs_pnfs_cb, lc)) {
-        diskfs_inode_load_recs_pnfs_cb(op, op->result, lc);
+                               DISKFS_BT_OP_LOOKUP_EXACT, &diskfs_sid_key,
+                               NULL, lc->sid_rec, sizeof(lc->sid_rec),
+                               diskfs_inode_load_recs_sid_cb, lc)) {
+        diskfs_inode_load_recs_sid_cb(op, op->result, lc);
     }
 } /* diskfs_inode_load_recs_acl_cb */
 
