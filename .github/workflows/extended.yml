@@ -1057,10 +1057,38 @@ jobs:
         env:
           SMBTORTURE_BACKENDS: ${{ inputs.smbtorture_backends }}
           SMBTORTURE_FILTER: ${{ inputs.smbtorture_filter }}
-          SMBTORTURE_PARALLEL: ${{ inputs.smbtorture_parallel || '32' }}
+          # Empty means "size it from the runner"; the dispatch input still
+          # overrides.  See the run step below for why this is no longer 32.
+          SMBTORTURE_PARALLEL: ${{ inputs.smbtorture_parallel }}
         run: |
           rm -rf smbt-report
           mkdir -p smbt-report
+          # 32 was sized for the ARC hosts.  A cell is a chimera server plus an
+          # smbtorture client, and for the diskfs backends the server also lays
+          # down ten 1 GB device images; thirty-two of those at once on a
+          # four-vCPU, 16 GB hosted runner ran the machine out of memory.  The
+          # servers then died during startup --
+          #
+          #   io_uring_queue_init_params() failed: Cannot allocate memory (-12)
+          #
+          # -- before their test ran, and smbtorture recorded the cell as
+          # failed.  That is what turned this job red the first time it ran on
+          # hosted runners: 53 "newly failing" cells, 45 of them on
+          # diskfs_io_uring (io_uring rings AND the device images), and none at
+          # all on memfs, linux or plain io_uring.  The same run took 36 minutes
+          # against 16 before the move, at identical concurrency -- the machine
+          # was thrashing, not the tests regressing.
+          #
+          # Two per vCPU keeps the overlap these cells actually benefit from --
+          # they spend most of their time waiting on a daemon, which is why
+          # oversubscribing at all is right -- without the 8x that broke them.
+          # regen.sh's own default is 12, for reference.  Derived rather than
+          # hardcoded so a runner change does not silently reintroduce this.
+          if [ -z "${SMBTORTURE_PARALLEL}" ]; then
+            SMBTORTURE_PARALLEL=$(( $(nproc) * 2 ))
+          fi
+          export SMBTORTURE_PARALLEL
+          echo "smbtorture concurrency: ${SMBTORTURE_PARALLEL} cells ($(nproc) vCPU)"
           docker run --rm --privileged \
             -e SMBTORTURE_BACKENDS \
             -e SMBTORTURE_FILTER \
