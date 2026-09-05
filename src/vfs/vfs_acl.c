@@ -94,6 +94,14 @@ ace_applies(
                      * AUTH_NONE is short-circuited to a full grant before ACL
                      * evaluation, so a cred reaching here is authenticated. */
                     return cred->flavor != CHIMERA_VFS_AUTH_NONE;
+                case CHIMERA_WHO_ANONYMOUS:
+                    /* ANONYMOUS@ (S-1-5-7) is the complement of AUTHENTICATED@:
+                     * it matches only a caller with no established identity.
+                     * Anonymous policy is enforced at the export level, which
+                     * short-circuits AUTH_NONE to a full grant before ACL
+                     * evaluation, so an ANONYMOUS@ ACE on an object matches no
+                     * caller that reaches here (RFC 7530 §6.2.1.5). */
+                    return cred->flavor == CHIMERA_VFS_AUTH_NONE;
                 case CHIMERA_WHO_OWNER_RIGHTS:
                     /* OWNER RIGHTS matches the caller when it is the owner. */
                     return (uint64_t) cred->uid == owner_uid;
