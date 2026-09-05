@@ -260,11 +260,15 @@ chimera_nfs3_set_wcc_data(
         wcc->before.attributes_follow = 0;
     }
 
-    if (post_attr && post_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) {
-        chimera_nfs3_set_post_op_attr(&wcc->after, post_attr);
-    } else {
-        wcc->after.attributes_follow = 0;
-    }
+    /* 'after' is an ordinary post_op_attr (RFC 1813 2.6): return it whenever
+     * the server has the post-operation attributes.  Atomicity governs only
+     * 'before' -- whether the pair can be trusted for strict cache
+     * consistency -- so gating 'after' on it would drop the whole wcc_data
+     * for every backend that cannot stat atomically with the operation
+     * (linux, io_uring), which is exactly the case where the client most
+     * needs the post-op state.  set_post_op_attr already suppresses itself
+     * when the backend did not actually fetch the attributes. */
+    chimera_nfs3_set_post_op_attr(&wcc->after, post_attr);
 } /* chimera_nfs3_set_wcc_data */
 
 static inline void
