@@ -258,12 +258,17 @@ diskfs_dispatch(
 
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
-    .sdk_version  = CHIMERA_VFS_SDK_VERSION,
-    .name         = "diskfs",
-    .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
-    .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
+    .sdk_version = CHIMERA_VFS_SDK_VERSION,
+    .name        = "diskfs",
+    .fh_magic    = CHIMERA_VFS_FH_MAGIC_DISKFS,
+    /* CHIMERA_VFS_CAP_TRANSACTIONAL is deliberately not declared: diskfs's
+     * transaction engine is deferred to a second wave of the
+     * compound-operations work.  Without the cap,
+     * chimera_vfs_begin_transaction() never binds a transaction to diskfs and
+     * every consumer runs diskfs ops in autocommit mode; the engine code
+     * (diskfs_txn_*) stays in the tree, dormant. */
+    .capabilities   = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
-        CHIMERA_VFS_CAP_TRANSACTIONAL |
         /* Require a real open so every file op carries a pinned inode in
          * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
          * to skip per-I/O inode resolution. */
