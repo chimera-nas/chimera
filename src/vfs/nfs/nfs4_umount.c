@@ -63,9 +63,18 @@ chimera_nfs4_umount_destroy_clientid_callback(
     (void) verf;
 
     if (status || !res || res->status != NFS4_OK) {
-        chimera_nfsclient_debug(
+        /* Error, not debug.  Reaching here strands the clientid -- and every
+         * VFS handle behind its opens -- until the lease expires, which is 90
+         * seconds of an export that cannot be unmounted.  NFS4ERR_CLIENTID_BUSY
+         * in particular should now be unreachable: the VFS fences the deferred
+         * closes before dispatching this teardown, so opens remaining on the
+         * lease means that fence has a hole.  Either way it is worth saying out
+         * loud rather than leaving to be inferred from EBUSY symptoms days
+         * later, which is exactly how this went unexplained. */
+        chimera_nfsclient_error(
             "NFS4 DESTROY_CLIENTID to %s did not succeed (rpc %d, nfs %d); "
-            "the server will expire the clientid with the lease",
+            "the server will expire the clientid with the lease, and the export "
+            "stays busy until it does",
             td->server->hostname, status, res ? res->status : -1);
     }
 
