@@ -13,13 +13,13 @@
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 
-/* PATHCONF's reply is entirely synthetic -- the limits are server constants,
- * independent of the object -- but the handle is still validated the way every
- * other file-handle-bearing procedure validates it: decoded (a bogus handle is
- * NFS3ERR_BADHANDLE) then resolved with a GETATTR (a stale handle is
- * NFS3ERR_NOENT).  memfs's open_fh is lazy and does not resolve the inode, so
- * the GETATTR is what actually catches a freed object; its returned attributes
- * are discarded and the constants are returned. */
+/* PATHCONF's limits are server constants, independent of the object, but the
+ * handle is still validated the way every other file-handle-bearing procedure
+ * validates it: decoded (a bogus handle is NFS3ERR_BADHANDLE) then resolved
+ * with a GETATTR (a stale handle is NFS3ERR_NOENT).  memfs's open_fh is lazy
+ * and does not resolve the inode, so the GETATTR is what actually catches a
+ * freed object; its attributes fill obj_attributes, which RFC 1813 3.3.20
+ * defines as the post-operation attributes of the argument object. */
 static void
 chimera_nfs3_pathconf_complete(
     enum chimera_vfs_error    error_code,
@@ -36,15 +36,16 @@ chimera_nfs3_pathconf_complete(
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
     if (res.status == NFS3_OK) {
-        res.resok.obj_attributes.attributes_follow = 0;
-        res.resok.case_insensitive                 = 0;
-        res.resok.case_preserving                  = 1;
-        res.resok.no_trunc                         = 1;
-        res.resok.linkmax                          = UINT32_MAX;
-        res.resok.name_max                         = 255;
-        res.resok.chown_restricted                 = 1;   /* POSIX: chown is superuser-only */
+        chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
+
+        res.resok.case_insensitive = 0;
+        res.resok.case_preserving  = 1;
+        res.resok.no_trunc         = 1;
+        res.resok.linkmax          = UINT32_MAX;
+        res.resok.name_max         = 255;
+        res.resok.chown_restricted = 1;   /* POSIX: chown is superuser-only */
     } else {
-        res.resfail.obj_attributes.attributes_follow = 0;
+        chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
     }
 
     chimera_vfs_release(thread->vfs_thread, req->handle);
