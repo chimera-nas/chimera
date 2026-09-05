@@ -779,6 +779,7 @@ nfs4_cb_layoutrecall(
     const uint8_t                    *fh,
     uint32_t                          fh_len,
     uint16_t                          export_id,
+    uint32_t                          layout_type,
     const struct stateid4            *layout_stateid,
     void (                           *done )(
         int   cb_status,
@@ -816,8 +817,15 @@ nfs4_cb_layoutrecall(
         nops++;
     }
 
+    /* clora_type must echo the layouttype4 that was granted: the client matches
+     * a recall by {type, fh, iomode, range} and answers NFS4ERR_NOMATCHING_LAYOUT
+     * for a block/SCSI layout recalled as flex-files (RFC 8881 20.3). */
+    if (!layout_type) {
+        layout_type = NFS4_LAYOUT4_FLEX_FILES;
+    }
+
     ops[nops].argop                                        = OP_CB_LAYOUTRECALL;
-    ops[nops].opcblayoutrecall.clora_type                  = NFS4_LAYOUT4_FLEX_FILES;
+    ops[nops].opcblayoutrecall.clora_type                  = layout_type;
     ops[nops].opcblayoutrecall.clora_iomode                = LAYOUTIOMODE4_ANY;
     ops[nops].opcblayoutrecall.clora_changed               = 0;
     ops[nops].opcblayoutrecall.clora_recall.lor_recalltype = LAYOUTRECALL4_FILE;

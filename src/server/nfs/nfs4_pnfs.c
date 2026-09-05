@@ -609,11 +609,14 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         }
         nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
-        nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                client_short_id, table,
-                                &req->thread->shared->nfs4_layout_table,
-                                &res->logr_resok4.logr_stateid);
+        layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
+                                         client_short_id, table,
+                                         &req->thread->shared->nfs4_layout_table,
+                                         &res->logr_resok4.logr_stateid);
     }
+
+    /* Remember what we handed out so CB_LAYOUTRECALL can name the same type. */
+    layout->layout_type = LAYOUT4_FLEX_FILES;
 
     /* Open the client's callback channel so a later conflicting op can recall
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
@@ -845,11 +848,15 @@ lg_sourced_cb(
         }
         nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
-        nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                client_short_id, table,
-                                &req->thread->shared->nfs4_layout_table,
-                                &res->logr_resok4.logr_stateid);
+        layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
+                                         client_short_id, table,
+                                         &req->thread->shared->nfs4_layout_table,
+                                         &res->logr_resok4.logr_stateid);
     }
+
+    /* Remember the backend-sourced type: a block/SCSI holder must be recalled
+     * as block/SCSI or the client finds no matching layout to return. */
+    layout->layout_type = loc_type;
 
     /* Open the client's callback channel so a later conflicting op can recall
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */

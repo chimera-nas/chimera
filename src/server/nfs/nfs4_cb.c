@@ -149,7 +149,7 @@ nfs4_cb_recall_holder(
     ctx->fhlen = holder->fh_len;
 
     if (!nfs4_cb_layoutrecall(thread, client, holder->fh, holder->fh_len,
-                              holder->export_id,
+                              holder->export_id, holder->layout_type,
                               &recall_stateid, nfs4_cb_recall_done, ctx)) {
         chimera_nfs_error("CB: holder has no callback channel; revoking layout");
         free(ctx);

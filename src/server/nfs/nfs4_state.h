@@ -512,6 +512,12 @@ struct nfs_layout_state {
     uint32_t                 seqid;     /* server-incremented layout stateid seqid */
     uint32_t                 iomode;    /* current LAYOUTIOMODE4 */
 
+    /* layouttype4 granted for this file (RFC 8881 3.3.13): flex-files, block
+     * or SCSI.  CB_LAYOUTRECALL must echo it -- the client matches a recall by
+     * {layout type, fh, iomode, range} and answers NFS4ERR_NOMATCHING_LAYOUT
+     * otherwise.  Set by LAYOUTGET; 0 means "not yet granted". */
+    uint32_t                 layout_type;
+
     uint8_t                  shard;
     uint32_t                 slot_idx;
     uint32_t                 generation;
