@@ -75,8 +75,14 @@ chimera_nfs3_create_exclusive_verify(
     uint32_t            verf_atime, verf_mtime;
 
     if (error_code != CHIMERA_VFS_OK) {
+        /* The name is taken and the re-open could not read it back to compare
+         * verifiers.  Whatever the re-open itself hit, the answer the client
+         * needs is that the exclusive CREATE lost, so the status stays EEXIST:
+         * a passthrough backend fails the re-open of an existing directory
+         * with EISDIR, which is not an answer to "did my CREATE succeed".
+         * Carry dir_wcc, which RFC 1813 3.3.8 requires even on failure. */
         chimera_nfs3_create_reply(req, CHIMERA_VFS_EEXIST,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, dir_pre_attr, dir_post_attr);
         return;
     }
 
@@ -90,7 +96,7 @@ chimera_nfs3_create_exclusive_verify(
     } else {
         chimera_vfs_release(req->thread->vfs_thread, handle);
         chimera_nfs3_create_reply(req, CHIMERA_VFS_EEXIST,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, dir_pre_attr, dir_post_attr);
     }
 } /* chimera_nfs3_create_exclusive_verify */
 
