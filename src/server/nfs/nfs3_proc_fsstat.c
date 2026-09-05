@@ -20,28 +20,28 @@ chimera_nfs3_fsstat_complete(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
     struct FSSTAT3res                 res;
+    uint64_t                          mask;
     int                               rc;
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
-    /* Only treat missing statfs attributes as NOTSUPP when the getattr itself
-     * succeeded -- otherwise a real error (e.g. NFS3ERR_NOENT from a stale
-     * handle, whose failed getattr leaves va_set_mask empty) would be
-     * clobbered into a misleading NFS3ERR_NOTSUPP. */
-    if (res.status == NFS3_OK &&
-        (attr->va_set_mask & CHIMERA_NFS3_FSSTAT_MASK) != CHIMERA_NFS3_FSSTAT_MASK) {
-        res.status = NFS3ERR_NOTSUPP;
-    }
-
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
-        res.resok.tbytes   = attr->va_fs_space_total;
-        res.resok.fbytes   = attr->va_fs_space_free;
-        res.resok.abytes   = attr->va_fs_space_avail;
-        res.resok.tfiles   = attr->va_fs_files_total;
-        res.resok.ffiles   = attr->va_fs_files_free;
-        res.resok.afiles   = attr->va_fs_files_avail;
+        mask = attr->va_set_mask;
+
+        /* FSSTAT is mandatory and RFC 1813 3.3.18 does not list NFS3ERR_NOTSUPP
+         * among its errors, so a backend that supplies only part of the statfs
+         * set must still get an answer: report every field it did supply and
+         * leave the rest at 0, which the spec already treats as "unknown".
+         * Failing the whole call made df (and mount-time usage reporting) error
+         * out on any backend short of the complete set. */
+        res.resok.tbytes   = (mask & CHIMERA_VFS_ATTR_SPACE_TOTAL) ? attr->va_fs_space_total : 0;
+        res.resok.fbytes   = (mask & CHIMERA_VFS_ATTR_SPACE_FREE) ? attr->va_fs_space_free : 0;
+        res.resok.abytes   = (mask & CHIMERA_VFS_ATTR_SPACE_AVAIL) ? attr->va_fs_space_avail : 0;
+        res.resok.tfiles   = (mask & CHIMERA_VFS_ATTR_FILES_TOTAL) ? attr->va_fs_files_total : 0;
+        res.resok.ffiles   = (mask & CHIMERA_VFS_ATTR_FILES_FREE) ? attr->va_fs_files_free : 0;
+        res.resok.afiles   = (mask & CHIMERA_VFS_ATTR_FILES_AVAIL) ? attr->va_fs_files_avail : 0;
         res.resok.invarsec = 0;
     } else {
         chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
