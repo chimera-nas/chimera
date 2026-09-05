@@ -1199,6 +1199,16 @@ main(
     struct mbt_env      env;
     struct mbt_env_opts opts;
 
+    /* Line-buffer stdout so a crash cannot swallow the progress output.
+     * These drivers print one line per trace, and both that and chimera's log
+     * (which defaults to stdout) are block-buffered when stdout is a pipe --
+     * which it always is under ctest.  glibc's abort() does not flush stdio,
+     * so on Linux an aborting run loses everything since the last 4 KB
+     * boundary, including the line naming the trace that was executing and
+     * the fatal log message itself.  That is exactly what made a CI abort
+     * here undiagnosable from its artifacts. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     umask(0);
 
     traces = mbt_collect_traces(argc, argv, &ntraces);
