@@ -50,6 +50,10 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
             return NFS3ERR_STALE;
         case CHIMERA_VFS_EBADCOOKIE:
             return NFS3ERR_BAD_COOKIE;
+        case CHIMERA_VFS_ETXN_EXHAUSTED:
+            /* Transaction retry budget exhausted; JUKEBOX tells the client
+             * to retry after a delay rather than fail the syscall. */
+            return NFS3ERR_JUKEBOX;
         case CHIMERA_VFS_EBADF:
             return NFS3ERR_BADHANDLE;
         case CHIMERA_VFS_ENOTSUP:

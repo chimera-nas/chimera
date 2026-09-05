@@ -46,8 +46,9 @@ chimera_client_txn_replay(
     struct chimera_client_request *request)
 {
     if (++request->txn_attempt > CHIMERA_CLIENT_TXN_MAX_RETRIES) {
-        /* Give up after too many conflicts; surface a retriable error. */
-        request->txn_op_status = CHIMERA_VFS_EIO;
+        /* Give up after too many conflicts; surface a retriable status
+         * (EAGAIN at the POSIX layer) distinct from a real I/O failure. */
+        request->txn_op_status = CHIMERA_VFS_ETXN_EXHAUSTED;
         request->txn_reply(thread, request);
         return;
     }

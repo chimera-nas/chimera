@@ -33,8 +33,10 @@ chimera_nfs3_txn_replay(struct nfs_request *req)
     struct chimera_server_nfs_thread *thread = req->thread;
 
     if (++req->txn_attempt > CHIMERA_NFS3_TXN_MAX_RETRIES) {
-        /* Give up after too many conflicts; surface a retriable error. */
-        req->txn_op_status = CHIMERA_VFS_EIO;
+        /* Give up after too many conflicts; surface a retriable status
+         * (NFS3ERR_JUKEBOX on the wire, matching the hand-rolled write and
+         * create drivers) rather than a hard NFS3ERR_IO. */
+        req->txn_op_status = CHIMERA_VFS_ETXN_EXHAUSTED;
         req->txn_reply(req);
         return;
     }
