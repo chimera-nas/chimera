@@ -63,15 +63,14 @@ chimera_nfs3_link(
     nfs3_trace_link(req, args);
 
     /* Decode the existing-file handle (sets the request export + squash) and
-     * the target-directory handle (authenticated into req->saved_fh).  The
-     * target handle must outlive this (async) call, so it lives in the request
-     * rather than on the stack (saved_fh is unused by NFSv3). */
+     * the target-directory handle (authenticated into req->saved_fh, layering
+     * its own export's sec= and squash policy on top).  The target handle must
+     * outlive this (async) call, so it lives in the request rather than on the
+     * stack (saved_fh is unused by NFSv3). */
     res.status = chimera_nfs3_decode_fh(req, args->file.data.data, args->file.data.len);
-    if (res.status == NFS3_OK &&
-        chimera_nfs_fh_unwrap(args->link.dir.data.data, args->link.dir.data.len,
-                              &linkdir_export_id, req->saved_fh, &req->saved_fhlen,
-                              shared->fh_key, shared->fh_sign) != CHIMERA_NFS_FH_OK) {
-        res.status = NFS3ERR_BADHANDLE;
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_decode_fh2(req, args->link.dir.data.data,
+                                             args->link.dir.data.len, &linkdir_export_id);
     }
     /* The link directory gains an entry and the file's nlink changes, so
      * both exports must be writable. */

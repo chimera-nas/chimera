@@ -98,14 +98,13 @@ chimera_nfs3_rename(
     nfs3_trace_rename(req, args);
 
     /* Decode both directory handles: the source sets the request export (and
-     * squash); the destination is authenticated into req->saved_fh.  Both must
-     * outlive this (async) call, so they go in the request, not on the stack. */
+     * squash); the destination is authenticated into req->saved_fh and layers
+     * its own export's sec= and squash policy on top.  Both must outlive this
+     * (async) call, so they go in the request, not on the stack. */
     res.status = chimera_nfs3_decode_fh(req, args->from.dir.data.data, args->from.dir.data.len);
-    if (res.status == NFS3_OK &&
-        chimera_nfs_fh_unwrap(args->to.dir.data.data, args->to.dir.data.len,
-                              &todir_export_id, req->saved_fh, &req->saved_fhlen,
-                              shared->fh_key, shared->fh_sign) != CHIMERA_NFS_FH_OK) {
-        res.status = NFS3ERR_BADHANDLE;
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_decode_fh2(req, args->to.dir.data.data,
+                                             args->to.dir.data.len, &todir_export_id);
     }
     /* Both directories are mutated, so both exports must be writable. */
     if (res.status == NFS3_OK) {

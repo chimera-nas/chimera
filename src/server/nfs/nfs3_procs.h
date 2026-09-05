@@ -40,6 +40,52 @@ chimera_nfs3_decode_fh(
 } /* chimera_nfs3_decode_fh */
 
 /*
+ * Decode the second (destination) wire handle of RENAME / LINK into
+ * req->saved_fh and report its export id.
+ *
+ * The first handle went through chimera_nfs3_decode_fh, which stamped
+ * req->export_id and squashed req->cred under that export.  Two exports may
+ * name sub-paths of one VFS share, so the destination directory can belong to
+ * a different export whose policy the VFS-level cross-mount check will not
+ * catch: its sec= list must permit the request's auth flavor, and its squash
+ * must apply to the credential the new entry is created under.  Unwrapping
+ * alone enforces neither.
+ *
+ * Squashing only ever maps toward the anonymous identity, so layering the
+ * destination export's policy on top of the source's yields the more
+ * restrictive of the two and is a no-op when both handles name the same
+ * export.  A sec= rejection maps to NFS3ERR_ACCES for the same reason as in
+ * chimera_nfs3_decode_fh.
+ */
+static inline nfsstat3
+chimera_nfs3_decode_fh2(
+    struct nfs_request *req,
+    const void         *fhdata,
+    uint32_t            fhlen,
+    uint16_t           *export_id)
+{
+    struct chimera_server_nfs_shared *shared = req->thread->shared;
+
+    if (chimera_nfs_fh_unwrap(fhdata, fhlen, export_id,
+                              req->saved_fh, &req->saved_fhlen,
+                              shared->fh_key, shared->fh_sign) !=
+        CHIMERA_NFS_FH_OK) {
+        return NFS3ERR_BADHANDLE;
+    }
+
+    const struct chimera_nfs_export *export =
+        chimera_nfs_get_export_by_id(shared, *export_id);
+
+    if (!chimera_nfs_export_sec_ok(export, req->sec_bit)) {
+        return NFS3ERR_ACCES;
+    }
+
+    chimera_nfs_squash_cred(&req->cred, export);
+
+    return NFS3_OK;
+} /* chimera_nfs3_decode_fh2 */
+
+/*
  * Per-export read-only gate for mutating NFSv3 procedures.  Call after a
  * successful chimera_nfs3_decode_fh with the export id the mutation targets.
  * RENAME and LINK mutate through two handles and use chimera_nfs3_check_rofs2
