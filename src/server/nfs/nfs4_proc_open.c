@@ -16,6 +16,7 @@
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
+#include "vfs/vfs_idmap.h"
 
 /*
  * Acquire a cross-protocol SHARE reservation in the claim core for a freshly
@@ -151,7 +152,9 @@ chimera_nfs4_open_grant_delegation(
     bool                              exists = false;
     uint8_t                           deleg_type;
     struct nfsace4                   *perms;
-    static const char                 everyone[] = "EVERYONE@";
+    struct chimera_principal          who;
+    char                             *who_str;
+    int                               who_len;
 
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
 
@@ -299,11 +302,35 @@ chimera_nfs4_open_grant_delegation(
         perms                               = &res->resok4.delegation.read.permissions;
     }
 
+    /* RFC 7530 §16.16: the permissions ACE names the users that may open the
+     * delegated file without an ACCESS call.  It therefore has to name the
+     * principal this delegation was handed to and carry the rights the
+     * delegation actually conveys: an EVERYONE@ ACE invites the client to skip
+     * the server's per-user check for every other local user, and READ_DATA on
+     * a write delegation sends the holder back for an ACCESS round trip to
+     * write -- the very round trip the field exists to eliminate.  The who
+     * string is rendered like FATTR4_OWNER (numeric form, no domain) and lives
+     * in the reply's dbuf so it outlives this frame. */
+    who     = chimera_idmap_uid_principal(req->cred.uid);
+    who_str = xdr_dbuf_alloc_space(CHIMERA_IDMAP_WHO_MAX,
+                                   req->encoding->dbuf);
+    chimera_nfs_abort_if(who_str == NULL, "Failed to allocate space");
+    who_len = chimera_idmap_principal_to_who(&who, NULL, who_str,
+                                             CHIMERA_IDMAP_WHO_MAX);
+
     perms->type        = ACE4_ACCESS_ALLOWED_ACE_TYPE;
     perms->flag        = 0;
-    perms->access_mask = ACE4_READ_DATA;
-    perms->who.len     = sizeof(everyone) - 1;
-    perms->who.data    = (void *) everyone;
+    perms->access_mask = ACE4_GENERIC_READ;
+
+    if (deleg_type == OPEN_DELEGATE_WRITE) {
+        /* The data/attribute rights a write delegation conveys; not WRITE_ACL
+         * or WRITE_OWNER, which it does not. */
+        perms->access_mask |= ACE4_WRITE_DATA | ACE4_APPEND_DATA |
+            ACE4_WRITE_ATTRIBUTES;
+    }
+
+    perms->who.len  = who_len > 0 ? who_len : 0;
+    perms->who.data = who_str;
     return false;
 } /* chimera_nfs4_open_grant_delegation */
 
