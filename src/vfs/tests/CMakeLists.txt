@@ -103,6 +103,26 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/zerorange_cairn COMMAND vfs_zerorange_test cairn)
 endif()
 
+# Native Windows SID round trip through the VFS, parameterized by
+# backend: only the engine-managed backends that store the canonical ACL
+# natively (memfs, cairn, diskfs) can persist a SID-bearing principal and the
+# owner/group SID companions.  The passthrough backends are mode-only.
+add_executable(vfs_acl_sid_test vfs_acl_sid_test.c)
+target_link_libraries(vfs_acl_sid_test chimera_vfs chimera_vfs_memfs
+    chimera_vfs_diskfs chimera_vfs_memkv evpl)
+add_test(NAME chimera/vfs/acl_sid_memfs COMMAND vfs_acl_sid_test memfs)
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/vfs/acl_sid_diskfs_aio COMMAND vfs_acl_sid_test diskfs_aio)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    target_link_libraries(vfs_acl_sid_test chimera_vfs_io_uring)
+    add_test(NAME chimera/vfs/acl_sid_diskfs_io_uring COMMAND vfs_acl_sid_test diskfs_io_uring)
+endif()
+if(CAIRN_ENABLED)
+    target_link_libraries(vfs_acl_sid_test chimera_vfs_cairn)
+    add_test(NAME chimera/vfs/acl_sid_cairn COMMAND vfs_acl_sid_test cairn)
+endif()
+
 # Tag every test registered above with the 'vfs' label so the suite can be run
 # independently via `ctest -L vfs`.
 get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
