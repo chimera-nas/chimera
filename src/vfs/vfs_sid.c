@@ -181,8 +181,11 @@ chimera_sid_from_bin(
 {
     int len = chimera_sid_bin_len(buf, avail);
 
+    /* Fully define the struct on every path -- the pad, and the tail past the
+     * SID -- so a chimera_sid (and any ACE carrying one) is byte-deterministic
+     * and safe to memcmp. */
+    memset(sid, 0, sizeof(*sid));
     if (len < 0) {
-        sid->len = 0;
         return -1;
     }
     memcpy(sid->data, buf, len);
@@ -210,10 +213,14 @@ chimera_sid_from_str(
     struct chimera_sid *sid,
     const char         *str)
 {
-    int len = chimera_sid_str_to_bin(str, sid->data, CHIMERA_SID_MAX_LEN);
+    int len;
 
+    /* Zero first, then parse into data[]: the pad and the tail past the SID
+     * are defined whether the parse succeeds or not. */
+    memset(sid, 0, sizeof(*sid));
+    len = chimera_sid_str_to_bin(str, sid->data, CHIMERA_SID_MAX_LEN);
     if (len < 0) {
-        sid->len = 0;
+        memset(sid, 0, sizeof(*sid));
         return -1;
     }
     sid->len = (uint8_t) len;
