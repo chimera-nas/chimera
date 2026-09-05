@@ -243,13 +243,16 @@ chimera_nfs4_getattr_complete(
         return;
     }
 
-    /* RFC 8881 §10.4.3 / §20.1: if another client holds a write delegation on
-     * this file it may have uncommitted size/change locally, so query it via
-     * CB_GETATTR and merge the result.  Only meaningful on 4.1+ with a known
-     * requesting client and delegations enabled. */
+    /* RFC 7530 §10.4.3 / RFC 8881 §10.4.3: if another client holds a write
+     * delegation on this file it may have uncommitted size/change locally, so
+     * query it via CB_GETATTR and merge the result.  CB_GETATTR is an NFSv4.0
+     * mechanism (RFC 7530 §18.1) that 4.1 inherited, and the send path serves
+     * both (nfs4_callback.c prepends CB_SEQUENCE only for 4.1+), so the query
+     * runs for any minor version -- gating it on 4.1+ left 4.0 peers reading
+     * pre-modification size/change. */
     client = req->session ? req->session->client_unified : NULL;
 
-    if (req->minorversion >= 1 && client &&
+    if (client &&
         chimera_server_config_get_nfs4_delegations(req->thread->shared->config) &&
         (wdeleg = nfs4_find_conflicting_write_deleg(req->thread, req->fh,
                                                     req->fhlen,
