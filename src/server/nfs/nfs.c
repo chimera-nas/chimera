@@ -212,7 +212,8 @@ nfs_server_init(
 
     /* RPCSEC_GSS (Kerberos): register the acceptor keytab once at startup.
      * Per-thread provider registration happens in nfs_server_thread_init. */
-    if (chimera_server_config_get_nfs_kerberos_enabled(config)) {
+    shared->gss_enabled = chimera_server_config_get_nfs_kerberos_enabled(config);
+    if (shared->gss_enabled) {
         chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config));
         chimera_nfs_info("RPCSEC_GSS: Kerberos authentication enabled");
     }

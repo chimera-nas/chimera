@@ -390,6 +390,11 @@ struct chimera_server_nfs_shared {
     int                                 fh_sign;
     uint8_t                             fh_key[16];
 
+    /* True once the RPCSEC_GSS (Kerberos) acceptor is installed, snapshotted
+     * from server.nfs_kerberos_enabled at init.  Security-flavor advertisement
+     * consults it so we never offer a flavor the RPC layer cannot accept. */
+    int                                 gss_enabled;
+
     struct chimera_nfs_mount_entry     *mount_entries;
     pthread_mutex_t                     mount_entries_lock;
     int                                 num_mount_entries;
@@ -796,13 +801,15 @@ chimera_nfs_fh_encode(
 /*
  * Populate `out` (capacity >= 4) with the secinfo4 entries advertising an
  * export's allowed security flavors.  An export with no explicit policy
- * (sec_allowed == 0) advertises everything chimera supports.  Returns the
+ * (sec_allowed == 0) advertises everything chimera supports.  `gss_enabled` is
+ * the server's live RPCSEC_GSS state (shared->gss_enabled).  Returns the
  * number of entries written, in the server's preference order.
  */
 static inline int
 chimera_nfs_fill_secinfo(
     struct secinfo4 *out,
-    uint32_t         sec_allowed)
+    uint32_t         sec_allowed,
+    int              gss_enabled)
 {
     /* Kerberos v5 mechanism OID 1.2.840.113554.1.2.2 (RFC 1964). */
     static const uint8_t krb5_oid[9] = {
@@ -825,6 +832,17 @@ chimera_nfs_fill_secinfo(
     };
     /* *INDENT-ON* */
     unsigned i;
+
+    /* RFC 7530 §3.2.1.1 / §16.31: SECINFO must report flavors the server will
+     * actually accept.  Without the Kerberos acceptor installed (default:
+     * server.nfs_kerberos_enabled is off) an RPCSEC_GSS client would be
+     * rejected at the RPC layer, so suppress the krb5 triples -- but only when
+     * AUTH_SYS survives, since an export explicitly configured for GSS alone
+     * must not be silently downgraded to an empty (or AUTH_SYS) list. */
+    if (!gss_enabled && (mask & CHIMERA_NFS_SEC_SYS)) {
+        mask &= ~(CHIMERA_NFS_SEC_KRB5 | CHIMERA_NFS_SEC_KRB5I |
+                  CHIMERA_NFS_SEC_KRB5P);
+    }
 
     if (mask & CHIMERA_NFS_SEC_SYS) {
         out[n++].flavor = AUTH_SYS;
