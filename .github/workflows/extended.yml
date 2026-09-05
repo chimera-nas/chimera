@@ -608,8 +608,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: amd64, runner: ubuntu-24.04,     build_type: Release, kvm_cmake: "-DKVM_TESTING=ON"  }
-          - { arch: amd64, runner: ubuntu-24.04,     build_type: Debug,   kvm_cmake: "-DKVM_TESTING=ON"  }
+          # KVM_FETCH_IMAGES=OFF: the guest images are ~3.4 GB each and land in
+          # /kvm, outside the build tree this job tars, so fetching them here
+          # downloads several GB that the artifact then excludes.  The kvm
+          # shard fetches them on demand instead -- the split kvm/CMakeLists.txt
+          # documents, and the same pairing build-test.yml's test-dev uses.
+          - { arch: amd64, runner: ubuntu-24.04,     build_type: Release, kvm_cmake: "-DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF" }
+          - { arch: amd64, runner: ubuntu-24.04,     build_type: Debug,   kvm_cmake: "-DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF" }
           - { arch: arm64, runner: ubuntu-24.04-arm, build_type: Release, kvm_cmake: "-DKVM_TESTING=OFF" }
           - { arch: arm64, runner: ubuntu-24.04-arm, build_type: Debug,   kvm_cmake: "-DKVM_TESTING=OFF" }
 
@@ -759,6 +764,21 @@ jobs:
                 rest)       SEL="-LE $EXCL" ;;
                 *)          echo "unknown category $CATEGORY" >&2; exit 1 ;;
               esac
+              # The build job left the guest images unfetched (see build-dev),
+              # and they live in /kvm outside the tree unpacked above, so the
+              # kvm shard has none.  Fetch exactly the images this configure
+              # declares rather than a hardcoded list: the previous incarnation
+              # of this job named three, kvm/CMakeLists.txt now builds four, and
+              # a list that drifts silently fetches the wrong set.
+              if [ "$CATEGORY" = kvm ]; then
+                imgs=$(ninja -t targets all 2>/dev/null \
+                       | grep -oE "^kvm_[a-z0-9_]+_image" | sort -u)
+                if [ -z "$imgs" ]; then
+                  echo "::error::kvm shard: no kvm_*_image targets in this build"
+                  exit 1
+                fi
+                ninja $imgs
+              fi
               # An empty shard is reported, not failed.  It means the label is
               # absent on this platform (pynfs and the KVM guests are not built
               # everywhere), and `rest` picks up anything unlabelled anyway, so
