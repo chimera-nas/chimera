@@ -209,6 +209,21 @@ chimera_nfs4_open_grant_delegation(
             return true;
     } /* switch */
 
+    /* RFC 7530 §9.1.11: "The server must not bestow a delegation for any open
+     * that would require confirmation", and §16.18.5: "Servers MUST NOT
+     * require confirmation on OPENs that grant delegations."  The two
+     * decisions are made in different places -- install_state has already
+     * committed OPEN4_RESULT_CONFIRM into the reply for a 4.0 OPEN on an
+     * unconfirmed open_owner -- so read that decision back and decline rather
+     * than hand out a delegation stateid on open state that is still subject
+     * to cancellation if OPEN_CONFIRM never arrives.  The client gets one on
+     * its next OPEN.  Deliberately after the probe gate above so the first
+     * OPEN of a new owner still kicks the CB_NULL probe, leaving the path
+     * validated by the time that next OPEN arrives. */
+    if (res->resok4.rflags & OPEN4_RESULT_CONFIRM) {
+        return false;
+    }
+
     /* fh_hash must match the open-cache / SHARE-lease hashing so the
      * delegation and conflicting opens land on the same file_state. */
     fh_hash = XXH3_64bits(req->fh, req->fhlen) & INT64_MAX;
