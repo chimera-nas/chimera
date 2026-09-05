@@ -150,6 +150,33 @@ chimera_nfs4_open_downgrade(
 
     pthread_mutex_unlock(&owner->lock);
 
+    /* RFC 7530 §16.19: the downgrade changes the *effective* share
+     * reservation, so the cross-protocol claim that arbitrates against SMB
+     * and NLM has to narrow with it -- otherwise the old, broader deny keeps
+     * blocking opens this state no longer denies.  The new bits are a subset
+     * of the standing ones (checked above), which is what shrink requires.
+     * Done outside owner->lock: shrink pumps the claim waiters, whose
+     * completions take that lock. */
+    if (open_state->share_claim_held) {
+        uint8_t granted = 0, denied = 0;
+
+        if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+            granted |= CHIMERA_CLAIM_R;
+        }
+        if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+            granted |= CHIMERA_CLAIM_W;
+        }
+        if (args->share_deny & OPEN4_SHARE_DENY_READ) {
+            denied |= CHIMERA_CLAIM_R;
+        }
+        if (args->share_deny & OPEN4_SHARE_DENY_WRITE) {
+            denied |= CHIMERA_CLAIM_W;
+        }
+
+        chimera_vfs_claim_shrink(open_state->share_file_state,
+                                 &open_state->share_claim, granted, denied);
+    }
+
     nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                             thread->vfs_thread);
 
