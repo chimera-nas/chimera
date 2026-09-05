@@ -23,7 +23,7 @@ chimera_nfs3_readdirplus_callback(
     struct READDIRPLUS3args            *args = req->args_readdirplus;
     struct entryplus3                  *entry;
     struct nfs_nfs3_readdirplus_cursor *cursor;
-    int                                 dbuf_before = req->encoding->dbuf->used, dbuf_cur;
+    uint32_t                            entry_cur, dirinfo_cur, fh_cur = 0;
     int                                 rc;
 
     cursor = &req->readdirplus3_cursor;
@@ -54,25 +54,34 @@ chimera_nfs3_readdirplus_callback(
                                   req->encoding->dbuf);
         chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
+        fh_cur = 4 + ((wirelen + 3) & ~3);
     } else {
         entry->name_handle.handle_follows = 0;
     }
 
-    dbuf_cur = req->encoding->dbuf->used - dbuf_before;
-
     /* XDR wire size of directory info (fileid + name + cookie) per RFC 1813:
      * value_follows (4) + fileid3 (8) + filename3 (4 + padded len) + cookie3 (8) */
-    uint32_t dirinfo_cur = 24 + ((namelen + 3) & ~3);
+    dirinfo_cur = 24 + ((namelen + 3) & ~3);
 
-    if (cursor->count + dbuf_cur > args->maxcount ||
+    /* RFC 1813 3.3.17: maxcount bounds the XDR-encoded READDIRPLUS3resok, so
+    * the budget has to be charged in wire bytes.  The dbuf bytes this entry
+    * consumed are the in-memory entryplus3 (pointers, xdr_string descriptors,
+    * padding) and over-charge by a fixed per-entry delta, which made the
+    * server return fewer entries than maxcount allowed.  On the wire an
+    * entryplus3 adds a post_op_attr (4, plus fattr3's 84 when present) and a
+    * post_op_fh3 (4, plus the padded handle when present) to the dirinfo. */
+    entry_cur = dirinfo_cur + 4 +
+        (entry->name_attributes.attributes_follow ? 84 : 0) + 4 + fh_cur;
+
+    if (cursor->count + entry_cur > args->maxcount ||
         cursor->dircount + dirinfo_cur > args->dircount) {
         chimera_nfs_debug("readdirplus: exceeded limits (count %d+%d vs max %d, dircount %d+%d vs max %d)",
-                          (int) cursor->count, dbuf_cur, args->maxcount,
+                          (int) cursor->count, entry_cur, args->maxcount,
                           (int) cursor->dircount, dirinfo_cur, args->dircount);
         return -1;
     }
 
-    cursor->count    += dbuf_cur;
+    cursor->count    += entry_cur;
     cursor->dircount += dirinfo_cur;
 
     if (cursor->entries) {

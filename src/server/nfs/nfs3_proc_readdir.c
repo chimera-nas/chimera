@@ -24,7 +24,7 @@ chimera_nfs3_readdir_callback(
     struct READDIR3args            *args = req->args_readdir;
     struct entry3                  *entry;
     struct nfs_nfs3_readdir_cursor *cursor;
-    int                             dbuf_before = req->encoding->dbuf->used, dbuf_cur;
+    uint32_t                        entry_cur;
     int                             rc;
 
     cursor = &req->readdir3_cursor;
@@ -39,13 +39,20 @@ chimera_nfs3_readdir_callback(
     rc = xdr_dbuf_alloc_string(&entry->name, name, namelen, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate string");
 
-    dbuf_cur = req->encoding->dbuf->used - dbuf_before;
+    /* RFC 1813 3.3.16: count bounds the XDR-encoded READDIR3resok, so the
+     * budget has to be charged in wire bytes.  The bytes this entry consumed in
+     * the dbuf are the in-memory struct entry3 (nextentry pointer, xdr_string
+     * descriptor, padding) and over-charge by a fixed per-entry delta, which
+     * made the server return fewer entries than count allowed.  On the wire an
+     * entry3 is value_follows (4) + fileid3 (8) + filename3 (4 + padded len) +
+     * cookie3 (8). */
+    entry_cur = 24 + ((namelen + 3) & ~3);
 
-    if (cursor->count + dbuf_cur > args->count) {
+    if (cursor->count + entry_cur > args->count) {
         return -1;
     }
 
-    cursor->count += dbuf_cur;
+    cursor->count += entry_cur;
 
     if (cursor->entries) {
         cursor->last->nextentry = entry;
