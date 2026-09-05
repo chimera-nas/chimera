@@ -492,6 +492,12 @@ diskfs_inode_load_sync(
             diskfs_acl_serial_install(inode, rec, len);
         }
 
+        len = diskfs_bt_lookup_pump(shared, io, buf, &diskfs_sid_key,
+                                    rec, DISKFS_SID_REC_MAX);
+        if (len >= 0) {
+            diskfs_sid_serial_install(inode, rec, len);
+        }
+
         len = diskfs_bt_lookup_pump(shared, io, buf, &diskfs_pnfs_key,
                                     rec, CHIMERA_VFS_PNFS_LAYOUT_MAX);
         if (len >= 0) {
