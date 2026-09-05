@@ -14,6 +14,7 @@
  */
 
 #include <stdio.h>
+#include <sys/stat.h>
 
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -701,7 +702,10 @@ chimera_smb_acl_to_sd(
             out[ace_pos + 2]  = ACE_UNIX_SIZE & 0xff;
             out[ace_pos + 3]  = (ACE_UNIX_SIZE >> 8) & 0xff;
             out[ace_pos + 15] = 0x10;      /* GENERIC_ALL */
-            write_unix_sid(&out[ace_pos + 8], 3, mode & 07777);
+            /* Emit type + permission bits: cifs.ko's modefromsid stores the full
+             * mode so a device/FIFO/socket node reconstructs its POSIX type
+             * from S-1-5-88-3, not just its permissions. */
+            write_unix_sid(&out[ace_pos + 8], 3, mode);
             ace_pos  += ACE_UNIX_SIZE;
             ace_count = 1;
         }
@@ -1037,7 +1041,7 @@ chimera_smb_query_emit_sd(
     int      sd_len;
 
     sd_len = chimera_smb_acl_to_sd(
-        uid, gid, mode & 07777, acl,
+        uid, gid, mode & (S_IFMT | 07777), acl,
         !!(addl_info & OWNER_SECURITY_INFORMATION),
         !!(addl_info & GROUP_SECURITY_INFORMATION),
         !!(addl_info & DACL_SECURITY_INFORMATION),

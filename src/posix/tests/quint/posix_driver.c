@@ -1499,6 +1499,7 @@ posix_env_setup(
              * from the mode -- which the proxy's engine DAC gate would then
              * misjudge. */
             chimera_server_config_set_smb_mode_from_sid(server_config, 1);
+            chimera_server_config_set_smb_posix_rename(server_config, 1);
         } else {
             chimera_server_config_set_nfs_enabled(server_config, 1);
         }

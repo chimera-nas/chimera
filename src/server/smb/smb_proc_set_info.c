@@ -49,6 +49,32 @@ chimera_smb_set_info_callback(
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_callback */
 
+/* Map a VFS error from a SetInfo operation (hard link, rename, etc.) to the
+ * SMB2 status the client expects, instead of collapsing every failure to
+ * INTERNAL_ERROR (which surfaces as EIO).  A hard link onto an existing name is
+ * the important one: OBJECT_NAME_COLLISION -> EEXIST, matching link(2). */
+static inline uint32_t
+chimera_smb_set_info_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:           return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_EEXIST:       return SMB2_STATUS_OBJECT_NAME_COLLISION;
+        case CHIMERA_VFS_ENOENT:       return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:        return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_EISDIR:       return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+        case CHIMERA_VFS_ENOTDIR:      return SMB2_STATUS_NOT_A_DIRECTORY;
+        case CHIMERA_VFS_ENOTEMPTY:    return SMB2_STATUS_DIRECTORY_NOT_EMPTY;
+        case CHIMERA_VFS_EXDEV:        return SMB2_STATUS_NOT_SAME_DEVICE;
+        case CHIMERA_VFS_EMLINK:       return SMB2_STATUS_TOO_MANY_LINKS;
+        case CHIMERA_VFS_ENOSPC:
+        case CHIMERA_VFS_EDQUOT:       return SMB2_STATUS_DISK_FULL;
+        case CHIMERA_VFS_ENAMETOOLONG: return SMB2_STATUS_NAME_TOO_LONG;
+        case CHIMERA_VFS_EROFS:        return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        default:                       return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_set_info_error_status */
+
 static void
 chimera_smb_set_info_link_callback(
     enum chimera_vfs_error    error_code,
@@ -72,7 +98,8 @@ chimera_smb_set_info_link_callback(
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
 
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request,
+                                 chimera_smb_set_info_error_status(error_code));
 } /* chimera_smb_set_info_link_callback */
 
 static void

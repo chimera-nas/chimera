@@ -12,6 +12,16 @@
 #include "evpl/evpl.h"
 #include "common/misc.h"
 
+#ifndef SMB2_0_IOCTL_IS_FSCTL
+#define SMB2_0_IOCTL_IS_FSCTL 0x00000001
+#endif /* ifndef SMB2_0_IOCTL_IS_FSCTL */
+
+/* A single stable st_dev for every object served through this proxy mount:
+ * POSIX requires all files on one filesystem to share st_dev, and the model's
+ * identity check requires it stable across ops.  The value is arbitrary -- the
+ * model checks consistency, not the number. */
+#define CHIMERA_SMB_ST_DEV    ((uint64_t) 0x00736d62)  /* 'smb' */
+
 /*
  * File operations for the SMB2 client -- a PATH-ONLY VFS backend.
  *
@@ -188,7 +198,7 @@ smb_path_normalize(
     return out;
 } /* smb_path_normalize */
 
-static int
+int
 smb_at_full_path(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request,
@@ -429,7 +439,7 @@ smb_sd_to_attrs(
             if (off_dacl + sid_offset + 20 <= len &&
                 smb_parse_unix_sid(acl + sid_offset, len - off_dacl - sid_offset,
                                    3, &value) == 0) {
-                *r_perms     = value & 07777;
+                *r_perms     = value;   /* full mode: type bits included */
                 *r_have_mode = 1;
                 break;
             }
@@ -469,9 +479,20 @@ smb_all_info_to_attrs(
     attr->va_space_used = smb_wire_le64(b + 40);
     attr->va_size       = smb_wire_le64(b + 48);
     attr->va_nlink      = smb_wire_le32(b + 56);
-    /* The real inode number (b+64) is deliberately NOT used: open/lookup address
-     * objects by a path-derived id, and a real inode here would make one object
-     * report two identities across ops. */
+    /* Report a stable POSIX identity.  The inode number is the server's
+     * IndexNumber (b+64) -- one value per object, shared by every hard link and
+     * preserved across renames, unlike the path-derived id used for the FH
+     * (which changes with the name).  st_dev is a single per-mount constant so
+     * every object on this filesystem shares it, as POSIX requires.  Together
+     * they give a (dev,ino) pair that is consistent across ops. */
+    if (len >= 72) {
+        uint64_t index_number = smb_wire_le64(b + 64);
+        if (index_number) {
+            attr->va_ino       = index_number;
+            attr->va_dev       = CHIMERA_SMB_ST_DEV;
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_INUM | CHIMERA_VFS_ATTR_DEV;
+        }
+    }
 
     if (file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) {
         mode_type     = S_IFDIR;
@@ -546,8 +567,17 @@ smb_attr_enrich_security_reply(
         if (sd_len && evpl_iovec_cursor_get_blob(body, sd, sd_len) >= 0) {
             smb_sd_to_attrs(sd, sd_len, state->enrich_attr, &perms, &have_mode);
             if (have_mode) {
-                state->enrich_attr->va_mode =
-                    (state->enrich_attr->va_mode & S_IFMT) | perms;
+                /* modefromsid carries the POSIX type: a device/FIFO/socket node
+                 * is a reparse point on the wire (FileAttributes reads back as a
+                 * symlink) but a real special file here, so its S-1-5-88-3 type
+                 * bits win over the FileAttributes-derived type.  Regular files,
+                 * dirs and symlinks agree on both, so this is a no-op for them. */
+                if (perms & S_IFMT) {
+                    state->enrich_attr->va_mode = perms;
+                } else {
+                    state->enrich_attr->va_mode =
+                        (state->enrich_attr->va_mode & S_IFMT) | (perms & 07777);
+                }
             }
         }
     }
@@ -946,7 +976,8 @@ smb_parse_symlink_error(
     struct evpl_iovec_cursor *body,
     char                     *out_target,
     int                       out_max,
-    int                      *out_relative)
+    int                      *out_relative,
+    int                      *out_unparsed)
 {
     uint16_t structsize, reserved16, reparse_data_len, unparsed_len;
     uint16_t sub_off, sub_len, print_off, print_len;
@@ -979,12 +1010,16 @@ smb_parse_symlink_error(
     (void) print_len;
 
     if (sym_tag != SMB2_SYMLINK_ERROR_TAG ||
-        reparse_tag != SMB2_IO_REPARSE_TAG_SYMLINK ||
-        unparsed_len != 0) {
-        /* Not a link error we can resolve (or an intermediate-component stop we
-         * do not splice); let the caller see the raw ELOOP. */
+        reparse_tag != SMB2_IO_REPARSE_TAG_SYMLINK) {
+        /* Not a link error we can resolve; let the caller see the raw ELOOP. */
         return -1;
     }
+
+    /* UnparsedPathLength is the byte count (UTF-16) of the path suffix AFTER
+     * the symlink the server stopped on -- non-zero for an intermediate (mid-
+     * path) symlink, which must be followed and the suffix preserved, not
+     * surfaced as ELOOP. */
+    *out_unparsed = unparsed_len / 2;
 
     /* PathBuffer begins here; SubstituteNameOffset is relative to it. */
     if (sub_off > 0) {
@@ -1023,32 +1058,55 @@ smb_splice_symlink_target(
     int         path_len,
     const char *target,
     int         tlen,
-    int         relative)
+    int         relative,
+    int         unparsed)
 {
-    int base;
+    int  base, parsed_len, suffix_len, newlen;
+    char scratch[CHIMERA_SMB_PATH_MAX + 1];
+
+    /* The server stopped on a symlink after resolving path[0..parsed_len); the
+     * remaining path[parsed_len..path_len) is the unparsed suffix (the tail
+     * after an intermediate symlink, or a trailing '/' after a final one).  The
+     * symlink is the last component of the parsed portion.  Splice the target
+     * in place of THAT component and keep the suffix, so "x/a/z" (a -> "c")
+     * resolves to "x/c/z" and "x/b/" (b -> "c") to "x/c/" -- not "x/a/z"'s "z"
+     * component or "x/b/"'s empty one, which would re-hit the same link every
+     * hop and loop to ELOOP where the answer is the dangling target's ENOENT. */
+    if (unparsed < 0 || unparsed > path_len) {
+        unparsed = 0;
+    }
+    parsed_len = path_len - unparsed;
+    suffix_len = unparsed;
 
     if (!relative) {
+        /* Absolute target: resolve from the share root (drop the whole prefix
+         * up to and including the symlink), keeping the suffix. */
         while (tlen > 0 && target[0] == '/') {
             target++;
             tlen--;
         }
-        if (tlen > CHIMERA_SMB_PATH_MAX) {
-            return -1;
+        base = 0;
+    } else {
+        /* Relative target: replace the symlink component in place. */
+        base = parsed_len;
+        while (base > 0 && path[base - 1] != '/') {
+            base--;
         }
-        memmove(path, target, tlen);
-        return tlen;
     }
 
-    /* base = start of the final component (index just past the last '/'). */
-    base = path_len;
-    while (base > 0 && path[base - 1] != '/') {
-        base--;
-    }
-    if (base + tlen > CHIMERA_SMB_PATH_MAX) {
+    newlen = base + tlen + suffix_len;
+    if (newlen > CHIMERA_SMB_PATH_MAX) {
         return -1;
     }
-    memmove(path + base, target, tlen);
-    return base + tlen;
+
+    /* new = path[0..base) + target + path[parsed_len..path_len) (the suffix).
+     * Assemble in scratch: the suffix overlaps the destination, so an in-place
+     * memmove would be error-prone. */
+    memcpy(scratch, path, base);
+    memcpy(scratch + base, target, tlen);
+    memcpy(scratch + base + tlen, path + parsed_len, suffix_len);
+    memcpy(path, scratch, newlen);
+    return newlen;
 } /* smb_splice_symlink_target */
 
 static void
@@ -1066,13 +1124,14 @@ smb_create_follow_shim(
     if (status == SMB2_STATUS_STOPPED_ON_SYMLINK && fc->hops > 0) {
         char target[CHIMERA_SMB_PATH_MAX + 1];
         int  relative = 0;
+        int  unparsed = 0;
         int  tlen     = smb_parse_symlink_error(body, target, sizeof(target),
-                                                &relative);
+                                                &relative, &unparsed);
         int  newlen;
 
         if (tlen > 0 &&
             (newlen = smb_splice_symlink_target(fc->path, fc->path_len, target,
-                                                tlen, relative)) >= 0) {
+                                                tlen, relative, unparsed)) >= 0) {
             fc->path_len = newlen;
             fc->hops--;
             smb_send_create_ex(conn, request, fc->path, fc->path_len,
@@ -1465,6 +1524,18 @@ chimera_smb_client_lookup_at(
     char path[CHIMERA_SMB_PATH_MAX + 1];
     int  path_len;
 
+    /* Resolving a name under a non-directory parent handle is ENOTDIR (POSIX),
+     * even when that parent's name was unlinked while it stayed open: the open
+     * token keeps the inode's type, whereas re-resolving the parent's now-stale
+     * path would answer ENOENT.  A path-only backend cannot infer this from the
+     * wire (the server reports OBJECT_PATH_NOT_FOUND -> ENOENT for a file in the
+     * path prefix), so the open state's recorded type decides it here. */
+    if (smb_parent_is_nondir(request->lookup_at.handle)) {
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
     path_len = smb_at_full_path(conn, request, request->lookup_at.component,
                                 request->lookup_at.component_len,
                                 path, sizeof(path));
@@ -1475,13 +1546,20 @@ chimera_smb_client_lookup_at(
     }
 
     /* Resolve to the raw entry (like an NFS LOOKUP): open the reparse point so a
-     * final-component symlink comes back as the link node itself rather than
-     * STOPPED_ON_SYMLINK.  The VFS core then decides whether to follow it. */
-    smb_send_create(conn, request, path, path_len,
-                    SMB2_FILE_READ_ATTRIBUTES,
-                    SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN, SMB2_FILE_OPEN_REPARSE_POINT,
-                    chimera_smb_lookup_create_reply);
+     * FINAL-component symlink comes back as the link node itself rather than
+     * STOPPED_ON_SYMLINK, and the VFS core decides whether to follow it.  But an
+     * INTERMEDIATE symlink (the whole mount-relative path is handed to a path-
+     * only backend at once, so "a/b" where "a" is a link stops on "a") must be
+     * followed here -- POSIX always follows mid-path symlinks -- rather than
+     * surfaced as ELOOP.  The follow shim does exactly that: REPARSE_POINT means
+     * a final link never trips it, while a mid-path stop (UnparsedPathLength>0)
+     * is spliced and retried. */
+    smb_send_create_follow(conn, request, path, path_len,
+                           SMB2_FILE_READ_ATTRIBUTES,
+                           SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                           SMB2_FILE_OPEN, SMB2_FILE_OPEN_REPARSE_POINT,
+                           NULL, 0,
+                           chimera_smb_lookup_create_reply);
 } /* chimera_smb_client_lookup_at */
 
 /* ---- open_at / open_fh (persistent open) ------------------------------- */
@@ -1602,13 +1680,16 @@ chimera_smb_client_open_at(
      * against the target type (FILE_IS_A_DIRECTORY otherwise), so a directory
      * open that left NON_DIRECTORY_FILE set would be refused. */
     /* Constrain the target type only when the caller committed to one: an
-     * explicit directory open is DIRECTORY_FILE; a plain file open is
-     * NON_DIRECTORY_FILE (opening a directory as a file is EISDIR).  A PATH /
-     * INFERRED open (chmod/chown/stat by path, which do not know the type)
-     * constrains neither, so the server opens whatever is there. */
+     * explicit directory open is DIRECTORY_FILE; a write-intent file open is
+     * NON_DIRECTORY_FILE (opening a directory for writing is EISDIR).  A PATH /
+     * INFERRED open (chmod/chown/stat by path, which do not know the type), or a
+     * read-only open, constrains neither: POSIX open(dir, O_RDONLY) succeeds and
+     * hands back a directory fd, so only a write-intent open turns a directory
+     * into EISDIR. */
     uint32_t       options =
         (request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) ? SMB2_FILE_DIRECTORY_FILE :
-        (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED)) ? 0 :
+        (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+                                   CHIMERA_VFS_OPEN_READ_ONLY)) ? 0 :
         SMB2_FILE_NON_DIRECTORY_FILE;
     uint8_t        lease_ctx[CHIMERA_SMB_LEASE_CTX_SIZE];
     uint8_t        lease_key[16];
@@ -1642,6 +1723,16 @@ chimera_smb_client_open_at(
         options |= SMB2_FILE_OPEN_REPARSE_POINT;
     }
 
+    /* POSIX O_CREAT|O_EXCL over an existing symlink is EEXIST regardless of the
+     * link's target: the exclusive create must see the link node itself, never
+     * follow it (which would create the target, or stop on the link as ELOOP).
+     * OPEN_REPARSE_POINT makes an existing symlink collide
+     * (OBJECT_NAME_COLLISION -> EEXIST); it is inert for a fresh name or a
+     * regular-file collision. */
+    if (disposition == SMB2_FILE_CREATE) {
+        options |= SMB2_FILE_OPEN_REPARSE_POINT;
+    }
+
     /* WRITE_OWNER|WRITE_DAC|READ_CONTROL: the rights the server enforces for a
      * modefromsid SET_SECURITY, so this handle can stamp the caller's POSIX
      * owner/mode -- at create time here, or later via fchmod/chown/setattr on
@@ -1650,11 +1741,15 @@ chimera_smb_client_open_at(
         SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE |
         SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
 
-    /* Opening the link node itself (NOFOLLOW: lstat/readlink/lchown) must not
-     * ask for data access -- a symlink reparse point has no data stream and the
-     * server refuses READ/WRITE_DATA on it.  Attribute + delete + the SD rights
-     * are all these callers use. */
-    if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+    /* Opening the link node itself for METADATA (lstat/readlink/lchown, all
+     * O_PATH-style) must not ask for data access -- a symlink reparse point has
+     * no data stream and the server refuses READ/WRITE_DATA on it.  Gate this on
+     * OPEN_PATH: a data-intent O_NOFOLLOW open (open(O_NOFOLLOW|O_RDWR) on a
+     * regular file) is NOT metadata-only -- it needs its read/write grant, and
+     * O_NOFOLLOW only means "fail if the leaf is a symlink" (which the reparse
+     * open then surfaces as the server refusing data on a link node). */
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+        (request->open_at.flags & CHIMERA_VFS_OPEN_PATH)) {
         desired_access = SMB2_FILE_READ_ATTRIBUTES | SMB2_DELETE |
             SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
     }
@@ -1755,7 +1850,8 @@ chimera_smb_client_open_fh(
      * not whatever it points at -- how the core reads a link's target and how a
      * self-referential link is caught as ELOOP rather than silently followed. */
     if (!chimera_smb_fh_is_root(request->fh_len) &&
-        chimera_smb_fh_is_nofollow(request->fh)) {
+        (chimera_smb_fh_is_nofollow(request->fh) ||
+         (request->open_fh.flags & CHIMERA_VFS_OPEN_NOFOLLOW))) {
         options |= SMB2_FILE_OPEN_REPARSE_POINT;
     }
 
@@ -1763,10 +1859,14 @@ chimera_smb_client_open_fh(
         /* The share root is the empty path.  It also needs the SD rights so a
          * chmod/chown of the export root (the model's fsInit normalization)
          * lands rather than failing ACCESS_DENIED. */
-        path           = "";
-        path_len       = 0;
-        desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_READ_ATTRIBUTES |
-            SMB2_FILE_LIST_DIRECTORY |
+        path     = "";
+        path_len = 0;
+        /* WRITE_DATA (ADD_FILE on a directory) so a POSIX fsync of a directory
+         * handle -- which the SMB server, like Samba, refuses on a handle
+         * without write access -- is permitted; the mount already adds children
+         * at the root, so the right is not new. */
+        desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
+            SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_LIST_DIRECTORY |
             SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
     } else {
         /* Re-CREATE any other object from the path its id was interned under
@@ -1787,6 +1887,32 @@ chimera_smb_client_open_fh(
         desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
             SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE |
             SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
+    }
+
+    /* An explicit NOFOLLOW open targets a symlink node to read its target (or
+     * lstat it): request metadata-only access so the server satisfies it with an
+     * O_PATH-style handle.  A symlink has no data stream, so asking for
+     * READ/WRITE_DATA would make the backend follow the link (ELOOP) instead of
+     * opening the node.  Gate this on the explicit flag, not on the fh's
+     * nofollow bit: every looked-up fh carries that bit, and a plain metadata
+     * op (chmod/chown) on a regular file's lookup fh still needs its full
+     * WRITE_DACL|WRITE_OWNER grant. */
+    if (request->open_fh.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        desired_access = SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL;
+    }
+
+    /* Creating a symlink or device node opens its parent directory O_PATH (as a
+     * dirfd for the *_at op); that directory handle is only a dirfd -- it never
+     * deletes or renames anything (remove_at/rename_at/rmdir each re-open their
+     * target with their own DELETE-access CREATE).  Its broad grant's DELETE bit
+     * is therefore unused, and worse: the cached parent handle's lingering
+     * DELETE reservation is read by a later rename INTO the directory as a
+     * conflicting deleter, failing it SHARING_VIOLATION (EAGAIN).  Drop DELETE
+     * for O_PATH directory handles; keep it for file handles and keep
+     * WRITE_OWNER|WRITE_DACL throughout so chmod/chown via the handle lands. */
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_PATH) &&
+        (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
+        desired_access &= ~(uint32_t) SMB2_DELETE;
     }
 
     smb_send_create(conn, request, path, path_len, desired_access,
@@ -1890,17 +2016,45 @@ chimera_smb_client_mkdir_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
+    char fullpath[CHIMERA_SMB_PATH_MAX + 1];
+    int  fullpath_len;
+
+    /* A dirfd-relative create whose parent is a non-directory is ENOTDIR, even
+     * when the parent's name was unlinked (the open fd keeps the inode alive):
+     * the parent's interned path is then stale, so path resolution would give a
+     * misleading ENOENT.  The open state records the type directly. */
+    if (smb_parent_is_nondir(request->mkdir_at.handle)) {
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
     /* Give the new directory a re-openable child fh for the VFS name cache. */
     chimera_smb_set_child_fh(conn, request, request->mkdir_at.name,
                              request->mkdir_at.name_len, 0,
                              &request->mkdir_at.r_attr);
 
+    /* Resolve the leaf against the parent handle (a dirfd-relative create);
+     * for a root-relative create this is just the name. */
+    fullpath_len = smb_at_full_path(conn, request, request->mkdir_at.name,
+                                    request->mkdir_at.name_len, fullpath,
+                                    sizeof(fullpath));
+    if (fullpath_len < 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    /* OPEN_REPARSE_POINT: an mkdir whose name is an existing symlink is EEXIST
+     * (POSIX), not a follow into the target -- the create must collide with the
+     * link node rather than stop on it (ELOOP).  Inert for a fresh name. */
     smb_send_create(conn, request,
-                    request->mkdir_at.name, request->mkdir_at.name_len,
+                    fullpath, fullpath_len,
                     SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL |
                     SMB2_WRITE_DACL | SMB2_WRITE_OWNER,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_CREATE, SMB2_FILE_DIRECTORY_FILE,
+                    SMB2_FILE_CREATE,
+                    SMB2_FILE_DIRECTORY_FILE | SMB2_FILE_OPEN_REPARSE_POINT,
                     chimera_smb_mkdir_create_reply);
 } /* chimera_smb_client_mkdir_at */
 
@@ -1960,17 +2114,27 @@ chimera_smb_client_remove_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
+    /* A dirfd-relative unlink/rmdir whose parent is a non-directory is ENOTDIR
+     * (even when the parent's name was unlinked while its fd stayed open -- its
+     * interned path is then stale and would resolve to a misleading ENOENT). */
+    if (smb_parent_is_nondir(request->remove_at.handle)) {
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
     /* POSIX unlink/rmdir removes the named entry itself; a final-component
      * symlink must be deleted as the link, never followed (which would ELOOP or
      * hit the target).  FILE_OPEN_REPARSE_POINT opens the link node so
      * DELETE_ON_CLOSE removes it. */
-    smb_send_create(conn, request,
-                    request->remove_at.name, request->remove_at.namelen,
-                    SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
-                    SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN,
-                    SMB2_FILE_DELETE_ON_CLOSE | SMB2_FILE_OPEN_REPARSE_POINT,
-                    chimera_smb_remove_create_reply);
+    smb_send_create_follow(conn, request,
+                           request->remove_at.name, request->remove_at.namelen,
+                           SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
+                           SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                           SMB2_FILE_OPEN,
+                           SMB2_FILE_DELETE_ON_CLOSE | SMB2_FILE_OPEN_REPARSE_POINT,
+                           NULL, 0,
+                           chimera_smb_remove_create_reply);
 } /* chimera_smb_client_remove_at */
 
 /* ---- setattr (SET_INFO on the open handle) ----------------------------- */
@@ -2170,6 +2334,131 @@ chimera_smb_client_setattr(
     /* Owner/group/mode only (or nothing): straight to the security leg. */
     chimera_smb_setattr_data_done(conn, request);
 } /* chimera_smb_client_setattr */
+
+/* ---- allocate (fallocate) --------------------------------------------- */
+
+/* Completion for the EndOfFile grow (ALLOCATE) or the SET_ZERO_DATA punch
+ * (DEALLOCATE): map status and finish. */
+static void
+chimera_smb_allocate_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+
+    (void) conn;
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    request->status = (status == SMB2_STATUS_SUCCESS)
+                      ? CHIMERA_VFS_OK
+                      : chimera_smb_status_to_errno(status);
+    request->complete(request);
+} /* chimera_smb_allocate_reply */
+
+/* The file's current size is now in r_post_attr (queried via the enrich chain).
+ * fallocate(mode 0) grows the file to offset+length when that exceeds the
+ * current EOF and is otherwise a no-op (a non-sparse backend has no holes to
+ * fill); it never shrinks. */
+static void
+chimera_smb_allocate_query_done(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_op_state *state  = request->plugin_data;
+    uint64_t                     target = request->allocate.offset +
+        request->allocate.length;
+    struct evpl_iovec            iov;
+    struct evpl_iovec_cursor     cursor;
+    struct smb2_header          *hdr;
+
+    if (target <= request->allocate.r_post_attr.va_size) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* Reflect the grown size in the post-attrs the enrich query populated. */
+    request->allocate.r_post_attr.va_size = target;
+
+    chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_ENDOFFILE_INFO);
+    evpl_iovec_cursor_append_uint32(&cursor, 8);                              /* BufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 32); /* BufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);                              /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                              /* AdditionalInformation */
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.vid);
+    evpl_iovec_cursor_append_uint64(&cursor, target);
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_allocate_reply, request);
+} /* chimera_smb_allocate_query_done */
+
+/* posix_fallocate/fallocate(2).  ALLOCATE (flags 0) reserves space for
+ * [offset, offset+length) and grows the file to offset+length if it is
+ * currently shorter -- realized as a size query followed by a conditional
+ * FileEndOfFileInformation set.  DEALLOCATE (punch hole, keep size) is an
+ * FSCTL_SET_ZERO_DATA over the range, which the server maps to a backend
+ * deallocate. */
+void
+chimera_smb_client_allocate(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state =
+        smb_handle_open_state(request->allocate.handle);
+    struct evpl_iovec               iov;
+    struct evpl_iovec_cursor        cursor;
+    struct smb2_header             *hdr;
+    uint32_t                        input_offset;
+
+    if (!open_state) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
+        chimera_smb_client_pdu_begin(conn, SMB2_IOCTL, &iov, &cursor, &hdr);
+
+        input_offset = sizeof(struct smb2_header) + 56;
+
+        evpl_iovec_cursor_append_uint16(&cursor, SMB2_IOCTL_REQUEST_SIZE);
+        evpl_iovec_cursor_append_uint32(&cursor, SMB2_FSCTL_SET_ZERO_DATA);
+        evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
+        evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
+        evpl_iovec_cursor_append_uint32(&cursor, input_offset);
+        evpl_iovec_cursor_append_uint32(&cursor, 16);                    /* InputCount */
+        evpl_iovec_cursor_append_uint32(&cursor, 0);                     /* MaxInputResponse */
+        evpl_iovec_cursor_append_uint32(&cursor, 0);                     /* OutputOffset */
+        evpl_iovec_cursor_append_uint32(&cursor, 0);                     /* OutputCount */
+        evpl_iovec_cursor_append_uint32(&cursor, 0);                     /* MaxOutputResponse */
+        evpl_iovec_cursor_append_uint32(&cursor, SMB2_0_IOCTL_IS_FSCTL); /* Flags */
+        evpl_iovec_cursor_append_uint32(&cursor, 0);                     /* Reserved2 */
+        /* FILE_ZERO_DATA_INFORMATION: FileOffset, BeyondFinalZero. */
+        evpl_iovec_cursor_append_uint64(&cursor, request->allocate.offset);
+        evpl_iovec_cursor_append_uint64(&cursor, request->allocate.offset +
+                                        request->allocate.length);
+
+        chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                      chimera_smb_allocate_reply, request);
+        return;
+    }
+
+    /* ALLOCATE: query the current size, then grow if needed. */
+    smb_attr_enrich_begin(conn, request, &open_state->file_id,
+                          &request->allocate.r_post_attr,
+                          chimera_smb_allocate_query_done);
+} /* chimera_smb_client_allocate */
 
 /* ---- commit (FLUSH) ---------------------------------------------------- */
 

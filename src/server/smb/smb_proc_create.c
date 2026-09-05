@@ -218,6 +218,22 @@ chimera_smb_create_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_create_error_status */
 
+/* As above, but for a failure resolving the *parent* path of a create.  A
+ * missing component is an OBJECT_PATH_NOT_FOUND (an intermediate path element),
+ * not OBJECT_NAME_NOT_FOUND (the final name); ENOTDIR/EACCES/ELOOP still map to
+ * their specific statuses so, e.g., mkdir under a non-directory reports
+ * NOT_A_DIRECTORY (ENOTDIR) rather than a bare ENOENT. */
+static inline uint32_t
+chimera_smb_create_parent_error_status(enum chimera_vfs_error error_code)
+{
+    uint32_t status = chimera_smb_create_error_status(error_code);
+
+    if (status == SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
+        status = SMB2_STATUS_OBJECT_PATH_NOT_FOUND;
+    }
+    return status;
+} /* chimera_smb_create_parent_error_status */
+
 /* Emit the SMB2 ERROR Response carrying a SymbolicLinkErrorResponse body
  * (MS-SMB2 2.2.2 / 2.2.2.2.1) for a create that STATUS_STOPPED_ON_SYMLINK'd.
  * The link target (UTF-8, already '\'-separated) and its relative flag were
@@ -272,7 +288,7 @@ chimera_smb_create_emit_symlink_error(
     evpl_iovec_cursor_append_uint32(cursor, SMB2_SYMLINK_ERROR_TAG);     /* 'SYML' */
     evpl_iovec_cursor_append_uint32(cursor, SMB2_IO_REPARSE_TAG_SYMLINK);
     evpl_iovec_cursor_append_uint16(cursor, reparse_data_length);
-    evpl_iovec_cursor_append_uint16(cursor, 0);        /* UnparsedPathLength */
+    evpl_iovec_cursor_append_uint16(cursor, request->create.r_symlink_unparsed); /* UnparsedPathLength */
     evpl_iovec_cursor_append_uint16(cursor, 0);        /* SubstituteNameOffset */
     evpl_iovec_cursor_append_uint16(cursor, name_len); /* SubstituteNameLength */
     evpl_iovec_cursor_append_uint16(cursor, name_len); /* PrintNameOffset */
@@ -2269,9 +2285,8 @@ chimera_smb_create_mkdir_callback(
         }
 
         chimera_smb_create_release_parent(request);
-        chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
-                                     SMB2_STATUS_OBJECT_NAME_COLLISION :
-                                     SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_create_error_status(error_code));
         return;
     }
 
@@ -2551,11 +2566,84 @@ chimera_smb_create_symlink_readlink_cb(
             }
         }
         request->create.r_symlink_target_len = target_length;
+        request->create.r_symlink_unparsed   = 0;  /* final component: no suffix */
         request->create.r_symlink_error      = 1;
     }
 
     chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
 } /* chimera_smb_create_symlink_readlink_cb */
+
+/* An intermediate (parent-path) component is a symbolic link: readlink it so the
+ * STATUS_STOPPED_ON_SYMLINK reply carries the target AND the unparsed suffix
+ * ("/" + create name), letting the client splice the link and retry.  Without
+ * the body the client can only surface ELOOP -- so a create/stat/rmdir THROUGH a
+ * symlinked directory would wrongly fail where POSIX follows the link. */
+static void
+chimera_smb_create_parent_symlink_readlink_cb(
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+    int                         i;
+
+    (void) attr;
+
+    if (request->create.r_symlink_handle) {
+        chimera_vfs_release(vfs_thread, request->create.r_symlink_handle);
+        request->create.r_symlink_handle = NULL;
+    }
+
+    if (error_code == CHIMERA_VFS_OK && target_length > 0 &&
+        target_length < CHIMERA_VFS_PATH_MAX) {
+        request->create.r_symlink_relative =
+            (request->create.r_symlink_target[0] != '/');
+        for (i = 0; i < target_length; i++) {
+            if (request->create.r_symlink_target[i] == '/') {
+                request->create.r_symlink_target[i] = '\\';
+            }
+        }
+        request->create.r_symlink_target_len = target_length;
+        /* Unparsed suffix = "/" + create name, in UTF-16 bytes (the part of the
+         * path after the parent-path symlink the server stopped on). */
+        request->create.r_symlink_unparsed =
+            (uint16_t) ((request->create.name_len + 1) * 2);
+        request->create.r_symlink_error = 1;
+    }
+
+    chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+} /* chimera_smb_create_parent_symlink_readlink_cb */
+
+/* Reopen the parent-path symlink (by the fh the lookup returned) to read its
+ * target for the SymbolicLinkErrorResponse body. */
+static void
+chimera_smb_create_parent_symlink_open_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+        return;
+    }
+
+    request->create.r_symlink_handle = oh;
+
+    chimera_vfs_readlink(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        oh,
+        request->create.r_symlink_target,
+        CHIMERA_VFS_PATH_MAX,
+        0,
+        chimera_smb_create_parent_symlink_readlink_cb,
+        request);
+} /* chimera_smb_create_parent_symlink_open_cb */
 
 static void
 chimera_smb_create_symlink_open_cb(
@@ -4169,7 +4257,8 @@ chimera_smb_create_open_parent_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("Open parent error_code %d", error_code);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_create_parent_error_status(error_code));
         return;
     }
 
@@ -4223,7 +4312,8 @@ chimera_smb_create_lookup_parent_callback(
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_create_parent_error_status(error_code));
         return;
     }
 
@@ -4231,9 +4321,20 @@ chimera_smb_create_lookup_parent_callback(
      * reparse point on the server, it returns STATUS_STOPPED_ON_SYMLINK so the
      * client resolves the link and retries (MS-SMB2 2.2.2.2.1).  The parent-path
      * lookup is issued without LOOKUP_FOLLOW, so a symlink as the final component
-     * of the parent path resolves to the link itself here. */
+     * of the parent path resolves to the link itself here.  Readlink it (by the
+     * fh the lookup returned) so the reply carries the target AND the unparsed
+     * suffix -- a bare STOPPED body leaves the client with only ELOOP, breaking
+     * every op that traverses a symlinked directory. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode)) {
-        chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+        request->create.r_symlink_handle = NULL;
+        chimera_vfs_open_fh(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            attr->va_fh,
+            attr->va_fh_len,
+            CHIMERA_VFS_OPEN_NOFOLLOW | CHIMERA_VFS_OPEN_PATH,
+            chimera_smb_create_parent_symlink_open_cb,
+            request);
         return;
     }
 

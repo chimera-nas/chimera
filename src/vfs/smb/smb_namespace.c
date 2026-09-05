@@ -252,20 +252,24 @@ chimera_smb_symlink_ioctl_reply(
 
     request->status = chimera_smb_status_to_errno(status);
 
-    /* The server rebound this handle to the new symlink; stamp the creator's
-     * owner onto it (lchown semantics) before closing.  A symlink's mode is
-     * always 0777, so convey owner only (no set_attr).  Only on success -- a
-     * failed reparse leaves nothing to own. */
+    /* The server rebound this handle to the new node; stamp the creator's owner
+     * (lchown semantics) before closing.  A symlink's mode is always 0777, so
+     * convey owner only; a device/FIFO/socket node carries the mode the caller
+     * requested -- the server's SET_REPARSE laid down a default 0666, so pass
+     * the real mode too.  Only on success -- a failed reparse leaves nothing to
+     * own. */
     if (status == SMB2_STATUS_SUCCESS) {
-        struct chimera_vfs_attrs owner;
+        struct chimera_vfs_attrs        owner;
+        const struct chimera_vfs_attrs *mode_src =
+            (request->opcode == CHIMERA_VFS_OP_MKNOD_AT) ?
+            request->mknod_at.set_attr : NULL;
 
-        if (smb_build_create_owner_attrs(request, NULL, &owner)) {
+        if (smb_build_create_owner_attrs(request, mode_src, &owner)) {
             smb_send_set_security(conn, request, &state->file_id, &owner,
                                   chimera_smb_symlink_secured_reply);
             return;
         }
     }
-
     smb_send_close(conn, request, &state->file_id, chimera_smb_symlink_close_reply);
 } /* chimera_smb_symlink_ioctl_reply */
 
@@ -370,6 +374,9 @@ chimera_smb_client_symlink_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
+    char fullpath[CHIMERA_SMB_PATH_MAX + 1];
+    int  fullpath_len;
+
     /* Give the new symlink a re-openable child fh for the VFS name cache. */
     chimera_smb_set_child_fh(conn, request, request->symlink_at.name,
                              request->symlink_at.namelen, 1,
@@ -379,8 +386,17 @@ chimera_smb_client_symlink_at(
      * exists, matching symlink_at's EEXIST semantics).  The server's
      * SET_REPARSE handler then removes the placeholder and lays down the real
      * symlink, so we only need DELETE + WRITE access on the placeholder. */
+    fullpath_len = smb_at_full_path(conn, request, request->symlink_at.name,
+                                    request->symlink_at.namelen, fullpath,
+                                    sizeof(fullpath));
+    if (fullpath_len < 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
     smb_send_create(conn, request,
-                    request->symlink_at.name, request->symlink_at.namelen,
+                    fullpath, fullpath_len,
                     SMB2_DELETE | SMB2_FILE_WRITE_DATA | SMB2_FILE_WRITE_ATTRIBUTES |
                     SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL |
                     SMB2_WRITE_DACL | SMB2_WRITE_OWNER,
@@ -672,6 +688,8 @@ chimera_smb_client_mknod_at(
     struct chimera_vfs_request     *request)
 {
     uint64_t mode = request->mknod_at.set_attr->va_mode;
+    char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
+    int      fullpath_len;
 
     /* Give the new node a re-openable child fh for the VFS name cache. */
     chimera_smb_set_child_fh(conn, request, request->mknod_at.name,
@@ -688,10 +706,24 @@ chimera_smb_client_mknod_at(
         return;
     }
 
+    /* Resolve the leaf against the parent handle (a dirfd-relative create);
+     * for a root-relative create this is just the name. */
+    fullpath_len = smb_at_full_path(conn, request, request->mknod_at.name,
+                                    request->mknod_at.name_len, fullpath,
+                                    sizeof(fullpath));
+    if (fullpath_len < 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    /* WRITE_DACL|WRITE_OWNER are needed for the post-reparse owner/mode stamp
+     * (modefromsid SET_SECURITY), exactly as the symlink placeholder requests. */
     smb_send_create(conn, request,
-                    request->mknod_at.name, request->mknod_at.name_len,
+                    fullpath, fullpath_len,
                     SMB2_DELETE | SMB2_FILE_WRITE_DATA |
-                    SMB2_FILE_WRITE_ATTRIBUTES | SMB2_FILE_READ_ATTRIBUTES,
+                    SMB2_FILE_WRITE_ATTRIBUTES | SMB2_FILE_READ_ATTRIBUTES |
+                    SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_CREATE, SMB2_FILE_NON_DIRECTORY_FILE,
                     chimera_smb_mknod_create_reply);
@@ -870,6 +902,7 @@ chimera_smb_client_link_at(
 {
     const char *src;
     int         srclen = 0, destlen;
+    uint32_t    link_options;
     char        dest[CHIMERA_SMB_PATH_MAX + 1];
 
     /* Give the new name a re-openable child fh for the VFS name cache. */
@@ -904,9 +937,18 @@ chimera_smb_client_link_at(
         return;
     }
 
+    /* POSIX link() hard-links the symlink itself, never its target (only
+     * linkat(AT_SYMLINK_FOLLOW) follows, and there the caller hands us the
+     * already-resolved target).  A nofollow source fh names the link node, so
+     * open the reparse point directly rather than following it -- otherwise a
+     * link to a dangling symlink would spuriously fail ENOENT. */
+    link_options = (!chimera_smb_fh_is_root(request->fh_len) &&
+                    chimera_smb_fh_is_nofollow(request->fh))
+                   ? SMB2_FILE_OPEN_REPARSE_POINT : 0;
+
     smb_send_create(conn, request, src, srclen,
                     SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN, 0,
+                    SMB2_FILE_OPEN, link_options,
                     chimera_smb_link_create_reply);
 } /* chimera_smb_client_link_at */

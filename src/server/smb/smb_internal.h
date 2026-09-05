@@ -248,6 +248,10 @@ struct chimera_smb_config {
      * Windows ACL memfs synthesizes.  Default 0; the POSIX-over-SMB loopback
      * enables it (chimera_server_config_set_smb_mode_from_sid). */
     int                            mode_from_sid;
+    /* POSIX rename semantics: skip the contained-open recall and destination-
+     * parent dir-lease probe (a POSIX rename never fails on open handles).
+     * Default 0; the POSIX-over-SMB loopback enables it. */
+    int                            posix_rename;
     /* Answer a replayed durable-v2 CREATE that matches a still-deferred CREATE
      * the Windows way (ACCESS_DENIED, and no replay detection while the original
      * is deferred on a share conflict) rather than the default Samba way
@@ -739,6 +743,11 @@ struct chimera_smb_request {
             uint8_t                            r_symlink_error;
             uint8_t                            r_symlink_relative;
             uint16_t                           r_symlink_target_len;
+            /* UnparsedPathLength (bytes, UTF-16) for the SymbolicLinkError
+             * Response: 0 for a final-component symlink, and the "/"+name suffix
+             * for an intermediate (parent-path) symlink so the client resolves
+             * the mid-path link and retries rather than seeing a bare ELOOP. */
+            uint16_t                           r_symlink_unparsed;
             char                               r_symlink_target[CHIMERA_VFS_PATH_MAX];
             struct chimera_vfs_open_handle    *r_symlink_handle;
         } create;

@@ -58,7 +58,12 @@ chimera_vfs_open_at_hdl_callback(
         }
 
         /* A path-only open returns an opaque per-open token, not a stable child
-         * fh; caching name->token would hand out a dead token, so skip it. */
+         * fh; caching name->token would hand out a dead token, so do not insert
+         * one.  But a create still MUST invalidate any stale entry for the name
+         * -- above all the negative (tombstone) entry a prior unlink left, which
+         * would otherwise make the just-created object look absent until the
+         * tombstone ages out (path-only lookup_at repopulates a correct stable
+         * fh on the next miss). */
         if (!chimera_vfs_module_is_path_only(request->module)) {
             chimera_vfs_name_cache_insert(thread, cache,
                                           request->open_at.handle->fh_hash,
@@ -69,6 +74,14 @@ chimera_vfs_open_at_hdl_callback(
                                           request->open_at.namelen,
                                           request->open_at.r_attr.va_fh,
                                           request->open_at.r_attr.va_fh_len);
+        } else if (request->open_at.r_created) {
+            chimera_vfs_name_cache_remove(cache,
+                                          request->open_at.handle->fh_hash,
+                                          request->open_at.handle->fh,
+                                          request->open_at.handle->fh_len,
+                                          request->open_at.name_hash,
+                                          request->open_at.name,
+                                          request->open_at.namelen);
         }
 
         chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
@@ -309,6 +322,29 @@ chimera_vfs_open_at_hs(
         namelen >= CHIMERA_VFS_NAME_MAX) {
         callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL, private_data);
         return;
+    }
+
+    /* An FS_PATH_OP backend receives the whole path as `name` and answers a
+     * too-long name with ENOENT, not ENAMETOOLONG (the server cannot distinguish
+     * the two from a wire CREATE).  Enforce the POSIX limits here, per component,
+     * exactly as chimera_vfs_lookup does -- so chmod/chown/utimens/open by an
+     * over-long path report ENAMETOOLONG rather than ENOENT. */
+    if (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+        int complen = 0, i;
+
+        if (namelen >= CHIMERA_VFS_PATH_MAX) {
+            callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL, private_data);
+            return;
+        }
+        for (i = 0; i < namelen; i++) {
+            if (name[i] == '/') {
+                complen = 0;
+            } else if (++complen >= CHIMERA_VFS_NAME_MAX) {
+                callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL,
+                         private_data);
+                return;
+            }
+        }
     }
 
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);

@@ -396,44 +396,65 @@ chimera_vfs_lookup_pathonly_readlink_complete(
     target                = lp_request->lookup.path + strlen(lp_request->lookup.path) + 1;
     target[target_length] = '\0';
 
-    if (target[0] == '/') {
-        /* Absolute target: from the mount root (skip leading slashes). */
-        while (*target == '/') {
-            target++;
-            target_length--;
-        }
-        nlen = target_length;
-        if (nlen >= CHIMERA_VFS_PATH_MAX) {
-            goto too_long;
-        }
-        memcpy(scratch, target, nlen);
-    } else {
-        /* Relative target: splice onto the link's lexical directory. */
+    {
         const char *orig = lp_request->lookup.path;
         int         olen = strlen(orig);
-        int         dlen = 0, i;
+        int         comp_end, suffix_len, i;
 
-        for (i = olen - 1; i >= 0; i--) {
-            if (orig[i] == '/') {
-                dlen = i;
-                break;
-            }
+        /* A trailing '/' (POSIX dir-forcing) is a suffix ON the symlink
+         * component, not part of its name.  The path-only mount stopped on the
+         * last NON-empty component, so splice the target in place of THAT and
+         * keep the trailing slashes after it -- otherwise "x/b/" (b -> "a")
+         * would splice to "x/b/a", re-hit b every hop, and loop to ELOOP where
+         * the answer is the dangling target's ENOENT. */
+        comp_end = olen;
+        while (comp_end > 0 && orig[comp_end - 1] == '/') {
+            comp_end--;
         }
+        suffix_len = olen - comp_end;
 
-        if (dlen > 0) {
-            nlen = dlen + 1 + target_length;
-            if (nlen >= CHIMERA_VFS_PATH_MAX) {
-                goto too_long;
+        if (target[0] == '/') {
+            /* Absolute target: from the mount root (skip leading slashes). */
+            while (*target == '/') {
+                target++;
+                target_length--;
             }
-            memcpy(scratch, orig, dlen);
-            scratch[dlen] = '/';
-            memcpy(scratch + dlen + 1, target, target_length);
-        } else {
-            nlen = target_length;
+            nlen = target_length + suffix_len;
             if (nlen >= CHIMERA_VFS_PATH_MAX) {
                 goto too_long;
             }
             memcpy(scratch, target, target_length);
+            memcpy(scratch + target_length, orig + comp_end, suffix_len);
+        } else {
+            /* Relative target: splice onto the link's lexical directory (the
+             * component before the last non-empty one). */
+            int dlen = 0;
+
+            for (i = comp_end - 1; i >= 0; i--) {
+                if (orig[i] == '/') {
+                    dlen = i;
+                    break;
+                }
+            }
+
+            if (dlen > 0) {
+                nlen = dlen + 1 + target_length + suffix_len;
+                if (nlen >= CHIMERA_VFS_PATH_MAX) {
+                    goto too_long;
+                }
+                memcpy(scratch, orig, dlen);
+                scratch[dlen] = '/';
+                memcpy(scratch + dlen + 1, target, target_length);
+                memcpy(scratch + dlen + 1 + target_length, orig + comp_end,
+                       suffix_len);
+            } else {
+                nlen = target_length + suffix_len;
+                if (nlen >= CHIMERA_VFS_PATH_MAX) {
+                    goto too_long;
+                }
+                memcpy(scratch, target, target_length);
+                memcpy(scratch + target_length, orig + comp_end, suffix_len);
+            }
         }
     }
 
@@ -489,7 +510,8 @@ chimera_vfs_lookup_pathonly_complete(
 
         chimera_vfs_open_fh(thread, lp_request->cred, lp_request->lookup.next_fh,
                             attr->va_fh_len,
-                            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+                            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_NOFOLLOW,
                             chimera_vfs_lookup_pathonly_symlink_open_complete,
                             lp_request);
         return;
