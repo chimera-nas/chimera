@@ -57,10 +57,12 @@
 #include "vfs_varint.h"
 #include "vfs_fh.h"
 
-/* Attribute vocabularies a module fills in or interprets: the canonical
- * ACL carried by chimera_vfs_attrs.va_acl, the access-mask evaluator that
- * keeps ACCESS answers consistent across backends, and the protocol-
- * exported "user." xattr keyspace. */
+/* Attribute vocabularies a module fills in or interprets: the native SID
+ * value type, the canonical ACL carried by chimera_vfs_attrs.va_acl (whose
+ * principals may carry that SID), the access-mask evaluator that keeps
+ * ACCESS answers consistent across backends, and the protocol-exported
+ * "user." xattr keyspace. */
+#include "vfs_sid.h"
 #include "vfs_acl.h"
 #include "vfs_acl_serialize.h"
 #include "vfs_access.h"

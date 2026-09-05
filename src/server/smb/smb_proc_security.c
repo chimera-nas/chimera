@@ -256,7 +256,7 @@ chimera_smb_sd_to_acl(
             attrs->va_uid       = value;
             attrs->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         } else if (chimera_sid_bin_to_str(sd_buf + offset_owner, sd_len - offset_owner,
-                                  sidstr, sizeof(sidstr)) > 0) {
+                                          sidstr, sizeof(sidstr)) > 0) {
             if (chimera_idmap_sid_to_principal(sidstr, &p) == 0 &&
                 p.type != CHIMERA_PRINCIPAL_SPECIAL) {
                 attrs->va_uid       = p.id;
@@ -289,7 +289,7 @@ chimera_smb_sd_to_acl(
             attrs->va_gid       = value;
             attrs->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         } else if (chimera_sid_bin_to_str(sd_buf + offset_group, sd_len - offset_group,
-                                  sidstr, sizeof(sidstr)) > 0) {
+                                          sidstr, sizeof(sidstr)) > 0) {
             if (chimera_idmap_sid_to_principal(sidstr, &p) == 0 &&
                 p.type != CHIMERA_PRINCIPAL_SPECIAL) {
                 attrs->va_gid       = p.id;
@@ -360,7 +360,7 @@ chimera_smb_sd_to_acl(
                 }
 
                 /* An exotic SID may have no string form that fits sidstr; it
-                 * is still storable verbatim, it just cannot be looked up. */
+                * is still storable verbatim, it just cannot be looked up. */
                 if (chimera_sid_bin_to_str(sid_buf, sid_avail, sidstr,
                                            sizeof(sidstr)) <= 0) {
                     sidstr[0] = '\0';

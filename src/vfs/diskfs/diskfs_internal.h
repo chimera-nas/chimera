@@ -1098,7 +1098,7 @@ struct diskfs_xattr_rec {
         (((DISKFS_ACL_REC_MAX) -CHIMERA_ACL_SERIAL_HDR) / CHIMERA_ACL_SERIAL_ACE)
 
 /* Native owner/group SID record: two length-prefixed SIDs. */
-#define DISKFS_SID_REC_MAX  (2 + 2 * CHIMERA_SID_MAX_LEN)
+#define DISKFS_SID_REC_MAX        (2 + 2 * CHIMERA_SID_MAX_LEN)
 
 /* setattr's SID-record replay step (diskfs_request_private.sid_action). */
 #define DISKFS_SID_ACTION_NONE    0
@@ -1113,7 +1113,7 @@ struct diskfs_xattr_rec {
  * pairs, padded to a 4 KiB multiple.  Full-block redo: the record carries
  * the entire post-image of every dirty block in the transaction.
  */
-#define DISKFS_REDO_MAGIC 0x4F44455246534944ULL     /* "DISFREDO" */
+#define DISKFS_REDO_MAGIC         0x4F44455246534944ULL /* "DISFREDO" */
 
 
 /*

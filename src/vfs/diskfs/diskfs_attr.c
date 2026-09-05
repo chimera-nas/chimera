@@ -1276,10 +1276,10 @@ diskfs_setattr_inode_cb(
                                      DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
         static __thread uint8_t nbuf[sizeof(struct chimera_acl) +
                                      DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        struct chimera_acl *old_acl = (struct chimera_acl *) obuf;
-        struct chimera_acl *new_acl = (struct chimera_acl *) nbuf;
-        uint8_t             sbuf[DISKFS_ACL_REC_MAX];
-        int                 slen;
+        struct chimera_acl     *old_acl = (struct chimera_acl *) obuf;
+        struct chimera_acl     *new_acl = (struct chimera_acl *) nbuf;
+        uint8_t                 sbuf[DISKFS_ACL_REC_MAX];
+        int                     slen;
 
         if (chimera_acl_deserialize((const char *) inode->acl_serial,
                                     inode->acl_serial_len, old_acl,

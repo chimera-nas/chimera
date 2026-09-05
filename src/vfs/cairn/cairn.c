@@ -2379,8 +2379,8 @@ cairn_setattr(
         if (orig_set_mask & (CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID |
                              CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
             struct chimera_sid owner, group;
-            int                had     = cairn_load_sids(thread, inode->inum,
-                                                         &owner, &group);
+            int                had = cairn_load_sids(thread, inode->inum,
+                                                     &owner, &group);
             int                changed = 0;
 
             if (orig_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) {
