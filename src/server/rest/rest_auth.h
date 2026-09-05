@@ -23,7 +23,8 @@ struct chimera_rest_jwt_claims {
 
 void
 chimera_rest_auth_init_secret(
-    struct chimera_rest_server *rest);
+    struct chimera_rest_server *rest,
+    const char                 *state_dir);
 
 int
 chimera_rest_auth_validate_credentials(
