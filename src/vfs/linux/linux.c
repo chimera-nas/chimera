@@ -1275,7 +1275,7 @@ chimera_linux_read(
     int                          fd, i;
     ssize_t                      len, left = request->read.length;
     struct iovec                *iov;
-    struct stat                  st;
+    struct statx                 stx;
 
     (void) thread;
 
@@ -1334,9 +1334,11 @@ chimera_linux_read(
          * because the offset exceeds the directory's nominal size.  The VFS
          * core owns request->read.iov and releases it on completion (r_length
          * stays 0 here). */
-        if (errno == EINVAL && fstat(fd, &st) == 0) {
-            if (S_ISREG(st.st_mode) &&
-                request->read.offset >= (uint64_t) st.st_size) {
+        if (errno == EINVAL &&
+            statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                  CHIMERA_LINUX_STATX_MASK, &stx) == 0) {
+            if (S_ISREG(stx.stx_mode) &&
+                request->read.offset >= stx.stx_size) {
                 chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                         &request->read.r_attr, fd);
 
@@ -1349,7 +1351,7 @@ chimera_linux_read(
             /* POSIX read(2): a directory descriptor answers EISDIR whatever
              * else is also wrong with the request (the kernel checks offset
              * validity first and can answer EINVAL for a huge offset). */
-            if (S_ISDIR(st.st_mode)) {
+            if (S_ISDIR(stx.stx_mode)) {
                 errno = EISDIR;
             }
         }
@@ -1361,16 +1363,17 @@ chimera_linux_read(
         return;
     }
 
-    if (fstat(fd, &st) == 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_LINUX_STATX_MASK, &stx) == 0) {
         if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-            chimera_linux_stat_to_attr(&request->read.r_attr, &st);
+            chimera_linux_statx_to_attr(&request->read.r_attr, &stx);
         }
 
-        request->read.r_eof = (request->read.offset + len >= (uint64_t) st.st_size);
+        request->read.r_eof = (request->read.offset + len >= stx.stx_size);
     } else {
         chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
 
-        /* fstat() failed: we cannot compare against the file size, so report
+        /* statx() failed: we cannot compare against the file size, so report
          * EOF only when the read returned nothing for a non-zero request -- a
          * short read is NOT end-of-file (RFC 1813 §3.3.6). */
         request->read.r_eof = (len == 0 && request->read.length > 0);
@@ -2598,11 +2601,11 @@ chimera_linux_set_xattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int         fd      = (int) request->set_xattr.handle->vfs_private;
-    char       *scratch = (char *) request->plugin_data;
-    int         flags   = 0;
-    int         rc;
-    struct stat st;
+    int          fd      = (int) request->set_xattr.handle->vfs_private;
+    char        *scratch = (char *) request->plugin_data;
+    int          flags   = 0;
+    int          rc;
+    struct statx stx;
 
     (void) private_data;
 
@@ -2612,12 +2615,13 @@ chimera_linux_set_xattr(
         flags = XATTR_REPLACE;
     }
 
-    if (fstat(fd, &st) < 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_LINUX_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
-    chimera_linux_stat_to_attr(&request->set_xattr.r_pre_attr, &st);
+    chimera_linux_statx_to_attr(&request->set_xattr.r_pre_attr, &stx);
 
     TERM_STR(name, request->set_xattr.name, request->set_xattr.namelen, scratch);
 
@@ -2626,10 +2630,11 @@ chimera_linux_set_xattr(
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
-    } else if (fstat(fd, &st) < 0) {
+    } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                     CHIMERA_LINUX_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
     } else {
-        chimera_linux_stat_to_attr(&request->set_xattr.r_post_attr, &st);
+        chimera_linux_statx_to_attr(&request->set_xattr.r_post_attr, &stx);
         request->status = CHIMERA_VFS_OK;
     }
 
@@ -2680,19 +2685,20 @@ chimera_linux_remove_xattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int         fd      = (int) request->remove_xattr.handle->vfs_private;
-    char       *scratch = (char *) request->plugin_data;
-    int         rc;
-    struct stat st;
+    int          fd      = (int) request->remove_xattr.handle->vfs_private;
+    char        *scratch = (char *) request->plugin_data;
+    int          rc;
+    struct statx stx;
 
     (void) private_data;
 
-    if (fstat(fd, &st) < 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_LINUX_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
-    chimera_linux_stat_to_attr(&request->remove_xattr.r_pre_attr, &st);
+    chimera_linux_statx_to_attr(&request->remove_xattr.r_pre_attr, &stx);
 
     TERM_STR(name, request->remove_xattr.name, request->remove_xattr.namelen, scratch);
 
@@ -2700,10 +2706,11 @@ chimera_linux_remove_xattr(
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
-    } else if (fstat(fd, &st) < 0) {
+    } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                     CHIMERA_LINUX_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
     } else {
-        chimera_linux_stat_to_attr(&request->remove_xattr.r_post_attr, &st);
+        chimera_linux_statx_to_attr(&request->remove_xattr.r_post_attr, &stx);
         request->status = CHIMERA_VFS_OK;
     }
 

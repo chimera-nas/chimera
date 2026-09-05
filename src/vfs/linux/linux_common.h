@@ -40,6 +40,14 @@
 
 #define chimera_linux_abort_if(cond, ...) \
         chimera_abort_if(cond, "linux", __FILE__, __LINE__, __VA_ARGS__)
+
+/* The statx(2) request mask both passthrough backends use for attributes.
+ * STATX_BTIME rides along with the basic set: ext4/xfs/btrfs track a birth
+ * time and the mapper needs it to fill va_btime (SMB CreationTime, NFSv4
+ * time_create).  Asking for it costs nothing on filesystems that do not have
+ * one -- the kernel simply leaves the bit clear in stx_mask. */
+#define CHIMERA_LINUX_STATX_MASK (STATX_BASIC_STATS | STATX_BTIME)
+
 #define TERM_STR(name, str, len, scratch) \
         char *(name) = scratch; \
         scratch     += (len) + 1; \
@@ -206,6 +214,17 @@ chimera_linux_statx_to_attr(
     attr->va_mtime.tv_nsec = stx->stx_mtime.tv_nsec;
     attr->va_ctime.tv_sec  = stx->stx_ctime.tv_sec;
     attr->va_ctime.tv_nsec = stx->stx_ctime.tv_nsec;
+
+    /* Birth time is optional in the VFS and optional in statx: only claim the
+     * bit when the kernel actually returned one (ext4/xfs/btrfs do, tmpfs and
+     * older kernels do not), so consumers keep their "not tracked" fallback
+     * rather than reporting a zero creation time. */
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_BTIME) &&
+        (stx->stx_mask & STATX_BTIME)) {
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_BTIME;
+        attr->va_btime.tv_sec  = stx->stx_btime.tv_sec;
+        attr->va_btime.tv_nsec = stx->stx_btime.tv_nsec;
+    }
 
     /* See chimera_linux_stat_to_attr: map the device id to a stable
      * per-filesystem fsid (vfs_fsid.h) rather than exposing the raw device
@@ -518,18 +537,20 @@ chimera_linux_map_attrs(
     int                       fd)
 {
     int            rc;
-    struct stat    st;
+    struct statx   stx;
     struct statvfs stvfs;
 
+    /* statx() rather than fstat(): same stats, one syscall, plus a birth time. */
     if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
 
-        rc = fstat(fd, &st);
+        rc = statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                   CHIMERA_LINUX_STATX_MASK, &stx);
 
         if (rc) {
             return;
         }
 
-        chimera_linux_stat_to_attr(attr, &st);
+        chimera_linux_statx_to_attr(attr, &stx);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
@@ -587,7 +608,7 @@ chimera_linux_map_child_attrs(
     const char                 *name)
 {
     int            rc;
-    struct stat    st;
+    struct statx   stx;
     struct statvfs stvfs;
     int            stat_valid = 0;
 
@@ -597,13 +618,16 @@ chimera_linux_map_child_attrs(
 
     if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
 
-        rc = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
+        /* statx() rather than fstatat(): same basic stats in one syscall, plus
+         * the birth time that fstatat(2) cannot report. */
+        rc = statx(dirfd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                   CHIMERA_LINUX_STATX_MASK, &stx);
 
         if (rc) {
             return chimera_linux_errno_to_status(errno);
         }
 
-        chimera_linux_stat_to_attr(attr, &st);
+        chimera_linux_statx_to_attr(attr, &stx);
         stat_valid = 1;
     }
 
@@ -628,7 +652,7 @@ chimera_linux_map_child_attrs(
     }
 
     if ((attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) && stat_valid &&
-        (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) {
+        (S_ISREG(stx.stx_mode) || S_ISDIR(stx.stx_mode))) {
         attr->va_ea_size   = chimera_linux_ea_size_at(dirfd, name);
         attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
     }
