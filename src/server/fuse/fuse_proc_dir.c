@@ -60,7 +60,7 @@ chimera_fuse_opendir_gated(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -307,7 +307,7 @@ chimera_fuse_op_readdir(
         CHIMERA_FUSE_ATTR_MASK :
         (CHIMERA_VFS_ATTR_INUM | CHIMERA_VFS_ATTR_MODE);
 
-    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred, NULL,
                         file->handle,
                         attr_mask, 0,
                         in->offset,
@@ -375,7 +375,7 @@ chimera_fuse_op_fsyncdir(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
                        chimera_fuse_file(in->fh)->handle,
                        0, 0, 0, 0,
                        chimera_fuse_fsyncdir_complete, req);

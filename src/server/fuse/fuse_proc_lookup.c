@@ -63,7 +63,7 @@ chimera_fuse_lookup_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, oh,
+    chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL, oh,
                           name, strlen(name),
                           CHIMERA_FUSE_ATTR_MASK, 0,
                           chimera_fuse_lookup_complete, req);
@@ -88,7 +88,7 @@ chimera_fuse_op_lookup(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,

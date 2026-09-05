@@ -111,7 +111,7 @@ chimera_fuse_open_gated(
 
     /* O_TRUNC arrives as a separate SETATTR(size=0) because we do not
      * advertise FUSE_ATOMIC_O_TRUNC. */
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh, req->fh_len,
                         req->u.open.vfs_flags,
                         chimera_fuse_open_callback, req);
@@ -248,7 +248,7 @@ chimera_fuse_create_open_callback(
     req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
 
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, oh,
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL, oh,
                         name, strlen(name),
                         flags,
                         &req->u.create.set_attr,
@@ -280,7 +280,7 @@ chimera_fuse_op_create(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -342,7 +342,7 @@ chimera_fuse_op_read(
     chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
-    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred, NULL,
                            file->handle,
                            in->offset, in->size,
                            req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
@@ -430,7 +430,7 @@ chimera_fuse_op_write(
     chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
-    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, NULL,
                             file->handle,
                             in->offset, in->size, sync,
                             0, 0,
@@ -476,7 +476,7 @@ chimera_fuse_op_flush(
                                      file->handle->fh_hash, in->lock_owner);
 
     /* close(2) must surface write errors, so flush commits. */
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
                        file->handle,
                        0, 0, 0, 0,
                        chimera_fuse_commit_complete, req);
@@ -496,7 +496,7 @@ chimera_fuse_op_fsync(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
                        chimera_fuse_file(in->fh)->handle,
                        0, 0, 0, 0,
                        chimera_fuse_commit_complete, req);
@@ -568,7 +568,7 @@ chimera_fuse_op_fallocate(
         return;
     }
 
-    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred, NULL,
                          chimera_fuse_file(in->fh)->handle,
                          in->offset, in->length, flags,
                          0, 0,
@@ -632,7 +632,7 @@ chimera_fuse_op_lseek(
             return;
     } /* switch */
 
-    chimera_vfs_seek(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_seek(req->thread->vfs_thread, &req->cred, NULL,
                      chimera_fuse_file(in->fh)->handle,
                      in->offset, what,
                      chimera_fuse_lseek_complete, req);
@@ -697,7 +697,7 @@ chimera_fuse_op_copy_file_range(
      * cached, including this one; the write triggers the usual claim break,
      * and this mount is exempt from its own invalidation through the
      * credential's origin stamp. */
-    chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred, NULL,
                            src->handle, in->off_in,
                            dst->handle, in->off_out,
                            in->len, 0,
