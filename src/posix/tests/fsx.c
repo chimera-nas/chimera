@@ -2377,8 +2377,8 @@ writefileimage()
         if (iret == -1) {
             prterr("writefileimage: write");
         } else {
-            prt("short write: 0x%x bytes instead of 0x%llx\n",
-                iret, (unsigned long long) file_size);
+            prt("short write: 0x%zx bytes instead of 0x%llx\n",
+                (size_t) iret, (unsigned long long) file_size);
         }
         report_failure(172);
     }
