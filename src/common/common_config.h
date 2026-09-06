@@ -171,6 +171,20 @@ chimera_apply_common_config(
         evpl_global_config_set_buffer_size(cfg, size);
     }
 
+    /* io_uring ring depth.  Each ring costs roughly 1.5 MB of kernel-accounted
+     * memory at the default 8192 entries -- IORING_SETUP_SQE128 and
+     * IORING_SETUP_CQE32 double both entry sizes -- and SQPOLL adds a kernel
+     * thread per ring.  A host running many event-loop threads, or many chimera
+     * processes at once, can be refused with ENOMEM while otherwise healthy, so
+     * a constrained deployment needs to be able to ask for less.  libevpl
+     * honours the value or fails the ring; it never reduces it silently, since
+     * a ring that quietly shrank would make throughput depend on how loaded the
+     * machine was at startup. */
+    val = json_object_get(common, "io_uring_entries");
+    if (json_is_integer(val)) {
+        evpl_global_config_set_io_uring_entries(cfg, json_integer_value(val));
+    }
+
     val = json_object_get(common, "preallocate_slabs");
     if (json_is_integer(val)) {
         evpl_global_config_set_preallocate_slabs(cfg, json_integer_value(val));
