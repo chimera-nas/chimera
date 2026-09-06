@@ -24,38 +24,72 @@ chimera_vfs_symlink_at_complete(struct chimera_vfs_request *request)
 
 
     if (request->status == CHIMERA_VFS_OK) {
-        /* A new symlink is a directory content change, observable by change
-         * watchers and directory-lease holders like any other create. */
-        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                request->fh,
-                                request->fh_len,
-                                CHIMERA_VFS_NOTIFY_FILE_ADDED,
-                                request->symlink_at.name,
-                                request->symlink_at.namelen,
-                                NULL, 0);
+        if (chimera_vfs_request_publishes(request)) {
+            /* A new symlink is a directory content change, observable by change
+             * watchers and directory-lease holders like any other create. */
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->fh,
+                                    request->fh_len,
+                                    CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                    request->symlink_at.name,
+                                    request->symlink_at.namelen,
+                                    NULL, 0);
 
-        chimera_vfs_name_cache_insert(thread, name_cache,
-                                      request->fh_hash,
-                                      request->fh,
-                                      request->fh_len,
-                                      request->symlink_at.name_hash,
-                                      request->symlink_at.name,
-                                      request->symlink_at.namelen,
-                                      request->symlink_at.r_attr.va_fh,
-                                      request->symlink_at.r_attr.va_fh_len);
+            chimera_vfs_name_cache_insert(thread, name_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          request->symlink_at.name_hash,
+                                          request->symlink_at.name,
+                                          request->symlink_at.namelen,
+                                          request->symlink_at.r_attr.va_fh,
+                                          request->symlink_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->fh_hash,
-                                      request->fh,
-                                      request->fh_len,
-                                      &request->symlink_at.r_dir_post_attr);
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          &request->symlink_at.r_dir_post_attr);
 
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      chimera_vfs_hash(request->symlink_at.r_attr.va_fh, request->symlink_at.r_attr.
-                                                       va_fh_len),
-                                      request->symlink_at.r_attr.va_fh,
-                                      request->symlink_at.r_attr.va_fh_len,
-                                      &request->symlink_at.r_attr);
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          chimera_vfs_hash(request->symlink_at.r_attr.va_fh, request->symlink_at.r_attr.
+                                                           va_fh_len),
+                                          request->symlink_at.r_attr.va_fh,
+                                          request->symlink_at.r_attr.va_fh_len,
+                                          &request->symlink_at.r_attr);
+        } else {
+            /* Enlisted: evict instead of publish -- parent dir attrs, the
+             * new name's cached entry, and any recycled-inode attr entry on
+             * the link's FH would all be stale once the compound commits. */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          &inval);
+
+            chimera_vfs_name_cache_remove(name_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          request->symlink_at.name_hash,
+                                          request->symlink_at.name,
+                                          request->symlink_at.namelen);
+
+            if ((request->symlink_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+                request->symlink_at.r_attr.va_fh_len > 0) {
+                chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                              chimera_vfs_hash(request->symlink_at.r_attr.va_fh,
+                                                               request->symlink_at.r_attr.va_fh_len),
+                                              request->symlink_at.r_attr.va_fh,
+                                              request->symlink_at.r_attr.va_fh_len,
+                                              &inval);
+            }
+        }
     }
 
 
@@ -207,10 +241,10 @@ chimera_vfs_symlink_at(
         gate->callback       = callback;
         gate->private_data   = private_data;
 
-        chimera_vfs_gate_fh(&gate->gate_ctx, thread, cred,
-                            handle->fh, handle->fh_len,
-                            CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
-                            chimera_vfs_symlink_at_gate_complete, gate);
+        chimera_vfs_gate_fh_compound(&gate->gate_ctx, thread, cred, compound,
+                                     handle->fh, handle->fh_len,
+                                     CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
+                                     chimera_vfs_symlink_at_gate_complete, gate);
         return;
     }
 

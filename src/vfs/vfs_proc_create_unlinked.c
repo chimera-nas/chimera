@@ -20,13 +20,30 @@ chimera_vfs_create_unlinked_hdl_callback(
     chimera_vfs_create_unlinked_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
-                                      chimera_vfs_hash(request->create_unlinked.r_attr.va_fh, request->create_unlinked.
-                                                       r_attr.
-                                                       va_fh_len),
-                                      request->create_unlinked.r_attr.va_fh,
-                                      request->create_unlinked.r_attr.va_fh_len,
-                                      &request->create_unlinked.r_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                          chimera_vfs_hash(request->create_unlinked.r_attr.va_fh, request->
+                                                           create_unlinked.r_attr.
+                                                           va_fh_len),
+                                          request->create_unlinked.r_attr.va_fh,
+                                          request->create_unlinked.r_attr.va_fh_len,
+                                          &request->create_unlinked.r_attr);
+        } else {
+            /* Enlisted: evict any recycled-inode entry on the new FH that
+             * the commit would leave stale (STAT-less insert = eviction). */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                          chimera_vfs_hash(request->create_unlinked.r_attr.va_fh, request->
+                                                           create_unlinked.r_attr.
+                                                           va_fh_len),
+                                          request->create_unlinked.r_attr.va_fh,
+                                          request->create_unlinked.r_attr.va_fh_len,
+                                          &inval);
+        }
     }
 
     chimera_vfs_complete(request);

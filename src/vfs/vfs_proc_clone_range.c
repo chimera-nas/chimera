@@ -14,11 +14,26 @@ chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
     chimera_vfs_clone_range_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
-                                      request->clone_range.dst_handle->fh_hash,
-                                      request->clone_range.dst_handle->fh,
-                                      request->clone_range.dst_handle->fh_len,
-                                      &request->clone_range.r_post_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->clone_range.dst_handle->fh_hash,
+                                          request->clone_range.dst_handle->fh,
+                                          request->clone_range.dst_handle->fh_len,
+                                          &request->clone_range.r_post_attr);
+        } else {
+            /* Enlisted: evict the pre-compound entry the commit will make
+             * stale (STAT-less insert = eviction). */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->clone_range.dst_handle->fh_hash,
+                                          request->clone_range.dst_handle->fh,
+                                          request->clone_range.dst_handle->fh_len,
+                                          &inval);
+        }
     }
 
     chimera_vfs_complete(request);

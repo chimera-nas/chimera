@@ -24,58 +24,97 @@ chimera_vfs_link_at_complete(struct chimera_vfs_request *request)
 
 
     if (request->status == CHIMERA_VFS_OK) {
-        /* A hard link (or an SMB rename, which lands here) adds a name to the
-         * target directory — the same kind of directory-content change as a
-         * create.  Emit FILE_ADDED on the parent so CHANGE_NOTIFY watchers see
-         * it (this path previously emitted nothing) and, via the notify
-         * chokepoint, any SMB3 directory lease on the parent is broken.  A
-         * directory cannot be hard-linked, so the added entry is always a file.
-         * parent_lease_skip (set when an SMB op supplied a ParentLeaseKey)
-         * spares the caller's own directory lease from that break. */
-        uint64_t skip_lo = 0, skip_hi = 0;
+        if (chimera_vfs_request_publishes(request)) {
+            /* A hard link (or an SMB rename, which lands here) adds a name to the
+             * target directory — the same kind of directory-content change as a
+             * create.  Emit FILE_ADDED on the parent so CHANGE_NOTIFY watchers see
+             * it (this path previously emitted nothing) and, via the notify
+             * chokepoint, any SMB3 directory lease on the parent is broken.  A
+             * directory cannot be hard-linked, so the added entry is always a file.
+             * parent_lease_skip (set when an SMB op supplied a ParentLeaseKey)
+             * spares the caller's own directory lease from that break. */
+            uint64_t skip_lo = 0, skip_hi = 0;
 
-        if (request->link_at.parent_lease_skip_valid) {
-            memcpy(&skip_lo, request->link_at.parent_lease_skip, 8);
-            memcpy(&skip_hi, request->link_at.parent_lease_skip + 8, 8);
-        }
-        chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                      request->link_at.dir_fh,
-                                      request->link_at.dir_fhlen,
-                                      CHIMERA_VFS_NOTIFY_FILE_ADDED,
-                                      request->link_at.name,
-                                      request->link_at.namelen,
-                                      NULL, 0,
-                                      skip_lo, skip_hi,
-                                      request->link_at.parent_lease_skip_valid);
+            if (request->link_at.parent_lease_skip_valid) {
+                memcpy(&skip_lo, request->link_at.parent_lease_skip, 8);
+                memcpy(&skip_hi, request->link_at.parent_lease_skip + 8, 8);
+            }
+            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                          request->link_at.dir_fh,
+                                          request->link_at.dir_fhlen,
+                                          CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                          request->link_at.name,
+                                          request->link_at.namelen,
+                                          NULL, 0,
+                                          skip_lo, skip_hi,
+                                          request->link_at.parent_lease_skip_valid);
 
-        chimera_vfs_name_cache_insert(thread, name_cache,
-                                      request->link_at.dir_fh_hash,
-                                      request->link_at.dir_fh,
-                                      request->link_at.dir_fhlen,
-                                      request->link_at.name_hash,
-                                      request->link_at.name,
-                                      request->link_at.namelen,
-                                      request->fh,
-                                      request->fh_len);
+            chimera_vfs_name_cache_insert(thread, name_cache,
+                                          request->link_at.dir_fh_hash,
+                                          request->link_at.dir_fh,
+                                          request->link_at.dir_fhlen,
+                                          request->link_at.name_hash,
+                                          request->link_at.name,
+                                          request->link_at.namelen,
+                                          request->fh,
+                                          request->fh_len);
 
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->link_at.dir_fh_hash,
-                                      request->link_at.dir_fh,
-                                      request->link_at.dir_fhlen,
-                                      &request->link_at.r_dir_post_attr);
-
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->fh_hash,
-                                      request->fh,
-                                      request->fh_len,
-                                      &request->link_at.r_attr);
-
-        if (request->link_at.r_replaced_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
             chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                          request->link_at.r_replaced_attr.va_fh_hash,
-                                          request->link_at.r_replaced_attr.va_fh,
-                                          request->link_at.r_replaced_attr.va_fh_len,
-                                          &request->link_at.r_replaced_attr);
+                                          request->link_at.dir_fh_hash,
+                                          request->link_at.dir_fh,
+                                          request->link_at.dir_fhlen,
+                                          &request->link_at.r_dir_post_attr);
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          &request->link_at.r_attr);
+
+            if (request->link_at.r_replaced_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                              request->link_at.r_replaced_attr.va_fh_hash,
+                                              request->link_at.r_replaced_attr.va_fh,
+                                              request->link_at.r_replaced_attr.va_fh_len,
+                                              &request->link_at.r_replaced_attr);
+            }
+        } else {
+            /* Enlisted: evict instead of publish -- the target dir's attrs,
+             * the new name's cached entry, the linked object's attrs (its
+             * nlink/ctime change on commit), and any replaced victim's attrs
+             * would all be stale once the compound commits. */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->link_at.dir_fh_hash,
+                                          request->link_at.dir_fh,
+                                          request->link_at.dir_fhlen,
+                                          &inval);
+
+            chimera_vfs_name_cache_remove(name_cache,
+                                          request->link_at.dir_fh_hash,
+                                          request->link_at.dir_fh,
+                                          request->link_at.dir_fhlen,
+                                          request->link_at.name_hash,
+                                          request->link_at.name,
+                                          request->link_at.namelen);
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          &inval);
+
+            if (request->link_at.r_replaced_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+                chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                              request->link_at.r_replaced_attr.va_fh_hash,
+                                              request->link_at.r_replaced_attr.va_fh,
+                                              request->link_at.r_replaced_attr.va_fh_len,
+                                              &inval);
+            }
         }
     }
 

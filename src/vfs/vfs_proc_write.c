@@ -22,11 +22,26 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
     chimera_vfs_io_claim_release(request);
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
-                                      request->write.handle->fh_hash,
-                                      request->write.handle->fh,
-                                      request->write.handle->fh_len,
-                                      &request->write.r_post_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->write.handle->fh_hash,
+                                          request->write.handle->fh,
+                                          request->write.handle->fh_len,
+                                          &request->write.r_post_attr);
+        } else {
+            /* Enlisted: evict the pre-compound entry the commit will make
+             * stale (STAT-less insert = eviction). */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->write.handle->fh_hash,
+                                          request->write.handle->fh,
+                                          request->write.handle->fh_len,
+                                          &inval);
+        }
     }
 
     chimera_vfs_complete(request);
@@ -252,7 +267,12 @@ chimera_vfs_write_owned(
             gate->callback     = callback;
             gate->private_data = private_data;
 
-            chimera_vfs_getattr(thread, cred, NULL, handle,
+            /* The grant probe joins the caller's compound (captured above,
+             * pre-dispatch -- the WRITE request does not exist yet) so it
+             * evaluates against the compound's staged attrs on an engine
+             * backend, not BASE state; the probe's own dispatch guard
+             * enlists or ejects it. */
+            chimera_vfs_getattr(thread, cred, compound, handle,
                                 CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
                                 chimera_vfs_write_gate_complete, gate);
             return;

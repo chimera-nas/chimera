@@ -12,7 +12,8 @@ chimera_vfs_commit_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_commit_callback_t callback = request->proto_callback;
 
-    if (request->status == CHIMERA_VFS_OK) {
+    if (request->status == CHIMERA_VFS_OK &&
+        chimera_vfs_request_publishes(request)) {
         chimera_vfs_attr_cache_refresh(request->thread, request->thread->vfs->vfs_attr_cache,
                                        request->commit.handle->fh_hash,
                                        request->commit.handle->fh,

@@ -21,39 +21,75 @@ chimera_vfs_mkdir_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_mkdir_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                request->mkdir_at.handle->fh,
-                                request->mkdir_at.handle->fh_len,
-                                CHIMERA_VFS_NOTIFY_DIR_ADDED,
-                                request->mkdir_at.name,
-                                request->mkdir_at.name_len,
-                                NULL, 0);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->mkdir_at.handle->fh,
+                                    request->mkdir_at.handle->fh_len,
+                                    CHIMERA_VFS_NOTIFY_DIR_ADDED,
+                                    request->mkdir_at.name,
+                                    request->mkdir_at.name_len,
+                                    NULL, 0);
 
-        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
-                                      request->mkdir_at.handle->fh_hash,
-                                      request->mkdir_at.handle->fh,
-                                      request->mkdir_at.handle->fh_len,
-                                      &request->mkdir_at.r_dir_post_attr);
+            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                          request->mkdir_at.handle->fh_hash,
+                                          request->mkdir_at.handle->fh,
+                                          request->mkdir_at.handle->fh_len,
+                                          &request->mkdir_at.r_dir_post_attr);
 
-        /* A path-only backend returns no child fh; skip the child name/attr
-         * cache (va_fh_len==0 is the name cache's negative marker). */
-        if (request->mkdir_at.r_attr.va_fh_len > 0) {
-            chimera_vfs_name_cache_insert(thread, cache,
+            /* A path-only backend returns no child fh; skip the child name/attr
+             * cache (va_fh_len==0 is the name cache's negative marker). */
+            if (request->mkdir_at.r_attr.va_fh_len > 0) {
+                chimera_vfs_name_cache_insert(thread, cache,
+                                              request->mkdir_at.handle->fh_hash,
+                                              request->mkdir_at.handle->fh,
+                                              request->mkdir_at.handle->fh_len,
+                                              request->mkdir_at.name_hash,
+                                              request->mkdir_at.name,
+                                              request->mkdir_at.name_len,
+                                              request->mkdir_at.r_attr.va_fh,
+                                              request->mkdir_at.r_attr.va_fh_len);
+
+                chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                              chimera_vfs_hash(request->mkdir_at.r_attr.va_fh,
+                                                               request->mkdir_at.r_attr.va_fh_len),
+                                              request->mkdir_at.r_attr.va_fh,
+                                              request->mkdir_at.r_attr.va_fh_len,
+                                              &request->mkdir_at.r_attr);
+            }
+        } else {
+            /* Enlisted: publish nothing provisional, but evict what the
+             * commit would make stale -- the parent dir's attr entry, any
+             * cached (positive or negative) entry for the new name, and any
+             * recycled-inode attr entry keyed by the new child's FH.  A
+             * STAT-less insert builds no entry and evicts the slot. */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                          request->mkdir_at.handle->fh_hash,
+                                          request->mkdir_at.handle->fh,
+                                          request->mkdir_at.handle->fh_len,
+                                          &inval);
+
+            chimera_vfs_name_cache_remove(cache,
                                           request->mkdir_at.handle->fh_hash,
                                           request->mkdir_at.handle->fh,
                                           request->mkdir_at.handle->fh_len,
                                           request->mkdir_at.name_hash,
                                           request->mkdir_at.name,
-                                          request->mkdir_at.name_len,
-                                          request->mkdir_at.r_attr.va_fh,
-                                          request->mkdir_at.r_attr.va_fh_len);
+                                          request->mkdir_at.name_len);
 
-            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
-                                          chimera_vfs_hash(request->mkdir_at.r_attr.va_fh,
-                                                           request->mkdir_at.r_attr.va_fh_len),
-                                          request->mkdir_at.r_attr.va_fh,
-                                          request->mkdir_at.r_attr.va_fh_len,
-                                          &request->mkdir_at.r_attr);
+            if ((request->mkdir_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+                request->mkdir_at.r_attr.va_fh_len > 0) {
+                chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                              chimera_vfs_hash(request->mkdir_at.r_attr.va_fh,
+                                                               request->mkdir_at.r_attr.va_fh_len),
+                                              request->mkdir_at.r_attr.va_fh,
+                                              request->mkdir_at.r_attr.va_fh_len,
+                                              &inval);
+            }
         }
     }
 
@@ -255,10 +291,10 @@ chimera_vfs_mkdir_at(
 
         /* Creating an entry in a directory requires both the right to add a
          * subdirectory (APPEND_DATA) and search permission (EXECUTE) on it. */
-        chimera_vfs_gate_fh(&gate->gate_ctx, thread, cred,
-                            handle->fh, handle->fh_len,
-                            CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE,
-                            chimera_vfs_mkdir_at_gate_complete, gate);
+        chimera_vfs_gate_fh_compound(&gate->gate_ctx, thread, cred, compound,
+                                     handle->fh, handle->fh_len,
+                                     CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE,
+                                     chimera_vfs_mkdir_at_gate_complete, gate);
         return;
     }
 

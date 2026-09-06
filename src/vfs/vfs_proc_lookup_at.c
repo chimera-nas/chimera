@@ -22,7 +22,8 @@ chimera_vfs_lookup_at_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_attr_cache   *attr_cache = thread->vfs->vfs_attr_cache;
     chimera_vfs_lookup_at_callback_t callback   = request->proto_callback;
 
-    if (request->status == CHIMERA_VFS_OK) {
+    if (request->status == CHIMERA_VFS_OK &&
+        chimera_vfs_request_publishes(request)) {
         /* A path-only backend resolves the whole path in one shot and returns no
          * stable child fh.  Skip the child name/attr cache: a zero-length fh is
          * the name cache's NEGATIVE (ENOENT) marker, so caching a

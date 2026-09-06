@@ -51,53 +51,84 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
         request->remove_at.r_removed_attr.va_set_mask &=
             ~CHIMERA_VFS_ATTR_MASK_STAT;
 
-        uint64_t skip_lo = 0, skip_hi = 0;
+        if (chimera_vfs_request_publishes(request)) {
+            uint64_t skip_lo = 0, skip_hi = 0;
 
-        if (request->remove_at.parent_lease_skip_valid) {
-            memcpy(&skip_lo, request->remove_at.parent_lease_skip, 8);
-            memcpy(&skip_hi, request->remove_at.parent_lease_skip + 8, 8);
+            if (request->remove_at.parent_lease_skip_valid) {
+                memcpy(&skip_lo, request->remove_at.parent_lease_skip, 8);
+                memcpy(&skip_hi, request->remove_at.parent_lease_skip + 8, 8);
+            }
+            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                          request->remove_at.handle->fh,
+                                          request->remove_at.handle->fh_len,
+                                          action,
+                                          request->remove_at.name,
+                                          request->remove_at.namelen,
+                                          NULL, 0,
+                                          skip_lo, skip_hi,
+                                          request->remove_at.parent_lease_skip_valid);
+
+            /* Signal any CHANGE_NOTIFY armed on a handle to the object that was
+             * just removed (its own FH, distinct from the parent emit above) so
+             * that pending request completes with STATUS_DELETE_PENDING rather
+             * than parking forever.  Prefer the caller-supplied child FH; fall
+             * back to the FH the backend reported for the removed entry. */
+            if (request->remove_at.child_fh && request->remove_at.child_fh_len > 0) {
+                chimera_vfs_notify_emit_delete(thread->vfs->vfs_notify,
+                                               request->remove_at.child_fh,
+                                               request->remove_at.child_fh_len);
+            } else if (request->remove_at.r_removed_attr.va_set_mask &
+                       CHIMERA_VFS_ATTR_FH) {
+                chimera_vfs_notify_emit_delete(thread->vfs->vfs_notify,
+                                               request->remove_at.r_removed_attr.va_fh,
+                                               request->remove_at.r_removed_attr.va_fh_len);
+            }
+
+            chimera_vfs_name_cache_insert(thread, name_cache,
+                                          request->remove_at.handle->fh_hash,
+                                          request->remove_at.handle->fh,
+                                          request->remove_at.handle->fh_len,
+                                          request->remove_at.name_hash,
+                                          request->remove_at.name,
+                                          request->remove_at.namelen,
+                                          NULL,
+                                          0);
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->remove_at.handle->fh_hash,
+                                          request->remove_at.handle->fh,
+                                          request->remove_at.handle->fh_len,
+                                          &request->remove_at.r_dir_post_attr);
+        } else {
+            /* Enlisted remove: the zero-length name insert above is a
+             * PUBLICATION of a negative (ENOENT) entry, which would be a
+             * phantom if the compound rolls back -- but it doubles as the
+             * invalidation of any positive entry for the doomed name, which
+             * must survive suppression (a positive entry would go stale the
+             * moment the compound commits).  Keep the conservative half:
+             * drop the entry outright, asserting nothing either way.  The
+             * parent dir's attr entry likewise goes stale on commit
+             * (mtime/nlink), so evict it too; the removed object's own attr
+             * entries are already evicted unconditionally below. */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->remove_at.handle->fh_hash,
+                                          request->remove_at.handle->fh,
+                                          request->remove_at.handle->fh_len,
+                                          &inval);
+
+            chimera_vfs_name_cache_remove(name_cache,
+                                          request->remove_at.handle->fh_hash,
+                                          request->remove_at.handle->fh,
+                                          request->remove_at.handle->fh_len,
+                                          request->remove_at.name_hash,
+                                          request->remove_at.name,
+                                          request->remove_at.namelen);
         }
-        chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                      request->remove_at.handle->fh,
-                                      request->remove_at.handle->fh_len,
-                                      action,
-                                      request->remove_at.name,
-                                      request->remove_at.namelen,
-                                      NULL, 0,
-                                      skip_lo, skip_hi,
-                                      request->remove_at.parent_lease_skip_valid);
-
-        /* Signal any CHANGE_NOTIFY armed on a handle to the object that was
-         * just removed (its own FH, distinct from the parent emit above) so
-         * that pending request completes with STATUS_DELETE_PENDING rather
-         * than parking forever.  Prefer the caller-supplied child FH; fall
-         * back to the FH the backend reported for the removed entry. */
-        if (request->remove_at.child_fh && request->remove_at.child_fh_len > 0) {
-            chimera_vfs_notify_emit_delete(thread->vfs->vfs_notify,
-                                           request->remove_at.child_fh,
-                                           request->remove_at.child_fh_len);
-        } else if (request->remove_at.r_removed_attr.va_set_mask &
-                   CHIMERA_VFS_ATTR_FH) {
-            chimera_vfs_notify_emit_delete(thread->vfs->vfs_notify,
-                                           request->remove_at.r_removed_attr.va_fh,
-                                           request->remove_at.r_removed_attr.va_fh_len);
-        }
-
-        chimera_vfs_name_cache_insert(thread, name_cache,
-                                      request->remove_at.handle->fh_hash,
-                                      request->remove_at.handle->fh,
-                                      request->remove_at.handle->fh_len,
-                                      request->remove_at.name_hash,
-                                      request->remove_at.name,
-                                      request->remove_at.namelen,
-                                      NULL,
-                                      0);
-
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->remove_at.handle->fh_hash,
-                                      request->remove_at.handle->fh,
-                                      request->remove_at.handle->fh_len,
-                                      &request->remove_at.r_dir_post_attr);
 
         if (request->remove_at.r_removed_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
             chimera_vfs_attr_cache_insert(thread, attr_cache,
@@ -277,6 +308,7 @@ chimera_vfs_remove_at_sticky_lookup(
     gate->child_fh_resolved = 1;
 
     chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
+                            gate->compound,
                             gate->handle->fh, gate->handle->fh_len,
                             gate->child_fh, gate->child_fh_len,
                             chimera_vfs_remove_at_gate_complete, gate);
@@ -376,15 +408,18 @@ chimera_vfs_remove_at_common(
         gate->private_data = private_data;
 
         if (child_fh && child_fh_len > 0) {
-            chimera_vfs_gate_delete(&gate->gate_ctx, thread, cred,
+            chimera_vfs_gate_delete(&gate->gate_ctx, thread, cred, compound,
                                     handle->fh, handle->fh_len,
                                     child_fh, child_fh_len,
                                     chimera_vfs_remove_at_gate_complete, gate);
         } else {
             /* No child FH from the caller (e.g. an NFS name-based REMOVE):
-            * resolve it by name so the sticky-directory owner rule and any
-            * per-object DELETE grant are honored, not silently skipped. */
-            chimera_vfs_lookup(thread, cred, NULL, handle->fh, handle->fh_len,
+             * resolve it by name so the sticky-directory owner rule and any
+             * per-object DELETE grant are honored, not silently skipped.
+             * The lookup joins the caller's compound (pre-dispatch: the
+             * REMOVE_AT request does not exist yet) so a victim the compound
+             * itself staged is visible to the resolution. */
+            chimera_vfs_lookup(thread, cred, compound, handle->fh, handle->fh_len,
                                name, namelen, CHIMERA_VFS_ATTR_FH, 0,
                                chimera_vfs_remove_at_sticky_lookup, gate);
         }
@@ -502,7 +537,10 @@ chimera_vfs_remove_at(
         ctx->private_data      = private_data;
         ctx->child_fh_len      = 0;
 
-        chimera_vfs_lookup_at(thread, cred, NULL, handle, name, namelen,
+        /* Joins the caller's compound (pre-dispatch: the REMOVE_AT request
+         * does not exist yet) so a victim the compound itself staged is
+         * visible to the recall resolution. */
+        chimera_vfs_lookup_at(thread, cred, compound, handle, name, namelen,
                               CHIMERA_VFS_ATTR_FH, 0,
                               chimera_vfs_remove_recall_lookup_complete, ctx);
         return;

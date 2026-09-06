@@ -23,6 +23,7 @@ struct chimera_vfs_attrs;
 struct chimera_vfs_cred;
 struct chimera_vfs_thread;
 struct chimera_vfs_open_handle;
+struct chimera_vfs_compound;
 
 /*
  * Return the subset of `requested` (canonical CHIMERA_ACE_* mask bits) that is
@@ -139,8 +140,30 @@ typedef void (*chimera_vfs_gate_callback_t)(
  * one instance, since the helpers never run concurrently on the same context.
  */
 struct chimera_vfs_gate_ctx {
-    struct chimera_vfs_thread      *thread;
-    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_thread     *thread;
+    const struct chimera_vfs_cred *cred;
+    /* The gated PRIMARY operation's compound (NULL = probes run standalone),
+     * forwarded verbatim to every interior probe op the gate issues
+     * (open_fh/getattr) so a probe JOINS the caller's compound and observes
+     * its staged effects (e.g. an uncommitted mkdir/chmod on an engine
+     * backend) instead of BASE state.
+     *
+     * This is the gated wrapper's own pre-dispatch compound argument,
+     * captured here by the compound-threading gate entries -- NOT a
+     * read-back of the primary request's post-guard request->compound.  The
+     * gate runs strictly BEFORE the wrapper allocates and dispatches its
+     * real request (the gate scratch exists precisely because that request
+     * does not exist yet), so there is no post-guard pointer to read, and
+     * this capture cannot resurrect a pointer the dispatch guard cleared:
+     * the primary's enlistment guard runs only after the gate has
+     * completed.  Interior sites that DO hold a live primary request
+     * (rename_at's recall lookups) instead forward request->compound read
+     * at issue time, never a stale copy, for the same reason in reverse.
+     * Each probe still passes through its own dispatch guard, which enlists
+     * it only on an exact {module, mount_private} owner match and ejects it
+     * (standalone autocommit) otherwise.  The entries without a compound
+     * parameter (gate_fh / _obj / _dac / _prefix) clear this to NULL. */
+    struct chimera_vfs_compound    *compound;
     chimera_vfs_gate_callback_t     callback;
     void                           *private_data;
     struct chimera_vfs_open_handle *handle;  /* currently-open object */
@@ -158,7 +181,9 @@ struct chimera_vfs_gate_ctx {
     int                             any_type;
 };
 
-/* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
+/* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`.
+ * Probes run standalone (no compound); use chimera_vfs_gate_fh_compound()
+ * from a gated wrapper that carries its caller's compound. */
 void chimera_vfs_gate_fh(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
@@ -169,15 +194,30 @@ void chimera_vfs_gate_fh(
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data);
 
+/* As chimera_vfs_gate_fh(), threading the gated primary operation's compound
+ * (may be NULL) into the gate's interior probes -- see the ctx member. */
+void chimera_vfs_gate_fh_compound(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
 /* As chimera_vfs_gate_fh(), but evaluated even where gate_needed() would
  * defer to the backend -- for the few spots where the ENGINE is about to
  * deny an operation itself and POSIX orders an access denial ahead of it,
  * on a backend that will never see the op (see the unprivileged
- * device-mknod EPERM in vfs_proc_mknod_at.c). */
+ * device-mknod EPERM in vfs_proc_mknod_at.c).  `compound` (may be NULL)
+ * is the gated primary operation's compound -- see the ctx member. */
 void chimera_vfs_gate_fh_always(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *fh,
     int                            fhlen,
     uint32_t                       required,
@@ -223,11 +263,14 @@ void chimera_vfs_gate_fh_prefix(
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data);
 
-/* Authorize deleting `child_fh` from directory `parent_fh` (delete_allowed). */
+/* Authorize deleting `child_fh` from directory `parent_fh` (delete_allowed).
+ * `compound` (may be NULL) is the gated primary operation's compound,
+ * forwarded to the parent/child probes -- see the ctx member. */
 void chimera_vfs_gate_delete_always(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *parent_fh,
     int                            parent_fhlen,
     const void                    *child_fh,
@@ -239,6 +282,7 @@ void chimera_vfs_gate_delete(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *parent_fh,
     int                            parent_fhlen,
     const void                    *child_fh,

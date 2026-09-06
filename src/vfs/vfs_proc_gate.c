@@ -12,6 +12,13 @@
  * wrapper inserts a single call before dispatching its real operation.  Each is
  * a true no-op (no backend I/O) when chimera_vfs_gate_needed() is false, so the
  * delegated/AUTH_NONE/root fast paths are unchanged.
+ *
+ * The probes forward ctx->compound (the gated primary operation's compound,
+ * captured pre-dispatch by the compound-threading entries; see the member's
+ * comment in sdk/vfs_access.h) so they JOIN the caller's compound and observe
+ * its staged effects on an engine backend rather than BASE state.  Each probe
+ * is enlisted or ejected by its own dispatch guard, so a probe resolving on a
+ * foreign {module, mount} runs standalone automatically.
  */
 
 #include <stdlib.h>
@@ -74,7 +81,7 @@ chimera_vfs_gate_fh_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, ctx->compound, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_fh_getattr, ctx);
 } /* chimera_vfs_gate_fh_open */
@@ -84,6 +91,7 @@ chimera_vfs_gate_fh_impl(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *fh,
     int                            fhlen,
     uint32_t                       required,
@@ -98,12 +106,13 @@ chimera_vfs_gate_fh_impl(
 
     ctx->thread       = thread;
     ctx->cred         = cred;
+    ctx->compound     = compound;
     ctx->required     = required;
     ctx->callback     = callback;
     ctx->private_data = private_data;
     ctx->handle       = NULL;
 
-    chimera_vfs_open_fh(thread, cred, NULL, fh, fhlen,
+    chimera_vfs_open_fh(thread, cred, ctx->compound, fh, fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_fh_open, ctx);
 } /* chimera_vfs_gate_fh_impl */
@@ -130,16 +139,18 @@ chimera_vfs_gate_fh_obj(
 
     ctx->any_type = 1;
 
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
+    /* No compound-threading caller yet: probes run standalone. */
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, NULL, fh, fhlen, required,
                              chimera_vfs_gate_needed(module->capabilities, cred),
                              callback, private_data);
 } /* chimera_vfs_gate_fh_obj */
 
 SYMBOL_EXPORT void
-chimera_vfs_gate_fh(
+chimera_vfs_gate_fh_compound(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *fh,
     int                            fhlen,
     uint32_t                       required,
@@ -159,9 +170,24 @@ chimera_vfs_gate_fh(
     * assertion is the default and must not be inherited from a prior use. */
     ctx->any_type = 0;
 
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, compound, fh, fhlen, required,
                              chimera_vfs_gate_needed(module->capabilities, cred),
                              callback, private_data);
+} /* chimera_vfs_gate_fh_compound */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_fh(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    chimera_vfs_gate_fh_compound(ctx, thread, cred, NULL, fh, fhlen, required,
+                                 callback, private_data);
 } /* chimera_vfs_gate_fh */
 
 /*
@@ -177,6 +203,7 @@ chimera_vfs_gate_fh_always(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *fh,
     int                            fhlen,
     uint32_t                       required,
@@ -194,7 +221,7 @@ chimera_vfs_gate_fh_always(
 
     ctx->any_type = 0;
 
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required, 1,
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, compound, fh, fhlen, required, 1,
                              callback, private_data);
 } /* chimera_vfs_gate_fh_always */
 
@@ -225,7 +252,8 @@ chimera_vfs_gate_fh_dac(
 
     ctx->any_type = 0;
 
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
+    /* No compound-threading caller yet: probes run standalone. */
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, NULL, fh, fhlen, required,
                              chimera_vfs_gate_needed_dac(module->capabilities, cred),
                              callback, private_data);
 } /* chimera_vfs_gate_fh_dac */
@@ -257,7 +285,8 @@ chimera_vfs_gate_fh_prefix(
 
     ctx->any_type = 0;
 
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
+    /* No compound-threading caller yet: probes run standalone. */
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, NULL, fh, fhlen, required,
                              chimera_vfs_gate_needed_prefix(module->capabilities, cred),
                              callback, private_data);
 } /* chimera_vfs_gate_fh_prefix */
@@ -327,7 +356,7 @@ chimera_vfs_gate_delete_child_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, ctx->compound, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_child_getattr, ctx);
 } /* chimera_vfs_gate_delete_child_open */
@@ -364,7 +393,7 @@ chimera_vfs_gate_delete_parent_getattr(
         return;
     }
 
-    chimera_vfs_open_fh(ctx->thread, ctx->cred, NULL, ctx->child_fh, ctx->child_fhlen,
+    chimera_vfs_open_fh(ctx->thread, ctx->cred, ctx->compound, ctx->child_fh, ctx->child_fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_delete_child_open, ctx);
 } /* chimera_vfs_gate_delete_parent_getattr */
@@ -384,7 +413,7 @@ chimera_vfs_gate_delete_parent_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, ctx->compound, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_parent_getattr, ctx);
 } /* chimera_vfs_gate_delete_parent_open */
@@ -394,6 +423,7 @@ chimera_vfs_gate_delete(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *parent_fh,
     int                            parent_fhlen,
     const void                    *child_fh,
@@ -415,7 +445,8 @@ chimera_vfs_gate_delete(
         return;
     }
 
-    chimera_vfs_gate_delete_always(ctx, thread, cred, parent_fh, parent_fhlen,
+    chimera_vfs_gate_delete_always(ctx, thread, cred, compound,
+                                   parent_fh, parent_fhlen,
                                    child_fh, child_fhlen, callback,
                                    private_data);
 } /* chimera_vfs_gate_delete */
@@ -431,6 +462,7 @@ chimera_vfs_gate_delete_always(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *parent_fh,
     int                            parent_fhlen,
     const void                    *child_fh,
@@ -440,6 +472,7 @@ chimera_vfs_gate_delete_always(
 {
     ctx->thread       = thread;
     ctx->cred         = cred;
+    ctx->compound     = compound;
     ctx->child_fh     = child_fh;
     ctx->child_fhlen  = child_fhlen;
     ctx->callback     = callback;
@@ -449,7 +482,7 @@ chimera_vfs_gate_delete_always(
     ctx->sticky       = 0;
     ctx->parent_uid   = (uint64_t) -1;
 
-    chimera_vfs_open_fh(thread, cred, NULL, parent_fh, parent_fhlen,
+    chimera_vfs_open_fh(thread, cred, ctx->compound, parent_fh, parent_fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_delete_parent_open, ctx);
 } /* chimera_vfs_gate_delete_always */

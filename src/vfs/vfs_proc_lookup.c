@@ -58,13 +58,18 @@ chimera_vfs_lookup_open_dispatch(
     lp_request->lookup.parent_fh_len = oh->fh_len;
 
     /* Crossed into a path-only mount: it has no child fhs to walk, so hand the
-     * whole remaining path to it in one lookup and return the final attrs. */
+     * whole remaining path to it in one lookup and return the final attrs.
+     * This used to forward NULL deliberately (a MOUNT boundary was crossed);
+     * now the walk's compound is forwarded like every other component op and
+     * the central dispatch guard decides -- it enlists the op only when the
+     * path-only mount matches the compound's owner {module, mount_private}
+     * and ejects it to run standalone otherwise. */
     if (chimera_vfs_module_is_path_only(oh->vfs_module)) {
         const char *remaining = lp_request->lookup.pathc;
 
         chimera_vfs_lookup_at(
             thread,
-            lp_request->cred, NULL,
+            lp_request->cred, lp_request->compound,
             oh,
             remaining,
             strlen(remaining),

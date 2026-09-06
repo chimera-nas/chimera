@@ -46,37 +46,39 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
             (request->rename_at.flags & CHIMERA_VFS_RENAME_SRC_IS_DIR)
             ? CHIMERA_VFS_NOTIFY_RENAMED_DIR : CHIMERA_VFS_NOTIFY_RENAMED;
 
-        if (!cross_dir) {
-            /* Intra-directory rename: a single RENAMED event on the
-             * directory carrying both old and new names. */
-            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                          request->fh,
-                                          request->fh_len,
-                                          rn_class,
-                                          request->rename_at.new_name,
-                                          request->rename_at.new_namelen,
-                                          request->rename_at.name,
-                                          request->rename_at.namelen,
-                                          skip_lo, skip_hi, has_skip);
-        } else {
-            /* Cross-directory rename: source dir sees the OLD name only,
-             * destination sees the NEW name only. */
-            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                          request->fh,
-                                          request->fh_len,
-                                          rn_class,
-                                          NULL, 0,
-                                          request->rename_at.name,
-                                          request->rename_at.namelen,
-                                          skip_lo, skip_hi, has_skip);
-            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                          request->rename_at.new_fh,
-                                          request->rename_at.new_fhlen,
-                                          rn_class,
-                                          request->rename_at.new_name,
-                                          request->rename_at.new_namelen,
-                                          NULL, 0,
-                                          skip_lo, skip_hi, has_skip);
+        if (chimera_vfs_request_publishes(request)) {
+            if (!cross_dir) {
+                /* Intra-directory rename: a single RENAMED event on the
+                 * directory carrying both old and new names. */
+                chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                              request->fh,
+                                              request->fh_len,
+                                              rn_class,
+                                              request->rename_at.new_name,
+                                              request->rename_at.new_namelen,
+                                              request->rename_at.name,
+                                              request->rename_at.namelen,
+                                              skip_lo, skip_hi, has_skip);
+            } else {
+                /* Cross-directory rename: source dir sees the OLD name only,
+                 * destination sees the NEW name only. */
+                chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                              request->fh,
+                                              request->fh_len,
+                                              rn_class,
+                                              NULL, 0,
+                                              request->rename_at.name,
+                                              request->rename_at.namelen,
+                                              skip_lo, skip_hi, has_skip);
+                chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                              request->rename_at.new_fh,
+                                              request->rename_at.new_fhlen,
+                                              rn_class,
+                                              request->rename_at.new_name,
+                                              request->rename_at.new_namelen,
+                                              NULL, 0,
+                                              skip_lo, skip_hi, has_skip);
+            }
         }
 
         /* Remove cache entries for both old and new paths.
@@ -108,17 +110,40 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
          * or a subsequent getattr/stat would serve a stale nlink/timestamp.
          * For a same-directory rename both FHs are identical and the second
          * insert simply re-inserts the same fresh entry. */
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->fh_hash,
-                                      request->fh,
-                                      request->fh_len,
-                                      &request->rename_at.r_fromdir_post_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          &request->rename_at.r_fromdir_post_attr);
 
-        chimera_vfs_attr_cache_insert(thread, attr_cache,
-                                      request->rename_at.new_fh_hash,
-                                      request->rename_at.new_fh,
-                                      request->rename_at.new_fhlen,
-                                      &request->rename_at.r_todir_post_attr);
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->rename_at.new_fh_hash,
+                                          request->rename_at.new_fh,
+                                          request->rename_at.new_fhlen,
+                                          &request->rename_at.r_todir_post_attr);
+        } else {
+            /* Enlisted: both parents' attr entries go stale on commit
+             * (mtime/ctime, and nlink on a cross-dir directory move) --
+             * evict instead of publishing provisional attrs.  The name
+             * cache entries are removed unconditionally above/below. */
+            struct chimera_vfs_attrs dirinval;
+
+            dirinval.va_req_mask = 0;
+            dirinval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->fh_hash,
+                                          request->fh,
+                                          request->fh_len,
+                                          &dirinval);
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          request->rename_at.new_fh_hash,
+                                          request->rename_at.new_fh,
+                                          request->rename_at.new_fhlen,
+                                          &dirinval);
+        }
 
         /* A rename that replaced an existing destination changed that inode's
          * link count -- a hard-link survivor drops to nlink-1, or it was the
@@ -264,7 +289,13 @@ chimera_vfs_rename_at_recall_source(struct chimera_vfs_request *request)
     struct chimera_vfs_thread *thread = request->thread;
 
     if (thread->vfs->vfs_state) {
-        chimera_vfs_lookup(thread, request->cred, NULL, request->fh, request->fh_len,
+        /* Forward the primary's compound as the live post-guard field
+         * (request->compound read at issue time), not a captured copy: the
+         * RENAME_AT itself has not been dispatched yet here, but reading
+         * the field means this helper can never resurrect a pointer the
+         * enlistment guard cleared if this chain ever runs post-dispatch. */
+        chimera_vfs_lookup(thread, request->cred, request->compound,
+                           request->fh, request->fh_len,
                            request->rename_at.name, request->rename_at.namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_source_lookup_complete,
@@ -389,7 +420,11 @@ chimera_vfs_rename_at_dispatch(
      * itself.  Only when a caching protocol is enabled. */
     if ((flags & CHIMERA_VFS_REMOVE_RECALL) && thread->vfs->caching_enabled &&
         !target_fh) {
-        chimera_vfs_lookup(thread, cred, NULL, new_fh, new_fhlen, new_name, new_namelen,
+        /* request->compound (the live post-guard field, == `compound` here
+         * since the RENAME_AT is not yet dispatched): the doomed-target
+         * resolution sees a destination the compound itself staged. */
+        chimera_vfs_lookup(thread, cred, request->compound,
+                           new_fh, new_fhlen, new_name, new_namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_target_lookup_complete,
                            request);
@@ -518,6 +553,7 @@ chimera_vfs_rename_at_gate_dst_lookup(
         gate->dst_target_fh_len = attr->va_fh_len;
 
         chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
+                                       gate->compound,
                                        gate->new_fh, gate->new_fhlen,
                                        gate->dst_target_fh, gate->dst_target_fh_len,
                                        chimera_vfs_rename_at_gate_target, gate);
@@ -544,6 +580,7 @@ chimera_vfs_rename_at_gate_dst(
 
     if (gate->target_fh && gate->target_fh_len > 0) {
         chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
+                                       gate->compound,
                                        gate->new_fh, gate->new_fhlen,
                                        gate->target_fh, gate->target_fh_len,
                                        chimera_vfs_rename_at_gate_target, gate);
@@ -553,8 +590,10 @@ chimera_vfs_rename_at_gate_dst(
     /* The caller supplied no replaced-target FH (e.g. the NFS server rename,
      * which does not resolve the destination name up front).  Resolve it here
      * so a sticky destination directory's owner rule is enforced against the
-     * object actually being replaced. */
-    chimera_vfs_lookup(gate->thread, gate->cred, NULL, gate->new_fh, gate->new_fhlen,
+     * object actually being replaced.  Joins the caller's compound so a
+     * destination the compound itself staged is seen. */
+    chimera_vfs_lookup(gate->thread, gate->cred, gate->compound,
+                       gate->new_fh, gate->new_fhlen,
                        gate->new_name, gate->new_namelen,
                        CHIMERA_VFS_ATTR_FH, 0,
                        chimera_vfs_rename_at_gate_dst_lookup, gate);
@@ -574,6 +613,7 @@ chimera_vfs_rename_at_gate_src(
     }
 
     chimera_vfs_gate_fh_always(&gate->gate_ctx, gate->thread, gate->cred,
+                               gate->compound,
                                gate->new_fh, gate->new_fhlen,
                                CHIMERA_ACE_WRITE_DATA,
                                chimera_vfs_rename_at_gate_dst, gate);
@@ -600,6 +640,7 @@ chimera_vfs_rename_at_gate_lookup(
         gate->src_child_fh_len = attr->va_fh_len;
 
         chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
+                                       gate->compound,
                                        gate->fh, gate->fhlen,
                                        gate->src_child_fh, gate->src_child_fh_len,
                                        chimera_vfs_rename_at_gate_src, gate);
@@ -608,10 +649,11 @@ chimera_vfs_rename_at_gate_lookup(
 
     /* No FH resolved: fall back to DELETE_CHILD on the source directory alone
      * (sticky owner check needs the object's attrs). */
-    chimera_vfs_gate_fh(&gate->gate_ctx, gate->thread, gate->cred,
-                        gate->fh, gate->fhlen,
-                        CHIMERA_ACE_DELETE_CHILD,
-                        chimera_vfs_rename_at_gate_src, gate);
+    chimera_vfs_gate_fh_compound(&gate->gate_ctx, gate->thread, gate->cred,
+                                 gate->compound,
+                                 gate->fh, gate->fhlen,
+                                 CHIMERA_ACE_DELETE_CHILD,
+                                 chimera_vfs_rename_at_gate_src, gate);
 } /* chimera_vfs_rename_at_gate_lookup */
 
 SYMBOL_EXPORT void
@@ -705,8 +747,10 @@ chimera_vfs_rename_at(
 
         /* Resolve the source object's FH first so the sticky-bit owner check on
          * the source directory can be evaluated (no-follow: rename operates on
-         * the name itself). */
-        chimera_vfs_lookup(thread, cred, NULL, fh, fhlen, name, namelen,
+         * the name itself).  Joins the caller's compound (pre-dispatch: the
+         * RENAME_AT request does not exist yet) so a source the compound
+         * itself staged is visible. */
+        chimera_vfs_lookup(thread, cred, compound, fh, fhlen, name, namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_gate_lookup, gate);
         return;

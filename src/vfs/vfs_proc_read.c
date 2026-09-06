@@ -155,6 +155,7 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
      * backend skips the stat entirely, so there is nothing to cache and
      * inserting here would only evict a valid entry. */
     if (request->status == CHIMERA_VFS_OK &&
+        chimera_vfs_request_publishes(request) &&
         (request->read.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) == CHIMERA_VFS_ATTR_MASK_STAT) {
         chimera_vfs_attr_cache_refresh(request->thread, request->thread->vfs->vfs_attr_cache,
                                        request->read.handle->fh_hash,
@@ -424,7 +425,12 @@ chimera_vfs_read_submit(
             gate->callback     = callback;
             gate->private_data = private_data;
 
-            chimera_vfs_getattr(thread, cred, NULL, handle,
+            /* The grant probe joins the caller's compound (captured above,
+             * pre-dispatch -- the READ request does not exist yet) so it
+             * evaluates against the compound's staged attrs on an engine
+             * backend, not BASE state; the probe's own dispatch guard
+             * enlists or ejects it. */
+            chimera_vfs_getattr(thread, cred, compound, handle,
                                 CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
                                 chimera_vfs_read_gate_complete, gate);
             return;
