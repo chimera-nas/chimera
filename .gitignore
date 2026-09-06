@@ -34,3 +34,8 @@ venv/
 .pytest_cache/
 .plan
 .claude/scheduled_tasks.lock
+
+# MBT harness artifacts: every quint replayer writes <suite>.debug.log and
+# <suite>.metrics.prom into the working directory it is run from.
+*.debug.log
+*.metrics.prom

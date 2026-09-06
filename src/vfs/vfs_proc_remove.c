@@ -95,6 +95,31 @@ chimera_vfs_remove_child_lookup_complete(
         memcpy(request->remove.child_fh, attr->va_fh, attr->va_fh_len);
         request->remove.child_fh_len = attr->va_fh_len;
 
+        /* Permission on the PARENT is judged before what the child is.
+         * POSIX lists both conditions for unlink and rmdir and orders
+         * neither, but Linux's may_delete() runs
+         * inode_permission(MAY_WRITE) on the directory and only then looks
+         * at the entry -- so a caller who may not write the directory gets
+         * EACCES, not EISDIR/ENOTDIR.  Checking the type first told a
+         * caller what was in a directory they had no right to read.  The
+         * authoritative gate still runs in remove_at (with the sticky rule,
+         * which POSIX orders after the type check); this only settles which
+         * error the caller sees.  Found by the quint POSIX suite once the
+         * model stopped carrying both orders as a policy knob. */
+        if (dir_attr && (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            !chimera_vfs_access_allowed(dir_attr, request->cred,
+                                        CHIMERA_ACE_DELETE_CHILD) &&
+            !chimera_vfs_access_allowed(attr, request->cred,
+                                        CHIMERA_ACE_DELETE)) {
+            chimera_vfs_remove_callback_t callback = request->remove.callback;
+            void                         *priv     = request->remove.private_data;
+
+            chimera_vfs_release(thread, request->remove.parent_handle);
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_EACCES, priv);
+            return;
+        }
+
         /* Enforce the caller's type assertion (rmdir vs unlink) here, once, for
          * every backend.  Engine backends re-check it themselves, but the NFS
          * proxy backends cannot: NFSv4 REMOVE is type-agnostic on the wire, and
@@ -192,8 +217,12 @@ chimera_vfs_remove_parent_open_complete(
         oh,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,
-        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
-        0,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID,
+        /* The parent's owner and mode, so the type assertion below can be
+         * ordered behind the permission check the way every implementation
+         * orders it.  Free: this lookup already happens. */
+        CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID,
         chimera_vfs_remove_child_lookup_complete,
         request);
 } /* chimera_vfs_remove_parent_open_complete */

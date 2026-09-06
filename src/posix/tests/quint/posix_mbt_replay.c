@@ -21,7 +21,10 @@
  */
 
 #define POSIX_DRIVER_ENGINE_ONLY
+/* After posix_driver.c: that unit sets the feature-test macros the system
+ * headers need, so nothing may pull them in ahead of it. */
 #include "posix_driver.c"
+#include <signal.h>
 #include "common/mbt_trace_dir.h"
 
 /* ---- small helpers over the raw ITF JSON --------------------------------- */
@@ -140,16 +143,55 @@ map_get_pair(
     return NULL;
 } /* map_get_pair */
 
+/* True when the model has `pid` holding at least one byte-range lock, on any
+ * file.  The key is the (pid, ino) pair and the value the map of locked bytes,
+ * so an entry that survived an unlock can be present but empty. */
+static int
+model_pid_holds_lock(
+    json_t *ps,
+    int64_t pid)
+{
+    json_t *pairs = ps ? json_object_get(ps, "locks") : NULL;
+    size_t  i;
+
+    pairs = json_is_object(pairs) ? json_object_get(pairs, "#map") : NULL;
+    if (!json_is_array(pairs)) {
+        return 0;
+    }
+    for (i = 0; i < json_array_size(pairs); i++) {
+        json_t *pair = json_array_get(pairs, i);
+        json_t *k    = json_array_get(pair, 0);
+        json_t *tup  = json_is_object(k) ? json_object_get(k, "#tup") : NULL;
+        json_t *v    = json_array_get(pair, 1);
+        json_t *bytes;
+
+        if (!json_is_array(tup) || json_array_size(tup) != 2 ||
+            tf_i64(json_array_get(tup, 0)) != pid) {
+            continue;
+        }
+        bytes = json_is_object(v) ? json_object_get(v, "#map") : NULL;
+        if (json_is_array(bytes) && json_array_size(bytes) > 0) {
+            return 1;
+        }
+    }
+    return 0;
+} /* model_pid_holds_lock */
+
 /* ---- replay state -------------------------------------------------------- */
 
-#define R_MAXPID 4
-#define R_MAXFD  64
-#define R_MAXSID 64
-#define R_MAXINO 8192
-#define BADFD    999999
-#define MOUNT    "/test"
+#define R_MAXPID   4
+#define R_MAXFD    64
+#define R_MAXSID   64
+#define R_MAXINO   8192
+#define BADFD      999999
+#define MOUNT      "/test"
+
+#define R_MAXSTRAY 64
 
 static int           g_fdmap[R_MAXPID][R_MAXFD]; /* (pid, model fd) -> real fd     */
+static int           g_stray_fd[R_MAXSTRAY];     /* deferred stray descriptors     */
+static int           g_stray_pid[R_MAXSTRAY];    /* ... and the pid that minted    */
+static int           g_n_stray;                  /* ... them (see stray_release)   */
 static CHIMERA_DIR  *g_dirmap[R_MAXSID];    /* model sid -> live DIR*         */
 
 struct ident { int present; long long dev, ino; };
@@ -171,10 +213,36 @@ static const struct {
     const char *trace;      /* trace file basename */
     const char *why;
 } posix_mbt_declines[] = {
-    /* Currently empty -- every entry the first diskfs rounds added has been
-     * retired by a fix.  The sentinel keeps the array non-empty; add new
-     * declines above it. */
-    { NULL, NULL, NULL },
+    /* Three traces the unified corpus reaches that the per-backend corpora
+     * never generated.  Each names a defect, not a policy difference; the
+     * sentinel keeps the array non-empty and new declines go above it.
+     *
+     * cairn: a write whose data never lands.  pid1 opens /b, writes 4096
+     * bytes, and the call reports success -- but the file is still size 0 at
+     * the audit.  The model and every other backend grow it.  Both traces are
+     * the same shape and neither depends on the clone the flavor is named
+     * for: the RCloneRange steps around them all expect EBADF or EINVAL, so
+     * reflink is never exercised.  These were invisible until the capability
+     * skip stopped pardoning divergences recorded before it fired. */
+    { "cairn",  "stepClone_128_0x1_0.itf.json",
+      "write reports success but leaves the file at size 0 (audit: /b)" },
+    { "cairn",  "stepClone_128_0x1_2.itf.json",
+      "write reports success but leaves the file at size 0 (audit: /b)" },
+
+    /* diskfs: SEEK_HOLE/SEEK_DATA over an allocated-but-unwritten extent.
+     * The model materializes the blocks a fallocate reserves and calls them
+     * data, so it seeks past them; diskfs reports the unwritten remainder as
+     * a hole and stops earlier.  POSIX lets an implementation report an
+     * allocated extent either way, so neither side is wrong -- ext4 takes the
+     * same conservative reading (recorded there as EXT4-5).  A second
+     * implementation choosing it is the argument for widening the model to an
+     * acceptance set rather than recording each one as a deviation; until
+     * then the offset mismatch has no reconciliation to hang on, because
+     * KNOWN_DEVIATIONS keys on errno and both sides here succeed. */
+    { "diskfs", "stepSparse_128_0x1_1.itf.json",
+      "SEEK_HOLE stops at the unwritten part of a fallocate'd extent" },
+
+    { NULL,     NULL,                           NULL },
 };
 
 static const char *
@@ -196,14 +264,66 @@ posix_mbt_declined(const char *path)
     return NULL;
 } /* posix_mbt_declined */
 
-static int           g_strict_atime;        /* from the trace LInit caps      */
-static int           g_nmismatch;           /* per-trace mismatch tally       */
-static const char   *g_trace;               /* current trace path (messages)  */
-static int           g_step;                /* current trace step (messages)  */
-static json_t       *g_cur_fs;              /* model post-state fs (this step) */
-static json_t       *g_prev_fs;             /* model PRE-state fs (this step)  */
-static json_t       *g_cur_ps;              /* model protocol state (ps)       */
-static const char   *g_cur_tag;             /* current op tag (for reconcile)  */
+static int         g_strict_atime;     /* harness policy, not from caps  */
+/* The errnos the model says POSIX ALSO permits for the condition this step
+ * hit, carried in the LCall label (see posix_ops.qnt's Out.alt).  Where the
+ * standard names two spellings for one condition -- rmdir on a non-empty
+ * directory is {ENOTEMPTY, EEXIST}, a sticky refusal is {EPERM, EACCES} --
+ * answering either conforms, so this is not a deviation and nothing is
+ * recorded against the implementation for it. */
+static json_t     *g_cur_alt;          /* the LCall record carrying it     */
+static int         g_nalts;            /* permitted alternates taken       */
+/* Set when a step needs an optional interface this backend does not have
+ * (copy_file_range, reflink, SEEK_DATA/SEEK_HOLE).  The corpus is generated
+ * once, for everybody, with those interfaces present; a backend without one
+ * cannot replay the trace that uses it, and says so rather than failing. */
+static const char *g_cap_skip;
+
+
+/* Defined below, with the other ITF helpers. */
+static int itf_set_has_int(
+    json_t     *rec,
+    const char *field,
+    int64_t     n);
+
+/* True when the model named `e` as an alternate POSIX also permits for the
+ * condition this step hit. */
+static int
+alt_permits(int e)
+{
+    return g_cur_alt && itf_set_has_int(g_cur_alt, "alt", (int64_t) e);
+} /* alt_permits */
+static int         g_nmismatch;             /* per-trace mismatch tally       */
+static const char *g_trace;                 /* current trace path (messages)  */
+static int         g_step;                  /* current trace step (messages)  */
+static json_t     *g_cur_fs;                /* model post-state fs (this step) */
+static json_t     *g_prev_fs;               /* model PRE-state fs (this step)  */
+static json_t     *g_cur_ps;                /* model protocol state (ps)       */
+static const char *g_cur_tag;               /* current op tag (for reconcile)  */
+
+/* Wall-clock cap on a single replayed step.  A model trace can ask for a
+ * BLOCKING acquire (F_SETLKW), and the generator only emits one where the
+ * model says it will not block -- so if it does block, the implementation is
+ * holding a lock the model does not know about and the call never returns.
+ * Without this the whole batch hangs and CI reports a timeout with nothing
+ * in it; with it, the step that wedged is named and the run fails fast. */
+#define MBT_STEP_TIMEOUT_SEC 60
+
+static void
+mbt_step_alarm(int sig)
+{
+    (void) sig;
+    /* async-signal-safe enough for a death rattle: write(2) and _exit(2). */
+    fprintf(stderr,
+            "\nHANG: %s step %d: %s did not return within %d seconds.\n"
+            "The model only issues a blocking acquire where it believes "
+            "nothing conflicts, so this means the implementation holds a "
+            "lock the model does not know about.\n",
+            g_trace ? g_trace : "?", g_step, g_cur_tag ? g_cur_tag : "?",
+            MBT_STEP_TIMEOUT_SEC);
+    fflush(stderr);
+    _exit(1);
+} /* mbt_step_alarm */
 static json_t       *g_cur_rv;              /* current op request value        */
 
 /* Known-deviation tallies for the per-trace summary (PD<id> -> count). */
@@ -1456,6 +1576,22 @@ check_status(
             return 0;
         }
     }
+    if (alt_permits(actual)) {
+        g_nalts++;
+        return 0;
+    }
+    /* An absent optional interface refuses every call to it, whatever the
+     * model expected of the arguments, so this does not test `expected`. */
+    if (actual == EOPNOTSUPP && expected != EOPNOTSUPP) {
+        if (strcmp(g_cur_tag, "RCloneRange") == 0) {
+            g_cap_skip = "clone_file_range (reflink)";
+            return 0;
+        }
+        if (strcmp(g_cur_tag, "RCopyRange") == 0) {
+            g_cap_skip = "copy_file_range";
+            return 0;
+        }
+    }
     mism("errno: expected %lld, got %d", (long long) expected, actual);
     return 0;
 } /* check_status */
@@ -1852,10 +1988,24 @@ op_open(
     } else if (tf_field(res_v, "e") != 0 && e == 0 && rc >= 0) {
         /* The model expected this open to fail but chimera minted a
          * descriptor (PD24's EMFILE; over the NFS loopback also opens whose
-         * expected EACCES the server's DAC reading does not share).  Close
-         * the stray descriptor -- the model never learned of it, so nothing
-         * downstream ever would. */
-        chimera_posix_close(rc);
+         * expected EACCES the server's DAC reading does not share).  The
+         * model never learned of it, so nothing downstream ever would --
+         * but closing it here is not free.  close(2) releases every
+         * byte-range lock the CALLING process holds on that file, and the
+         * model, whose open failed, still believes it holds them: the next
+         * process to ask for those bytes is granted them, and the F_SETLKW
+         * after that waits on a lock the model cannot see.  Hold the
+         * descriptor until the trace ends when the model has the pid
+         * holding locks, and close it in close_live_handles() with the
+         * rest.  Only lock-bearing traces pay the deferral, so the open
+         * reference cannot outlive an unlink anywhere it did not already. */
+        if (model_pid_holds_lock(g_cur_ps, pid) && g_n_stray < R_MAXSTRAY) {
+            g_stray_fd[g_n_stray]  = rc;
+            g_stray_pid[g_n_stray] = pid;
+            g_n_stray++;
+        } else {
+            chimera_posix_close(rc);
+        }
         if (tf_bool(fl, "creat")) {
             json_t *comps = json_object_get(json_object_get(rv, "pth"),
                                             "comps");
@@ -3448,6 +3598,14 @@ close_live_handles(void)
             }
         }
     }
+    /* Deferred stray descriptors (see op_open): closed last and AS the pid
+     * that minted them, for the same reason the fdmap loop above is. */
+    while (g_n_stray > 0) {
+        g_n_stray--;
+        apply_cred(g_stray_pid[g_n_stray]);
+        chimera_posix_close(g_stray_fd[g_n_stray]);
+    }
+
     /* The recycle that follows runs as root. */
     apply_root_cred();
     for (sid = 0; sid < R_MAXSID; sid++) {
@@ -3751,7 +3909,9 @@ replay_trace(const char *path)
     g_strict_atime = tf_bool(caps, "strictAtime");
 
     state_reset();
-    g_trace = path;
+    g_cap_skip = NULL;
+    g_nalts    = 0;
+    g_trace    = path;
 
     /* Per-pid credentials (creds_for): pid0 root-or-uid100, pid1 uid200. */
     setcred(0, tf_bool(caps, "withRoot") ? 0 : 100, 10, 10, 30);
@@ -3781,10 +3941,15 @@ replay_trace(const char *path)
         g_cur_ps   = state_get(st, "ps");
         g_cur_tag  = tag;
         g_cur_rv   = tf_val(req);
+        g_cur_alt  = v;
         g_cur_pid  = pid;
         g_cur_step = (int) i;
         last_fs    = g_cur_fs;
 
+        if (g_cap_skip) {
+            break;
+        }
+        alarm(MBT_STEP_TIMEOUT_SEC);
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {
             fprintf(stderr, "%s: step %zu: unimplemented op %s\n", path, i,
                     tag);
@@ -3792,6 +3957,8 @@ replay_trace(const char *path)
             return -1;
         }
     }
+
+    alarm(0);
 
     audited = last_fs ? final_audit(last_fs) : 0;
 
@@ -3819,6 +3986,23 @@ replay_trace(const char *path)
                devs);
     }
     json_decref(root);
+    if (g_cap_skip) {
+        /* A skip abandons the REST of the trace; it does not pardon what
+         * already diverged.  Reporting SKIP over a recorded mismatch would
+         * let a real defect ride out of the run behind a missing optional
+         * interface -- the trace is short one answer AND wrong about one it
+         * gave, and only the second of those is the backend's fault to
+         * hide. */
+        if (g_nmismatch) {
+            fprintf(stderr, "%s: needs %s (skipped from there), but %d "
+                    "divergence(s) were already recorded -- reporting those\n",
+                    path, g_cap_skip, g_nmismatch);
+            return 1;
+        }
+        fprintf(stderr, "%s: SKIP: needs %s, which this backend does not "
+                "implement\n", path, g_cap_skip);
+        return 2;
+    }
     return g_nmismatch ? 1 : 0;
 } /* replay_trace */
 
@@ -3829,7 +4013,7 @@ main(
 {
     const char *backend = "memfs";
     int         ntraces = 0;
-    int         i, ran = 0, failures = 0, bad = 0;
+    int         i, ran = 0, failures = 0, bad = 0, skipped = 0;
 
     /* Line-buffer stdout so a crash cannot swallow the progress output.
      * These drivers print one line per trace, and both that and chimera's log
@@ -3874,6 +4058,8 @@ main(
         return 1;
     }
 
+    signal(SIGALRM, mbt_step_alarm);
+
     if (posix_env_setup(backend, NULL) != 0) {
         mbt_free_traces(traces, ntraces);
         return 1;
@@ -3895,6 +4081,12 @@ main(
         rc = replay_trace(traces[i]);
         if (rc < 0) {
             bad++;
+        } else if (rc == 2) {
+            /* A capability skip happens PART WAY THROUGH, so the filesystem
+             * has been written to: `ran` still advances, or the next trace
+             * would start on a dirty tree. */
+            skipped++;
+            ran++;
         } else {
             ran++;
             if (rc) {
@@ -3909,8 +4101,8 @@ main(
     close_live_handles();
     posix_env_teardown();
 
-    printf("batch: %d replayed, %d failed, %d unhandled of %d trace(s)\n",
-           ran, failures, bad, ntraces);
+    printf("batch: %d replayed, %d skipped, %d failed, %d unhandled of %d "
+           "trace(s)\n", ran - skipped, skipped, failures, bad, ntraces);
     fflush(stdout);
     mbt_free_traces(traces, ntraces);
     return (failures || bad) ? 1 : 0;
