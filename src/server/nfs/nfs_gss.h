@@ -25,6 +25,18 @@ int
 chimera_nfs_gss_init(
     const char *keytab);
 
+struct chimera_server_config;
+
+/*
+ * Install the configured principal -> UNIX identity map.  Consulted by
+ * chimera_nfs_gss_map_principal ahead of nsswitch, which stays the fallback.
+ * Process-global, like the acceptor identity above; call once per server
+ * start, before any context is accepted.
+ */
+void
+chimera_nfs_gss_set_principal_map(
+    const struct chimera_server_config *config);
+
 /* The GSSAPI-backed RPCSEC_GSS provider vtable. */
 extern const struct evpl_rpc2_gss_provider chimera_nfs_gss_provider;
 

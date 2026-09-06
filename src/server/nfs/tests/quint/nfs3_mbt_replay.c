@@ -1454,12 +1454,18 @@ static int      g_traces_skipped;
  * Returns 0 when the operation can be replayed under the harness's security
  * flavor, and -1 when it cannot.
  *
- * Under RPCSEC_GSS the caller's identity is the authenticated principal, not
- * a field of the credential, so an operation that asks to be made as some
- * other uid has no expression: there is one context and it is root's.  Rather
- * than replay it as root and compare against an oracle that expected a
- * different identity -- which would turn a DAC trace into a false pass -- the
- * trace is abandoned and counted as not applicable to this flavor.
+ * Under RPCSEC_GSS there is no uid on the wire: the caller is whoever the
+ * context authenticated.  Calling as a second user therefore means a second
+ * context under that user's own principal -- which is what a real client's
+ * rpc.gssd builds, one per user, from each user's credential cache -- so that
+ * is what this asks for, and the server maps the principal back to the uid
+ * through its configured principal map.
+ *
+ * What the map cannot express is a gid unrelated to the uid, or supplementary
+ * groups: those come from the server's idea of the user, not from the call.
+ * An operation asking for one is abandoned rather than replayed under an
+ * identity that only resembles it, which would turn a DAC trace into a false
+ * pass.
  */
 static int
 mbt_set_cred(
@@ -1471,10 +1477,22 @@ mbt_set_cred(
     size_t  n, i, cap = sizeof(mbt_cred_gids) / sizeof(mbt_cred_gids[0]);
 
     if (env->sec != MBT_SEC_SYS) {
-        /* The default credential is root's, which is who the principal maps
-         * to, so a trace that never names one replays unchanged. */
-        return (!cred || (op_i64(cred, "uid") == 0 && op_i64(cred, "gid") == 0))
-               ? 0 : -1;
+        uint32_t uid = 0, gid = 0;
+
+        if (cred) {
+            uid  = (uint32_t) op_i64(cred, "uid");
+            gid  = (uint32_t) op_i64(cred, "gid");
+            gids = json_object_get(cred, "gids");
+
+            if (gid != uid ||
+                (gids && json_array_size(itf_seq(gids)) > 0)) {
+                return -1;
+            }
+        }
+
+        env->cred = *mbt_cred_for_uid(env, env->nfs_conn, &env->nfs_v3.rpc2,
+                                      uid);
+        return 0;
     }
 
     env->cred.flavor = EVPL_RPC2_AUTH_SYS;
@@ -1506,6 +1524,68 @@ mbt_set_cred(
     env->cred.authsys.gids     = n ? mbt_cred_gids : NULL;
     return 0;
 } /* mbt_set_cred */
+
+/*
+ * The distinct uids a corpus calls as.
+ *
+ * The server reads its principal map once, at start-up, so the identities a
+ * replay will need have to be known before the first trace runs.  Reading the
+ * traces twice is cheaper than the alternative -- a map wide enough for any
+ * uid a corpus might one day use -- and it stays right when the corpus
+ * changes.
+ */
+static int
+mbt_collect_cred_uids(
+    char    **traces,
+    int       ntraces,
+    uint32_t *out,
+    int       cap)
+{
+    int n = 0, i;
+
+    for (i = 0; i < ntraces; i++) {
+        json_error_t jerr;
+        json_t      *root = json_load_file(traces[i], 0, &jerr);
+        json_t      *states, *st;
+        size_t       k;
+
+        if (!root) {
+            continue;   /* run_trace reports the parse error properly */
+        }
+
+        states = json_object_get(root, "states");
+
+        json_array_foreach(states, k, st)
+        {
+            json_t  *last_op = json_object_get(st, "lastOp");
+            json_t  *op      = last_op ? json_object_get(last_op, "value") : NULL;
+            json_t  *cred    = op ? json_object_get(op, "cred") : NULL;
+            uint32_t uid;
+            int      seen = 0, j;
+
+            if (!cred) {
+                continue;
+            }
+
+            uid = (uint32_t) op_i64(cred, "uid");
+
+            for (j = 0; j < n; j++) {
+                if (out[j] == uid) {
+                    seen = 1;
+                    break;
+                }
+            }
+
+            if (!seen && n < cap) {
+                out[n++] = uid;
+            }
+        }
+
+        json_decref(root);
+    }
+
+    return n;
+} /* mbt_collect_cred_uids */
 
 /* ---- replay driver -------------------------------------------------------- */
 
@@ -1848,8 +1928,13 @@ main(
      * isolation.  A single-fs backend (linux/io_uring) would instead clear the
      * backing directory between traces. */
     if (!dry_run) {
+        uint32_t            uids[MBT_MAX_MAPPED_UIDS];
         struct mbt_env_opts opts = { .module = backend, .rdma = rdma,
                                      .sec    = sec };
+
+        opts.num_principal_uids = mbt_collect_cred_uids(traces, ntraces, uids,
+                                                        MBT_MAX_MAPPED_UIDS);
+        opts.principal_uids = uids;
         mbt_env_open_opts(&env, &opts);
     }
 

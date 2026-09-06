@@ -504,8 +504,8 @@ main(
     c.env = &env;
     snprintf(c.mntpath, sizeof(c.mntpath), "/fs0");
 
-    drc_cred_init(&u1, 1000);
-    drc_cred_init(&u2, 1001);
+    drc_cred_init(&env, &u1, 1000);
+    drc_cred_init(&env, &u2, 1001);
 
     /* The shared wrappers used by trace setup run as root, which is what
      * creates the 0777 working directory the two users then share. */

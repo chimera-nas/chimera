@@ -102,12 +102,35 @@ enum mbt_sec {
 /* The MEMORY: keytab krb5_local populates.  MIT krb5 keys these by name
  * within a process, so naming the same one here is what lets the server's own
  * acceptor resolve the key the test's realm minted. */
-#define MBT_KRB5_KEYTAB    "MEMORY:evpl_krb5_local"
+#define MBT_KRB5_KEYTAB      "MEMORY:evpl_krb5_local"
 
 /* A two-component principal, which chimera's NFS server maps to root -- the
  * identity every trace's default credential already assumes.  A one-component
  * name would squash to anonymous and no trace would pass. */
-#define MBT_KRB5_PRINCIPAL "nfs/localhost"
+#define MBT_KRB5_PRINCIPAL   "nfs/localhost"
+
+/*
+ * User principals are named for the uid they stand for, and the server is
+ * configured to map them back (see mbt_gss_configure_principals).  A real
+ * deployment would name them for people and map through nsswitch or an
+ * explicit table; naming them for the uid is what lets a trace that says
+ * "as uid 1000" be replayed without inventing a directory of users.
+ */
+#define MBT_KRB5_USER_PREFIX "u"
+
+/* Distinct uids one replay can call as. */
+#define MBT_MAX_IDENTITIES   32
+
+/* The server reads its principal map once, at start-up, so every uid a replay
+ * will call as has to be declared before the first trace runs.  A caller that
+ * knows its corpus passes them in (mbt_env_opts.principal_uids); this is the
+ * bound on how many. */
+#define MBT_MAX_MAPPED_UIDS  32
+
+struct mbt_identity {
+    uint32_t                    uid;
+    struct krb5_local_identity *id;
+};
 
 static inline const char *
 mbt_sec_name(enum mbt_sec sec)
@@ -188,6 +211,7 @@ mbt_sec_service(enum mbt_sec sec)
 
 struct mbt_conn_cred {
     struct evpl_rpc2_conn       *conn;
+    uint32_t                     uid;
     struct evpl_rpc2_gss_client *gss;
     struct evpl_rpc2_cred        cred;
 };
@@ -256,19 +280,19 @@ struct mbt_result {
 /* Optional server shaping for a suite (the NFS4 MBT suite needs all
  * three; the NFS3 defaults need none). */
 struct mbt_env_opts {
-    int         nfs4_delegations; /* delegations are off by default */
-    int         smb_named_streams; /* NFSv4 OPENATTR / named attributes: off by
-                                    * default (the shared knob gates OPENATTR) */
-    int         disable_caches;   /* VFS attr+name caches: exact attr
-                                   * comparison cannot tolerate staleness */
-    const char *memfs_config;     /* module config JSON, e.g. block_size */
-    const char *module;           /* VFS backend: NULL/"memfs", "diskfs",
+    int             nfs4_delegations; /* delegations are off by default */
+    int             smb_named_streams; /* NFSv4 OPENATTR / named attributes: off by
+                                        * default (the shared knob gates OPENATTR) */
+    int             disable_caches; /* VFS attr+name caches: exact attr
+                                     * comparison cannot tolerate staleness */
+    const char     *memfs_config; /* module config JSON, e.g. block_size */
+    const char     *module;       /* VFS backend: NULL/"memfs", "diskfs",
                                    * "cairn".  diskfs/cairn self-provision
                                    * scratch under the env's session_dir. */
     /* Auxiliary NFS services (portmap/rpcbind, NLM, NSM).  Off by default:
      * the NFS3/NFS4 suites never touch them, and connecting three more
      * inproc services per replay process is pure overhead there. */
-    int         aux;
+    int             aux;
     /* Carry NFS over RPC-over-RDMA instead of plain RPC record marking.
      *
      * The inproc transport has two protocols: STREAM_INPROC, and
@@ -278,43 +302,48 @@ struct mbt_env_opts {
      * so pointing the client at the server's RDMA endpoint exercises the read
      * and write chunk paths -- the RDMA framing is genuinely under test here,
      * not emulated away. */
-    int         rdma;
+    int             rdma;
     /* server.portmap_hostname: when set, portmap universal addresses are
      * built from this host instead of the connection's local address.  The
      * aux suite uses it to make the uaddr predictable (the inproc local
      * address is not an IP). */
-    const char *portmap_hostname;
-    int         pnfs_num_ds;      /* >0: run as a pNFS metadata server with
+    const char     *portmap_hostname;
+    int             pnfs_num_ds;  /* >0: run as a pNFS metadata server with
                                    * this many in-process data servers */
-    const char *pnfs_ds_module;   /* DS backend (default "memfs") */
+    const char     *pnfs_ds_module; /* DS backend (default "memfs") */
     /* REST API and Prometheus scrape endpoint, for the control-plane suite:
      * both follow the server's transport flavor, so under inproc these are
      * endpoint names rather than bound ports, reachable from this process by
      * an http agent on env->evpl (see server/rest/tests/quint/ctl_http.h).
      * 0 leaves the endpoint off, which is what every other suite wants. */
-    int         rest_port;
-    int         metrics_port;
+    int             rest_port;
+    int             metrics_port;
     /* REST bearer/basic authentication.  Only meaningful with rest_port. */
-    int         rest_auth;
+    int             rest_auth;
     /* The other two protocol servers.  Off by default (the NFS suites want
      * nothing else listening); the control-plane suite turns them on because
      * shares and buckets cannot be created on a server whose SMB or S3
      * protocol was never initialized. */
-    int         smb_enabled;
-    int         s3_enabled;
+    int             smb_enabled;
+    int             s3_enabled;
     /* common.umount_timeout_ms: how long umount waits for a mount's open
      * handles to drain before reporting EBUSY.  0 keeps the server default
      * (1s).  A suite that unmounts often wants this short, because the wait
      * is per attempt and the handles are dropped by an asynchronous sweep. */
-    int         umount_timeout_ms;
+    int             umount_timeout_ms;
+    /* The uids this replay will call as, declared to the server's principal
+     * map before it starts.  Empty means root only, which is what every probe
+     * wants; a replayer scans its corpus (mbt_collect_cred_uids). */
+    const uint32_t *principal_uids;
+    int             num_principal_uids;
     /* The client's security flavor (see enum mbt_sec).  AUTH_SYS by default;
      * anything else stands a Kerberos realm up in this process and runs every
      * call under a context established against the server's own acceptor. */
-    int         sec;
+    int             sec;
     /* server.nfs3_drc: the NFSv3 duplicate-request cache.  Off by default in
      * the server and here; the DRC suite is the only caller that turns it on.
      * The NFSv4.0 cache needs no flag -- it is always installed. */
-    int         nfs3_drc;
+    int             nfs3_drc;
 };
 
 struct mbt_env {
@@ -349,6 +378,11 @@ struct mbt_env {
      * flavor covers here and stay on AUTH_SYS. */
     struct evpl_rpc2_cred        mount_cred;
     struct evpl_rpc2_cred        aux_cred;
+    /* The NFS connection's machine-principal credential, kept pristine.
+     * env->cred is working storage -- a replayer rewrites it per operation to
+     * whichever identity that operation is made as -- so the credential for
+     * root has to live somewhere that rewriting cannot reach. */
+    struct evpl_rpc2_cred        root_cred;
 
     /* Credentials for connections the suites open themselves.  Under AUTH_SYS
      * one credential serves every connection; a GSS context belongs to the
@@ -362,6 +396,15 @@ struct mbt_env {
      * server's acceptor registers that identity at start-up. */
     int                          sec;
     struct krb5_local           *krb5;
+    /* One per distinct uid the replay has called as; uid 0 uses the realm's
+     * own machine principal and needs no entry. */
+    struct mbt_identity          identities[MBT_MAX_IDENTITIES];
+    int                          num_identities;
+    /* Contexts established minus contexts retired.  LeakSanitizer would catch
+     * an imbalance, but only where there is one -- macOS has no LSan, so a
+     * context leaked here passes locally and fails in CI.  Counting them is
+     * cheap and fails the same way everywhere. */
+    int                          gss_outstanding;
     struct evpl_rpc2_gss_client *nfs_gss;
     struct evpl_rpc2_gss_client *mount_gss;
 
@@ -497,11 +540,59 @@ mbt_gss_ready(
     w->done   = 1;
 } /* mbt_gss_ready */
 
+/*
+ * The initiator identity for `uid`.
+ *
+ * uid 0 is the machine principal, which is what a real client presents for the
+ * mount and for root's I/O; every other uid gets a user principal of its own.
+ * Identities are kept on the env because minting one is not free and a trace
+ * returns to the same uid many times.
+ */
+static inline void *
+mbt_gss_identity(
+    struct mbt_env *env,
+    uint32_t        uid)
+{
+    char name[64];
+    int  i;
+
+    if (uid == 0) {
+        return krb5_local_initiator_arg(env->krb5);
+    }
+
+    for (i = 0; i < env->num_identities; i++) {
+        if (env->identities[i].uid == uid) {
+            return krb5_local_identity_arg(env->identities[i].id);
+        }
+    }
+
+    if (env->num_identities == MBT_MAX_IDENTITIES) {
+        fprintf(stderr, "%s: more than %d identities wanted\n",
+                mbt_sec_name(env->sec), MBT_MAX_IDENTITIES);
+        exit(1);
+    }
+
+    snprintf(name, sizeof(name), MBT_KRB5_USER_PREFIX "%u", uid);
+
+    env->identities[env->num_identities].uid = uid;
+    env->identities[env->num_identities].id  =
+        krb5_local_identity_create(env->krb5, name);
+
+    if (!env->identities[env->num_identities].id) {
+        fprintf(stderr, "%s: could not build an identity for uid %u\n",
+                mbt_sec_name(env->sec), uid);
+        exit(1);
+    }
+
+    return krb5_local_identity_arg(env->identities[env->num_identities++].id);
+} /* mbt_gss_identity */
+
 static inline struct evpl_rpc2_gss_client *
-mbt_gss_establish(
+mbt_gss_establish_as(
     struct mbt_env           *env,
     struct evpl_rpc2_program *program,
     struct evpl_rpc2_conn    *conn,
+    uint32_t                  uid,
     const char               *what)
 {
     struct mbt_gss_wait w = { 0 };
@@ -509,7 +600,7 @@ mbt_gss_establish(
 
     evpl_rpc2_gss_client_create(env->evpl, program, conn,
                                 krb5_local_initiator_provider(),
-                                krb5_local_arg(env->krb5),
+                                mbt_gss_identity(env, uid),
                                 mbt_sec_service(env->sec),
                                 MBT_KRB5_PRINCIPAL, mbt_gss_ready, &w);
 
@@ -525,7 +616,35 @@ mbt_gss_establish(
         exit(1);
     }
 
+    env->gss_outstanding++;
+
     return w.client;
+} /* mbt_gss_establish_as */
+
+/* Retire a context this harness established.  Every destroy goes through here
+ * so the balance above stays honest. */
+static inline void
+mbt_gss_retire(
+    struct mbt_env              *env,
+    struct evpl_rpc2_gss_client *client)
+{
+    if (!client) {
+        return;
+    }
+
+    evpl_rpc2_gss_client_destroy(env->evpl, client);
+    env->gss_outstanding--;
+} /* mbt_gss_retire */
+
+/* The machine principal, which is who every connection-level context is. */
+static inline struct evpl_rpc2_gss_client *
+mbt_gss_establish(
+    struct mbt_env           *env,
+    struct evpl_rpc2_program *program,
+    struct evpl_rpc2_conn    *conn,
+    const char               *what)
+{
+    return mbt_gss_establish_as(env, program, conn, 0, what);
 } /* mbt_gss_establish */
 
 /*
@@ -548,11 +667,11 @@ mbt_cred_for(
     int                   i;
 
     if (env->sec == MBT_SEC_SYS || conn == env->nfs_conn) {
-        return &env->cred;
+        return &env->root_cred;
     }
 
     for (i = 0; i < env->num_conn_creds; i++) {
-        if (env->conn_creds[i].conn == conn) {
+        if (env->conn_creds[i].conn == conn && env->conn_creds[i].uid == 0) {
             return &env->conn_creds[i].cred;
         }
     }
@@ -565,6 +684,7 @@ mbt_cred_for(
 
     cc       = &env->conn_creds[env->num_conn_creds++];
     cc->conn = conn;
+    cc->uid  = 0;
     cc->gss  = mbt_gss_establish(env, program, conn, "connection");
 
     cc->cred.flavor      = EVPL_RPC2_AUTH_RPCSEC_GSS;
@@ -573,6 +693,59 @@ mbt_cred_for(
 
     return &cc->cred;
 } /* mbt_cred_for */
+
+/*
+ * The credential for a call on `conn` made as `uid`.
+ *
+ * Under AUTH_SYS the caller sets uid in the credential and one credential
+ * serves everyone.  Under RPCSEC_GSS there is no uid on the wire: the caller
+ * is whoever the context authenticated, so calling as a second user means a
+ * second context, established under that user's own principal.  That is what
+ * rpc.gssd does per user, and it is what this builds -- lazily, and kept,
+ * because a trace returns to the same uid many times.
+ */
+static inline struct evpl_rpc2_cred *
+mbt_cred_for_uid(
+    struct mbt_env           *env,
+    struct evpl_rpc2_conn    *conn,
+    struct evpl_rpc2_program *program,
+    uint32_t                  uid)
+{
+    struct mbt_conn_cred *cc;
+    int                   i;
+
+    if (env->sec == MBT_SEC_SYS) {
+        return &env->cred;
+    }
+
+    if (uid == 0 && conn == env->nfs_conn) {
+        return &env->root_cred;
+    }
+
+    for (i = 0; i < env->num_conn_creds; i++) {
+        if (env->conn_creds[i].conn == conn &&
+            env->conn_creds[i].uid == uid) {
+            return &env->conn_creds[i].cred;
+        }
+    }
+
+    if (env->num_conn_creds == MBT_MAX_CONN_CREDS) {
+        fprintf(stderr, "%s: more than %d contexts wanted\n",
+                mbt_sec_name(env->sec), MBT_MAX_CONN_CREDS);
+        exit(1);
+    }
+
+    cc       = &env->conn_creds[env->num_conn_creds++];
+    cc->conn = conn;
+    cc->uid  = uid;
+    cc->gss  = mbt_gss_establish_as(env, program, conn, uid, "identity");
+
+    cc->cred.flavor      = EVPL_RPC2_AUTH_RPCSEC_GSS;
+    cc->cred.gss.service = mbt_sec_service(env->sec);
+    cc->cred.gss.client  = cc->gss;
+
+    return &cc->cred;
+} /* mbt_cred_for_uid */
 
 /*
  * Retire whatever context a suite's own connection carried, before the
@@ -591,9 +764,7 @@ mbt_conn_release(
             continue;
         }
 
-        if (env->conn_creds[i].gss) {
-            evpl_rpc2_gss_client_destroy(env->evpl, env->conn_creds[i].gss);
-        }
+        mbt_gss_retire(env, env->conn_creds[i].gss);
 
         env->conn_creds[i] = env->conn_creds[--env->num_conn_creds];
         return;
@@ -731,9 +902,33 @@ mbt_env_open_opts(
     chimera_server_config_set_nfs_enabled(config, 1);
 
     if (env->sec != MBT_SEC_SYS) {
+        uint32_t uid;
+
         chimera_server_config_set_nfs_kerberos_enabled(config, 1);
         chimera_server_config_set_nfs_kerberos_keytab(config,
                                                       MBT_KRB5_KEYTAB);
+
+        /*
+         * Teach the server what the harness's principals mean.  Without this
+         * every user principal would resolve through nsswitch, find no local
+         * account, and squash to anonymous -- so a trace's "as uid 1000" would
+         * silently become "as nobody" and its expected access outcomes would
+         * all be wrong.  The map is the same mechanism a Kerberos-only
+         * deployment uses for the same reason.
+         */
+        for (i = 0; opts && i < opts->num_principal_uids; i++) {
+            char name[64];
+
+            uid = opts->principal_uids[i];
+
+            if (uid == 0) {
+                continue;   /* the machine principal already maps to root */
+            }
+
+            snprintf(name, sizeof(name), MBT_KRB5_USER_PREFIX "%u", uid);
+            chimera_server_config_add_nfs_principal_map(config, name, uid, uid,
+                                                        0, NULL);
+        }
     }
 
     /* The RDMA listener is additional, not instead: the server keeps its
@@ -1050,6 +1245,8 @@ mbt_env_open_opts(
         env->mount_cred.gss.client  = env->mount_gss;
     }
 
+    env->root_cred = env->cred;
+
     env->data_buf = malloc(MBT_MAX_DATA);
 } /* mbt_env_open_opts */
 
@@ -1266,15 +1463,22 @@ mbt_env_stop(struct mbt_env *env)
     }
     /* Before the connections they were established on: destroy sends a
      * DESTROY down each one so the server drops its half now rather than at
-     * expiry. */
-    if (env->nfs_gss) {
-        evpl_rpc2_gss_client_destroy(env->evpl, env->nfs_gss);
-        env->nfs_gss = NULL;
+     * expiry.
+     *
+     * The per-identity contexts first.  A suite that opened its own
+     * connections releases those through mbt_conn_release, but the ones
+     * mbt_cred_for_uid raised for a second user live on the env's own
+     * connection and have nothing else to retire them. */
+    for (i = 0; i < env->num_conn_creds; i++) {
+        mbt_gss_retire(env, env->conn_creds[i].gss);
+        env->conn_creds[i].gss = NULL;
     }
-    if (env->mount_gss) {
-        evpl_rpc2_gss_client_destroy(env->evpl, env->mount_gss);
-        env->mount_gss = NULL;
-    }
+    env->num_conn_creds = 0;
+
+    mbt_gss_retire(env, env->nfs_gss);
+    env->nfs_gss = NULL;
+    mbt_gss_retire(env, env->mount_gss);
+    env->mount_gss = NULL;
 
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->nfs_conn);
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->mount_conn);
@@ -1298,6 +1502,17 @@ mbt_env_stop(struct mbt_env *env)
         chimera_server_destroy(env->ds_server[i]);
         prometheus_metrics_destroy(env->ds_metrics[i]);
     }
+
+    if (env->gss_outstanding) {
+        fprintf(stderr, "%s: %d GSS context(s) never retired\n",
+                mbt_sec_name(env->sec), env->gss_outstanding);
+        exit(1);
+    }
+
+    for (i = 0; i < env->num_identities; i++) {
+        krb5_local_identity_destroy(env->identities[i].id);
+    }
+    env->num_identities = 0;
 
     if (env->krb5) {
         krb5_local_destroy(env->krb5);
