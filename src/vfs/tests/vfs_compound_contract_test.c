@@ -310,6 +310,27 @@ lookup_child(
     assert(ctx->status == CHIMERA_VFS_OK);
 } /* lookup_child */
 
+/* Standalone (NULL-compound) resolve of `name` under parent_fh; returns 1 if
+ * it exists, 0 on NOENT.  Unlike lookup_child it does not assert OK, so it can
+ * probe whether a mid-compound mutation is already visible to an outside
+ * observer (the Pillai non-atomic scenario). */
+static int
+lookup_present(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *parent_fh,
+    uint32_t                       parent_fh_len,
+    const char                    *name)
+{
+    chimera_vfs_lookup(ctx->vfs_thread, cred, NULL, parent_fh, parent_fh_len,
+                       name, (int) strlen(name),
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                       lookup_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK || ctx->status == CHIMERA_VFS_ENOENT);
+    return ctx->status == CHIMERA_VFS_OK;
+} /* lookup_present */
+
 static struct chimera_vfs_open_handle *
 open_handle(
     struct test_ctx               *ctx,
@@ -1033,6 +1054,99 @@ test_single_op_fold_liveness(
     TEST_PASS("single-op compound ends fire for COMMIT_DURABLE and COMMIT; effects persist");
 } /* test_single_op_fold_liveness */
 
+/* (l) Pillai non-atomic mode: a multi-op GROUPING (non-RETRYABLE) WRITE
+ * compound -- mkdir, mkdir, create+write, set_xattr, with a read-your-writes
+ * read spliced in -- must yield the correct FINAL state after COMMIT whether
+ * cairn applied it atomically (default) or op-by-op (CHIMERA_CAIRN_NONATOMIC).
+ * Since atomicity is permitted-but-never-promised, both are conformant and the
+ * final-state assertions hold either way; that is the property this guards.
+ *
+ * The scenario also proves the knob is actually doing something: after the
+ * first enlisted mkdir completes, a STANDALONE (outside-the-compound) lookup
+ * of that name probes the base DB.  With the knob ON the op was committed
+ * early, so the prefix is already visible mid-compound; with it OFF the
+ * mutation is still staged and invisible until END.  The env is read exactly
+ * as the backend reads it, so this stays a single self-checking scenario. */
+static void
+test_nonatomic_grouping_final_state(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    const uint8_t                  *cairn_fh,
+    uint32_t                        cairn_fh_len,
+    struct chimera_vfs_open_handle *cairn_root)
+{
+    struct chimera_vfs_compound    *compound;
+    struct chimera_vfs_open_handle *file_h;
+    struct chimera_vfs_open_handle *reopen_h;
+    const char                     *env       = getenv("CHIMERA_CAIRN_NONATOMIC");
+    int                             nonatomic = (env && *env && *env != '0');
+    uint8_t                         pattern[RYW_LEN];
+    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                        file_fh_len;
+    int                             mid_visible;
+
+    for (int i = 0; i < RYW_LEN; i++) {
+        pattern[i] = (uint8_t) (0x3C ^ (i * 11));
+    }
+
+    /* GROUPING lane: no RETRYABLE flag.  Eagerly bound to cairn. */
+    compound = chimera_vfs_compound_begin(ctx->vfs_thread, cred,
+                                          cairn_fh, cairn_fh_len,
+                                          CHIMERA_VFS_COMPOUND_WRITE,
+                                          chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                          0);
+    assert(compound != NULL);
+    assert(compound->module != NULL);
+    assert(strcmp(compound->module->name, "cairn") == 0);
+    assert(!(compound->flags & CHIMERA_VFS_COMPOUND_RETRYABLE));
+
+    /* Op 1: an enlisted mkdir. */
+    mkdir_under(ctx, cred, compound, cairn_root, "l_dir1");
+
+    /* Probe mid-compound visibility of the just-completed op through a
+     * standalone lookup (base DB).  This asserts the knob's whole point. */
+    mid_visible = lookup_present(ctx, cred, cairn_fh, cairn_fh_len, "l_dir1");
+    if (nonatomic) {
+        assert(mid_visible);        /* committed early: prefix already visible */
+    } else {
+        assert(!mid_visible);       /* staged: invisible until END */
+    }
+
+    /* Ops 2-5: more mutations, plus an in-compound read-your-writes check
+     * that must hold in BOTH modes (early-committed to base, or staged). */
+    mkdir_under(ctx, cred, compound, cairn_root, "l_dir2");
+
+    file_h = create_file(ctx, cred, compound, cairn_root, "l_file");
+    write_data(ctx, cred, compound, file_h, 0, pattern, RYW_LEN);
+    read_verify(ctx, cred, compound, file_h, 0, pattern, RYW_LEN);
+    xattr_roundtrip(ctx, cred, compound, file_h, "user.l_key", "pillai");
+
+    end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
+
+    /* Final state must be correct regardless of atomicity: every mutation is
+     * durably present and the file's bytes and xattr round-trip. */
+    lookup_child(ctx, cred, cairn_fh, cairn_fh_len, "l_dir1");
+    lookup_child(ctx, cred, cairn_fh, cairn_fh_len, "l_dir2");
+    lookup_child(ctx, cred, cairn_fh, cairn_fh_len, "l_file");
+    memcpy(file_fh, ctx->fh, ctx->fh_len);
+    file_fh_len = ctx->fh_len;
+
+    reopen_h = open_handle(ctx, cred, file_fh, file_fh_len);
+    read_verify(ctx, cred, NULL, reopen_h, 0, pattern, RYW_LEN);
+    xattr_roundtrip(ctx, cred, NULL, reopen_h, "user.l_key", "pillai");
+    chimera_vfs_release(ctx->vfs_thread, reopen_h);
+
+    chimera_vfs_release(ctx->vfs_thread, file_h);
+
+    if (nonatomic) {
+        TEST_PASS("non-atomic grouping compound: prefix visible mid-compound; "
+                  "final state correct after COMMIT");
+    } else {
+        TEST_PASS("atomic grouping compound: staged prefix invisible mid-compound; "
+                  "final state correct after COMMIT");
+    }
+} /* test_nonatomic_grouping_final_state */
+
 int
 main(
     int    argc,
@@ -1147,6 +1261,8 @@ main(
                               cairn_root);
     test_single_op_fold_liveness(&ctx, &cred, cairn_fh, cairn_fh_len,
                                  cairn_root);
+    test_nonatomic_grouping_final_state(&ctx, &cred, cairn_fh, cairn_fh_len,
+                                        cairn_root);
 
     chimera_vfs_release(ctx.vfs_thread, mem_root);
     chimera_vfs_release(ctx.vfs_thread, cairn_root);

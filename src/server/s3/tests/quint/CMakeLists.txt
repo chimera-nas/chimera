@@ -141,6 +141,17 @@ if(CAIRN_ENABLED)
         LABELS "quint;s3_mbt;cairn"
         TIMEOUT 300)
 
+    # Same corpus with cairn forced non-atomic (grouping compounds commit
+    # op-by-op): proves no S3 flow relies on cairn's compound atomicity
+    # (the best-effort contract's Pillai defense).
+    add_test(NAME chimera/server/s3/mbt/batch_cairn_nonatomic
+        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+                --backend cairn --exclude-prefix stepMultipart_)
+    set_tests_properties(chimera/server/s3/mbt/batch_cairn_nonatomic PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_cairn_nonatomic;CHIMERA_CAIRN_NONATOMIC=1"
+        LABELS "quint;s3_mbt;cairn"
+        TIMEOUT 300)
+
     add_test(NAME chimera/server/s3/mbt/batch_multipart_cairn
         COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
                 --backend cairn --block-size 5242880

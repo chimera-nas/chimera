@@ -109,6 +109,16 @@ if(CAIRN_ENABLED)
     target_link_libraries(vfs_compound_contract_test chimera_vfs chimera_vfs_memfs
         chimera_vfs_cairn chimera_vfs_memkv evpl)
     add_test(chimera/vfs/compound_contract_test vfs_compound_contract_test)
+
+    # Same binary under the Pillai non-atomic knob: cairn commits each enlisted
+    # grouping-lane mutation to the base DB as its op completes instead of one
+    # atomic batch at COMPOUND_END.  The contract permits this, so every
+    # scenario must still hold; scenario (l) additionally asserts the knob is
+    # live (a mid-compound standalone lookup sees the committed prefix).
+    add_test(NAME chimera/vfs/compound_contract_test_nonatomic
+             COMMAND vfs_compound_contract_test)
+    set_tests_properties(chimera/vfs/compound_contract_test_nonatomic PROPERTIES
+        ENVIRONMENT "CHIMERA_CAIRN_NONATOMIC=1")
 endif()
 
 # Tag every test registered above with the 'vfs' label so the suite can be run

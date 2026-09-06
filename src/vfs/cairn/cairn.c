@@ -121,6 +121,23 @@ void rocksdb_flush_wal(
 #define chimera_cairn_abort_if(cond, ...) \
         chimera_abort_if(cond, "cairn", __FILE__, __LINE__, __VA_ARGS__)
 
+/*
+ * Pillai non-atomic debug mode (TEST-ONLY, off in production).
+ *
+ * The compound contract permits atomicity but never promises it.  cairn's
+ * default GROUPING lane happens to apply a compound atomically -- one indexed
+ * batch write at COMPOUND_END -- which lets a careless consumer silently come
+ * to rely on all-or-nothing, a reliance that would break on proxies and
+ * non-compound backends.  When CHIMERA_CAIRN_NONATOMIC is set in the
+ * environment, a GROUPING-lane WRITE compound instead commits each enlisted
+ * mutation to the base DB as its op completes (cairn_dispatch), so a
+ * mid-compound observer sees a partial prefix and COMPOUND_END is a near-no-op.
+ * Run with the knob on, the MBT suites expose any consumer that baked in
+ * atomicity.  Read once at module init below (like CHIMERA_OC_TRACE); the
+ * RETRYABLE lane and the default (knob off) path are untouched.
+ */
+static int cairn_nonatomic;
+
 struct cairn_inode_key {
     uint8_t  keytype;
     uint64_t inum;
@@ -1558,6 +1575,13 @@ cairn_init(
     int                  bloom_filter = 1; // Default to enabled
     int                  statistics   = 0; // Opt-in for diagnostics
     int                  i;
+
+    /* Read the Pillai non-atomic test knob once at module init (see the
+     * cairn_nonatomic comment above).  Idempotent across module instances. */
+    {
+        const char *env = getenv("CHIMERA_CAIRN_NONATOMIC");
+        cairn_nonatomic = (env && *env && *env != '0');
+    }
 
     cfg = json_loads(cfgdata, 0, &json_error);
 
@@ -6868,6 +6892,35 @@ cairn_dispatch(
             request->complete(request);
             break;
     } /* switch */
+
+    /*
+     * Pillai non-atomic test mode (CHIMERA_CAIRN_NONATOMIC): commit this
+     * enlisted GROUPING-lane WRITE op's staged mutations to the base DB NOW,
+     * as the op completes, instead of holding the whole compound's staged
+     * work for one atomic batch write at COMPOUND_END.  cairn_txn_commit_once
+     * flushes the compound's extent batch then its metadata WBWI (data-first
+     * ordering preserved) with nosync write options and NULLs both, so END
+     * finds nothing staged and becomes a no-op.  This deliberately breaks
+     * compound atomicity: a mid-compound observer of the base DB sees the
+     * committed prefix, and an ABORT can no longer discard the already-applied
+     * ops -- exactly the behavior the contract permits but never promises, so
+     * an MBT run with the knob on flushes out any consumer that relied on
+     * all-or-nothing.
+     *
+     * Read-your-writes is preserved: the writes land in the base DB before the
+     * next enlisted op runs, and that op's metadata reads (meta_wbwi now NULL
+     * -> plain base read, or a freshly staged WBWI merged over the updated
+     * base) and extent reads (data_batch now NULL -> base iterator) observe
+     * them.  Grouping WRITE lane only -- the RETRYABLE lane (meta_txn) and the
+     * autocommit path (cur_txn NULL) are left exactly as they were.  Any
+     * commit error is logged inside the helper; the op already reported OK, so
+     * we do not fail it retroactively (this is a test-only mode).
+     */
+    if (unlikely(cairn_nonatomic) && thread->cur_txn &&
+        thread->cur_txn->core.mode == CHIMERA_VFS_COMPOUND_WRITE &&
+        cairn_txn_grouping(thread->cur_txn)) {
+        cairn_txn_commit_once(thread, thread->cur_txn, 0, 0);
+    }
 
     /* Enlisted op fully completed (inline); detach the stash so the per-cycle
      * autocommit machinery below and any later op see no transaction. */

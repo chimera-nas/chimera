@@ -312,6 +312,21 @@ set_tests_properties(chimera/posix/mbt/batch_cairn PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
+# Same corpus with cairn forced non-atomic (grouping compounds commit
+# op-by-op): proves no POSIX call relies on cairn's compound atomicity
+# (the best-effort contract's Pillai defense).
+add_test(NAME chimera/posix/mbt/batch_cairn_nonatomic
+    COMMAND $<TARGET_FILE:posix_mbt_replay>
+            --backend cairn
+            --trace-dir ${SPECS_BUNDLE_DIR}/posix
+            --exclude-prefix step --exclude-prefix nfs3_
+            --exclude-prefix nfs4_ --exclude-prefix fuse_)
+set_tests_properties(chimera/posix/mbt/batch_cairn_nonatomic PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_cairn_nonatomic;CHIMERA_CAIRN_NONATOMIC=1"
+    LABELS "quint;posix_mbt;cairn"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
+
 # The same corpus replayed through the NFS loopback: an in-process chimera
 # server exports a memfs filesystem over the inproc transport and the posix
 # client mounts it through the nfs proxy module (src/vfs/nfs) with vers=3 --
