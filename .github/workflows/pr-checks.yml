@@ -456,7 +456,34 @@ jobs:
               # whether that is where the registered tests look, is the whole
               # question -- so the diagnostic below must run either way.
               ninja kvm_ubuntu2404_image || echo "IMAGE FETCH FAILED (continuing to report)"
-              bash /workspace/kvm/kvm_diagnose.sh /build ubuntu2404'
+              bash /workspace/kvm/kvm_diagnose.sh /build ubuntu2404
+
+              # ---- escalation: the same guest, through the real harness ----
+              #
+              # The check above boots a guest directly: no netns, no tap, no
+              # chimera, no ctest.  It passes, so KVM, the images and the guest
+              # itself are all fine, and whatever breaks the extended kvm shard
+              # is in the part it skips.
+              #
+              # The extended logs point at the backend rather than the guest:
+              # nfstest_posix_memfs_nfs3 passed there while the diskfs variants
+              # timed out, and diskfs_aio_nfs4.1 hung outright.  So run one of
+              # each, memfs first as the control, and let ctest bound them --
+              # this is the comparison, and it is cheap.
+              #
+              # Both are run even if the first fails (|| true): a control that
+              # fails is itself the answer, and stopping there would hide it.
+              ninja
+              ctest -R "nfstest_posix_memfs_nfs3" --output-on-failure --timeout 420 -j 1 || true
+              ctest -R "nfstest_posix_diskfs_io_uring_nfs3" --output-on-failure --timeout 420 -j 1 || true
+
+              # Whatever ctest could not reclaim is still running.  12 of the 13
+              # wrappers launch qemu in the foreground and never kill it, so a
+              # guest outliving its test is the mechanism that turns one hang
+              # into a six-hour wedge -- name any survivor here rather than
+              # inferring it from a cancelled job.
+              echo "=== qemu processes still alive after ctest ==="
+              pgrep -af "qemu-system-" || echo "  none (nothing was left behind)"'
 
 
   analyze-macos:
