@@ -6258,16 +6258,8 @@ memfs_link_at(
      * would) without taking the lock a second time. */
     if (request->fh_len == request->link_at.dir_fhlen &&
         memcmp(request->fh, request->link_at.dir_fh, request->fh_len) == 0) {
-        /* Same ordering as the general path below: a name that is already
-         * taken is reported as taken, before the source's type.  The parent
-         * lock is held here, so the dirent is queryable without the second
-         * lock this branch exists to avoid. */
-        rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash,
-                            existing_dirent);
-
         pthread_mutex_unlock(&parent_inode->lock);
-        request->status = (existing_dirent && !request->link_at.replace) ?
-            CHIMERA_VFS_EEXIST : CHIMERA_VFS_EISDIR;
+        request->status = CHIMERA_VFS_EISDIR;
         request->complete(request);
         return;
     }
@@ -6277,25 +6269,6 @@ memfs_link_at(
     if (!inode) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ESTALE;
-        request->complete(request);
-        return;
-    }
-
-    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
-
-    /* The destination is judged before the source's type.  XSH link lists
-     * EEXIST, EACCES and EPERM without ordering them, and Linux resolves and
-     * checks path2 in do_linkat() before vfs_link() ever reaches its
-     * "S_ISDIR(inode) -> -EPERM" -- so a link onto a name that is already
-     * taken reports the taken name, whatever the source happens to be.
-     * Checking the source first reported EPERM for a call that would have
-     * failed EEXIST regardless of what was being linked.  The name is taken
-     * without an explicit replace request; with one we clobber the existing
-     * entry (CIFS rename with replace-if-exists, S3 overwrite). */
-    if (existing_dirent && !request->link_at.replace) {
-        pthread_mutex_unlock(&parent_inode->lock);
-        pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         return;
     }
@@ -6312,7 +6285,20 @@ memfs_link_at(
         return;
     }
 
+    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
+
     if (existing_dirent) {
+        /* The name is taken. Without an explicit replace request this is an
+         * error; with one we clobber the existing entry (CIFS rename with
+         * replace-if-exists, S3 PutObject/CopyObject overwrite). */
+        if (!request->link_at.replace) {
+            pthread_mutex_unlock(&parent_inode->lock);
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_EEXIST;
+            request->complete(request);
+            return;
+        }
+
         /* If the name already points at the link target itself, the link is
          * already in place — succeed without disturbing it. Guard this before
          * locking the existing inode, which would otherwise self-deadlock on
