@@ -2157,13 +2157,29 @@ chimera_smb_client_remove_at(
     /* POSIX unlink/rmdir removes the named entry itself; a final-component
      * symlink must be deleted as the link, never followed (which would ELOOP or
      * hit the target).  FILE_OPEN_REPARSE_POINT opens the link node so
-     * DELETE_ON_CLOSE removes it. */
+     * DELETE_ON_CLOSE removes it.
+     *
+     * Project the caller's rmdir-vs-unlink assertion onto the CREATE options so
+     * the peer enforces it (#959): without one, an SMB server deletes whatever
+     * the name resolves to and RMDIR of a file (or REMOVE of a directory) would
+     * succeed instead of failing NFS3ERR_NOTDIR / NFS3ERR_ISDIR (RFC 1813
+     * 3.3.12, 3.3.13).  The peer answers STATUS_NOT_A_DIRECTORY /
+     * STATUS_FILE_IS_A_DIRECTORY, which the status map turns into ENOTDIR /
+     * EISDIR. */
+    uint32_t options = SMB2_FILE_DELETE_ON_CLOSE | SMB2_FILE_OPEN_REPARSE_POINT;
+
+    if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
+        options |= SMB2_FILE_DIRECTORY_FILE;
+    } else if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) {
+        options |= SMB2_FILE_NON_DIRECTORY_FILE;
+    }
+
     smb_send_create_follow(conn, request,
                            request->remove_at.name, request->remove_at.namelen,
                            SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
                            SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                            SMB2_FILE_OPEN,
-                           SMB2_FILE_DELETE_ON_CLOSE | SMB2_FILE_OPEN_REPARSE_POINT,
+                           options,
                            NULL, 0,
                            chimera_smb_remove_create_reply);
 } /* chimera_smb_client_remove_at */
