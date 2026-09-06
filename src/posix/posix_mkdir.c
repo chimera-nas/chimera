@@ -71,60 +71,19 @@ chimera_posix_mkdir(
     chimera_posix_completion_destroy(&comp);
 
     if (err) {
-        if ((err == EEXIST || err == EACCES) &&
-            path_len > 1 && path[path_len - 1] == '/') {
-            /* The backend judged the slash-stripped name.  XBD 4.16: a
-             * trailing slash makes the pathname resolve through the final
-             * component -- a non-directory there is ENOTDIR and a symlink
-             * loop is ELOOP, and resolution errors precede the operation's
-             * own existence/permission errors.  stat() with the slash
-             * preserved applies exactly those rules; any other stat
-             * outcome (a directory, a dangling link) keeps the backend's
-             * errno. */
-            struct stat st;
-
-            if (chimera_posix_stat(path, &st) < 0) {
-                if (errno == ENOTDIR || errno == ELOOP) {
-                    return -1;
-                }
-                if (errno == ENOENT) {
-                    /* The final component is a symbolic link whose target does
-                     * not exist.  The trailing slash resolves through the link
-                     * (XBD 4.16), so mkdir(2) must create the link's *target*,
-                     * not fail EEXIST on the link itself.  Read the link and
-                     * retry the create on the resolved path. */
-                    char    link[CHIMERA_VFS_PATH_MAX];
-                    char    tgt[CHIMERA_VFS_PATH_MAX];
-                    char    full[CHIMERA_VFS_PATH_MAX];
-                    ssize_t n;
-                    int     llen = path_len;
-
-                    while (llen > 1 && path[llen - 1] == '/') {
-                        llen--;
-                    }
-                    memcpy(link, path, llen);
-                    link[llen] = '\0';
-
-                    n = chimera_posix_readlink(link, tgt, sizeof(tgt) - 1);
-                    if (n > 0) {
-                        tgt[n] = '\0';
-                        if (tgt[0] == '/') {
-                            return chimera_posix_mkdir(tgt, mode);
-                        } else {
-                            const char *ls   = rindex(link, '/');
-                            int         dlen = ls ? (int) (ls - link) : 0;
-
-                            if (snprintf(full, sizeof(full), "%.*s/%s", dlen,
-                                         link, tgt) >= (int) sizeof(full)) {
-                                errno = ENAMETOOLONG;
-                                return -1;
-                            }
-                            return chimera_posix_mkdir(full, mode);
-                        }
-                    }
-                }
-            }
-        }
+        /* The backend's answer stands, trailing slash and all.  This used to
+         * re-judge a slash-terminated path with stat() and turn EEXIST into
+         * ENOTDIR or ELOOP -- and, for a dangling symlink, follow the link
+         * and create its target -- on the reading that XBD 4.16 makes a
+         * trailing slash resolve THROUGH the final component.  It does not,
+         * on the create path: XSH mkdir lists EEXIST as "the named file
+         * exists" with no qualification, and Linux answers EEXIST for
+         * mkdir("f/"), mkdir("dir/"), mkdir("lnk2dir/") and
+         * mkdir("dangling/") alike, creating nothing in any of them.  The
+         * old reading was shared with the quint model, which is why the MBT
+         * suite passed: the two agreed on something POSIX never said, and it
+         * took replaying the corpus at ext4 to break the tie.
+         */
         errno = err;
         return -1;
     }

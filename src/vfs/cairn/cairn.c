@@ -3025,6 +3025,14 @@ cairn_mkdir_at(
 
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
+    /* ...and a new SUBDIRECTORY inherits the set-group-ID bit itself, so the
+     * property propagates down a tree instead of stopping at the first
+     * level.  After apply_attrs, which sets the requested mode.  Matches
+     * memfs/diskfs and Linux (inode_init_owner). */
+    if (parent_inode->mode & S_ISGID) {
+        inode.mode |= S_ISGID;
+    }
+
     cairn_inherit_acl(thread, &inode, parent_inode->inum,
                       new_acl_mkdir,
                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
@@ -5192,14 +5200,10 @@ cairn_link_at(
 
     target_inode = target_ih.inode;
 
-    if (S_ISDIR(target_inode->mode)) {
-        cairn_inode_handle_release(&parent_ih);
-        cairn_inode_handle_release(&target_ih);
-        request->status = CHIMERA_VFS_EISDIR;
-        request->complete(request);
-        return;
-    }
-
+    /* The destination is judged before the source's type: XSH link orders
+     * EEXIST and EPERM against each other not at all, and Linux checks path2
+     * in do_linkat() before vfs_link() reaches its "S_ISDIR -> -EPERM".  Same
+     * ordering as memfs and diskfs. */
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->link_at.name_hash;
@@ -5211,6 +5215,14 @@ cairn_link_at(
         cairn_inode_handle_release(&target_ih);
         cairn_dirent_handle_release(&dh);
         request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
+    }
+
+    if (S_ISDIR(target_inode->mode)) {
+        cairn_inode_handle_release(&parent_ih);
+        cairn_inode_handle_release(&target_ih);
+        request->status = CHIMERA_VFS_EISDIR;
         request->complete(request);
         return;
     }

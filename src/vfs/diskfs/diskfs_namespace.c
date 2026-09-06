@@ -828,6 +828,14 @@ diskfs_mkdir_at_alloc_cb(
 
     diskfs_apply_attrs(inode, request->mkdir_at.set_attr);
 
+    /* ...and a new SUBDIRECTORY inherits the set-group-ID bit itself, so the
+     * property propagates down a tree instead of stopping at the first
+     * level.  After apply_attrs, which sets the requested mode.  Matches
+     * memfs and Linux (inode_init_owner). */
+    if (parent->mode & S_ISGID) {
+        inode->mode |= S_ISGID;
+    }
+
     parent->nlink++;
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
@@ -3304,19 +3312,33 @@ diskfs_link_at_check_cb(
 
     diskfs_bt_op_free(thread, op);
 
-    if (result >= 0) {
-        if (request->link_at.replace) {
-            p->rd_inum = rec->inum;
-            p->rd_gen  = rec->gen;
-
-            op = diskfs_bt_op_alloc(thread);
-            if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0], hash,
-                                        diskfs_link_at_removed_cb, request)) {
-                diskfs_link_at_removed_cb(op, op->result, request);
-            }
-            return;
-        }
+    /* The destination is judged before the source's type.  XSH link lists
+     * EEXIST, EACCES and EPERM without ordering them, and Linux resolves and
+     * checks path2 in do_linkat() before vfs_link() ever reaches its
+     * "S_ISDIR(inode) -> -EPERM" -- so a link onto a name that is already
+     * taken reports the taken name, whatever the source is.  Same ordering
+     * as memfs and cairn. */
+    if (result >= 0 && !request->link_at.replace) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
+        return;
+    }
+
+    if (unlikely(S_ISDIR(((struct diskfs_inode *) p->inode_stash[1])->mode))) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EISDIR);
+        return;
+    }
+
+    if (result >= 0) {
+        /* Replace: clobber the existing entry (CIFS rename with
+         * replace-if-exists, S3 overwrite). */
+        p->rd_inum = rec->inum;
+        p->rd_gen  = rec->gen;
+
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0], hash,
+                                    diskfs_link_at_removed_cb, request)) {
+            diskfs_link_at_removed_cb(op, op->result, request);
+        }
         return;
     }
 
@@ -3342,10 +3364,9 @@ diskfs_link_at_inode_cb(
         return;
     }
 
-    if (unlikely(S_ISDIR(inode->mode))) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EISDIR);
-        return;
-    }
+    /* The source's type is judged in diskfs_link_at_check_cb, once the
+     * destination name has been looked up: a name that is already taken is
+     * reported as taken whatever the source happens to be (see there). */
 
     /* A deleted, unreferenced inode is dead -- it is queued for (or already
      * under) background reclaim, so it must not re-enter the namespace.  An
