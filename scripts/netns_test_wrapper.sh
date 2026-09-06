@@ -52,9 +52,57 @@ ulimit -l unlimited
 echo 16777216 > /proc/sys/fs/aio-max-nr
 
 # Run the test command inside the namespace, restoring LD_PRELOAD only for
-# the test process (not for the ip binary itself, which ASAN would break)
+# the test process (not for the ip binary itself, which ASAN would break).
+#
+# set -e is lifted around the run so a signal death reaches the report below
+# rather than killing the shell with the status unexamined.
+set +e
 if [ -n "${SAVED_LD_PRELOAD}" ]; then
     ip netns exec "${NETNS_NAME}" env LD_PRELOAD="${SAVED_LD_PRELOAD}" "$@"
 else
     ip netns exec "${NETNS_NAME}" "$@"
 fi
+STATUS=$?
+set -e
+
+# A command killed by a signal leaves only bash's own one-line "Illegal
+# instruction" on stderr, which says nothing about which binary died or why.
+# That is exactly how the fio SIGILL has stayed unexplained: the tests run with
+# chimera logging off, so the process produces no output at all before it dies.
+# Report what is knowable here, while the namespace and the environment that
+# produced it are still the ones the command saw.
+if [ "${STATUS}" -gt 128 ]; then
+    SIG=$((STATUS - 128))
+    echo "=== netns test died on signal ${SIG} ($(kill -l "${SIG}" 2>/dev/null || echo unknown)) ===" >&2
+    echo "  command: $*" >&2
+    echo "  uname:   $(uname -m) $(uname -r)" >&2
+
+    # SIGILL is the one that needs hardware context: an instruction the build
+    # emitted that this particular runner cannot execute looks exactly like a
+    # crash in the loaded plugin.  Name the CPU and the ISA levels it claims.
+    if [ "${SIG}" -eq 4 ]; then
+        echo "  cpu:     $(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//')" >&2
+        for f in avx2 bmi2 fma avx512f sse4_2; do
+            if grep -qm1 "^flags.*\b${f}\b" /proc/cpuinfo 2>/dev/null; then
+                printf '  isa:     %s present\n' "${f}" >&2
+            else
+                printf '  isa:     %s ABSENT\n' "${f}" >&2
+            fi
+        done
+        # The plugin is dlopened, so a mismatch there is invisible to ldd on the
+        # host binary; name it explicitly when the job file points at one.
+        for arg in "$@"; do
+            case "${arg}" in
+                *.fio)
+                    plugin=$(sed -n 's/^ioengine=external://p' "${arg}" 2>/dev/null | head -1)
+                    if [ -n "${plugin}" ]; then
+                        echo "  plugin:  ${plugin}" >&2
+                        ls -l "${plugin}" >&2 2>/dev/null || echo "  plugin:  MISSING" >&2
+                    fi
+                    ;;
+            esac
+        done
+    fi
+fi
+
+exit "${STATUS}"
