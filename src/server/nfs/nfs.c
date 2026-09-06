@@ -215,6 +215,7 @@ nfs_server_init(
     shared->gss_enabled = chimera_server_config_get_nfs_kerberos_enabled(config);
     if (shared->gss_enabled) {
         chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config));
+        chimera_nfs_gss_set_principal_map(config);
         chimera_nfs_info("RPCSEC_GSS: Kerberos authentication enabled");
     }
 

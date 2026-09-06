@@ -108,9 +108,31 @@ struct drc_ctx {
 
 static inline void
 drc_cred_init(
+    struct mbt_env        *env,
     struct evpl_rpc2_cred *cred,
     uint32_t               uid)
 {
+    /*
+     * Whose call this is, said the way the flavor in force says it.
+     *
+     * The distinction this suite turns on -- that a retransmit from a
+     * different requester is not a replay of somebody else's answer -- is
+     * asserted differently by each flavor: AUTH_SYS names a uid and a machine,
+     * RPCSEC_GSS names an authenticated principal and nothing else.  Chimera
+     * folds whichever of those the call carried into the identity it caches
+     * against, so a suite that only ever sent AUTH_SYS would leave the GSS arm
+     * of that untested no matter which security flavor the cells claimed to
+     * run under.
+     */
+    if (env->sec != MBT_SEC_SYS) {
+        /* One context per user, established on the env's own connection and
+         * used on whichever the suite is testing.  A context handle is
+         * server-global, and a real client keeps one per (user, server) rather
+         * than per connection, so this is both simpler and closer to life. */
+        *cred = *mbt_cred_for_uid(env, env->nfs_conn, &env->nfs_v3.rpc2, uid);
+        return;
+    }
+
     memset(cred, 0, sizeof(*cred));
     cred->flavor                  = EVPL_RPC2_AUTH_SYS;
     cred->authsys.uid             = uid;

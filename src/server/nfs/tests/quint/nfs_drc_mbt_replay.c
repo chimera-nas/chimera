@@ -253,7 +253,7 @@ issue_v3(
     const struct mbt_fh  *fh;
     uint32_t              st;
 
-    drc_cred_init(&cred, uid);
+    drc_cred_init(o->c.env, &cred, uid);
     drc_v3_begin(&o->c, conn, &cred, xid);
 
     if (strcmp(tag, "ACreate") == 0) {
@@ -409,7 +409,7 @@ issue_v4(
         return 0;
     }
 
-    drc_cred_init(&cred, uid);
+    drc_cred_init(o->c.env, &cred, uid);
     drc_v4_call(&o->c, conn, &cred, xid, a, nops, 0, &res);
     return res.status;
 } /* issue_v4 */
@@ -444,7 +444,7 @@ learn_handles(
         return;
     }
 
-    drc_cred_init(&cred, 1000);
+    drc_cred_init(o->c.env, &cred, 1000);
 
     for (i = 0; i < json_array_size(entries); i++) {
         json_t     *pair = json_array_get(entries, i);
@@ -807,7 +807,7 @@ run_trace(
         } else if (strcmp(tag, "ONull") == 0) {
             struct evpl_rpc2_cred cred;
 
-            drc_cred_init(&cred, 1000);
+            drc_cred_init(o->c.env, &cred, 1000);
             drc_v3_begin(&o->c, (int) op_i64(op, "conn"), &cred,
                          DRC_HOUSEKEEPING_XID);
             mbt_null(o->env);

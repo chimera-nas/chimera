@@ -1087,6 +1087,35 @@ const char *
 chimera_server_config_get_nfs_kerberos_keytab(
     const struct chimera_server_config *config);
 
+/*
+ * The static principal map: an authenticated Kerberos principal and the UNIX
+ * identity it stands for.  Consulted before nsswitch, which stays the
+ * fallback.  See the struct comment in server.c for why an explicit map
+ * exists at all.
+ */
+int
+chimera_server_config_add_nfs_principal_map(
+    struct chimera_server_config *config,
+    const char                   *principal,
+    uint32_t                      uid,
+    uint32_t                      gid,
+    uint32_t                      num_gids,
+    const uint32_t               *gids);
+
+int
+chimera_server_config_get_nfs_principal_map_count(
+    const struct chimera_server_config *config);
+
+/* Returns the principal, or NULL when index is out of range. */
+const char *
+chimera_server_config_get_nfs_principal_map_entry(
+    const struct chimera_server_config *config,
+    int                                 index,
+    uint32_t                           *uid,
+    uint32_t                           *gid,
+    uint32_t                           *num_gids,
+    const uint32_t                    **gids);
+
 void
 chimera_server_config_set_smb_kerberos_realm(
     struct chimera_server_config *config,

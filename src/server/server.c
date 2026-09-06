@@ -50,9 +50,34 @@ struct chimera_server_config_smb_auth {
     char kerberos_realm[256];
 };
 
+/*
+ * One entry of the static principal map: an authenticated Kerberos principal
+ * and the UNIX identity it stands for.
+ *
+ * RPCSEC_GSS puts no uid on the wire -- the caller is whoever the context
+ * authenticated -- so the server has to decide for itself what local identity
+ * a principal means.  Resolving the name through nsswitch is the usual answer
+ * and remains the fallback, but it requires every Kerberos user to also be a
+ * local account, which is not true of every deployment and is awkward to
+ * arrange in a test.  An explicit map is what nfsidmap's static method and
+ * Ganesha both offer for the same reason.
+ */
+struct chimera_server_config_principal_map_entry {
+    char     principal[256];
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t num_gids;
+    uint32_t gids[CHIMERA_VFS_CRED_MAX_GIDS];
+};
+
+#define CHIMERA_NFS_MAX_PRINCIPAL_MAP 64
+
 struct chimera_server_config_nfs_auth {
-    int  kerberos_enabled;       /* enable RPCSEC_GSS (sec=krb5) on the NFS server */
-    char kerberos_keytab[256];   /* keytab path; empty => KRB5_KTNAME default */
+    int                                              kerberos_enabled; /* enable RPCSEC_GSS (sec=krb5) on the NFS server */
+    char                                             kerberos_keytab[256]; /* keytab path; empty => KRB5_KTNAME default */
+    /* Consulted before nsswitch; empty means nsswitch alone, as before. */
+    struct chimera_server_config_principal_map_entry principal_map[CHIMERA_NFS_MAX_PRINCIPAL_MAP];
+    int                                              num_principal_map;
 };
 
 struct chimera_server_config {
@@ -308,6 +333,7 @@ chimera_server_config_init(void)
     config->smb_auth.kerberos_realm[0]  = '\0';
     config->nfs_auth.kerberos_enabled   = 0;
     config->nfs_auth.kerberos_keytab[0] = '\0';
+    config->nfs_auth.num_principal_map  = 0;
 
     config->anonuid = 65534;
     config->anongid = 65534;
@@ -3389,6 +3415,82 @@ chimera_server_config_get_nfs_kerberos_keytab(const struct chimera_server_config
 {
     return config->nfs_auth.kerberos_keytab;
 } /* chimera_server_config_get_nfs_kerberos_keytab */
+
+/*
+ * Add a principal -> UNIX identity mapping.
+ *
+ * `principal` is matched against the authenticated name with its realm
+ * stripped, so "u1000" matches "u1000@EXAMPLE.COM"; a two-component service
+ * name is written in full ("nfs/host").  Supplementary groups are carried
+ * because that is the part nsswitch resolution most often gets wrong for a
+ * Kerberos-only user: there is no local account to read them from.
+ */
+SYMBOL_EXPORT int
+chimera_server_config_add_nfs_principal_map(
+    struct chimera_server_config *config,
+    const char                   *principal,
+    uint32_t                      uid,
+    uint32_t                      gid,
+    uint32_t                      num_gids,
+    const uint32_t               *gids)
+{
+    struct chimera_server_config_principal_map_entry *e;
+    uint32_t                                          i;
+
+    if (!principal || !*principal ||
+        strlen(principal) >= sizeof(e->principal) ||
+        config->nfs_auth.num_principal_map >= CHIMERA_NFS_MAX_PRINCIPAL_MAP) {
+        return -1;
+    }
+
+    if (num_gids > CHIMERA_VFS_CRED_MAX_GIDS) {
+        num_gids = CHIMERA_VFS_CRED_MAX_GIDS;
+    }
+
+    e = &config->nfs_auth.principal_map[config->nfs_auth.num_principal_map++];
+
+    snprintf(e->principal, sizeof(e->principal), "%s", principal);
+    e->uid      = uid;
+    e->gid      = gid;
+    e->num_gids = num_gids;
+
+    for (i = 0; i < num_gids; i++) {
+        e->gids[i] = gids[i];
+    }
+
+    return 0;
+} /* chimera_server_config_add_nfs_principal_map */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_principal_map_count(const struct chimera_server_config *config)
+{
+    return config->nfs_auth.num_principal_map;
+} /* chimera_server_config_get_nfs_principal_map_count */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_nfs_principal_map_entry(
+    const struct chimera_server_config *config,
+    int                                 index,
+    uint32_t                           *uid,
+    uint32_t                           *gid,
+    uint32_t                           *num_gids,
+    const uint32_t                    **gids)
+{
+    const struct chimera_server_config_principal_map_entry *e;
+
+    if (index < 0 || index >= config->nfs_auth.num_principal_map) {
+        return NULL;
+    }
+
+    e = &config->nfs_auth.principal_map[index];
+
+    *uid      = e->uid;
+    *gid      = e->gid;
+    *num_gids = e->num_gids;
+    *gids     = e->gids;
+
+    return e->principal;
+} /* chimera_server_config_get_nfs_principal_map_entry */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_kerberos_realm(
