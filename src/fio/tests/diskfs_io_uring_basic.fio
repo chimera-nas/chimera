@@ -2,10 +2,16 @@
 #
 # SPDX-License-Identifier: Unlicense
 
+# chimera_log below sends chimera's own log to stderr.  Without it the engine
+# disables logging entirely, so a failure inside chimera produces no output at
+# all -- which is why the intermittent SIGILL here has only ever been visible as
+# bash's one-line "Illegal instruction" and nothing else.
+
 [global]
 thread=1
 ioengine=external:${PLUGIN_PATH}
 chimera_config=${FIO_TEST_BINARY}/diskfs_io_uring_basic.json
+chimera_log=/dev/stderr
 group_reporting
 numjobs=1
 create_on_open=1
