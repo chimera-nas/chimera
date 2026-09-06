@@ -5200,10 +5200,14 @@ cairn_link_at(
 
     target_inode = target_ih.inode;
 
-    /* The destination is judged before the source's type: XSH link orders
-     * EEXIST and EPERM against each other not at all, and Linux checks path2
-     * in do_linkat() before vfs_link() reaches its "S_ISDIR -> -EPERM".  Same
-     * ordering as memfs and diskfs. */
+    if (S_ISDIR(target_inode->mode)) {
+        cairn_inode_handle_release(&parent_ih);
+        cairn_inode_handle_release(&target_ih);
+        request->status = CHIMERA_VFS_EISDIR;
+        request->complete(request);
+        return;
+    }
+
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->link_at.name_hash;
@@ -5215,14 +5219,6 @@ cairn_link_at(
         cairn_inode_handle_release(&target_ih);
         cairn_dirent_handle_release(&dh);
         request->status = CHIMERA_VFS_EEXIST;
-        request->complete(request);
-        return;
-    }
-
-    if (S_ISDIR(target_inode->mode)) {
-        cairn_inode_handle_release(&parent_ih);
-        cairn_inode_handle_release(&target_ih);
-        request->status = CHIMERA_VFS_EISDIR;
         request->complete(request);
         return;
     }
