@@ -44,11 +44,9 @@ chimera_fuse_open_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
-    struct chimera_fuse_request   *req    = private_data;
-    struct chimera_fuse_thread    *thread = req->thread;
-    struct chimera_fuse_mount     *mount  = req->channel->mount;
+    struct chimera_fuse_request   *req   = private_data;
+    struct chimera_fuse_mount     *mount = req->channel->mount;
     struct chimera_fuse_open_file *file;
-    struct fuse_open_out           out;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
@@ -74,27 +72,14 @@ chimera_fuse_open_callback(
 
     chimera_fuse_file_link(mount, file);
 
-    memset(&out, 0, sizeof(out));
-    out.fh = (uint64_t) (uintptr_t) file;
+    req->file       = file;
+    req->file_owned = 1;
 
-    /* With an invalidation grant in force from here on, the kernel's cached
-     * pages are guaranteed to be dropped when any other party changes the
-     * file, so letting them survive across open/close cycles is coherent --
-     * and a real read-cache win.  (Pages, unlike attributes, are only
-     * seeded through us AFTER the arm, so a fresh grant fully covers
-     * them.)  No grant (contention) means no coverage: ttl mode keeps the
-     * kernel's default invalidate-on-open behavior, sync mode goes further
-     * and bypasses the page cache entirely so an uncovered open can never
-     * serve stale data. */
-    out.open_flags |= chimera_fuse_open_cache_flags(
-        mount, chimera_fuse_grant_open(thread, mount, req->nodeid, oh));
-
-    if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
-        /* The kernel never learned this fh, so no RELEASE will come. */
-        chimera_fuse_file_unlink(mount, file);
-        chimera_vfs_release(thread->vfs_thread, file->handle);
-        free(file);
-    }
+    /* The fuse_open_out -- including the invalidation-grant arm that decides
+     * its cache flags -- is built by the deliver path once the compound end
+     * settles; if the kernel never learns this fh (no RELEASE will come) --
+     * or a conflict replays the request -- the open_file is undone there. */
+    chimera_fuse_reply_open(req);
 } /* chimera_fuse_open_callback */
 
 static void
@@ -111,7 +96,8 @@ chimera_fuse_open_gated(
 
     /* O_TRUNC arrives as a separate SETATTR(size=0) because we do not
      * advertise FUSE_ATOMIC_O_TRUNC. */
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         req->u.open.vfs_flags,
                         chimera_fuse_open_callback, req);
@@ -184,9 +170,8 @@ chimera_fuse_create_callback(
     struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data)
 {
-    struct chimera_fuse_request   *req    = private_data;
-    struct chimera_fuse_thread    *thread = req->thread;
-    struct chimera_fuse_mount     *mount  = req->channel->mount;
+    struct chimera_fuse_request   *req   = private_data;
+    struct chimera_fuse_mount     *mount = req->channel->mount;
     struct chimera_fuse_open_file *file;
     struct fuse_open_out           out;
 
@@ -202,17 +187,18 @@ chimera_fuse_create_callback(
 
     chimera_fuse_file_link(mount, file);
 
+    req->file       = file;
+    req->file_owned = 1;
+
     memset(&out, 0, sizeof(out));
     out.fh = (uint64_t) (uintptr_t) file;
 
-    /* No invalidation grant here: the child's nodeid is assigned inside
-     * reply_entry, and the creator's own writes are self-coherent anyway.
-     * Any other mount's open of the file builds its own grant. */
-    if (chimera_fuse_reply_entry(req, attr, &out, sizeof(out)) != 0) {
-        chimera_fuse_file_unlink(mount, file);
-        chimera_vfs_release(thread->vfs_thread, file->handle);
-        free(file);
-    }
+    /* No invalidation grant here: the child's nodeid is assigned inside the
+     * entry deliver, and the creator's own writes are self-coherent anyway.
+     * Any other mount's open of the file builds its own grant.  If the
+     * kernel never sees the entry -- or a conflict replays the request --
+     * the deliver/replay path undoes the open_file. */
+    chimera_fuse_reply_entry(req, attr, &out, sizeof(out));
 } /* chimera_fuse_create_callback */
 
 static void
@@ -248,7 +234,8 @@ chimera_fuse_create_open_callback(
     req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
 
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req), oh,
                         name, strlen(name),
                         flags,
                         &req->u.create.set_attr,
@@ -280,7 +267,8 @@ chimera_fuse_op_create(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -342,7 +330,8 @@ chimera_fuse_op_read(
     chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
-    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+                           chimera_fuse_req_compound(req),
                            file->handle,
                            in->offset, in->size,
                            req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
@@ -430,7 +419,8 @@ chimera_fuse_op_write(
     chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
-    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+                            chimera_fuse_req_compound(req),
                             file->handle,
                             in->offset, in->size, sync,
                             0, 0,
@@ -476,7 +466,8 @@ chimera_fuse_op_flush(
                                      file->handle->fh_hash, in->lock_owner);
 
     /* close(2) must surface write errors, so flush commits. */
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+                       chimera_fuse_req_compound(req),
                        file->handle,
                        0, 0, 0, 0,
                        chimera_fuse_commit_complete, req);
@@ -496,7 +487,8 @@ chimera_fuse_op_fsync(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+                       chimera_fuse_req_compound(req),
                        chimera_fuse_file(in->fh)->handle,
                        0, 0, 0, 0,
                        chimera_fuse_commit_complete, req);
@@ -568,7 +560,8 @@ chimera_fuse_op_fallocate(
         return;
     }
 
-    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred,
+                         chimera_fuse_req_compound(req),
                          chimera_fuse_file(in->fh)->handle,
                          in->offset, in->length, flags,
                          0, 0,
@@ -632,7 +625,8 @@ chimera_fuse_op_lseek(
             return;
     } /* switch */
 
-    chimera_vfs_seek(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_seek(req->thread->vfs_thread, &req->cred,
+                     chimera_fuse_req_compound(req),
                      chimera_fuse_file(in->fh)->handle,
                      in->offset, what,
                      chimera_fuse_lseek_complete, req);
@@ -697,7 +691,8 @@ chimera_fuse_op_copy_file_range(
      * cached, including this one; the write triggers the usual claim break,
      * and this mount is exempt from its own invalidation through the
      * credential's origin stamp. */
-    chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred,
+                           chimera_fuse_req_compound(req),
                            src->handle, in->off_in,
                            dst->handle, in->off_out,
                            in->len, 0,

@@ -12,10 +12,11 @@
 #include "fuse_internal.h"
 #include "fuse_attr.h"
 #include "common/macros.h"
+#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
 /*
- * Channel read loop and reply writers.
+ * Channel read loop, the per-request compound driver, and reply writers.
  *
  * Each /dev/fuse read returns exactly one complete request, and each reply
  * is one atomic writev to the channel the request was read from -- the
@@ -23,6 +24,18 @@
  * so a reply on any other channel would not find it.  Requests are
  * dispatched on the thread that owns the channel and every VFS completion
  * fires on the issuing thread, so a request never changes threads.
+ *
+ * One FUSE request == one VFS compound (RETRYABLE).  The compound begins
+ * lazily at the request's first VFS call and is ended by the reply helpers
+ * BEFORE anything is written to the kernel: the helpers park the reply on
+ * the request, commit (durably for FSYNC/FSYNCDIR), and only the end
+ * callback delivers the parked reply.  A wait-die/optimistic-commit
+ * conflict -- surfaced by a member op as the CHIMERA_FUSE_ECONFLICT errno
+ * sentinel or by the commit itself -- aborts the compound and replays the
+ * whole request from the top, reusing the stable compound_ts so it cannot
+ * starve.  On a backend without compound support the compound never binds,
+ * every op autocommits standalone, and the end is a synchronous OK -- the
+ * deliver runs inline, exactly the old behaviour.
  */
 
 static struct chimera_fuse_request *
@@ -64,6 +77,12 @@ chimera_fuse_request_free(
     struct chimera_fuse_thread  *thread,
     struct chimera_fuse_request *req)
 {
+    /* Every begun compound must reach exactly one end before the request is
+     * recycled (the reply helpers and the replay driver own that). */
+    chimera_fuse_abort_if(req->compound,
+                          "fuse request freed with live compound (opcode %u)",
+                          req->opcode);
+
     thread->active_requests--;
 
     if (thread->num_free_requests >= CHIMERA_FUSE_MAX_POOLED_REQS) {
@@ -180,76 +199,244 @@ chimera_fuse_request_finish(struct chimera_fuse_request *req)
     chimera_fuse_request_free(thread, req);
 } /* chimera_fuse_request_finish */
 
-int
-chimera_fuse_reply(
-    struct chimera_fuse_request *req,
-    int                          error,
-    const void                  *payload,
-    size_t                       payload_len)
+/* --- the per-request compound driver --- */
+
+static void chimera_fuse_reply_deliver(
+    struct chimera_fuse_request *req);
+static void chimera_fuse_request_replay(
+    struct chimera_fuse_request *req);
+
+/* WRITE for the mutating opcodes, READ otherwise.  FLUSH/FSYNC/FSYNCDIR
+ * count as mutating: their commit publishes dirty data.  OPEN does not --
+ * O_TRUNC arrives as a separate SETATTR (no FUSE_ATOMIC_O_TRUNC). */
+static enum chimera_vfs_compound_mode
+chimera_fuse_opcode_mode(uint32_t opcode)
 {
-    int rc;
+    switch (opcode) {
+        case FUSE_SETATTR:
+        case FUSE_MKNOD:
+        case FUSE_MKDIR:
+        case FUSE_UNLINK:
+        case FUSE_RMDIR:
+        case FUSE_SYMLINK:
+        case FUSE_RENAME:
+        case FUSE_RENAME2:
+        case FUSE_LINK:
+        case FUSE_CREATE:
+        case FUSE_WRITE:
+        case FUSE_FLUSH:
+        case FUSE_FSYNC:
+        case FUSE_FSYNCDIR:
+        case FUSE_FALLOCATE:
+        case FUSE_COPY_FILE_RANGE:
+        case FUSE_SETXATTR:
+        case FUSE_REMOVEXATTR:
+            return CHIMERA_VFS_COMPOUND_WRITE;
+        default:
+            return CHIMERA_VFS_COMPOUND_READ;
+    } /* switch */
+} /* chimera_fuse_opcode_mode */
 
-    rc = chimera_fuse_send(req, error, payload, payload_len, NULL, 0, 0);
-    chimera_fuse_request_finish(req);
-
-    return rc;
-} /* chimera_fuse_reply */
-
-int
-chimera_fuse_send_only(
-    struct chimera_fuse_request *req,
-    int                          error,
-    const void                  *payload,
-    size_t                       payload_len)
+struct chimera_vfs_compound *
+chimera_fuse_req_compound(struct chimera_fuse_request *req)
 {
-    return chimera_fuse_send(req, error, payload, payload_len, NULL, 0, 0);
-} /* chimera_fuse_send_only */
+    if (!req->compound) {
+        /* Begin never returns NULL.  The hint is the request's resolved
+         * node when one is in hand (req->fh, set by resolve_nodeid or the
+         * FH-bearing getattr path); a handle-based op begins unbound and
+         * lazy-binds at its first enlisted op.  RETRYABLE: the reply path
+         * replays the whole request on ECOMPOUND_CONFLICT, reusing the
+         * stable ts assigned at dispatch. */
+        req->compound = chimera_vfs_compound_begin(
+            req->thread->vfs_thread, &req->cred,
+            req->fh_len ? req->fh : NULL, req->fh_len,
+            chimera_fuse_opcode_mode(req->opcode),
+            req->compound_ts,
+            CHIMERA_VFS_COMPOUND_RETRYABLE);
+    }
 
-void
-chimera_fuse_reply_read(
-    struct chimera_fuse_request *req,
-    int                          error,
-    struct evpl_iovec           *iov,
-    int                          niov,
-    size_t                       data_len)
+    return req->compound;
+} /* chimera_fuse_req_compound */
+
+/* Undo an open_file the request itself created (OPEN/OPENDIR/CREATE) whose
+ * fh the kernel will never learn: error reply, undeliverable reply, or a
+ * conflict replay. */
+static void
+chimera_fuse_file_undo(struct chimera_fuse_request *req)
 {
-    struct evpl *evpl = req->thread->evpl;
+    struct chimera_fuse_open_file *file = req->file;
 
-    chimera_fuse_send(req, error, NULL, 0, iov, niov,
-                      error == 0 ? data_len : 0);
+    if (!req->file_owned || !file) {
+        return;
+    }
 
-    /* The iovec array lives inside the request, so the backend's buffers are
-     * dropped before the request is recycled. */
-    evpl_iovecs_release(evpl, iov, niov);
+    req->file       = NULL;
+    req->file_owned = 0;
 
-    chimera_fuse_request_finish(req);
-} /* chimera_fuse_reply_read */
+    chimera_fuse_file_unlink(file->mount, file);
+    chimera_vfs_release(req->thread->vfs_thread, file->handle);
+    free(file);
+} /* chimera_fuse_file_undo */
 
-/*
- * Entry-shaped reply (LOOKUP, CREATE, MKDIR, MKNOD, SYMLINK, LINK): registers
- * the child in the nodeid table and undoes the lookup-count bump if the
- * kernel never saw the entry.  `extra` follows the fuse_entry_out in the
- * reply (CREATE's fuse_open_out).  Requires attr to carry a file handle.
- */
-int
-chimera_fuse_reply_entry(
-    struct chimera_fuse_request    *req,
-    const struct chimera_vfs_attrs *attr,
-    const void                     *extra,
-    size_t                          extra_len)
+/* Walk a packed READDIRPLUS reply undoing the lookup-count bumps of entries
+ * the kernel never received (undelivered reply, or a conflict replay). */
+static void
+chimera_fuse_readdirplus_unwind(struct chimera_fuse_request *req)
 {
     struct chimera_fuse_mount *mount = req->channel->mount;
-    struct fuse_entry_out      entry;
-    uint8_t                    payload[sizeof(entry) + 64];
-    uint32_t                   entry_ms    = mount->entry_timeout_ms;
-    uint32_t                   attr_ms     = mount->attr_timeout_ms;
-    int                        child_cover = CHIMERA_FUSE_COVER_NONE;
-    int                        rc;
+    uint8_t                   *base  = chimera_fuse_reply_space(req);
+    struct fuse_direntplus    *plus;
+    uint32_t                   off = 0;
 
-    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        chimera_fuse_reply(req, EIO, NULL, 0);
-        return -1;
+    while (off < req->u.readdir.used) {
+        plus = (struct fuse_direntplus *) (base + off);
+
+        if (plus->entry_out.nodeid &&
+            chimera_fuse_node_forget(mount->node_table,
+                                     plus->entry_out.nodeid, 1)) {
+            /* The undo retired the node: drop its coverage too. */
+            chimera_fuse_watch_forget(mount, req->thread->vfs_thread->vfs,
+                                      plus->entry_out.nodeid);
+            chimera_fuse_grant_forget(mount,
+                                      req->thread->vfs_thread->vfs->vfs_state,
+                                      plus->entry_out.nodeid);
+        }
+
+        off += FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET_DIRENTPLUS +
+                                 plus->dirent.namelen);
     }
+
+    req->u.readdir.used = 0;
+} /* chimera_fuse_readdirplus_unwind */
+
+static void
+chimera_fuse_compound_committed(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_fuse_request *req = private_data;
+
+    if (error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT) {
+        chimera_fuse_request_replay(req);
+        return;
+    }
+
+    if (error_code != CHIMERA_VFS_OK && req->pending_error == 0) {
+        /* The op chain succeeded but the commit did not: the reply must not
+         * promise effects the backend discarded. */
+        req->pending_error = chimera_fuse_errno(error_code);
+    }
+
+    chimera_fuse_reply_deliver(req);
+} /* chimera_fuse_compound_committed */
+
+/* End the request's compound (the parked reply is already staged); the
+ * commit callback delivers it -- or replays on conflict. */
+static void
+chimera_fuse_compound_commit(struct chimera_fuse_request *req)
+{
+    struct chimera_vfs_compound *compound = req->compound;
+
+    req->compound = NULL;
+
+    chimera_vfs_compound_end(req->thread->vfs_thread, &req->cred, compound,
+                             (req->opcode == FUSE_FSYNC ||
+                              req->opcode == FUSE_FSYNCDIR) ?
+                             CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                             CHIMERA_VFS_COMPOUND_COMMIT,
+                             chimera_fuse_compound_committed, req);
+} /* chimera_fuse_compound_commit */
+
+static void
+chimera_fuse_compound_aborted(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) error_code;   /* the abort's own result is immaterial: replaying */
+
+    chimera_fuse_request_replay(private_data);
+} /* chimera_fuse_compound_aborted */
+
+/* A member op failed with ECOMPOUND_CONFLICT (the CHIMERA_FUSE_ECONFLICT
+ * errno sentinel): abort the compound and replay the request. */
+static void
+chimera_fuse_compound_conflict(struct chimera_fuse_request *req)
+{
+    struct chimera_vfs_compound *compound = req->compound;
+
+    req->pending_kind = CHIMERA_FUSE_REPLY_NONE;
+    req->compound     = NULL;
+
+    chimera_vfs_compound_end(req->thread->vfs_thread, &req->cred, compound,
+                             CHIMERA_VFS_COMPOUND_ABORT,
+                             chimera_fuse_compound_aborted, req);
+} /* chimera_fuse_compound_conflict */
+
+/* Re-run the whole request from the top after a compound conflict: drop the
+ * failed attempt's residue (transient handle, owned open_file, parked read
+ * buffers, READDIRPLUS lookup counts), then re-invoke the handler against
+ * the intact request buffer.  The compound is re-begun lazily with the same
+ * wait-die ts, so the request cannot starve; the replay budget converts a
+ * livelock into a retriable EAGAIN. */
+static void
+chimera_fuse_request_replay(struct chimera_fuse_request *req)
+{
+    struct chimera_fuse_thread  *thread = req->thread;
+    const struct fuse_in_header *hdr;
+
+    if (req->pending_kind == CHIMERA_FUSE_REPLY_READ) {
+        evpl_iovecs_release(thread->evpl, req->pending_iov, req->pending_niov);
+    }
+
+    if (req->opcode == FUSE_READDIRPLUS) {
+        chimera_fuse_readdirplus_unwind(req);
+    }
+
+    chimera_fuse_file_undo(req);
+
+    if (req->handle) {
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+        req->handle = NULL;
+    }
+
+    req->pending_kind = CHIMERA_FUSE_REPLY_NONE;
+    req->entry_cover  = CHIMERA_FUSE_COVER_NONE;
+
+    if (++req->compound_attempt > CHIMERA_FUSE_COMPOUND_MAX_RETRIES) {
+        /* The compound is already retired; deliver the retriable failure
+         * directly. */
+        req->pending_kind        = CHIMERA_FUSE_REPLY_SIMPLE;
+        req->pending_error       = EAGAIN;
+        req->pending_payload     = NULL;
+        req->pending_payload_len = 0;
+        chimera_fuse_reply_deliver(req);
+        return;
+    }
+
+    hdr = chimera_fuse_request_hdr(req);
+
+    chimera_fuse_handlers[req->opcode](req, hdr, hdr + 1,
+                                       req->buf_len - sizeof(*hdr));
+} /* chimera_fuse_request_replay */
+
+/* --- deliver: the parked reply reaches the kernel (post-commit) --- */
+
+/* Entry-shaped deliver (LOOKUP, CREATE, MKDIR, MKNOD, SYMLINK, LINK):
+ * registers the child in the nodeid table, arms its coverage, applies the
+ * TTL policy, sends, and undoes the lookup-count bump if the kernel never
+ * saw the entry.  Runs only after the compound committed, so a replay can
+ * never double-register the child. */
+static void
+chimera_fuse_entry_deliver(struct chimera_fuse_request *req)
+{
+    struct chimera_fuse_mount      *mount = req->channel->mount;
+    const struct chimera_vfs_attrs *attr  = &req->pending_attr;
+    struct fuse_entry_out           entry;
+    uint8_t                         payload[sizeof(entry) + 64];
+    uint32_t                        entry_ms    = mount->entry_timeout_ms;
+    uint32_t                        attr_ms     = mount->attr_timeout_ms;
+    int                             child_cover = CHIMERA_FUSE_COVER_NONE;
+    int                             rc;
 
     /* The kernel is about to hold a dentry under this directory; keep its
      * namespace coherent with the other protocols (every entry-shaped op
@@ -307,12 +494,11 @@ chimera_fuse_reply_entry(
     entry.attr_valid       = attr_ms / 1000;
     entry.attr_valid_nsec  = (attr_ms % 1000) * 1000000;
 
-    chimera_fuse_abort_if(extra_len > 64, "fuse entry reply extra too large");
-
     memcpy(payload, &entry, sizeof(entry));
 
-    if (extra_len) {
-        memcpy(payload + sizeof(entry), extra, extra_len);
+    if (req->pending_extra_len) {
+        memcpy(payload + sizeof(entry), req->pending_extra,
+               req->pending_extra_len);
     }
 
     /* CREATE's combined reply: the open flags depend on the child grant
@@ -320,30 +506,227 @@ chimera_fuse_reply_entry(
      * fuse_open_out), so patch them in here.  Pages are only seeded through
      * us after the arm, so a FRESH grant fully covers KEEP_CACHE. */
     if (req->opcode == FUSE_CREATE &&
-        extra_len == sizeof(struct fuse_open_out)) {
+        req->pending_extra_len == sizeof(struct fuse_open_out)) {
         struct fuse_open_out *oo =
             (struct fuse_open_out *) (payload + sizeof(entry));
 
         oo->open_flags |= chimera_fuse_open_cache_flags(mount, child_cover);
     }
 
-    rc = chimera_fuse_send(req, 0, payload, sizeof(entry) + extra_len,
+    rc = chimera_fuse_send(req, 0, payload,
+                           sizeof(entry) + req->pending_extra_len,
                            NULL, 0, 0);
 
-    if (rc != 0 &&
-        chimera_fuse_node_forget(mount->node_table, entry.nodeid, 1)) {
-        /* The undo retired the node: drop the coverage taken above. */
-        chimera_fuse_watch_forget(mount, req->thread->vfs_thread->vfs,
-                                  entry.nodeid);
-        chimera_fuse_grant_forget(mount,
-                                  req->thread->vfs_thread->vfs->vfs_state,
-                                  entry.nodeid);
+    if (rc != 0) {
+        if (chimera_fuse_node_forget(mount->node_table, entry.nodeid, 1)) {
+            /* The undo retired the node: drop the coverage taken above. */
+            chimera_fuse_watch_forget(mount, req->thread->vfs_thread->vfs,
+                                      entry.nodeid);
+            chimera_fuse_grant_forget(mount,
+                                      req->thread->vfs_thread->vfs->vfs_state,
+                                      entry.nodeid);
+        }
+        /* CREATE's owned open_file is undone by the deliver tail. */
+    } else {
+        /* The kernel owns the entry -- and, for CREATE, the open fh. */
+        req->file_owned = 0;
+        if (req->opcode == FUSE_CREATE) {
+            req->file = NULL;
+        }
+    }
+} /* chimera_fuse_entry_deliver */
+
+/* OPEN/OPENDIR deliver: builds the fuse_open_out from the owned open_file.
+ * OPEN's cache flags arm the invalidation grant here, post-commit, so a
+ * replay never double-arms it. */
+static void
+chimera_fuse_openfile_deliver(struct chimera_fuse_request *req)
+{
+    struct chimera_fuse_mount *mount = req->channel->mount;
+    struct fuse_open_out       out;
+    int                        rc;
+
+    memset(&out, 0, sizeof(out));
+    out.fh = (uint64_t) (uintptr_t) req->file;
+
+    /* With an invalidation grant in force from here on, the kernel's cached
+     * pages are guaranteed to be dropped when any other party changes the
+     * file, so letting them survive across open/close cycles is coherent --
+     * and a real read-cache win.  (Pages, unlike attributes, are only
+     * seeded through us AFTER the arm, so a fresh grant fully covers
+     * them.)  No grant (contention) means no coverage: ttl mode keeps the
+     * kernel's default invalidate-on-open behavior, sync mode goes further
+     * and bypasses the page cache entirely so an uncovered open can never
+     * serve stale data. */
+    if (req->opcode == FUSE_OPEN) {
+        out.open_flags |= chimera_fuse_open_cache_flags(
+            mount, chimera_fuse_grant_open(req->thread, mount, req->nodeid,
+                                           req->file->handle));
     }
 
-    chimera_fuse_request_finish(req);
+    rc = chimera_fuse_send(req, 0, &out, sizeof(out), NULL, 0, 0);
 
-    return rc;
+    if (rc == 0) {
+        /* The kernel owns the fh now; RELEASE(DIR) will retire it. */
+        req->file       = NULL;
+        req->file_owned = 0;
+    }
+    /* rc != 0: the kernel never learned this fh, so no RELEASE will come;
+     * the deliver tail undoes the open_file. */
+} /* chimera_fuse_openfile_deliver */
+
+static void
+chimera_fuse_reply_deliver(struct chimera_fuse_request *req)
+{
+    struct chimera_fuse_thread *thread = req->thread;
+    int                         rc;
+
+    if (req->pending_error != 0) {
+        /* Error replies carry no payload regardless of kind; drop whatever
+         * the successful-op path had staged. */
+        chimera_fuse_send(req, req->pending_error, NULL, 0, NULL, 0, 0);
+
+        if (req->pending_kind == CHIMERA_FUSE_REPLY_READ) {
+            evpl_iovecs_release(thread->evpl, req->pending_iov,
+                                req->pending_niov);
+        }
+        if (req->opcode == FUSE_READDIRPLUS) {
+            chimera_fuse_readdirplus_unwind(req);
+        }
+    } else {
+        switch (req->pending_kind) {
+            case CHIMERA_FUSE_REPLY_READ:
+                chimera_fuse_send(req, 0, NULL, 0, req->pending_iov,
+                                  req->pending_niov, req->pending_data_len);
+                /* The iovec array lives inside the request, so the backend's
+                 * buffers are dropped before the request is recycled. */
+                evpl_iovecs_release(thread->evpl, req->pending_iov,
+                                    req->pending_niov);
+                break;
+            case CHIMERA_FUSE_REPLY_ENTRY:
+                chimera_fuse_entry_deliver(req);
+                break;
+            case CHIMERA_FUSE_REPLY_OPENFILE:
+                chimera_fuse_openfile_deliver(req);
+                break;
+            case CHIMERA_FUSE_REPLY_SIMPLE:
+            default:
+                rc = chimera_fuse_send(req, 0, req->pending_payload,
+                                       req->pending_payload_len, NULL, 0, 0);
+                if (rc != 0 && req->opcode == FUSE_READDIRPLUS) {
+                    /* The kernel never received the packed entries. */
+                    chimera_fuse_readdirplus_unwind(req);
+                }
+                break;
+        } /* switch */
+    }
+
+    /* An owned open_file whose fh the kernel never learned (error reply, or
+     * a failed entry/open send left the flag set) must be undone. */
+    chimera_fuse_file_undo(req);
+
+    req->pending_kind = CHIMERA_FUSE_REPLY_NONE;
+
+    chimera_fuse_request_finish(req);
+} /* chimera_fuse_reply_deliver */
+
+/* --- reply helpers: park the reply, end the compound --- */
+
+void
+chimera_fuse_reply(
+    struct chimera_fuse_request *req,
+    int                          error,
+    const void                  *payload,
+    size_t                       payload_len)
+{
+    if (error == CHIMERA_FUSE_ECONFLICT) {
+        chimera_fuse_compound_conflict(req);
+        return;
+    }
+
+    req->pending_kind        = CHIMERA_FUSE_REPLY_SIMPLE;
+    req->pending_error       = error;
+    req->pending_payload_len = (error == 0) ? payload_len : 0;
+
+    if (req->pending_payload_len == 0) {
+        req->pending_payload = NULL;
+    } else if (req->pending_payload_len <= sizeof(req->pending_copy)) {
+        /* Small payloads are built on the caller's stack; copy them so they
+         * survive the asynchronous compound end. */
+        memcpy(req->pending_copy, payload, req->pending_payload_len);
+        req->pending_payload = req->pending_copy;
+    } else {
+        /* Larger payloads are staged in the request buffer's reply area by
+         * construction (readdir/xattr/readlink), which lives until the
+         * request is recycled. */
+        req->pending_payload = payload;
+    }
+
+    chimera_fuse_compound_commit(req);
+} /* chimera_fuse_reply */
+
+void
+chimera_fuse_reply_read(
+    struct chimera_fuse_request *req,
+    int                          error,
+    struct evpl_iovec           *iov,
+    int                          niov,
+    size_t                       data_len)
+{
+    if (error == CHIMERA_FUSE_ECONFLICT) {
+        evpl_iovecs_release(req->thread->evpl, iov, niov);
+        chimera_fuse_compound_conflict(req);
+        return;
+    }
+
+    req->pending_kind     = CHIMERA_FUSE_REPLY_READ;
+    req->pending_error    = error;
+    req->pending_iov      = iov;
+    req->pending_niov     = niov;
+    req->pending_data_len = (error == 0) ? data_len : 0;
+
+    chimera_fuse_compound_commit(req);
+} /* chimera_fuse_reply_read */
+
+void
+chimera_fuse_reply_entry(
+    struct chimera_fuse_request    *req,
+    const struct chimera_vfs_attrs *attr,
+    const void                     *extra,
+    size_t                          extra_len)
+{
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        /* An owned open_file (CREATE) is undone by the deliver tail. */
+        chimera_fuse_reply(req, EIO, NULL, 0);
+        return;
+    }
+
+    chimera_fuse_abort_if(extra_len > sizeof(req->pending_extra),
+                          "fuse entry reply extra too large");
+
+    req->pending_kind  = CHIMERA_FUSE_REPLY_ENTRY;
+    req->pending_error = 0;
+    req->pending_attr  = *attr;
+    /* The ACL pointer is scoped to the VFS completion callback and the entry
+     * reply never reads it; do not let it dangle across the end. */
+    req->pending_attr.va_acl = NULL;
+    req->pending_extra_len   = extra_len;
+
+    if (extra_len) {
+        memcpy(req->pending_extra, extra, extra_len);
+    }
+
+    chimera_fuse_compound_commit(req);
 } /* chimera_fuse_reply_entry */
+
+void
+chimera_fuse_reply_open(struct chimera_fuse_request *req)
+{
+    req->pending_kind  = CHIMERA_FUSE_REPLY_OPENFILE;
+    req->pending_error = 0;
+
+    chimera_fuse_compound_commit(req);
+} /* chimera_fuse_reply_open */
 
 void
 chimera_fuse_channel_dead(struct chimera_fuse_channel *channel)
@@ -500,6 +883,27 @@ chimera_fuse_dispatch(
     req->nodeid      = hdr->nodeid;
     req->buf_len     = len;
     req->entry_cover = CHIMERA_FUSE_COVER_NONE;
+
+    /* Per-request compound state: the compound itself begins lazily at the
+     * first VFS call; the wait-die ts is fixed here and reused across
+     * conflict replays.  The fh scratch is cleared so the lazy begin's hint
+     * (and the getattr completion's rearm guard) never sees a previous
+     * request's handle. */
+    req->compound         = NULL;
+    req->compound_ts      = chimera_vfs_compound_alloc_ts(req->thread->vfs_thread);
+    req->compound_attempt = 0;
+    req->pending_kind     = CHIMERA_FUSE_REPLY_NONE;
+    req->pending_error    = 0;
+    req->file_owned       = 0;
+    req->fh_len           = 0;
+    req->fh2_len          = 0;
+
+    if (req->opcode == FUSE_READDIRPLUS) {
+        /* The unwind paths key off u.readdir.used, which the handler only
+         * initializes after its argument checks. */
+        req->u.readdir.used = 0;
+        req->u.readdir.plus = 1;
+    }
 
     chimera_fuse_map_cred(&req->cred, hdr, req->channel->mount);
 

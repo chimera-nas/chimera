@@ -61,7 +61,8 @@ chimera_fuse_getxattr_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred,
+                          chimera_fuse_req_compound(req), oh,
                           name, strlen(name),
                           chimera_fuse_reply_space(req),
                           CHIMERA_FUSE_XATTR_MAX,
@@ -89,7 +90,8 @@ chimera_fuse_op_getxattr(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_fuse_getxattr_open_callback, req);
@@ -149,7 +151,8 @@ chimera_fuse_setxattr_open_callback(
             return;
     } /* switch */
 
-    chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred,
+                          chimera_fuse_req_compound(req), oh,
                           option,
                           name, strlen(name),
                           value, size,
@@ -173,7 +176,8 @@ chimera_fuse_op_setxattr(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_fuse_setxattr_open_callback, req);
@@ -235,7 +239,8 @@ chimera_fuse_listxattr_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_list_xattrs(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_list_xattrs(req->thread->vfs_thread, &req->cred,
+                            chimera_fuse_req_compound(req), oh,
                             0,
                             chimera_fuse_reply_space(req),
                             CHIMERA_FUSE_XATTR_MAX,
@@ -263,7 +268,8 @@ chimera_fuse_op_listxattr(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_fuse_listxattr_open_callback, req);
@@ -300,7 +306,8 @@ chimera_fuse_removexattr_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred,
+                             chimera_fuse_req_compound(req), oh,
                              name, strlen(name),
                              chimera_fuse_removexattr_complete, req);
 } /* chimera_fuse_removexattr_open_callback */
@@ -317,7 +324,8 @@ chimera_fuse_op_removexattr(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_fuse_removexattr_open_callback, req);

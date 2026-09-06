@@ -73,7 +73,9 @@ chimera_fuse_resolve_root(
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
-    chimera_vfs_lookup(vfs_thread, &cred, NULL,
+    /* Mount-time resolution: no FUSE request exists to own a compound, so
+     * this lookup is deliberately standalone (autocommit). */
+    chimera_vfs_lookup(vfs_thread, &cred, chimera_vfs_compound_loose(vfs_thread),
                        root_fh, root_fh_len,
                        mount->share_path, strlen(mount->share_path),
                        CHIMERA_VFS_ATTR_FH,

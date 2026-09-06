@@ -19,11 +19,9 @@ chimera_fuse_opendir_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
-    struct chimera_fuse_request   *req    = private_data;
-    struct chimera_fuse_thread    *thread = req->thread;
-    struct chimera_fuse_mount     *mount  = req->channel->mount;
+    struct chimera_fuse_request   *req   = private_data;
+    struct chimera_fuse_mount     *mount = req->channel->mount;
     struct chimera_fuse_open_file *file;
-    struct fuse_open_out           out;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
@@ -37,15 +35,14 @@ chimera_fuse_opendir_callback(
 
     chimera_fuse_file_link(mount, file);
 
-    memset(&out, 0, sizeof(out));
-    out.fh = (uint64_t) (uintptr_t) file;
+    req->file       = file;
+    req->file_owned = 1;
 
-    if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
-        /* The kernel never learned this fh, so no RELEASEDIR will come. */
-        chimera_fuse_file_unlink(mount, file);
-        chimera_vfs_release(thread->vfs_thread, file->handle);
-        free(file);
-    }
+    /* The fuse_open_out is built by the deliver path once the compound end
+     * settles; if the kernel never learns this fh (no RELEASEDIR will come)
+     * -- or a conflict replays the request -- the open_file is undone
+     * there. */
+    chimera_fuse_reply_open(req);
 } /* chimera_fuse_opendir_callback */
 
 static void
@@ -60,7 +57,8 @@ chimera_fuse_opendir_gated(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -207,35 +205,6 @@ chimera_fuse_readdir_entry(
     return 0;
 } /* chimera_fuse_readdir_entry */
 
-/* Walk a packed READDIRPLUS reply undoing the lookup-count bumps of entries
- * the kernel never received. */
-static void
-chimera_fuse_readdirplus_unwind(struct chimera_fuse_request *req)
-{
-    struct chimera_fuse_mount *mount = req->channel->mount;
-    uint8_t                   *base  = chimera_fuse_reply_space(req);
-    struct fuse_direntplus    *plus;
-    uint32_t                   off = 0;
-
-    while (off < req->u.readdir.used) {
-        plus = (struct fuse_direntplus *) (base + off);
-
-        if (plus->entry_out.nodeid &&
-            chimera_fuse_node_forget(mount->node_table,
-                                     plus->entry_out.nodeid, 1)) {
-            /* The undo retired the node: drop its coverage too. */
-            chimera_fuse_watch_forget(mount, req->thread->vfs_thread->vfs,
-                                      plus->entry_out.nodeid);
-            chimera_fuse_grant_forget(mount,
-                                      req->thread->vfs_thread->vfs->vfs_state,
-                                      plus->entry_out.nodeid);
-        }
-
-        off += FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET_DIRENTPLUS +
-                                 plus->dirent.namelen);
-    }
-} /* chimera_fuse_readdirplus_unwind */
-
 static void
 chimera_fuse_readdir_complete(
     enum chimera_vfs_error          error_code,
@@ -247,7 +216,6 @@ chimera_fuse_readdir_complete(
     void                           *private_data)
 {
     struct chimera_fuse_request *req = private_data;
-    int                          rc;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
@@ -256,14 +224,12 @@ chimera_fuse_readdir_complete(
 
     req->file->readdir_verifier = verifier;
 
-    rc = chimera_fuse_send_only(req, 0, chimera_fuse_reply_space(req),
-                                req->u.readdir.used);
-
-    if (rc != 0 && req->u.readdir.plus) {
-        chimera_fuse_readdirplus_unwind(req);
-    }
-
-    chimera_fuse_request_finish(req);
+    /* The packed entries are staged in the request buffer, so they survive
+     * the compound end; a READDIRPLUS whose reply the kernel never takes
+     * (or that replays on conflict) has its lookup-count bumps unwound by
+     * the driver (chimera_fuse_readdirplus_unwind, opcode-keyed). */
+    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req),
+                       req->u.readdir.used);
 } /* chimera_fuse_readdir_complete */
 
 void
@@ -307,7 +273,8 @@ chimera_fuse_op_readdir(
         CHIMERA_FUSE_ATTR_MASK :
         (CHIMERA_VFS_ATTR_INUM | CHIMERA_VFS_ATTR_MODE);
 
-    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         file->handle,
                         attr_mask, 0,
                         in->offset,
@@ -375,7 +342,8 @@ chimera_fuse_op_fsyncdir(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
+                       chimera_fuse_req_compound(req),
                        chimera_fuse_file(in->fh)->handle,
                        0, 0, 0, 0,
                        chimera_fuse_fsyncdir_complete, req);

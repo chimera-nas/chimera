@@ -98,6 +98,30 @@ struct chimera_fuse_thread;
 struct chimera_fuse_shared;
 struct chimera_fuse_request;
 struct chimera_fuse_mount;
+struct chimera_vfs_compound;
+
+/* Retries for a whole-request compound replay (CHIMERA_VFS_ECOMPOUND_CONFLICT)
+ * before the request is failed with the retriable EAGAIN. */
+#define CHIMERA_FUSE_COMPOUND_MAX_RETRIES 8
+
+/* Internal errno sentinel produced by chimera_fuse_errno() for
+ * CHIMERA_VFS_ECOMPOUND_CONFLICT.  It never reaches the kernel: the reply
+ * helpers intercept it, abort the request's compound, and replay the whole
+ * request from the top. */
+#define CHIMERA_FUSE_ECONFLICT            0x434f4e46
+
+/* The reply shape parked in the request while its compound's end settles
+ * (see the reply helpers in fuse_dispatch.c): the deliver path sends the
+ * parked reply from the end callback, so nothing reaches the kernel before
+ * the compound commits -- which is what makes a commit-time conflict safe
+ * to replay. */
+enum chimera_fuse_reply_kind {
+    CHIMERA_FUSE_REPLY_NONE = 0,    /* nothing parked (no-reply op, conflict) */
+    CHIMERA_FUSE_REPLY_SIMPLE,      /* error or one payload blob */
+    CHIMERA_FUSE_REPLY_READ,        /* header + data iovecs (FUSE_READ) */
+    CHIMERA_FUSE_REPLY_ENTRY,       /* entry-shaped (LOOKUP/creates/LINK) */
+    CHIMERA_FUSE_REPLY_OPENFILE,    /* fuse_open_out built at deliver (OPEN/OPENDIR) */
+};
 
 /*
  * One POSIX byte-range lock held on behalf of a local process.  The embedded
@@ -105,7 +129,7 @@ struct chimera_fuse_mount;
  * locks conflict correctly with NLM, NFSv4, and SMB2 locks.  The range is
  * POSIX-inclusive [start, end]; end == CHIMERA_FUSE_LOCK_EOF means to-EOF.
  */
-#define CHIMERA_FUSE_LOCK_EOF        0x7fffffffffffffffULL
+#define CHIMERA_FUSE_LOCK_EOF 0x7fffffffffffffffULL
 
 struct chimera_fuse_lock {
     struct chimera_fuse_lock_file     *lf;
@@ -368,6 +392,42 @@ struct chimera_fuse_request {
      * fetched before the call. */
     int                             entry_cover;
 
+    /* One FUSE request == one VFS compound (CHIMERA_VFS_COMPOUND_RETRYABLE).
+     * Begun lazily at the request's first VFS call (chimera_fuse_req_compound;
+     * NULL for ops that make none -- the FORGET class, byte-range locks) and
+     * ended in the reply path BEFORE the reply is sent, so a commit-time
+     * ECOMPOUND_CONFLICT can replay the whole request without the kernel
+     * ever seeing a doomed reply.  compound_ts is the wait-die priority,
+     * assigned once at dispatch and reused across replays so a conflicting
+     * request cannot starve; compound_attempt bounds the replays. */
+    struct chimera_vfs_compound    *compound;
+    uint64_t                        compound_ts;
+    int                             compound_attempt;
+
+    /* Reply parked while the compound end settles (fuse_dispatch.c).  SIMPLE
+    * payloads are either copied into pending_copy (small stack-built reply
+    * structs) or left pointing into the request buffer's reply-staging area
+    * (readdir/xattr/readlink), which outlives the asynchronous end.  ENTRY
+    * captures the attrs (the VFS callback's storage does not survive it)
+    * plus the small extra blob (CREATE's fuse_open_out); the node insert,
+    * coverage arm, TTL policy, and send all run at deliver, after commit. */
+    enum chimera_fuse_reply_kind    pending_kind;
+    int                             pending_error;
+    const void                     *pending_payload;
+    size_t                          pending_payload_len;
+    struct evpl_iovec              *pending_iov;
+    int                             pending_niov;
+    size_t                          pending_data_len;
+    size_t                          pending_extra_len;
+    uint8_t                         pending_copy[256];
+    uint8_t                         pending_extra[64];
+    struct chimera_vfs_attrs        pending_attr;
+    /* The request allocated req->file itself (OPEN/OPENDIR/CREATE): the
+     * deliver path undoes it (unlink, release, free) when the kernel never
+     * learns the fh -- an error reply, a failed send, or a conflict replay
+     * -- and clears the flag once the kernel owns it. */
+    uint8_t                         file_owned;
+
     union {
         struct {
             uint32_t size;      /* kernel's reply size limit */
@@ -436,11 +496,23 @@ void
 chimera_fuse_channel_dead(
     struct chimera_fuse_channel *channel);
 
-/* Reply helpers: deliver (or drop) the reply, release any transient handle,
- * and recycle the request.  The int-returning ones report whether the kernel
- * actually took the reply (0) or never will (-1), for callers whose reply
- * hands the kernel a reference they must otherwise undo. */
-int
+/* The request's compound, begun lazily at its first VFS call.  Pass its
+ * result as the `compound` argument of every VFS call a request makes; the
+ * reply helpers end it (commit-before-send) and replay on conflict. */
+struct chimera_vfs_compound *
+chimera_fuse_req_compound(
+    struct chimera_fuse_request *req);
+
+/* Reply helpers: park the reply on the request, end the request's compound
+ * (COMMIT; COMMIT_DURABLE for FSYNC/FSYNCDIR), and deliver the parked reply
+ * from the end callback -- releasing any transient handle and recycling the
+ * request.  Nothing reaches the kernel before the compound end settles; an
+ * ECOMPOUND_CONFLICT (from a member op via the CHIMERA_FUSE_ECONFLICT errno
+ * sentinel, or from the commit itself) aborts and replays the whole request
+ * instead of delivering.  A reply that hands the kernel a reference (an
+ * entry's lookup count, an open's fh) is undone by the deliver path when the
+ * kernel never takes it. */
+void
 chimera_fuse_reply(
     struct chimera_fuse_request *req,
     int                          error,
@@ -457,22 +529,22 @@ chimera_fuse_reply_read(
     int                          niov,
     size_t                       data_len);
 
-int
+/* Entry-shaped reply (LOOKUP, CREATE, MKDIR, MKNOD, SYMLINK, LINK): captures
+ * attr + extra now; the node registration, coverage arm, and TTL policy run
+ * at deliver, after the compound commits.  Requires attr to carry a file
+ * handle (EIO reply otherwise). */
+void
 chimera_fuse_reply_entry(
     struct chimera_fuse_request    *req,
     const struct chimera_vfs_attrs *attr,
     const void                     *extra,
     size_t                          extra_len);
 
-/* Split primitives for replies that must inspect the delivery result while
- * the request (and its buffer) is still alive: send without recycling, then
- * finish (release any transient handle, recycle the request). */
-int
-chimera_fuse_send_only(
-    struct chimera_fuse_request *req,
-    int                          error,
-    const void                  *payload,
-    size_t                       payload_len);
+/* OPEN/OPENDIR reply: req->file (owned) carries the open; the fuse_open_out
+ * -- including OPEN's cache-flag grant arm -- is built at deliver. */
+void
+chimera_fuse_reply_open(
+    struct chimera_fuse_request *req);
 
 void
 chimera_fuse_request_finish(
@@ -494,7 +566,10 @@ chimera_fuse_mount_teardown(
     struct chimera_fuse_mount *mount);
 
 /* Per-opcode handlers (fuse_proc_*.c); each owns the request until it calls
- * a reply helper (or frees it directly for the no-reply ops). */
+ * a reply helper (or frees it directly for the no-reply ops).  A handler must
+ * be re-runnable from the top against its intact request buffer: a compound
+ * conflict replays it (chimera_fuse_request_replay) after the driver has
+ * released the attempt's transient handle and owned open_file. */
 typedef void (*chimera_fuse_handler_t)(
     struct chimera_fuse_request *req,
     const struct fuse_in_header *hdr,
@@ -1009,6 +1084,14 @@ chimera_fuse_errno(enum chimera_vfs_error error_code)
             return EINVAL;
         case CHIMERA_VFS_UNSET:
             return EIO;
+        case CHIMERA_VFS_ECOMPOUND_CONFLICT:
+            /* Never sent: the reply helpers intercept the sentinel and
+             * replay the whole request (see fuse_dispatch.c). */
+            return CHIMERA_FUSE_ECONFLICT;
+        case CHIMERA_VFS_ECOMPOUND_EXHAUSTED:
+            /* Retriable but never replayed (a mutating op already committed
+             * standalone, or the replay budget ran out). */
+            return EAGAIN;
         default:
             return (int) error_code;
     } /* switch */

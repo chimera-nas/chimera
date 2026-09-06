@@ -52,7 +52,8 @@ chimera_fuse_mkdir_open_callback(
     req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
 
-    chimera_vfs_mkdir_at(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_mkdir_at(req->thread->vfs_thread, &req->cred,
+                         chimera_fuse_req_compound(req), oh,
                          name, strlen(name),
                          &req->u.create.set_attr,
                          CHIMERA_FUSE_ATTR_MASK,
@@ -83,7 +84,8 @@ chimera_fuse_op_mkdir(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -134,7 +136,8 @@ chimera_fuse_mknod_open_callback(
         ((in->mode & 07777) & ~in->umask);
     req->u.create.set_attr.va_rdev = in->rdev;
 
-    chimera_vfs_mknod_at(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_mknod_at(req->thread->vfs_thread, &req->cred,
+                         chimera_fuse_req_compound(req), oh,
                          name, strlen(name),
                          &req->u.create.set_attr,
                          CHIMERA_FUSE_ATTR_MASK,
@@ -165,7 +168,8 @@ chimera_fuse_op_mknod(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -214,7 +218,8 @@ chimera_fuse_symlink_open_callback(
     req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req->u.create.set_attr.va_mode     = 0777;
 
-    chimera_vfs_symlink_at(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_symlink_at(req->thread->vfs_thread, &req->cred,
+                           chimera_fuse_req_compound(req), oh,
                            name, strlen(name),
                            target, strlen(target),
                            &req->u.create.set_attr,
@@ -241,7 +246,8 @@ chimera_fuse_op_symlink(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -308,7 +314,8 @@ chimera_fuse_op_link(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_link_at(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_link_at(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh2, req->fh2_len,
                         req->fh, req->fh_len,
                         name, strlen(name),
@@ -354,7 +361,8 @@ chimera_fuse_remove_open_callback(
     flags = (req->opcode == FUSE_RMDIR) ?
         CHIMERA_VFS_REMOVE_ISDIR : CHIMERA_VFS_REMOVE_ISNOTDIR;
 
-    chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred, NULL, oh,
+    chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred,
+                          chimera_fuse_req_compound(req), oh,
                           name, strlen(name),
                           NULL, 0,
                           flags,
@@ -371,7 +379,8 @@ chimera_fuse_remove_common(struct chimera_fuse_request *req)
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        chimera_fuse_req_compound(req),
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                         CHIMERA_VFS_OPEN_DIRECTORY,
@@ -472,7 +481,8 @@ chimera_fuse_op_rename(
      * GETATTR through the surviving open handle is answered from the attr
      * cache and still reports the pre-rename nlink.
      */
-    chimera_vfs_rename_at(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_rename_at(req->thread->vfs_thread, &req->cred,
+                          chimera_fuse_req_compound(req),
                           req->fh, req->fh_len,
                           oldname, strlen(oldname),
                           req->fh2, req->fh2_len,
