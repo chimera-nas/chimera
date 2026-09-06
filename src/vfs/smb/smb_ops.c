@@ -274,6 +274,11 @@ chimera_smb_set_child_fh(
         return;
     }
 
+    /* This name is being (re)created; drop any cached open handle left over from
+     * a prior object at the same interned path id, or a later open of the new
+     * object would be served the stale (dead server file id) handle. */
+    smb_evict_pathid(conn, request, fullpath, len);
+
     id                  = chimera_smb_path_intern(conn->server, fullpath, len);
     r_attr->va_fh_len   = chimera_smb_encode_open_fh(request->fh, id, nofollow, r_attr->va_fh);
     r_attr->va_ino      = id | 1;

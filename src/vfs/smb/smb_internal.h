@@ -698,6 +698,17 @@ void chimera_smb_client_umount(
 void chimera_smb_client_conn_on_connected(
     struct chimera_smb_client_conn *conn);
 
+/* Evict any cached open handle for `path`'s interned id from the open caches, so
+ * the next open of that path re-resolves (see smb_namespace.c).  Called after a
+ * namespace op retargets the path (rename/create over a reused id). */
+struct chimera_smb_client_conn;
+struct chimera_vfs_request;
+void smb_evict_pathid(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *path,
+    int                             pathlen);
+
 /* ---- path table (smb_ops.c): id <-> full mount-relative path ----------- */
 
 /* Intern `path` in the server's path table and return its stable 64-bit id
