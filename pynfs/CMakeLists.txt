@@ -90,6 +90,17 @@ set(PYNFS_SKIP_BACKENDS_SATT15 linux io_uring)
 # already excluded from the combined suite; this drops the per-code entries.)
 set(PYNFS_SKIP_BACKENDS_EID50  ${PYNFS_BACKENDS})
 
+# SEC7 (st_secinfo.testRPCSEC_GSS) requires SECINFO to list an RPCSEC_GSS
+# triple.  Chimera advertises krb5 only when the Kerberos acceptor is actually
+# installed (server.nfs_kerberos_enabled, off by default and off in this
+# harness): RFC 7530 3.2.1.1 / 16.31 require SECINFO to report flavors the
+# server will accept, and an RPCSEC_GSS client would otherwise be refused at the
+# RPC layer.  The test asserts the advertisement unconditionally, so it cannot
+# pass against a server with GSS disabled -- the same shape as EID50 above, a
+# test of a feature this configuration does not offer.  Scoped to 4.0, which is
+# where it runs; an unknown no<CODE> token aborts the 4.1/4.2 testserver.
+set(PYNFS_SKIP_BACKENDS_SEC7   ${PYNFS_BACKENDS})
+
 # Per-code NFSv4 lease-time override (seconds).  Delegation recall-handshake
 # tests open a file as one client, then drive a *second* client's conflicting
 # OPEN to force a CB_RECALL.  Establishing that second client (SETCLIENTID /
@@ -308,6 +319,9 @@ function(pynfs_add_combined_suite backend minor)
         endif()
         if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_SATT15)
             list(APPEND excludes noSATT15)
+        endif()
+        if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_SEC7)
+            list(APPEND excludes noSEC7)
         endif()
     endif()
 
