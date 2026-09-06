@@ -560,6 +560,10 @@ jobs:
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e CCACHE_MAXSIZE \
+            # Ring depth for the io_uring event core -- see the same setting in
+            # test-dev below.  This job runs the whole suite under ctest -j nproc,
+            # so it stacks rings the same way.
+            -e EVPL_IO_URING_ENTRIES=1024 \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
@@ -726,6 +730,14 @@ jobs:
         run: |
           docker run --rm --privileged \
             -e CATEGORY=${{ matrix.category }} \
+            # Ring depth for the io_uring event core.  The default 8192
+            # entries cost ~1.5 MB of kernel-accounted memory per ring
+            # (SQE128/CQE32 double both entry sizes) and SQPOLL adds a kernel
+            # thread each; ctest -j nproc runs many multi-threaded chimera
+            # processes at once, which is enough to be refused with ENOMEM and
+            # lose unrelated tests to a fatal ring allocation.  Ask for a ring
+            # sized to a test rather than to a server.
+            -e EVPL_IO_URING_ENTRIES=1024 \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -1127,6 +1139,14 @@ jobs:
           echo "smbtorture concurrency: ${SMBTORTURE_PARALLEL} cells ($(nproc) vCPU)"
           docker run --rm --privileged \
             -e SMBTORTURE_BACKENDS \
+            # Ring depth for the io_uring event core.  The default 8192
+            # entries cost ~1.5 MB of kernel-accounted memory per ring
+            # (SQE128/CQE32 double both entry sizes) and SQPOLL adds a kernel
+            # thread each; ctest -j nproc runs many multi-threaded chimera
+            # processes at once, which is enough to be refused with ENOMEM and
+            # lose unrelated tests to a fatal ring allocation.  Ask for a ring
+            # sized to a test rather than to a server.
+            -e EVPL_IO_URING_ENTRIES=1024 \
             -e SMBTORTURE_FILTER \
             -e SMBTORTURE_PARALLEL \
             -v "${{ github.workspace }}:/workspace" \

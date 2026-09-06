@@ -526,6 +526,12 @@ jobs:
         run: |
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
+            # Ring depth for the io_uring event core.  The 8192-entry default
+            # costs ~1.5 MB of kernel-accounted memory per ring and SQPOLL adds a
+            # kernel thread each; ctest -j nproc stacks enough of them to be
+            # refused with ENOMEM, which is fatal to the process.  Size the ring
+            # to a test rather than to a server.
+            -e EVPL_IO_URING_ENTRIES=1024 \
             -e CCACHE_MAXSIZE \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
@@ -868,6 +874,12 @@ jobs:
         run: |
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
+            # Ring depth for the io_uring event core.  The 8192-entry default
+            # costs ~1.5 MB of kernel-accounted memory per ring and SQPOLL adds a
+            # kernel thread each; ctest -j nproc stacks enough of them to be
+            # refused with ENOMEM, which is fatal to the process.  Size the ring
+            # to a test rather than to a server.
+            -e EVPL_IO_URING_ENTRIES=1024 \
             -e CCACHE_MAXSIZE \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
