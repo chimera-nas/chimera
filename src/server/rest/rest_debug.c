@@ -48,6 +48,11 @@ struct rest_fsop_ctx {
     int                             fh_len;
     struct chimera_vfs_attrs        set_attr;
     struct chimera_vfs_open_handle *handle;
+    /* One grouping-lane compound per fsop (flags 0: never replayed).  Begun
+     * once the request is validated, threaded through every VFS call of the
+     * op, and ended with COMMIT on every exit path (rest_fsop_finish). */
+    struct chimera_vfs_compound    *compound;
+    enum chimera_vfs_error op_status;
 };
 
 static void
@@ -71,26 +76,51 @@ rest_fsop_send_json(
 } /* rest_fsop_send_json */
 
 /*
- * Terminal completion for ops that don't hold an open handle (unlink, rename,
- * link, and the final leg of chmod once the handle is released). Maps the VFS
- * status to an HTTP response and frees the context.
+ * Compound-end completion: the fsop's compound has committed (or the commit
+ * itself failed).  Maps the settled status to an HTTP response and frees the
+ * context.  A commit-time failure on an otherwise-successful op surfaces as
+ * the fsop's error; the grouping lane never replays.
+ */
+static void
+rest_fsop_commit_cb(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct rest_fsop_ctx *ctx = private_data;
+    char                  response[128];
+
+    if (ctx->op_status == CHIMERA_VFS_OK && error_code != CHIMERA_VFS_OK) {
+        ctx->op_status = error_code;
+    }
+
+    if (ctx->op_status == CHIMERA_VFS_OK) {
+        rest_fsop_send_json(ctx->evpl, ctx->request, 200, "{\"status\":\"ok\"}");
+    } else {
+        snprintf(response, sizeof(response),
+                 "{\"error\":\"fsop failed\",\"vfs_error\":%d}", ctx->op_status);
+        rest_fsop_send_json(ctx->evpl, ctx->request, 500, response);
+    }
+
+    free(ctx);
+} /* rest_fsop_commit_cb */
+
+/*
+ * Terminal for every fsop exit path (success and error alike, for ops that
+ * don't hold an open handle -- unlink, rename, link -- and the final leg of
+ * chmod once the handle is released).  Ends the fsop's compound exactly once;
+ * COMMIT even after a failed member op keeps whatever ran (matching the old
+ * autocommit behaviour) and the reply is sent from the end callback.
  */
 static void
 rest_fsop_finish(
     struct rest_fsop_ctx  *ctx,
     enum chimera_vfs_error error_code)
 {
-    char response[128];
+    ctx->op_status = error_code;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        rest_fsop_send_json(ctx->evpl, ctx->request, 200, "{\"status\":\"ok\"}");
-    } else {
-        snprintf(response, sizeof(response),
-                 "{\"error\":\"fsop failed\",\"vfs_error\":%d}", error_code);
-        rest_fsop_send_json(ctx->evpl, ctx->request, 500, response);
-    }
-
-    free(ctx);
+    chimera_vfs_compound_end(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+                             ctx->compound, CHIMERA_VFS_COMPOUND_COMMIT,
+                             rest_fsop_commit_cb, ctx);
 } /* rest_fsop_finish */
 
 static void
@@ -151,7 +181,8 @@ rest_fsop_chmod_open_cb(
     ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     ctx->set_attr.va_mode     = ctx->mode;
 
-    chimera_vfs_setattr(ctx->vfs_thread, chimera_vfs_get_server_cred(), NULL,
+    chimera_vfs_setattr(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+                        ctx->compound,
                         ctx->handle, &ctx->set_attr, 0, 0,
                         rest_fsop_chmod_setattr_cb, ctx);
 } /* rest_fsop_chmod_open_cb */
@@ -172,11 +203,34 @@ rest_fsop_chmod_lookup_cb(
     memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
     ctx->fh_len = attr->va_fh_len;
 
-    chimera_vfs_open_fh(ctx->vfs_thread, chimera_vfs_get_server_cred(), NULL,
+    chimera_vfs_open_fh(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+                        ctx->compound,
                         ctx->fh, ctx->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         rest_fsop_chmod_open_cb, ctx);
 } /* rest_fsop_chmod_lookup_cb */
+
+/*
+ * Begin the fsop's grouping-lane compound.  Every current fsop mutates, so the
+ * mode is WRITE (a non-mutating fsop would begin READ); flags 0 = grouping
+ * only, never replayed.  The hint is the resolution root, so the compound
+ * starts unbound and lazy-binds at the first component op that lands on a
+ * compound-capable mount.  Begin never returns NULL; rest_fsop_finish ends the
+ * compound on every exit path.
+ */
+static void
+rest_fsop_begin(
+    struct rest_fsop_ctx *ctx,
+    const void           *hint_fh,
+    int                   hint_fhlen)
+{
+    ctx->compound = chimera_vfs_compound_begin(ctx->vfs_thread,
+                                               chimera_vfs_get_server_cred(),
+                                               hint_fh, hint_fhlen,
+                                               CHIMERA_VFS_COMPOUND_WRITE,
+                                               chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                               0);
+} /* rest_fsop_begin */
 
 void
 chimera_rest_handle_debug_fsop(
@@ -223,7 +277,9 @@ chimera_rest_handle_debug_fsop(
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     if (strcmp(op, "unlink") == 0) {
-        chimera_vfs_remove(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
+        rest_fsop_begin(ctx, root_fh, root_fh_len);
+        chimera_vfs_remove(ctx->vfs_thread, cred, ctx->compound,
+                           root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path), 0,
                            rest_fsop_remove_cb, ctx);
     } else if (strcmp(op, "rename") == 0) {
@@ -236,7 +292,9 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
-        chimera_vfs_rename(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
+        rest_fsop_begin(ctx, root_fh, root_fh_len);
+        chimera_vfs_rename(ctx->vfs_thread, cred, ctx->compound,
+                           root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            ctx->path2, strlen(ctx->path2),
                            rest_fsop_rename_cb, ctx);
@@ -250,7 +308,9 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
-        chimera_vfs_link(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
+        rest_fsop_begin(ctx, root_fh, root_fh_len);
+        chimera_vfs_link(ctx->vfs_thread, cred, ctx->compound,
+                         root_fh, root_fh_len,
                          ctx->path, strlen(ctx->path), 0,
                          ctx->path2, strlen(ctx->path2),
                          0, 0, rest_fsop_link_cb, ctx);
@@ -264,7 +324,9 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         ctx->mode = json_integer_value(mode_obj);
-        chimera_vfs_lookup(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
+        rest_fsop_begin(ctx, root_fh, root_fh_len);
+        chimera_vfs_lookup(ctx->vfs_thread, cred, ctx->compound,
+                           root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
                            rest_fsop_chmod_lookup_cb, ctx);
