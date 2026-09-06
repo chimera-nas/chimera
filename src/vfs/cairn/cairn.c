@@ -52,6 +52,7 @@ void rocksdb_flush_wal(
 #define CAIRN_KEY_ACL            7
 #define CAIRN_KEY_FS             8
 #define CAIRN_KEY_PNFS           9
+#define CAIRN_KEY_OPENREF        10
 
 /*
  * Storage layout:
@@ -63,6 +64,13 @@ void rocksdb_flush_wal(
  * Multi-DB ordering invariant: when a thread commits a cycle's batches, the data batch
  * is written first and the metadata batch second.  This ensures that a recovered metadb
  * never claims a file size that points at extent data still missing from datadb.
+ *
+ * Single-op compound fold: a compound that enlisted exactly one op commits its
+ * transaction WITHOUT sync and (for COMMIT_DURABLE) defers its end completion
+ * to the next per-cycle batch commit.  WAL ordering makes this sound: the
+ * fold's nosync commit appended to the same WAL its DB's next sync write (or
+ * explicit WAL flush) fsyncs, so once the cycle commit lands the folded writes
+ * are durable too.  See cairn_end_transaction.
  */
 #define CAIRN_INODE_LOCK_STRIPES 1024
 
@@ -74,6 +82,17 @@ void rocksdb_flush_wal(
  * far more requests than any single op would tolerate waiting on.
  */
 #define CAIRN_BATCH_MAX_OPS      16
+
+/*
+ * Extent scans that mutate the staged extent set (punch hole, remove file
+ * extents) collect this many victim keys per pass, then drop the iterator
+ * before applying them: a compound's extent reads iterate a WriteBatchWithIndex
+ * merged with datadb, and RocksDB documents that updating a WBWI with the
+ * iterator's current key invalidates the iterator's current entry.  A pass that
+ * fills the chunk re-scans; already-deleted extents are invisible to the merged
+ * view, so every pass makes progress.
+ */
+#define CAIRN_EXTENT_SCAN_CHUNK  64
 
 #define chimera_cairn_debug(...) chimera_debug("cairn", \
                                                __FILE__, \
@@ -114,6 +133,18 @@ struct cairn_dirent_key {
 } __attribute__((packed));
 
 struct cairn_symlink_key {
+    uint8_t  keytype;
+    uint64_t inum;
+} __attribute__((packed));
+
+/* Open-reference row: a u32 count of live backend opens of the inode,
+ * keyed by inum.  This is HANDLE-LIFECYCLE state, deliberately kept OUT of
+ * the inode record and out of every transaction: an enlisted open's ++ must
+ * survive its compound's abort (the core still closes the attempt handle,
+ * and that close's -- runs autocommit), so open/close mutate this row
+ * directly against the base meta DB under the inode's stripe mutex.  The
+ * row is deleted at count 0; see cairn_openref_adjust. */
+struct cairn_openref_key {
     uint8_t  keytype;
     uint64_t inum;
 } __attribute__((packed));
@@ -170,9 +201,24 @@ struct cairn_dirent_value {
     char     name[256];
 };
 
+/*
+ * Result of a metadata point read.  Snapshot and transaction reads hand back a
+ * pinnable slice; a grouping-lane compound read (WriteBatchWithIndex overlay)
+ * hands back a malloc'd merged-view copy, because the portable RocksDB C API's
+ * rocksdb_writebatch_wi_get_from_batch_and_db has no pinned variant (the
+ * pinned one only appeared in RocksDB 9.x).  data/len describe the value
+ * either way; cairn_meta_val_release frees whichever backing is set.
+ */
+struct cairn_meta_val {
+    const char              *data;      /* NULL = not found */
+    size_t                   len;
+    rocksdb_pinnableslice_t *slice;     /* base/txn read */
+    char                    *copy;      /* grouping-lane WBWI read */
+};
+
 struct cairn_dirent_handle {
     struct cairn_dirent_value *dirent;
-    rocksdb_pinnableslice_t   *slice;
+    struct cairn_meta_val      val;
 };
 
 struct cairn_symlink_target {
@@ -190,6 +236,12 @@ struct cairn_inode {
     uint64_t        inum;
     uint64_t        parent_inum; /* Parent directory for ".." lookup */
     uint32_t        gen;
+    /* RETIRED: refcnt used to count 1-for-namespace-presence plus one per
+     * open handle, but open counts living inside the transactional inode
+     * record broke abort symmetry (an enlisted open's staged ++ rolled back
+     * while the attempt handle's autocommit close still ran its --).  Live
+     * opens now live in the out-of-txn CAIRN_KEY_OPENREF row; this field is
+     * kept only for record-format compatibility and is written as 0. */
     uint32_t        refcnt;
     uint64_t        size;
     uint64_t        space_used;
@@ -211,8 +263,8 @@ struct cairn_inode {
 };
 
 struct cairn_inode_handle {
-    struct cairn_inode      *inode;
-    rocksdb_pinnableslice_t *slice;
+    struct cairn_inode   *inode;
+    struct cairn_meta_val val;
 };
 
 struct cairn_shared;
@@ -262,8 +314,19 @@ struct cairn_shared {
     rocksdb_options_t                       *meta_options;
     rocksdb_options_t                       *data_options;
     rocksdb_writeoptions_t                  *meta_write_opts;       /* sync=1 */
+    /* Write options for EXPLICIT compound metadata commits.  sync=0 when
+     * rocksdb_flush_wal is available: a multi-op END restores today's
+     * durable-commit semantics with an explicit meta-WAL fsync right after
+     * the commit, and a single-op END folds into the next per-cycle sync
+     * (see cairn_end_transaction).  Without flush_wal there is no way to
+     * add the barrier after a nosync commit, so this falls back to sync=1
+     * and the fold is disabled. */
+    rocksdb_writeoptions_t                  *meta_txn_write_opts;
     rocksdb_writeoptions_t                  *data_write_opts_async; /* sync=0 */
     rocksdb_writeoptions_t                  *data_write_opts_sync;  /* sync=1 */
+    /* CAIRN_KEY_OPENREF rows: volatile handle-lifecycle state, never worth
+     * an fsync (opens do not survive a restart; init sweeps leftovers). */
+    rocksdb_writeoptions_t                  *openref_write_opts;    /* sync=0 */
     rocksdb_readoptions_t                   *read_options;
     rocksdb_optimistictransaction_options_t *meta_otxn_opts;
     rocksdb_block_based_table_options_t     *meta_table_options;
@@ -295,26 +358,77 @@ struct cairn_shared {
 /*
  * Explicit transaction (CHIMERA_VFS_CAP_COMPOUND).  Unlike the per-cycle
  * autocommit batch (thread->meta_txn / thread->data_batch), each explicit
- * transaction carries its OWN rocksdb transaction + data batch, so concurrent
- * explicit transactions routed to the same delegation thread (and the per-cycle
+ * transaction carries its OWN rocksdb staging state, so concurrent explicit
+ * transactions routed to the same delegation thread (and the per-cycle
  * autocommit batch) never interfere.  The handle is &txn->core; an enlisted op
  * is steered to it via thread->cur_txn (set around the dispatch switch -- safe
- * because cairn ops run synchronously with no async yield).  Conflicts surface
- * only at CompoundEnd (optimistic commit validation); the internal replay
- * loop is NOT used, the conflict bubbles up so the protocol re-runs the whole
- * sequence. */
+ * because cairn ops run synchronously with no async yield).
+ *
+ * Two lanes, chosen by the core flags and hidden from the op handlers behind
+ * the cairn_meta_* / cairn_data_* helpers:
+ *
+ *   RETRYABLE (CHIMERA_VFS_COMPOUND_RETRYABLE): metadata stages in an
+ *   optimistic rocksdb transaction (meta_txn).  Conflicts surface only at
+ *   CompoundEnd (optimistic commit validation); the internal replay loop is
+ *   NOT used, the conflict bubbles up so the consumer re-runs the whole
+ *   sequence.
+ *
+ *   GROUPING (no RETRYABLE flag): the consumer cannot replay, so this lane
+ *   must never produce a conflict.  Metadata stages in a WriteBatchWithIndex
+ *   (meta_wbwi): read-your-writes via the indexed overlay, no validation, one
+ *   unconditional batch write at CompoundEnd.
+ *
+ * Both lanes stage extent data in an indexed batch (data_batch, a
+ * WriteBatchWithIndex) so extent reads inside the compound merge it over
+ * datadb -- read-your-writes for file data as well as metadata. */
 struct cairn_txn {
     struct chimera_vfs_compound core;      /* MUST be first */
-    rocksdb_transaction_t      *meta_txn;
-    rocksdb_writebatch_t       *data_batch;
+    rocksdb_transaction_t      *meta_txn;  /* RETRYABLE lane */
+    rocksdb_writebatch_wi_t    *meta_wbwi; /* grouping lane */
+    rocksdb_writebatch_wi_t    *data_batch; /* both lanes */
+    /* Single-op cycle-fold: set once this compound's END committed (nosync)
+     * and the END request was queued on the per-cycle completion list.  A
+     * re-dispatch of that END (the cycle commit's conflict replay re-runs
+     * every queued request) must only requeue it -- the explicit transaction
+     * is already committed and must not commit or complete twice. */
+    int                         folded;
 };
+
+static inline int
+cairn_txn_grouping(const struct cairn_txn *ctxn)
+{
+    return !(ctxn->core.flags & CHIMERA_VFS_COMPOUND_RETRYABLE);
+} /* cairn_txn_grouping */
+
+/* Lazily create the grouping lane's indexed metadata batch.  overwrite_key=1
+ * is required for rocksdb_writebatch_wi_create_iterator_with_base and gives
+ * last-write-wins point reads. */
+static inline rocksdb_writebatch_wi_t *
+cairn_get_meta_wbwi(struct cairn_txn *ctxn)
+{
+    if (!ctxn->meta_wbwi) {
+        ctxn->meta_wbwi = rocksdb_writebatch_wi_create(0, 1);
+    }
+    return ctxn->meta_wbwi;
+} /* cairn_get_meta_wbwi */
+
+/* Lazily create a compound's indexed extent-data batch (both lanes). */
+static inline rocksdb_writebatch_wi_t *
+cairn_get_txn_data_batch(struct cairn_txn *ctxn)
+{
+    if (!ctxn->data_batch) {
+        ctxn->data_batch = rocksdb_writebatch_wi_create(0, 1);
+    }
+    return ctxn->data_batch;
+} /* cairn_get_txn_data_batch */
 
 struct cairn_thread {
     struct evpl                 *evpl;
     struct cairn_shared         *shared;
     /* Non-NULL while dispatching an op enlisted in an explicit transaction;
-     * steers cairn_get_meta_txn / cairn_get_data_batch / read snapshotting /
-     * request completion to that transaction instead of the per-cycle batch. */
+     * steers the cairn_meta_* / cairn_data_* staging helpers, read
+     * snapshotting, and request completion to that transaction (whichever
+     * lane it uses) instead of the per-cycle batch. */
     struct cairn_txn            *cur_txn;
     /* Per-cycle metadata transaction, lazily begun on first metadata op.
      * Reads and writes go through this; on commit any key it read that has
@@ -333,6 +447,12 @@ struct cairn_thread {
      * fsynced (data_needs_sync was 0 then); for writes in the same cycle
      * as the COMMIT, the sync data commit's fsync already covers them. */
     int                          needs_data_wal_flush;
+    /* Set when a folded single-op COMMIT_DURABLE compound staged metadata:
+     * its meta commit ran with sync=0, so cairn_thread_commit must end the
+     * cycle with a durable metadata WAL (the cycle's own sync meta commit,
+     * or an explicit rocksdb_flush_wal(meta) when the cycle staged no
+     * metadata of its own) before completing the queued END. */
+    int                          needs_meta_wal_flush;
     /* Set when evpl_defer(&thread->commit) has been called this cycle.
      * Cleared inside cairn_thread_commit before its handler returns.
      * Read-only op handlers DL_APPEND to txn_requests and rely on the
@@ -377,8 +497,18 @@ cairn_punch_hole(
 /* Forward declarations (defined after cairn_thread_commit). */
 static rocksdb_transaction_t * cairn_get_meta_txn(
     struct cairn_thread *thread);
-static rocksdb_writebatch_t * cairn_get_data_batch(
-    struct cairn_thread *thread);
+/* Extent-data staging, lane-oblivious: routes to the compound's indexed batch
+ * when enlisted, else to the per-cycle plain WriteBatch. */
+static void cairn_data_put(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen,
+    const void          *val,
+    size_t               vlen);
+static void cairn_data_delete(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen);
 /* For the optimistic-retry replay path. */
 static void cairn_dispatch(
     struct chimera_vfs_request *request,
@@ -416,9 +546,24 @@ cairn_fh_to_inum(
 } /* cairn_fh_to_inum */
 
 static inline void
+cairn_meta_val_release(struct cairn_meta_val *v)
+{
+    if (v->slice) {
+        rocksdb_pinnableslice_destroy(v->slice);
+        v->slice = NULL;
+    }
+    if (v->copy) {
+        free(v->copy);
+        v->copy = NULL;
+    }
+    v->data = NULL;
+    v->len  = 0;
+} /* cairn_meta_val_release */
+
+static inline void
 cairn_inode_handle_release(struct cairn_inode_handle *ih)
 {
-    rocksdb_pinnableslice_destroy(ih->slice);
+    cairn_meta_val_release(&ih->val);
 } /* cairn_inode_handle_release */
 
 static inline pthread_mutex_t *
@@ -511,10 +656,119 @@ cairn_unlock_inodes(
     }
 } /* cairn_unlock_inodes */
 
+/*
+ * Open-reference accounting (CAIRN_KEY_OPENREF).
+ *
+ * The count of live backend opens of an inode lives in its own row, mutated
+ * DIRECTLY against the base meta DB -- never through a compound's staged
+ * state and never through the per-cycle transaction -- so that open and
+ * close stay symmetric no matter what happens to the transactions around
+ * them: an enlisted open's ++ survives its compound's abort, matching the
+ * autocommit close of the attempt handle that the core issues regardless.
+ *
+ * The read-modify-write runs under the inode's stripe mutex because an
+ * enlisted open executes on its COMPOUND's delegation thread, which need not
+ * be the file's own home thread -- per-thread serialization alone cannot
+ * order it against the file's closes.
+ *
+ * Writes are sync=0: the rows are volatile handle state (no open survives a
+ * restart); cairn_init sweeps any rows a crash left behind, so a stale
+ * nonzero count can never defer reclaim forever.
+ *
+ * Returns the post-adjustment count.  A negative adjustment of an absent /
+ * zero row clamps at 0 (the sanctioned aborted-create edge: the create's
+ * inode rolled back with its compound, but the ++ was applied directly, and
+ * the attempt handle's close finds no inode -- see cairn_close).
+ */
+static uint32_t
+cairn_openref_adjust(
+    struct cairn_shared *shared,
+    uint64_t             inum,
+    int32_t              delta)
+{
+    struct cairn_openref_key key;
+    char                    *err = NULL;
+    char                    *val;
+    size_t                   vlen  = 0;
+    uint32_t                 count = 0;
+
+    key.keytype = CAIRN_KEY_OPENREF;
+    key.inum    = inum;
+
+    cairn_lock_inode(shared, inum);
+
+    val = rocksdb_get(shared->meta_base_db, shared->read_options,
+                      (const char *) &key, sizeof(key), &vlen, &err);
+    chimera_cairn_abort_if(err, "Error reading openref row: %s\n", err);
+
+    if (val) {
+        if (vlen == sizeof(count)) {
+            memcpy(&count, val, sizeof(count));
+        }
+        free(val);
+    }
+
+    if (delta < 0 && count < (uint32_t) (-delta)) {
+        count = 0;
+    } else {
+        count += (uint32_t) delta;
+    }
+
+    if (count > 0) {
+        rocksdb_put(shared->meta_base_db, shared->openref_write_opts,
+                    (const char *) &key, sizeof(key),
+                    (const char *) &count, sizeof(count), &err);
+        chimera_cairn_abort_if(err, "Error writing openref row: %s\n", err);
+    } else if (val) {
+        rocksdb_delete(shared->meta_base_db, shared->openref_write_opts,
+                       (const char *) &key, sizeof(key), &err);
+        chimera_cairn_abort_if(err, "Error deleting openref row: %s\n", err);
+    }
+
+    cairn_unlock_inode(shared, inum);
+
+    return count;
+} /* cairn_openref_adjust */
+
+/* Current live-open count for an inum (stripe-locked base read, no
+ * mutation).  Used by the remove paths to decide between immediate reclaim
+ * (no opens) and deferring reclaim to the last close. */
+static uint32_t
+cairn_openref_count(
+    struct cairn_shared *shared,
+    uint64_t             inum)
+{
+    struct cairn_openref_key key;
+    char                    *err = NULL;
+    char                    *val;
+    size_t                   vlen  = 0;
+    uint32_t                 count = 0;
+
+    key.keytype = CAIRN_KEY_OPENREF;
+    key.inum    = inum;
+
+    cairn_lock_inode(shared, inum);
+
+    val = rocksdb_get(shared->meta_base_db, shared->read_options,
+                      (const char *) &key, sizeof(key), &vlen, &err);
+    chimera_cairn_abort_if(err, "Error reading openref row: %s\n", err);
+
+    cairn_unlock_inode(shared, inum);
+
+    if (val) {
+        if (vlen == sizeof(count)) {
+            memcpy(&count, val, sizeof(count));
+        }
+        free(val);
+    }
+
+    return count;
+} /* cairn_openref_count */
+
 static inline void
 cairn_dirent_handle_release(struct cairn_dirent_handle *dh)
 {
-    rocksdb_pinnableslice_destroy(dh->slice);
+    cairn_meta_val_release(&dh->val);
 } /* cairn_dirent_handle_release */
 
 /*
@@ -531,11 +785,13 @@ cairn_read_begin(
     struct cairn_shared   *shared;
     rocksdb_readoptions_t *mopts;
 
-    /* Enlisted in an explicit WRITE transaction: skip the snapshot so reads fall
-     * through to cur_txn->meta_txn (read-your-writes + optimistic conflict
-     * tracking).  A READ transaction keeps the per-op snapshot below: it is
-     * consistent and, crucially, never adds to a conflict read-set, so its
-     * CompoundEnd can't spuriously conflict. */
+    /* Enlisted in an explicit WRITE transaction: skip the snapshot so reads
+     * fall through to the compound's staged state (RETRYABLE lane:
+     * cur_txn->meta_txn, read-your-writes + optimistic conflict tracking;
+     * grouping lane: the WriteBatchWithIndex overlay, read-your-writes with
+     * no conflict read-set at all).  A READ transaction keeps the per-op
+     * snapshot below: it is consistent and, crucially, never adds to a
+     * conflict read-set, so its CompoundEnd can't spuriously conflict. */
     if (thread->cur_txn && thread->cur_txn->core.mode == CHIMERA_VFS_COMPOUND_WRITE) {
         return;
     }
@@ -576,26 +832,110 @@ cairn_read_end(struct cairn_thread *thread)
 
 /*
  * Metadata point read.  Reader ops (read_meta_opts set) read the committed
- * base DB at their pinned snapshot; writer ops read through meta_txn for
- * read-your-writes and optimistic conflict tracking.
+ * base DB at their pinned snapshot; writer ops read through the compound's
+ * staged state (RETRYABLE lane: meta_txn, read-your-writes + optimistic
+ * conflict tracking; grouping lane: the WriteBatchWithIndex merged with the
+ * base DB, read-your-writes with no conflict read-set) or, in autocommit,
+ * through the per-cycle meta_txn.  Returns 0 and fills v on a hit, -1 when
+ * the key does not exist (a delete staged in the compound reads as absent).
  */
-static inline rocksdb_pinnableslice_t *
-cairn_meta_get_pinned(
-    struct cairn_thread *thread,
-    const void          *key,
-    size_t               klen,
-    char               **err)
+static inline int
+cairn_meta_get(
+    struct cairn_thread   *thread,
+    const void            *key,
+    size_t                 klen,
+    struct cairn_meta_val *v,
+    char                 **err)
 {
     struct cairn_shared *shared = thread->shared;
 
+    v->slice = NULL;
+    v->copy  = NULL;
+    v->data  = NULL;
+    v->len   = 0;
+
     if (thread->read_meta_opts) {
-        return rocksdb_get_pinned(shared->meta_base_db, thread->read_meta_opts,
-                                  (const char *) key, klen, err);
+        v->slice = rocksdb_get_pinned(shared->meta_base_db, thread->read_meta_opts,
+                                      (const char *) key, klen, err);
+    } else if (thread->cur_txn && cairn_txn_grouping(thread->cur_txn)) {
+        struct cairn_txn *ctxn = thread->cur_txn;
+
+        if (ctxn->meta_wbwi) {
+            v->copy = rocksdb_writebatch_wi_get_from_batch_and_db(
+                ctxn->meta_wbwi, shared->meta_base_db, shared->read_options,
+                (const char *) key, klen, &v->len, err);
+            if (!v->copy) {
+                return -1;
+            }
+            v->data = v->copy;
+            return 0;
+        }
+        /* Nothing staged yet: plain base read. */
+        v->slice = rocksdb_get_pinned(shared->meta_base_db, shared->read_options,
+                                      (const char *) key, klen, err);
+    } else {
+        v->slice = rocksdb_transaction_get_pinned(cairn_get_meta_txn(thread),
+                                                  shared->read_options,
+                                                  (const char *) key, klen, err);
     }
-    return rocksdb_transaction_get_pinned(cairn_get_meta_txn(thread),
-                                          shared->read_options,
-                                          (const char *) key, klen, err);
-} /* cairn_meta_get_pinned */
+
+    if (!v->slice) {
+        return -1;
+    }
+    v->data = rocksdb_pinnableslice_value(v->slice, &v->len);
+    return 0;
+} /* cairn_meta_get */
+
+/*
+ * Metadata staging, lane-oblivious: op handlers call these instead of writing
+ * a rocksdb transaction directly, so a grouping-lane compound (which has no
+ * transaction) stages into its WriteBatchWithIndex while the RETRYABLE lane
+ * and the per-cycle autocommit batch keep the optimistic transaction.  `what`
+ * names the record kind for the (abort-on-failure) diagnostics.
+ */
+static inline void
+cairn_meta_put(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen,
+    const void          *val,
+    size_t               vlen,
+    const char          *what)
+{
+    char *err = NULL;
+
+    if (thread->cur_txn && cairn_txn_grouping(thread->cur_txn)) {
+        rocksdb_writebatch_wi_put(cairn_get_meta_wbwi(thread->cur_txn),
+                                  (const char *) key, klen,
+                                  (const char *) val, vlen);
+        return;
+    }
+
+    rocksdb_transaction_put(cairn_get_meta_txn(thread),
+                            (const char *) key, klen,
+                            (const char *) val, vlen, &err);
+    chimera_cairn_abort_if(err, "Error putting %s: %s\n", what, err);
+} /* cairn_meta_put */
+
+static inline void
+cairn_meta_delete(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen,
+    const char          *what)
+{
+    char *err = NULL;
+
+    if (thread->cur_txn && cairn_txn_grouping(thread->cur_txn)) {
+        rocksdb_writebatch_wi_delete(cairn_get_meta_wbwi(thread->cur_txn),
+                                     (const char *) key, klen);
+        return;
+    }
+
+    rocksdb_transaction_delete(cairn_get_meta_txn(thread),
+                               (const char *) key, klen, &err);
+    chimera_cairn_abort_if(err, "Error deleting %s: %s\n", what, err);
+} /* cairn_meta_delete */
 
 static inline int
 cairn_dirent_get(
@@ -603,27 +943,28 @@ cairn_dirent_get(
     struct cairn_dirent_key    *key,
     struct cairn_dirent_handle *dh)
 {
-    char  *err = NULL;
-    size_t len;
+    char *err = NULL;
 
-    dh->slice = cairn_meta_get_pinned(thread, key, sizeof(*key), &err);
-
-    chimera_cairn_abort_if(err, "Error getting dirent: %s\n", err);
-
-    if (!dh->slice) {
+    if (cairn_meta_get(thread, key, sizeof(*key), &dh->val, &err)) {
+        chimera_cairn_abort_if(err, "Error getting dirent: %s\n", err);
         dh->dirent = NULL;
         return -1;
     }
 
-    dh->dirent = (struct cairn_dirent_value *) rocksdb_pinnableslice_value(dh->slice, &len);
+    chimera_cairn_abort_if(err, "Error getting dirent: %s\n", err);
+
+    dh->dirent = (struct cairn_dirent_value *) dh->val.data;
 
     return 0;
 } /* cairn_dirent_get */
 
 /*
- * Iterator over metadb that sees this transaction's pending mutations
- * merged with the on-disk state.  rocksdb_transaction_create_iterator does
- * this natively.
+ * Iterator over metadb that sees the current staging state's pending
+ * mutations merged with the on-disk state.  rocksdb_transaction_create_
+ * iterator does this natively for the transaction lanes; the grouping lane
+ * merges its WriteBatchWithIndex over a base iterator (the with-base
+ * iterator takes ownership of the base, so the caller destroys only the
+ * returned iterator either way).
  */
 static inline rocksdb_iterator_t *
 cairn_meta_iterator(struct cairn_thread *thread)
@@ -633,24 +974,33 @@ cairn_meta_iterator(struct cairn_thread *thread)
     if (thread->read_meta_opts) {
         return rocksdb_create_iterator(shared->meta_base_db, thread->read_meta_opts);
     }
+    if (thread->cur_txn && cairn_txn_grouping(thread->cur_txn)) {
+        rocksdb_iterator_t *base =
+            rocksdb_create_iterator(shared->meta_base_db, shared->read_options);
+
+        if (!thread->cur_txn->meta_wbwi) {
+            return base;
+        }
+        return rocksdb_writebatch_wi_create_iterator_with_base(
+            thread->cur_txn->meta_wbwi, base);
+    }
     return rocksdb_transaction_create_iterator(cairn_get_meta_txn(thread),
                                                shared->read_options);
 } /* cairn_meta_iterator */
 
 /*
- * datadb still uses a plain WriteBatch (no per-thread conflict checking),
- * so iterators on it merge the batch with the DB explicitly via
- * writebatch_wi-style base+overlay.  We keep this path on the WBWI side
- * because extents are only iterated by the file's own home thread (no
- * cross-thread visibility issue), so a plain base-iter would also be
- * correct for typical workloads — but using WBWI keeps "write extent, then
- * unlink-file iterates extents" race-free within a single thread cycle.
+ * Extent iterator over datadb.  Autocommit (and READ-mode compounds) iterate
+ * the base DB directly: the per-cycle data batch stays a plain WriteBatch
+ * (nothing cross-thread to merge, and extents written in a cycle are not
+ * re-iterated within it).  A WRITE-mode compound with staged extent data
+ * merges its WriteBatchWithIndex over the base so reads, hole punches, and
+ * extent scans inside the compound observe the compound's own writes
+ * (read-your-writes for file data — a conformance requirement).
  *
- * Implementation note: rocksdb_writebatch_t has no with-base iterator
- * helper in the C API, so for extent iteration we use a base iterator
- * over datadb directly.  In-batch pending extent puts are not visible to
- * the iterator, which matches the original txn behaviour for the typical
- * write-then-not-immediately-iterate pattern.
+ * WARNING: RocksDB documents that updating a WBWI with the merged iterator's
+ * current key invalidates the iterator's current entry, so extent scans that
+ * mutate the staged set collect their work and apply it after destroying the
+ * iterator (see cairn_punch_hole / cairn_remove_file_extents).
  */
 static inline rocksdb_iterator_t *
 cairn_data_iterator(struct cairn_thread *thread)
@@ -659,8 +1009,14 @@ cairn_data_iterator(struct cairn_thread *thread)
     const rocksdb_readoptions_t *ropts  = thread->read_data_opts
         ? thread->read_data_opts
         : shared->read_options;
+    rocksdb_iterator_t          *base = rocksdb_create_iterator(shared->datadb, ropts);
 
-    return rocksdb_create_iterator(shared->datadb, ropts);
+    if (thread->cur_txn && thread->cur_txn->data_batch) {
+        /* Takes ownership of base. */
+        return rocksdb_writebatch_wi_create_iterator_with_base(
+            thread->cur_txn->data_batch, base);
+    }
+    return base;
 } /* cairn_data_iterator */
 
 static inline int
@@ -713,22 +1069,20 @@ cairn_inode_get_inum(
     struct cairn_inode_handle *ih)
 {
     char                  *err = NULL;
-    size_t                 len;
     struct cairn_inode_key key;
 
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inum;
 
-    ih->slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
-
-    chimera_cairn_abort_if(err, "Error getting inode: %s\n", err);
-
-    if (!ih->slice) {
+    if (cairn_meta_get(thread, &key, sizeof(key), &ih->val, &err)) {
+        chimera_cairn_abort_if(err, "Error getting inode: %s\n", err);
         ih->inode = NULL;
         return -1;
     }
 
-    ih->inode = (struct cairn_inode *) rocksdb_pinnableslice_value(ih->slice, &len);
+    chimera_cairn_abort_if(err, "Error getting inode: %s\n", err);
+
+    ih->inode = (struct cairn_inode *) ih->val.data;
 
     return 0;
 } /* cairn_inode_get_inum */
@@ -762,16 +1116,11 @@ cairn_put_dirent(
     struct cairn_dirent_key   *key,
     struct cairn_dirent_value *value)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
-    int                    len;
+    int len;
 
     len = sizeof(value->inum) + sizeof(value->name_len) + value->name_len;
 
-    rocksdb_transaction_put(txn,
-                            (const char *) key, sizeof(*key),
-                            (const char *) value, len, &err);
-    chimera_cairn_abort_if(err, "Error putting dirent: %s\n", err);
+    cairn_meta_put(thread, key, sizeof(*key), value, len, "dirent");
 } /* cairn_put_dirent */
 
 static inline void
@@ -779,17 +1128,12 @@ cairn_put_inode(
     struct cairn_thread *thread,
     struct cairn_inode  *inode)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
     struct cairn_inode_key key;
 
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inode->inum;
 
-    rocksdb_transaction_put(txn,
-                            (const char *) &key, sizeof(key),
-                            (const char *) inode, sizeof(*inode), &err);
-    chimera_cairn_abort_if(err, "Error putting inode: %s\n", err);
+    cairn_meta_put(thread, &key, sizeof(key), inode, sizeof(*inode), "inode");
 } /* cairn_put_inode */
 
 static inline void
@@ -797,11 +1141,7 @@ cairn_remove_dirent(
     struct cairn_thread     *thread,
     struct cairn_dirent_key *key)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
-
-    rocksdb_transaction_delete(txn, (const char *) key, sizeof(*key), &err);
-    chimera_cairn_abort_if(err, "Error deleting dirent: %s\n", err);
+    cairn_meta_delete(thread, key, sizeof(*key), "dirent");
 } /* cairn_remove_dirent */
 
 static inline void
@@ -809,15 +1149,12 @@ cairn_remove_inode(
     struct cairn_thread *thread,
     struct cairn_inode  *inode)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
     struct cairn_inode_key key;
 
     key.keytype = CAIRN_KEY_INODE;
     key.inum    = inode->inum;
 
-    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error deleting inode: %s\n", err);
+    cairn_meta_delete(thread, &key, sizeof(key), "inode");
 } /* cairn_remove_inode */
 
 static inline void
@@ -825,15 +1162,12 @@ cairn_remove_symlink_target(
     struct cairn_thread *thread,
     uint64_t             inum)
 {
-    rocksdb_transaction_t   *txn = cairn_get_meta_txn(thread);
-    char                    *err = NULL;
     struct cairn_symlink_key key;
 
     key.keytype = CAIRN_KEY_SYMLINK;
     key.inum    = inum;
 
-    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error deleting symlink target: %s\n", err);
+    cairn_meta_delete(thread, &key, sizeof(key), "symlink target");
 } /* cairn_remove_symlink_target */
 
 static inline void
@@ -843,9 +1177,7 @@ cairn_put_pnfs(
     const void          *blob,
     uint32_t             blob_len)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
-    struct cairn_pnfs_key  key;
+    struct cairn_pnfs_key key;
 
     if (blob_len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
         blob_len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
@@ -854,9 +1186,7 @@ cairn_put_pnfs(
     key.keytype = CAIRN_KEY_PNFS;
     key.inum    = inum;
 
-    rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
-                            (const char *) blob, blob_len, &err);
-    chimera_cairn_abort_if(err, "Error putting pnfs layout: %s\n", err);
+    cairn_meta_put(thread, &key, sizeof(key), blob, blob_len, "pnfs layout");
 } /* cairn_put_pnfs */
 
 static inline void
@@ -864,15 +1194,12 @@ cairn_remove_pnfs(
     struct cairn_thread *thread,
     uint64_t             inum)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
-    struct cairn_pnfs_key  key;
+    struct cairn_pnfs_key key;
 
     key.keytype = CAIRN_KEY_PNFS;
     key.inum    = inum;
 
-    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error deleting pnfs layout: %s\n", err);
+    cairn_meta_delete(thread, &key, sizeof(key), "pnfs layout");
 } /* cairn_remove_pnfs */
 
 /*
@@ -888,11 +1215,10 @@ cairn_map_pnfs(
     struct chimera_vfs_attrs *attr,
     const struct cairn_inode *inode)
 {
-    rocksdb_pinnableslice_t *slice;
-    struct cairn_pnfs_key    key;
-    char                    *err = NULL;
-    const char              *blob;
-    size_t                   len;
+    struct cairn_meta_val val;
+    struct cairn_pnfs_key key;
+    char                 *err = NULL;
+    size_t                len;
 
     if (!(attr->va_req_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT)) {
         return;
@@ -901,24 +1227,22 @@ cairn_map_pnfs(
     key.keytype = CAIRN_KEY_PNFS;
     key.inum    = inode->inum;
 
-    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error getting pnfs layout: %s\n", err);
-
-    if (!slice) {
+    if (cairn_meta_get(thread, &key, sizeof(key), &val, &err)) {
+        chimera_cairn_abort_if(err, "Error getting pnfs layout: %s\n", err);
         return;
     }
 
-    blob = rocksdb_pinnableslice_value(slice, &len);
+    len = val.len;
 
     if (len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
         len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
     }
 
-    memcpy(attr->va_pnfs, blob, len);
+    memcpy(attr->va_pnfs, val.data, len);
     attr->va_pnfs_len  = len;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
 
-    rocksdb_pinnableslice_destroy(slice);
+    cairn_meta_val_release(&val);
 } /* cairn_map_pnfs */
 
 /* Scratch big enough to (de)serialize the largest permitted ACL. */
@@ -933,8 +1257,6 @@ cairn_put_acl(
     uint64_t                  inum,
     const struct chimera_acl *acl)
 {
-    rocksdb_transaction_t  *txn = cairn_get_meta_txn(thread);
-    char                   *err = NULL;
     struct cairn_acl_key    key;
     static __thread uint8_t buf[CAIRN_ACL_SCRATCH];
     int                     len;
@@ -947,9 +1269,7 @@ cairn_put_acl(
     key.keytype = CAIRN_KEY_ACL;
     key.inum    = inum;
 
-    rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
-                            (const char *) buf, len, &err);
-    chimera_cairn_abort_if(err, "Error putting acl: %s\n", err);
+    cairn_meta_put(thread, &key, sizeof(key), buf, len, "acl");
 } /* cairn_put_acl */
 
 static inline void
@@ -957,15 +1277,12 @@ cairn_remove_acl(
     struct cairn_thread *thread,
     uint64_t             inum)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
-    struct cairn_acl_key   key;
+    struct cairn_acl_key key;
 
     key.keytype = CAIRN_KEY_ACL;
     key.inum    = inum;
 
-    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error deleting acl: %s\n", err);
+    cairn_meta_delete(thread, &key, sizeof(key), "acl");
 } /* cairn_remove_acl */
 
 /*
@@ -978,26 +1295,21 @@ cairn_load_acl(
     uint64_t             inum,
     struct chimera_acl  *out)
 {
-    rocksdb_pinnableslice_t *slice;
-    struct cairn_acl_key     key;
-    char                    *err = NULL;
-    const char              *blob;
-    size_t                   len;
-    int                      found = 0;
+    struct cairn_meta_val val;
+    struct cairn_acl_key  key;
+    char                 *err   = NULL;
+    int                   found = 0;
 
     key.keytype = CAIRN_KEY_ACL;
     key.inum    = inum;
 
-    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error getting acl: %s\n", err);
-
-    if (slice) {
-        blob = rocksdb_pinnableslice_value(slice, &len);
-        if (chimera_acl_deserialize(blob, len, out, CHIMERA_ACL_MAX_ACES) >= 0) {
+    if (cairn_meta_get(thread, &key, sizeof(key), &val, &err) == 0) {
+        if (chimera_acl_deserialize(val.data, val.len, out, CHIMERA_ACL_MAX_ACES) >= 0) {
             found = 1;
         }
-        rocksdb_pinnableslice_destroy(slice);
+        cairn_meta_val_release(&val);
     }
+    chimera_cairn_abort_if(err, "Error getting acl: %s\n", err);
 
     return found;
 } /* cairn_load_acl */
@@ -1172,35 +1484,56 @@ cairn_remove_file_extents(
     struct cairn_thread *thread,
     uint64_t             file_inum)
 {
-    rocksdb_writebatch_t   *batch;
     rocksdb_iterator_t     *iter;
     struct cairn_extent_key start_key, *extent_key;
+    struct cairn_extent_key del_keys[CAIRN_EXTENT_SCAN_CHUNK];
     size_t                  klen;
+    uint64_t                next_offset = 0;
+    int                     ndel, i, more = 1;
 
-    batch = cairn_get_data_batch(thread);
+    /* Collect-then-apply: cairn_data_iterator can be a merged WBWI+base
+     * iterator inside a compound, and updating the batch under it is unsafe
+     * (see CAIRN_EXTENT_SCAN_CHUNK).  A pass that fills the chunk resumes
+     * just past the last collected extent, which is progress under both the
+     * merged view and a base-only view (which would still show the batched
+     * deletes' victims). */
+    while (more) {
+        ndel = 0;
+        more = 0;
 
-    start_key.keytype = CAIRN_KEY_EXTENT;
-    start_key.inum    = file_inum;
-    start_key.offset  = htobe64(0);
+        start_key.keytype = CAIRN_KEY_EXTENT;
+        start_key.inum    = file_inum;
+        start_key.offset  = htobe64(next_offset);
 
-    iter = cairn_data_iterator(thread);
+        iter = cairn_data_iterator(thread);
 
-    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+        rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
 
-    while (rocksdb_iter_valid(iter)) {
-        extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+        while (rocksdb_iter_valid(iter)) {
+            extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
 
-        if (extent_key->keytype != CAIRN_KEY_EXTENT ||
-            extent_key->inum != file_inum) {
-            break;
+            if (extent_key->keytype != CAIRN_KEY_EXTENT ||
+                extent_key->inum != file_inum) {
+                break;
+            }
+
+            if (ndel == CAIRN_EXTENT_SCAN_CHUNK) {
+                more        = 1;
+                next_offset = be64toh(del_keys[ndel - 1].offset) + 1;
+                break;
+            }
+
+            del_keys[ndel++] = *extent_key;
+
+            rocksdb_iter_next(iter);
         }
 
-        rocksdb_writebatch_delete(batch, (const char *) extent_key, sizeof(*extent_key));
+        rocksdb_iter_destroy(iter);
 
-        rocksdb_iter_next(iter);
+        for (i = 0; i < ndel; i++) {
+            cairn_data_delete(thread, &del_keys[i], sizeof(del_keys[i]));
+        }
     }
-
-    rocksdb_iter_destroy(iter);
 } /* cairn_remove_file_extents */
 
 static void *
@@ -1355,6 +1688,17 @@ cairn_init(
     shared->meta_write_opts = rocksdb_writeoptions_create();
     rocksdb_writeoptions_set_sync(shared->meta_write_opts, 1);
 
+    /* Explicit-compound metadata commits: nosync when rocksdb_flush_wal can
+     * supply the durability barrier separately (multi-op ENDs fsync the meta
+     * WAL right after commit; single-op ENDs fold into the next per-cycle
+     * sync).  Without flush_wal, fall back to sync commits and no fold. */
+    shared->meta_txn_write_opts = rocksdb_writeoptions_create();
+#ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
+    rocksdb_writeoptions_set_sync(shared->meta_txn_write_opts, 0);
+#else  /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+    rocksdb_writeoptions_set_sync(shared->meta_txn_write_opts, 1);
+#endif /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+
     shared->data_write_opts_async = rocksdb_writeoptions_create();
 #ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
     rocksdb_writeoptions_set_sync(shared->data_write_opts_async, 0);
@@ -1368,6 +1712,10 @@ cairn_init(
     shared->data_write_opts_sync = rocksdb_writeoptions_create();
     rocksdb_writeoptions_set_sync(shared->data_write_opts_sync, 1);
 
+    /* Openref rows are volatile handle state: never fsync them. */
+    shared->openref_write_opts = rocksdb_writeoptions_create();
+    rocksdb_writeoptions_set_sync(shared->openref_write_opts, 0);
+
     shared->read_options = rocksdb_readoptions_create();
 
     shared->meta_otxn_opts = rocksdb_optimistictransaction_options_create();
@@ -1380,6 +1728,39 @@ cairn_init(
 
     shared->datadb = rocksdb_open(shared->data_options, data_path, &err);
     chimera_cairn_abort_if(err, "Failed to open datadb at %s: %s\n", data_path, err);
+
+    /* Sweep leftover open-reference rows.  Opens are volatile: none survive
+     * a restart, but their sync=0 rows may have reached the SSTs before a
+     * crash (or a clean shutdown with handles still cached).  A stale
+     * nonzero count would defer an unlinked inode's reclaim forever, so
+     * clear the namespace wholesale before serving. */
+    {
+        rocksdb_iterator_t   *iter;
+        rocksdb_writebatch_t *batch          = rocksdb_writebatch_create();
+        uint8_t               openref_prefix = CAIRN_KEY_OPENREF;
+        size_t                klen;
+        const char           *ikey;
+
+        iter = rocksdb_create_iterator(shared->meta_base_db, shared->read_options);
+        rocksdb_iter_seek(iter, (const char *) &openref_prefix, sizeof(openref_prefix));
+
+        while (rocksdb_iter_valid(iter)) {
+            ikey = rocksdb_iter_key(iter, &klen);
+            if (klen < 1 || (uint8_t) ikey[0] != CAIRN_KEY_OPENREF) {
+                break;
+            }
+            rocksdb_writebatch_delete(batch, ikey, klen);
+            rocksdb_iter_next(iter);
+        }
+        rocksdb_iter_destroy(iter);
+
+        if (rocksdb_writebatch_count(batch) > 0) {
+            rocksdb_write(shared->meta_base_db, shared->openref_write_opts,
+                          batch, &err);
+            chimera_cairn_abort_if(err, "Error sweeping openref rows: %s\n", err);
+        }
+        rocksdb_writebatch_destroy(batch);
+    }
 
     json_decref(cfg);
 
@@ -1478,8 +1859,10 @@ cairn_destroy(void *private_data)
     rocksdb_optimistictransactiondb_close(shared->meta_otxn_db);
     rocksdb_close(shared->datadb);
     rocksdb_writeoptions_destroy(shared->meta_write_opts);
+    rocksdb_writeoptions_destroy(shared->meta_txn_write_opts);
     rocksdb_writeoptions_destroy(shared->data_write_opts_async);
     rocksdb_writeoptions_destroy(shared->data_write_opts_sync);
+    rocksdb_writeoptions_destroy(shared->openref_write_opts);
     rocksdb_readoptions_destroy(shared->read_options);
     rocksdb_optimistictransaction_options_destroy(shared->meta_otxn_opts);
     rocksdb_options_destroy(shared->meta_options);
@@ -1535,7 +1918,11 @@ cairn_queue_request(
     }
 
     /* Queued requests are completed by the deferred commit, so ensure it's
-     * scheduled.  (Read-only ops complete inline and never come here.) */
+     * scheduled.  (Read-only ops complete inline and never come here.)
+     * Folded single-op CompoundEnds also queue here -- cur_txn is never set
+     * for the compound control ops -- which is what guarantees a cycle
+     * commit is scheduled even when the folded END is the only pending
+     * work. */
     cairn_ensure_commit_scheduled(thread);
     DL_APPEND(thread->txn_requests, request);
     thread->request_count++;
@@ -1557,18 +1944,40 @@ cairn_queue_request(
  */
 #define CAIRN_MAX_COMMIT_RETRIES 8
 
+/* Classify a rocksdb commit error string as a retriable write-conflict.
+ *
+ * The rocksdb C API does not surface the Status code from commit -- only its
+ * ToString() text via errptr -- so we must match on that text.  An
+ * OptimisticTransactionDB commit that loses a write-conflict race returns
+ * Status::Busy ("Resource busy: ...") and the pessimistic/timeout paths return
+ * Status::TryAgain / Status::TimedOut ("Operation timed out: ..." / "... Try
+ * again ..."); everything else is a hard failure.  Centralized here so the
+ * version-sensitive string set lives in exactly one place. */
+static inline int
+cairn_commit_err_is_conflict(const char *err)
+{
+    return err && (strstr(err, "Busy") || strstr(err, "busy") ||
+                   strstr(err, "TryAgain") || strstr(err, "Try again") ||
+                   strstr(err, "timed out") || strstr(err, "Timed out"));
+} /* cairn_commit_err_is_conflict */
+
 /*
  * Begin a fresh metadata transaction.  Used at the start of a cycle and on
- * every retry attempt.
+ * every retry attempt (with the always-sync per-cycle write options), and
+ * for explicit compounds (with meta_txn_write_opts -- see cairn_shared).
+ * The write options bind at begin: rocksdb_transaction_commit has no
+ * per-commit options, which is why the explicit lane picks its sync
+ * behaviour here rather than at CompoundEnd.
  */
 static inline rocksdb_transaction_t *
 cairn_meta_txn_begin(
-    struct cairn_shared   *shared,
-    rocksdb_transaction_t *old)
+    struct cairn_shared    *shared,
+    rocksdb_writeoptions_t *write_opts,
+    rocksdb_transaction_t  *old)
 {
     return rocksdb_optimistictransaction_begin(
         shared->meta_otxn_db,
-        shared->meta_write_opts,
+        write_opts,
         shared->meta_otxn_opts,
         old);
 } /* cairn_meta_txn_begin */
@@ -1635,7 +2044,8 @@ cairn_thread_commit(
      * recreated data_batch, the replayed extents would otherwise sit
      * un-committed until the next cycle's commit.
      */
-    int commit_status = CHIMERA_VFS_OK;
+    int commit_status  = CHIMERA_VFS_OK;
+    int meta_committed = 0;
 
     while (1) {
         if (thread->data_batch) {
@@ -1677,19 +2087,18 @@ cairn_thread_commit(
         if (!err) {
             rocksdb_transaction_destroy(thread->meta_txn);
             thread->meta_txn = NULL;
+            meta_committed   = 1;
             break;
         }
 
         /*
-         * RocksDB stringifies optimistic-transaction conflicts as
-         * "Resource busy: ..." (Status::Busy) or "Operation timed out: ..."
-         * (Status::TryAgain).  Treat either as the retry signal; any other
-         * status string is surfaced to clients as CHIMERA_VFS_EIO rather
-         * than aborting the server — the DB-level error is logged so it
-         * isn't silent.
+         * Conflicts (Status::Busy / Status::TryAgain, matched on their
+         * ToString() text by the centralized classifier) are the retry
+         * signal; any other status string is surfaced to clients as
+         * CHIMERA_VFS_EIO rather than aborting the server — the DB-level
+         * error is logged so it isn't silent.
          */
-        if (!(strstr(err, "busy") || strstr(err, "Busy") ||
-              strstr(err, "timed out") || strstr(err, "TryAgain"))) {
+        if (!cairn_commit_err_is_conflict(err)) {
             chimera_cairn_error("Error committing meta transaction: %s", err);
             free(err);
             err           = NULL;
@@ -1771,6 +2180,32 @@ cairn_thread_commit(
     }
     thread->needs_data_wal_flush = 0;
 
+    /*
+     * Folded single-op COMMIT_DURABLE compounds committed their metadata with
+     * sync=0 and rely on this cycle ending with a durable meta WAL before
+     * their queued END completes.  A sync per-cycle meta commit above already
+     * fsynced it; when the cycle staged no metadata of its own (meta_txn was
+     * NULL, or was discarded before committing), fsync the meta WAL
+     * explicitly.  Skip on commit error — the queued requests (the folded
+     * ENDs included) are being failed with EIO anyway.  The flag can only be
+     * set when rocksdb_flush_wal exists (the fold is compiled out otherwise).
+     */
+#ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
+    if (thread->needs_meta_wal_flush && !meta_committed &&
+        commit_status == CHIMERA_VFS_OK) {
+        rocksdb_flush_wal(shared->meta_base_db, 1, &err);
+        if (err) {
+            chimera_cairn_error("Error flushing meta WAL: %s", err);
+            free(err);
+            err           = NULL;
+            commit_status = CHIMERA_VFS_EIO;
+        }
+    }
+#else  /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+    (void) meta_committed;
+#endif /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+    thread->needs_meta_wal_flush = 0;
+
     while (thread->txn_requests) {
         request = thread->txn_requests;
         DL_DELETE(thread->txn_requests, request);
@@ -1789,16 +2224,25 @@ static rocksdb_transaction_t *
 cairn_get_meta_txn(struct cairn_thread *thread)
 {
     /* Enlisted: use the explicit transaction's own rocksdb txn and do NOT
-     * schedule a per-cycle commit -- it commits only at CompoundEnd. */
+     * schedule a per-cycle commit -- it commits only at CompoundEnd.  The
+     * grouping lane must never land here (its reads and writes route to the
+     * WriteBatchWithIndex in the cairn_meta_* helpers); an optimistic txn
+     * created for it could conflict, which that lane forbids. */
     if (thread->cur_txn) {
+        chimera_cairn_abort_if(cairn_txn_grouping(thread->cur_txn),
+                               "cairn_get_meta_txn called for a grouping-lane compound\n");
         if (!thread->cur_txn->meta_txn) {
-            thread->cur_txn->meta_txn = cairn_meta_txn_begin(thread->shared, NULL);
+            thread->cur_txn->meta_txn =
+                cairn_meta_txn_begin(thread->shared,
+                                     thread->shared->meta_txn_write_opts, NULL);
         }
         return thread->cur_txn->meta_txn;
     }
 
     if (!thread->meta_txn) {
-        thread->meta_txn = cairn_meta_txn_begin(thread->shared, NULL);
+        thread->meta_txn = cairn_meta_txn_begin(thread->shared,
+                                                thread->shared->meta_write_opts,
+                                                NULL);
     }
     cairn_ensure_commit_scheduled(thread);
     return thread->meta_txn;
@@ -1814,10 +2258,8 @@ cairn_stage_handle_state(
     struct cairn_thread             *thread,
     struct chimera_vfs_handle_state *hs)
 {
-    rocksdb_transaction_t *txn;
-    char                  *err = NULL;
-    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
-    size_t                 kv_key_len;
+    uint8_t kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t  kv_key_len;
 
     if (!hs || hs->key_len > CAIRN_KV_KEY_MAX) {
         return;
@@ -1827,30 +2269,60 @@ cairn_stage_handle_state(
     kv_key_len = 1 + hs->key_len;
     memcpy(kv_key + 1, hs->key, hs->key_len);
 
-    txn = cairn_get_meta_txn(thread);
-    rocksdb_transaction_put(txn,
-                            (const char *) kv_key, kv_key_len,
-                            (const char *) hs->value, hs->value_len, &err);
-    chimera_cairn_abort_if(err, "Error staging handle-state: %s\n", err);
+    cairn_meta_put(thread, kv_key, kv_key_len, hs->value, hs->value_len,
+                   "handle-state");
 } /* cairn_stage_handle_state */
 
-static rocksdb_writebatch_t *
-cairn_get_data_batch(struct cairn_thread *thread)
+/*
+ * Extent-data staging.  Enlisted ops stage in the compound's own indexed
+ * batch (a WriteBatchWithIndex, so in-compound extent reads can merge it over
+ * the base DB) and do NOT schedule a per-cycle commit -- the compound commits
+ * only at CompoundEnd.  Autocommit ops stage in the per-cycle plain
+ * WriteBatch as before.
+ */
+static void
+cairn_data_put(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen,
+    const void          *val,
+    size_t               vlen)
 {
-    /* Enlisted: stage extents in the explicit transaction's own batch. */
     if (thread->cur_txn) {
-        if (!thread->cur_txn->data_batch) {
-            thread->cur_txn->data_batch = rocksdb_writebatch_create();
-        }
-        return thread->cur_txn->data_batch;
+        rocksdb_writebatch_wi_put(cairn_get_txn_data_batch(thread->cur_txn),
+                                  (const char *) key, klen,
+                                  (const char *) val, vlen);
+        return;
     }
 
     if (!thread->data_batch) {
         thread->data_batch = rocksdb_writebatch_create();
     }
     cairn_ensure_commit_scheduled(thread);
-    return thread->data_batch;
-} /* cairn_get_data_batch */
+    rocksdb_writebatch_put(thread->data_batch,
+                           (const char *) key, klen,
+                           (const char *) val, vlen);
+} /* cairn_data_put */
+
+static void
+cairn_data_delete(
+    struct cairn_thread *thread,
+    const void          *key,
+    size_t               klen)
+{
+    if (thread->cur_txn) {
+        rocksdb_writebatch_wi_delete(cairn_get_txn_data_batch(thread->cur_txn),
+                                     (const char *) key, klen);
+        return;
+    }
+
+    if (!thread->data_batch) {
+        thread->data_batch = rocksdb_writebatch_create();
+    }
+    cairn_ensure_commit_scheduled(thread);
+    rocksdb_writebatch_delete(thread->data_batch,
+                              (const char *) key, klen);
+} /* cairn_data_delete */
 
 static void *
 cairn_thread_init(
@@ -2575,7 +3047,7 @@ cairn_mkfs(
     inode.parent_inum = inode.inum; /* Root directory's parent is itself */
     inode.size        = 4096;
     inode.space_used  = 4096;
-    inode.refcnt      = 1;
+    inode.refcnt      = 0;          /* retired field (see struct cairn_inode) */
     inode.uid         = 0;
     inode.gid         = 0;
     inode.nlink       = 2;
@@ -3064,8 +3536,7 @@ cairn_mkdir_at(
     inode.gid = (parent_inode->mode & S_ISGID) ?
         parent_inode->gid : request->cred->gid;
     inode.nlink  = 2;
-    inode.refcnt = 1;        /* open reference; without it rmdir underflows the
-                              * count and never frees the inode (stale handle) */
+    inode.refcnt = 0;        /* retired field (see struct cairn_inode) */
     inode.rdev   = 0;
     inode.mode   = S_IFDIR | 0755;
     inode.atime  = now;
@@ -3196,8 +3667,7 @@ cairn_mknod_at(
     inode.gid = (parent_inode->mode & S_ISGID) ?
         parent_inode->gid : request->cred->gid;
     inode.nlink  = 1;
-    inode.refcnt = 1;        /* open reference (see cairn_open_at); without it
-                              * unlink underflows the count and leaks the inode */
+    inode.refcnt = 0;        /* retired field (see struct cairn_inode) */
     inode.rdev   = 0;
     inode.atime  = now;
     inode.mtime  = now;
@@ -3374,9 +3844,15 @@ cairn_remove_at(
     cairn_map_attrs(fs, &request->remove_at.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
-        --inode->refcnt;
-
-        if (inode->refcnt == 0) {
+        /* Last name gone: reclaim now unless live opens pin the inode (the
+         * OPENREF row, read outside any transaction), in which case the
+         * last close reclaims.  This remove may itself be enlisted; if its
+         * compound aborts, the staged nlink change and reclaim roll back
+         * together while the untouched OPENREF row stays consistent.  (A
+         * cross-thread close landing between this check and this remove's
+         * commit can leave an unreferenced inode row behind -- bounded
+         * garbage, same family as the orphan extent rows.) */
+        if (cairn_openref_count(thread->shared, inode->inum) == 0) {
             // Remove type-specific data before removing inode
             if (S_ISREG(inode->mode)) {
                 cairn_remove_file_extents(thread, inode->inum);
@@ -3631,11 +4107,15 @@ cairn_open_fh(
         return;
     }
 
-    inode->refcnt++;
+    /* Record the live open OUTSIDE any transaction (see cairn_openref_adjust):
+     * even when this open is enlisted, the ++ takes effect immediately and
+     * survives a compound abort, matching the autocommit close the core will
+     * issue for the handle either way.  The inode record itself is untouched,
+     * so an enlisted plain open stages nothing that a rollback could lose. */
+    cairn_openref_adjust(thread->shared, inode->inum, 1);
 
     request->open_fh.r_vfs_private = (uint64_t) inode->inum;
 
-    cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
 
     cairn_stage_handle_state(thread, request->open_fh.handle_state);
@@ -3774,7 +4254,7 @@ cairn_open_at(
         new_inode.change++;
         new_inode.btime          = now;
         new_inode.dos_attributes = 0;
-        new_inode.refcnt         = 1;
+        new_inode.refcnt         = 0;  /* retired field (see struct cairn_inode) */
 
         /* Snapshot any explicit ACL pointer BEFORE cairn_apply_attrs() rewrites
          * va_set_mask and drops the ATTR_ACL bit. */
@@ -3896,13 +4376,19 @@ cairn_open_at(
 
     if (flags & CHIMERA_VFS_OPEN_INFERRED) {
         /* If this is an inferred open (ie an NFS3 create)
-         * then we aren't returning a handle so we don't need
-         * to increment the refcnt */
+         * then we aren't returning a handle so there is no live open to
+         * record */
 
         request->open_at.r_vfs_private = 0xdeadbeefUL;
 
     } else {
-        inode->refcnt++;
+        /* Record the live open OUTSIDE any transaction (see
+         * cairn_openref_adjust): an enlisted open's ++ must survive its
+         * compound's abort, because the core closes the attempt handle
+         * (autocommit --) either way.  For a create the inode itself may be
+         * only STAGED here; if the compound aborts, the close finds no
+         * inode and drops this row on its ENOENT path. */
+        cairn_openref_adjust(thread->shared, inode->inum, 1);
         request->open_at.r_vfs_private = (uint64_t) inode->inum;
     }
 
@@ -3935,6 +4421,7 @@ cairn_close(
 {
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
+    uint32_t                  opens;
     int                       rc;
 
     /* Close names an open instance, not a path, so resolve it through the
@@ -3943,20 +4430,33 @@ cairn_close(
      * the handle was opened on.
      *
      * Resolving by inum alone (no generation check) is sound because an open
-     * handle holds a refcnt and the branch below only removes an inode once
-     * that reaches zero, so an inum cannot be recycled under a live handle. */
+     * handle holds an OPENREF row reference and the branch below only removes
+     * an inode once that count reaches zero, so an inum cannot be recycled
+     * under a live handle. */
     rc = cairn_inode_get_inum(thread, request->close.vfs_private, &ih);
 
     if (rc) {
+        /* The open's inode never materialized: an enlisted CREATE staged the
+         * inode in its compound, the compound aborted, and the core is now
+         * closing the attempt handle.  The open's ++ was applied directly to
+         * the OPENREF row (deliberately, so committed cases stay symmetric),
+         * so drop that reference here -- otherwise the sanctioned-garbage row
+         * would linger at a nonzero count. */
+        cairn_openref_adjust(thread->shared, request->close.vfs_private, -1);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
     inode = ih.inode;
-    inode->refcnt--;
 
-    if (inode->refcnt == 0 && inode->nlink == 0) {
+    /* Drop the live-open reference OUTSIDE any transaction (close is never
+     * enlisted; the row mutation is immediate and abort-immune by design --
+     * see cairn_openref_adjust).  The inode record itself is not touched
+     * unless this was the last reference to an unlinked inode. */
+    opens = cairn_openref_adjust(thread->shared, inode->inum, -1);
+
+    if (opens == 0 && inode->nlink == 0) {
         // Remove type-specific data before removing inode
         if (S_ISREG(inode->mode)) {
             cairn_remove_file_extents(thread, inode->inum);
@@ -3967,8 +4467,6 @@ cairn_close(
         cairn_remove_inode(thread, inode);
         cairn_remove_acl(thread, inode->inum);
         cairn_remove_pnfs(thread, inode->inum);
-    } else {
-        cairn_put_inode(thread, inode);
     }
 
     cairn_inode_handle_release(&ih);
@@ -4208,106 +4706,153 @@ cairn_punch_hole(
     uint64_t             offset,
     uint64_t             length)
 {
-    rocksdb_writebatch_t   *batch;
     rocksdb_iterator_t     *iter;
     struct cairn_extent_key start_key, *extent_key;
     uint64_t                hole_end    = offset + length;
     uint64_t                space_freed = 0;
     size_t                  klen;
+    /*
+     * Collect-then-apply: cairn_data_iterator can be a merged WBWI+base
+     * iterator inside a compound, and updating the batch with the iterator's
+     * current key is unsafe (see CAIRN_EXTENT_SCAN_CHUNK) -- the head-trim
+     * fragment even reuses the victim's own key.  So each pass collects up
+     * to a chunk of victim keys (copying the head/tail fragment bytes, the
+     * only values needed, out of iterator-owned memory), destroys the
+     * iterator, applies the deletes, and rescans past the last victim if the
+     * chunk filled.  The trimmed head/tail fragments are re-put once, after
+     * the passes -- the net batch state matches the old single-pass code.
+     */
+    struct cairn_extent_key del_keys[CAIRN_EXTENT_SCAN_CHUNK];
+    struct cairn_extent_key head_key = { 0 }, tail_key = { 0 };
+    char                   *head_buf = NULL, *tail_buf = NULL;
+    uint64_t                head_len = 0, tail_len = 0;
+    uint64_t                rescan_offset = offset;
+    int                     ndel, i, more = 1, first_pass = 1;
 
     (void) shared;
 
-    batch = cairn_get_data_batch(thread);
+    while (more) {
+        ndel = 0;
+        more = 0;
 
-    start_key.keytype = CAIRN_KEY_EXTENT;
-    start_key.inum    = inode->inum;
-    start_key.offset  = htobe64(offset);
+        start_key.keytype = CAIRN_KEY_EXTENT;
+        start_key.inum    = inode->inum;
+        start_key.offset  = htobe64(rescan_offset);
 
-    iter = cairn_data_iterator(thread);
+        iter = cairn_data_iterator(thread);
 
-    // Find first extent less than or equal to our start offset
-    rocksdb_iter_seek_for_prev(iter, (const char *) &start_key, sizeof(start_key));
+        if (first_pass) {
+            /* Find first extent less than or equal to our start offset. */
+            rocksdb_iter_seek_for_prev(iter, (const char *) &start_key, sizeof(start_key));
 
-    /*
-     * After seek_for_prev, if we don't find a valid extent for our inode,
-     * seek forward to find extents that might overlap our punch range.
-     */
-    if (!rocksdb_iter_valid(iter)) {
-        start_key.offset = htobe64(0);
-        rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
-    } else {
-        extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+            /*
+             * After seek_for_prev, if we don't find a valid extent for our
+             * inode, seek forward to find extents that might overlap our
+             * punch range.
+             */
+            if (!rocksdb_iter_valid(iter)) {
+                start_key.offset = htobe64(0);
+                rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+            } else {
+                extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
 
-        if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
-            start_key.offset = htobe64(0);
+                if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
+                    start_key.offset = htobe64(0);
+                    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+                }
+            }
+            first_pass = 0;
+        } else {
+            /* Rescan: every extent starting before rescan_offset was already
+             * examined (a base-view iterator would still show the batched
+             * deletes' victims, so do not seek_for_prev back onto them). */
             rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
         }
-    }
 
-    while (rocksdb_iter_valid(iter)) {
-        extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
-        size_t      extent_length;
-        const char *extent_data = rocksdb_iter_value(iter, &extent_length);
+        while (rocksdb_iter_valid(iter)) {
+            extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+            size_t      extent_length;
+            const char *extent_data = rocksdb_iter_value(iter, &extent_length);
 
-        // Stop if we've moved past this inode
-        if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
-            break;
-        }
-
-        uint64_t    extent_start = be64toh(extent_key->offset);
-        uint64_t    extent_end   = extent_start + extent_length;
-
-        // Stop if extent starts after hole
-        if (extent_start >= hole_end) {
-            break;
-        }
-
-        // Check for overlap
-        if (extent_end > offset && extent_start < hole_end) {
-            // Track space being freed from original extent
-            space_freed += extent_length;
-
-            // Delete the original extent
-            rocksdb_writebatch_delete(batch, (const char *) extent_key, sizeof(*extent_key));
-
-            // If there's data before the hole, create a new extent
-            if (extent_start < offset) {
-                struct cairn_extent_key new_key = {
-                    .keytype = CAIRN_KEY_EXTENT,
-                    .inum    = inode->inum,
-                    .offset  = htobe64(extent_start),
-                };
-
-                rocksdb_writebatch_put(batch, (const char *) &new_key, sizeof(new_key),
-                                       extent_data, offset - extent_start);
-
-                // Add back space for the preserved portion
-                space_freed -= offset - extent_start;
+            /* Stop if we've moved past this inode. */
+            if (extent_key->keytype != CAIRN_KEY_EXTENT || extent_key->inum != inode->inum) {
+                break;
             }
 
-            // If there's data after the hole, create a new extent
-            if (extent_end > hole_end) {
-                struct cairn_extent_key new_key = {
-                    .keytype = CAIRN_KEY_EXTENT,
-                    .inum    = inode->inum,
-                    .offset  = htobe64(hole_end),
-                };
+            uint64_t    extent_start = be64toh(extent_key->offset);
+            uint64_t    extent_end   = extent_start + extent_length;
 
-                rocksdb_writebatch_put(batch, (const char *) &new_key, sizeof(new_key),
-                                       extent_data + (hole_end - extent_start),
-                                       extent_end - hole_end);
-
-                // Add back space for the preserved portion
-                space_freed -= extent_end - hole_end;
+            /* Stop if extent starts after hole. */
+            if (extent_start >= hole_end) {
+                break;
             }
+
+            /* Check for overlap. */
+            if (extent_end > offset && extent_start < hole_end) {
+                if (ndel == CAIRN_EXTENT_SCAN_CHUNK) {
+                    more          = 1;
+                    rescan_offset = be64toh(del_keys[ndel - 1].offset) + 1;
+                    break;
+                }
+
+                /* Track space being freed from the original extent. */
+                space_freed += extent_length;
+
+                /* Delete the original extent (applied after the scan). */
+                del_keys[ndel++] = *extent_key;
+
+                /* If there's data before the hole, preserve it. */
+                if (extent_start < offset && !head_buf) {
+                    head_len = offset - extent_start;
+                    head_buf = malloc(head_len);
+                    memcpy(head_buf, extent_data, head_len);
+                    head_key.keytype = CAIRN_KEY_EXTENT;
+                    head_key.inum    = inode->inum;
+                    head_key.offset  = htobe64(extent_start);
+
+                    /* Add back space for the preserved portion. */
+                    space_freed -= head_len;
+                }
+
+                /* If there's data after the hole, preserve it (the last
+                 * such extent wins, matching the old same-key overwrite). */
+                if (extent_end > hole_end) {
+                    if (tail_buf) {
+                        free(tail_buf);
+                        space_freed += tail_len;
+                    }
+                    tail_len = extent_end - hole_end;
+                    tail_buf = malloc(tail_len);
+                    memcpy(tail_buf, extent_data + (hole_end - extent_start), tail_len);
+                    tail_key.keytype = CAIRN_KEY_EXTENT;
+                    tail_key.inum    = inode->inum;
+                    tail_key.offset  = htobe64(hole_end);
+
+                    /* Add back space for the preserved portion. */
+                    space_freed -= tail_len;
+                }
+            }
+
+            rocksdb_iter_next(iter);
         }
 
-        rocksdb_iter_next(iter);
+        rocksdb_iter_destroy(iter);
+
+        for (i = 0; i < ndel; i++) {
+            cairn_data_delete(thread, &del_keys[i], sizeof(del_keys[i]));
+        }
     }
 
-    rocksdb_iter_destroy(iter);
+    if (head_buf) {
+        cairn_data_put(thread, &head_key, sizeof(head_key), head_buf, head_len);
+        free(head_buf);
+    }
+    if (tail_buf) {
+        cairn_data_put(thread, &tail_key, sizeof(tail_key), tail_buf, tail_len);
+        free(tail_buf);
+    }
 
-    // Update the inode's space_used
+    /* Update the inode's space_used. */
     if (space_freed > 0) {
         inode->space_used -= space_freed;
     }
@@ -4363,25 +4908,19 @@ cairn_write(
     // Write each iovec as a new extent
     current_offset = request->write.offset;
 
-    {
-        rocksdb_writebatch_t *data_batch = cairn_get_data_batch(thread);
+    for (i = 0; i < request->write.niov; i++) {
+        const struct evpl_iovec *iov = &request->write.iov[i];
 
-        for (i = 0; i < request->write.niov; i++) {
-            const struct evpl_iovec *iov = &request->write.iov[i];
+        struct cairn_extent_key  key = {
+            .keytype = CAIRN_KEY_EXTENT,
+            .inum    = inode->inum,
+            .offset  = htobe64(current_offset),
+        };
 
-            struct cairn_extent_key  key = {
-                .keytype = CAIRN_KEY_EXTENT,
-                .inum    = inode->inum,
-                .offset  = htobe64(current_offset),
-            };
+        cairn_data_put(thread, &key, sizeof(key), iov->data, iov->length);
 
-            rocksdb_writebatch_put(data_batch,
-                                   (const char *) &key, sizeof(key),
-                                   iov->data, iov->length);
-
-            total_space    += iov->length;
-            current_offset += iov->length;
-        }
+        total_space    += iov->length;
+        current_offset += iov->length;
     }
 
     // Update inode size if needed
@@ -4728,8 +5267,7 @@ cairn_symlink_at(
     new_inode.gid = (parent_inode->mode & S_ISGID) ?
         parent_inode->gid : request->cred->gid;
     new_inode.nlink  = 1;
-    new_inode.refcnt = 1;       /* open reference (see cairn_open_at); without it
-                                 * unlink underflows the count and leaks the inode */
+    new_inode.refcnt = 0;       /* retired field (see struct cairn_inode) */
     new_inode.rdev   = 0;
     new_inode.mode   = S_IFLNK | 0755;
     new_inode.atime  = now;
@@ -4752,15 +5290,10 @@ cairn_symlink_at(
 
     target_key.keytype = CAIRN_KEY_SYMLINK;
     target_key.inum    = new_inode.inum;
-    {
-        char *symlink_err = NULL;
-        rocksdb_transaction_put(cairn_get_meta_txn(thread),
-                                (const char *) &target_key, sizeof(target_key),
-                                request->symlink_at.target,
-                                request->symlink_at.targetlen, &symlink_err);
-        chimera_cairn_abort_if(symlink_err,
-                               "Error putting symlink target: %s\n", symlink_err);
-    }
+
+    cairn_meta_put(thread, &target_key, sizeof(target_key),
+                   request->symlink_at.target,
+                   request->symlink_at.targetlen, "symlink target");
 
     cairn_put_dirent(thread, &dirent_key, &dirent_value);
     cairn_put_inode(thread, parent_inode);
@@ -4808,26 +5341,22 @@ cairn_readlink(
     target_key.inum    = inode->inum;
 
     {
-        rocksdb_pinnableslice_t *slice;
-        const char              *target_data;
+        struct cairn_meta_val val;
 
-        slice = cairn_meta_get_pinned(thread, &target_key, sizeof(target_key), &err);
-
-        chimera_cairn_abort_if(err, "Error getting symlink target: %s\n", err);
-
-        if (!slice) {
+        if (cairn_meta_get(thread, &target_key, sizeof(target_key), &val, &err)) {
+            chimera_cairn_abort_if(err, "Error getting symlink target: %s\n", err);
             cairn_inode_handle_release(&ih);
             request->status = CHIMERA_VFS_EINVAL;
             request->complete(request);
             return;
         }
 
-        target_data = rocksdb_pinnableslice_value(slice, &target_len);
+        target_len = val.len;
 
         request->readlink.r_target_length = target_len;
-        memcpy(request->readlink.r_target, target_data, target_len);
+        memcpy(request->readlink.r_target, val.data, target_len);
 
-        rocksdb_pinnableslice_destroy(slice);
+        cairn_meta_val_release(&val);
     }
 
     cairn_map_attrs(fs, &request->readlink.r_attr, inode);
@@ -5109,9 +5638,11 @@ cairn_rename_at(
             }
 
             if (existing_inode->nlink == 0) {
-                existing_inode->refcnt--;
-
-                if (existing_inode->refcnt == 0) {
+                /* Rename over the victim's last name: reclaim now unless
+                 * live opens pin it (OPENREF row, read outside any
+                 * transaction), in which case the last close reclaims --
+                 * same protocol as cairn_remove_at. */
+                if (cairn_openref_count(thread->shared, existing_inode->inum) == 0) {
                     // Remove type-specific data before removing inode
                     if (S_ISREG(existing_inode->mode)) {
                         cairn_remove_file_extents(thread, existing_inode->inum);
@@ -5281,17 +5812,12 @@ cairn_link_at(
      * pre-link value. */
     cairn_map_attrs(fs, &request->link_at.r_dir_pre_attr, parent_inode);
 
-    /* Re-entering the namespace re-takes the reference that stands for it:
-     * refcnt holds one reference for the inode's presence in the namespace
-     * plus one per open handle, and cairn_remove_at drops the namespace one
-     * as nlink reaches 0.  An inode unlinked while open and then linked again
-     * would otherwise have that same reference dropped twice, removing the
-     * inode while open handles still refer to it.  (cairn has no
-     * create_unlinked, so nlink 0 here always means "lost its last name".) */
-    if (target_inode->nlink == 0) {
-        target_inode->refcnt++;
-    }
-
+    /* No reference bookkeeping on relink: reclaim keys purely off
+     * nlink == 0 && OPENREF == 0 (checked in remove/rename-over and close),
+     * so re-entering the namespace is just nlink 0 -> 1 -- an inode unlinked
+     * while open and linked again is naturally safe, with no
+     * namespace-reference counter to re-take.  (The old in-record refcnt
+     * scheme needed a ++ here; that field is retired.) */
     target_inode->nlink++;
     target_inode->ctime = now;
     target_inode->change++;
@@ -5370,10 +5896,8 @@ cairn_put_key(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t *txn;
-    char                  *err = NULL;
-    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
-    size_t                 kv_key_len;
+    uint8_t kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t  kv_key_len;
 
     (void) shared;
     (void) private_data;
@@ -5389,12 +5913,8 @@ cairn_put_key(
     kv_key_len = 1 + request->put_key.key_len;
     memcpy(kv_key + 1, request->put_key.key, request->put_key.key_len);
 
-    txn = cairn_get_meta_txn(thread);
-    rocksdb_transaction_put(txn,
-                            (const char *) kv_key, kv_key_len,
-                            (const char *) request->put_key.value,
-                            request->put_key.value_len, &err);
-    chimera_cairn_abort_if(err, "Error putting KV: %s\n", err);
+    cairn_meta_put(thread, kv_key, kv_key_len,
+                   request->put_key.value, request->put_key.value_len, "KV");
 
     request->status = CHIMERA_VFS_OK;
 
@@ -5427,21 +5947,18 @@ cairn_get_key(
     memcpy(kv_key + 1, request->get_key.key, request->get_key.key_len);
 
     {
-        rocksdb_pinnableslice_t *slice;
-        const char              *vp;
+        struct cairn_meta_val val;
 
-        slice = cairn_meta_get_pinned(thread, kv_key, kv_key_len, &err);
-        chimera_cairn_abort_if(err, "Error getting KV: %s\n", err);
-
-        if (!slice) {
+        if (cairn_meta_get(thread, kv_key, kv_key_len, &val, &err)) {
+            chimera_cairn_abort_if(err, "Error getting KV: %s\n", err);
             request->status = CHIMERA_VFS_ENOENT;
             request->complete(request);
             return;
         }
 
-        vp = rocksdb_pinnableslice_value(slice, &value_len);
-        memcpy(request->plugin_data, vp, value_len);
-        rocksdb_pinnableslice_destroy(slice);
+        value_len = val.len;
+        memcpy(request->plugin_data, val.data, value_len);
+        cairn_meta_val_release(&val);
     }
 
     request->get_key.r_value     = request->plugin_data;
@@ -5458,10 +5975,8 @@ cairn_delete_key(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    rocksdb_transaction_t *txn;
-    char                  *err = NULL;
-    uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
-    size_t                 kv_key_len;
+    uint8_t kv_key[1 + CAIRN_KV_KEY_MAX];
+    size_t  kv_key_len;
 
     (void) shared;
     (void) private_data;
@@ -5477,9 +5992,7 @@ cairn_delete_key(
     kv_key_len = 1 + request->delete_key.key_len;
     memcpy(kv_key + 1, request->delete_key.key, request->delete_key.key_len);
 
-    txn = cairn_get_meta_txn(thread);
-    rocksdb_transaction_delete(txn, (const char *) kv_key, kv_key_len, &err);
-    chimera_cairn_abort_if(err, "Error deleting KV: %s\n", err);
+    cairn_meta_delete(thread, kv_key, kv_key_len, "KV");
 
     request->status = CHIMERA_VFS_OK;
 
@@ -5601,9 +6114,7 @@ cairn_get_xattr(
 {
     struct cairn_inode_handle ih;
     struct cairn_xattr_key    key;
-    rocksdb_pinnableslice_t  *slice;
-    const char               *vp;
-    size_t                    vlen;
+    struct cairn_meta_val     val;
     char                     *err = NULL;
 
     (void) fs;
@@ -5621,29 +6132,27 @@ cairn_get_xattr(
                                    request->get_xattr.namelen);
     cairn_inode_handle_release(&ih);
 
-    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
-
-    if (!slice) {
+    if (cairn_meta_get(thread, &key, sizeof(key), &val, &err)) {
+        chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
         request->status = CHIMERA_VFS_ENODATA;
         request->complete(request);
         return;
     }
 
-    vp = rocksdb_pinnableslice_value(slice, &vlen);
-    if (!cairn_xattr_value_matches((const struct cairn_xattr_value *) vp, vlen,
+    if (!cairn_xattr_value_matches((const struct cairn_xattr_value *) val.data,
+                                   val.len,
                                    request->get_xattr.name,
                                    request->get_xattr.namelen)) {
-        rocksdb_pinnableslice_destroy(slice);
+        cairn_meta_val_release(&val);
         request->status = CHIMERA_VFS_ENODATA;
         request->complete(request);
         return;
     }
 
     {
-        const struct cairn_xattr_value *xv = (const struct cairn_xattr_value *) vp;
+        const struct cairn_xattr_value *xv = (const struct cairn_xattr_value *) val.data;
         if (xv->value_len > request->get_xattr.value_maxlen) {
-            rocksdb_pinnableslice_destroy(slice);
+            cairn_meta_val_release(&val);
             request->status = CHIMERA_VFS_ERANGE;
             request->complete(request);
             return;
@@ -5653,7 +6162,7 @@ cairn_get_xattr(
         request->get_xattr.r_value_len = xv->value_len;
     }
 
-    rocksdb_pinnableslice_destroy(slice);
+    cairn_meta_val_release(&val);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* cairn_get_xattr */
@@ -5668,13 +6177,10 @@ cairn_set_xattr(
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     struct cairn_xattr_key    key;
-    rocksdb_pinnableslice_t  *slice;
-    rocksdb_transaction_t    *txn;
+    struct cairn_meta_val     val;
     struct cairn_xattr_value *xv;
     uint32_t                  xv_len;
     char                     *err = NULL;
-    const char               *vp;
-    size_t                    vlen;
 
     (void) private_data;
 
@@ -5692,32 +6198,33 @@ cairn_set_xattr(
     key.hash    = chimera_vfs_hash(request->set_xattr.name,
                                    request->set_xattr.namelen);
 
-    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
-
-    if (slice) {
-        vp = rocksdb_pinnableslice_value(slice, &vlen);
-        if (!cairn_xattr_value_matches((const struct cairn_xattr_value *) vp, vlen,
+    if (cairn_meta_get(thread, &key, sizeof(key), &val, &err) == 0) {
+        chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
+        if (!cairn_xattr_value_matches((const struct cairn_xattr_value *) val.data,
+                                       val.len,
                                        request->set_xattr.name,
                                        request->set_xattr.namelen)) {
-            rocksdb_pinnableslice_destroy(slice);
+            cairn_meta_val_release(&val);
             cairn_inode_handle_release(&ih);
             request->status = CHIMERA_VFS_EEXIST;
             cairn_queue_request(thread, request);
             return;
         }
-        rocksdb_pinnableslice_destroy(slice);
+        cairn_meta_val_release(&val);
         if (request->set_xattr.option == CHIMERA_VFS_XATTR_CREATE) {
             cairn_inode_handle_release(&ih);
             request->status = CHIMERA_VFS_EEXIST;
             cairn_queue_request(thread, request);
             return;
         }
-    } else if (request->set_xattr.option == CHIMERA_VFS_XATTR_REPLACE) {
-        cairn_inode_handle_release(&ih);
-        request->status = CHIMERA_VFS_ENODATA;
-        cairn_queue_request(thread, request);
-        return;
+    } else {
+        chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
+        if (request->set_xattr.option == CHIMERA_VFS_XATTR_REPLACE) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_ENODATA;
+            cairn_queue_request(thread, request);
+            return;
+        }
     }
 
     xv_len = sizeof(*xv) + request->set_xattr.namelen +
@@ -5729,11 +6236,8 @@ cairn_set_xattr(
     memcpy(xv->data + request->set_xattr.namelen,
            request->set_xattr.value, request->set_xattr.value_len);
 
-    txn = cairn_get_meta_txn(thread);
-    rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
-                            (const char *) xv, xv_len, &err);
+    cairn_meta_put(thread, &key, sizeof(key), xv, xv_len, "xattr");
     free(xv);
-    chimera_cairn_abort_if(err, "Error putting xattr: %s\n", err);
 
     clock_gettime(CLOCK_REALTIME, &inode->ctime);
     cairn_put_inode(thread, inode);
@@ -5834,11 +6338,8 @@ cairn_remove_xattr(
     struct cairn_inode_handle ih;
     struct cairn_inode       *inode;
     struct cairn_xattr_key    key;
-    rocksdb_pinnableslice_t  *slice;
-    rocksdb_transaction_t    *txn;
+    struct cairn_meta_val     val;
     char                     *err = NULL;
-    const char               *vp;
-    size_t                    vlen;
 
     (void) private_data;
 
@@ -5856,31 +6357,27 @@ cairn_remove_xattr(
     key.hash    = chimera_vfs_hash(request->remove_xattr.name,
                                    request->remove_xattr.namelen);
 
-    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
-
-    if (!slice) {
+    if (cairn_meta_get(thread, &key, sizeof(key), &val, &err)) {
+        chimera_cairn_abort_if(err, "Error getting xattr: %s\n", err);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_ENODATA;
         cairn_queue_request(thread, request);
         return;
     }
 
-    vp = rocksdb_pinnableslice_value(slice, &vlen);
-    if (!cairn_xattr_value_matches((const struct cairn_xattr_value *) vp, vlen,
+    if (!cairn_xattr_value_matches((const struct cairn_xattr_value *) val.data,
+                                   val.len,
                                    request->remove_xattr.name,
                                    request->remove_xattr.namelen)) {
-        rocksdb_pinnableslice_destroy(slice);
+        cairn_meta_val_release(&val);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_ENODATA;
         cairn_queue_request(thread, request);
         return;
     }
-    rocksdb_pinnableslice_destroy(slice);
+    cairn_meta_val_release(&val);
 
-    txn = cairn_get_meta_txn(thread);
-    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
-    chimera_cairn_abort_if(err, "Error deleting xattr: %s\n", err);
+    cairn_meta_delete(thread, &key, sizeof(key), "xattr");
 
     clock_gettime(CLOCK_REALTIME, &inode->ctime);
     cairn_put_inode(thread, inode);
@@ -5891,68 +6388,79 @@ cairn_remove_xattr(
     cairn_queue_request(thread, request);
 } /* cairn_remove_xattr */
 
-/* Classify a rocksdb commit error string as a retriable write-conflict.
- *
- * The rocksdb C API does not surface the Status code from commit -- only its
- * ToString() text via errptr -- so we must match on that text.  An
- * OptimisticTransactionDB commit that loses a write-conflict race returns
- * Status::Busy ("Resource busy: ...") and the pessimistic/timeout paths return
- * Status::TryAgain / Status::TimedOut ("Operation timed out: ..." / "... Try
- * again ..."); everything else is a hard failure.  Centralized here so the
- * version-sensitive string set lives in exactly one place. */
-static inline int
-cairn_commit_err_is_conflict(const char *err)
+/* Release whatever metadata staging an explicit transaction still holds
+ * (rollback + destroy for the RETRYABLE lane's optimistic txn, destroy for
+ * the grouping lane's indexed batch).  Used on abort and on data-commit
+ * failure. */
+static void
+cairn_txn_release_meta(struct cairn_txn *ctxn)
 {
-    return err && (strstr(err, "Busy") || strstr(err, "busy") ||
-                   strstr(err, "TryAgain") || strstr(err, "Try again") ||
-                   strstr(err, "timed out") || strstr(err, "Timed out"));
-} /* cairn_commit_err_is_conflict */
+    char *err = NULL;
+
+    if (ctxn->meta_txn) {
+        rocksdb_transaction_rollback(ctxn->meta_txn, &err);
+        if (err) {
+            free(err);
+        }
+        rocksdb_transaction_destroy(ctxn->meta_txn);
+        ctxn->meta_txn = NULL;
+    }
+    if (ctxn->meta_wbwi) {
+        rocksdb_writebatch_wi_destroy(ctxn->meta_wbwi);
+        ctxn->meta_wbwi = NULL;
+    }
+} /* cairn_txn_release_meta */
 
 /*
  * Commit an explicit transaction once (no internal replay).  Data batch first
- * (idempotent, no conflict), then the optimistic metadata transaction.  A
- * metadata conflict (Busy / TryAgain) returns ECOMPOUND_CONFLICT so the protocol
- * re-runs the whole sequence; any other failure returns EIO.  `sync` governs
- * only the data-batch durability (the metadata transaction always commits with
- * the sync meta write options).
+ * (idempotent, no conflict), then the metadata.
+ *
+ * RETRYABLE lane: the optimistic transaction commits (its write options were
+ * fixed at begin: nosync when flush_wal is available, sync otherwise) and its
+ * conflict validation always runs -- a conflict (Busy / TryAgain) returns
+ * ECOMPOUND_CONFLICT so the consumer re-runs the whole sequence; any other
+ * failure returns EIO.  `meta_barrier` restores the durable-commit semantics
+ * of the old always-sync commit by fsyncing the meta WAL right after a nosync
+ * commit; the single-op fold passes 0 and defers that barrier to the next
+ * per-cycle commit instead.
+ *
+ * Grouping lane: one unconditional indexed-batch write -- no validation, so
+ * this lane can never return a conflict.  `meta_barrier` selects sync write
+ * options (COMMIT_DURABLE) versus the deferred/nosync ones.
+ *
+ * `data_sync` governs only the data-batch durability, as before.
  */
 static enum chimera_vfs_error
 cairn_txn_commit_once(
     struct cairn_thread *thread,
     struct cairn_txn    *ctxn,
-    int                  sync)
+    int                  data_sync,
+    int                  meta_barrier)
 {
     struct cairn_shared *shared = thread->shared;
     char *err = NULL;
 
     if (ctxn->data_batch) {
-        if (rocksdb_writebatch_count(ctxn->data_batch) > 0) {
-            rocksdb_writeoptions_t *wo = sync ? shared->data_write_opts_sync
-                                              : shared->data_write_opts_async;
+        if (rocksdb_writebatch_wi_count(ctxn->data_batch) > 0) {
+            rocksdb_writeoptions_t *wo = data_sync ? shared->data_write_opts_sync
+                                                   : shared->data_write_opts_async;
 
-            rocksdb_write(shared->datadb, wo, ctxn->data_batch, &err);
+            rocksdb_write_writebatch_wi(shared->datadb, wo, ctxn->data_batch, &err);
             if (err) {
                 chimera_cairn_error("explicit txn data commit: %s", err);
                 free(err);
-                rocksdb_writebatch_destroy(ctxn->data_batch);
+                rocksdb_writebatch_wi_destroy(ctxn->data_batch);
                 ctxn->data_batch = NULL;
-                if (ctxn->meta_txn) {
-                    err = NULL;
-                    rocksdb_transaction_rollback(ctxn->meta_txn, &err);
-                    if (err) {
-                        free(err);
-                    }
-                    rocksdb_transaction_destroy(ctxn->meta_txn);
-                    ctxn->meta_txn = NULL;
-                }
+                cairn_txn_release_meta(ctxn);
                 return CHIMERA_VFS_EIO;
             }
         }
-        rocksdb_writebatch_destroy(ctxn->data_batch);
+        rocksdb_writebatch_wi_destroy(ctxn->data_batch);
         ctxn->data_batch = NULL;
     }
 
     if (ctxn->meta_txn) {
+        /* RETRYABLE lane */
         rocksdb_transaction_commit(ctxn->meta_txn, &err);
         if (err) {
             int conflict = cairn_commit_err_is_conflict(err);
@@ -5972,6 +6480,43 @@ cairn_txn_commit_once(
         }
         rocksdb_transaction_destroy(ctxn->meta_txn);
         ctxn->meta_txn = NULL;
+
+#ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
+        if (meta_barrier) {
+            /* The txn was begun with nosync write options (so a single-op
+             * END can fold); make the committed metadata durable before the
+             * end callback, matching the old sync commit. */
+            rocksdb_flush_wal(shared->meta_base_db, 1, &err);
+            if (err) {
+                chimera_cairn_error("explicit txn meta WAL flush: %s", err);
+                free(err);
+                return CHIMERA_VFS_EIO;
+            }
+        }
+#else  /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+        /* Without flush_wal the txn was begun with sync write options, so
+         * the commit above already carried the barrier. */
+        (void) meta_barrier;
+#endif /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+    } else if (ctxn->meta_wbwi) {
+        /* Grouping lane: no validation, no conflict, one batch write. */
+        if (rocksdb_writebatch_wi_count(ctxn->meta_wbwi) > 0) {
+            rocksdb_writeoptions_t *wo = meta_barrier
+                ? shared->meta_write_opts
+                : shared->meta_txn_write_opts;
+
+            rocksdb_write_writebatch_wi(shared->meta_base_db, wo,
+                                        ctxn->meta_wbwi, &err);
+            if (err) {
+                chimera_cairn_error("grouping compound meta commit: %s", err);
+                free(err);
+                rocksdb_writebatch_wi_destroy(ctxn->meta_wbwi);
+                ctxn->meta_wbwi = NULL;
+                return CHIMERA_VFS_EIO;
+            }
+        }
+        rocksdb_writebatch_wi_destroy(ctxn->meta_wbwi);
+        ctxn->meta_wbwi = NULL;
     }
 
     return CHIMERA_VFS_OK;
@@ -5988,9 +6533,10 @@ cairn_begin_transaction(
     (void) shared;
     (void) private_data;
 
-    /* The core allocated and zeroed the handle (cairn_txn, compound_size below) and
-     * stamped its core header; meta_txn/data_batch are already NULL and are
-     * created lazily by the first enlisted op.  Nothing to set up here. */
+    /* The core allocated and zeroed the handle (cairn_txn, compound_size below)
+     * and stamped its core header; meta_txn/meta_wbwi/data_batch are already
+     * NULL and are created lazily by the first enlisted op (in whichever lane
+     * the core flags select).  Nothing to set up here. */
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* cairn_begin_transaction */
@@ -6004,28 +6550,96 @@ cairn_end_transaction(
 {
     struct cairn_txn      *ctxn = (struct cairn_txn *) request->compound;
     enum chimera_vfs_error status;
+    int                    grouping = cairn_txn_grouping(ctxn);
+    int                    durable  = request->compound_op.end_flag ==
+        CHIMERA_VFS_COMPOUND_COMMIT_DURABLE;
 
     (void) shared;
     (void) private_data;
 
-    if (request->compound_op.end_flag == CHIMERA_VFS_COMPOUND_ABORT) {
-        if (ctxn->meta_txn) {
-            char *err = NULL;
-            rocksdb_transaction_rollback(ctxn->meta_txn, &err);
-            if (err) {
-                free(err);
-            }
-            rocksdb_transaction_destroy(ctxn->meta_txn);
-        }
-        if (ctxn->data_batch) {
-            rocksdb_writebatch_destroy(ctxn->data_batch);
-        }
-        status = CHIMERA_VFS_OK;
-    } else {
-        status = cairn_txn_commit_once(thread, ctxn,
-                                       request->compound_op.end_flag ==
-                                       CHIMERA_VFS_COMPOUND_COMMIT_DURABLE);
+    /* Already folded: this dispatch is the per-cycle commit's conflict
+     * replay re-running its queued requests.  The explicit transaction
+     * committed before the END was first queued (independently of the
+     * cycle's own meta transaction), so just ride along: requeue for the
+     * completion drain, exactly like the autocommit ops being replayed. */
+    if (ctxn->folded) {
+        request->status = CHIMERA_VFS_OK;
+        cairn_queue_request(thread, request);
+        return;
     }
+
+    if (request->compound_op.end_flag == CHIMERA_VFS_COMPOUND_ABORT) {
+        cairn_txn_release_meta(ctxn);
+        if (ctxn->data_batch) {
+            rocksdb_writebatch_wi_destroy(ctxn->data_batch);
+            ctxn->data_batch = NULL;
+        }
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+#ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL
+    /*
+     * CYCLE-FOLD.  Giving every compound its own sync commit is what made
+     * explicit transactions an order of magnitude more expensive than the
+     * amortized per-cycle batch -- and a client PATH op is a multi-op
+     * compound (the walk enlists each component), so the fold must cover
+     * multi-op compounds too, not just the single-op case.  Commit WITHOUT
+     * sync (the RETRYABLE lane's optimistic validation still runs, so
+     * conflicts are detected exactly as before) and:
+     *
+     *   COMMIT_DURABLE: defer the END completion to the per-cycle batch
+     *   commit.  needs_meta_wal_flush / needs_data_wal_flush make that cycle
+     *   end with durable WALs, and WAL ordering means its fsync also covers
+     *   this compound's earlier nosync appends -- however many ops staged
+     *   them -- durable-before-callback with the same amortization
+     *   autocommit ops have always had.  cairn_queue_request schedules the
+     *   cycle commit (evpl deferral, runs at the end of the current
+     *   event-loop pass), so a folded END never waits on unrelated traffic.
+     *
+     *   COMMIT: complete immediately after the nosync commit.  The compound
+     *   contract defines COMMIT as commit WITHOUT the durability barrier
+     *   (NFS3 UNSTABLE writes rely on exactly that; the old always-sync
+     *   meta barrier on plain COMMIT was contract overdelivery).
+     */
+    {
+        int had_meta = grouping
+            ? (ctxn->meta_wbwi && rocksdb_writebatch_wi_count(ctxn->meta_wbwi) > 0)
+            : (ctxn->meta_txn != NULL);
+        int had_data = ctxn->data_batch &&
+            rocksdb_writebatch_wi_count(ctxn->data_batch) > 0;
+
+        if (had_meta || had_data) {
+            status = cairn_txn_commit_once(thread, ctxn, 0, 0);
+
+            if (status != CHIMERA_VFS_OK || !durable) {
+                request->status = status;
+                request->complete(request);
+                return;
+            }
+
+            if (had_meta) {
+                thread->needs_meta_wal_flush = 1;
+            }
+            if (had_data) {
+                thread->needs_data_wal_flush = 1;
+            }
+            ctxn->folded    = 1;
+            request->status = CHIMERA_VFS_OK;
+            cairn_queue_request(thread, request);
+            return;
+        }
+        /* Nothing staged: fall through, the commit below is a no-op. */
+    }
+#endif /* ifdef CHIMERA_HAVE_ROCKSDB_FLUSH_WAL */
+
+    /*
+     * Fold-ineligible commit (nothing staged, or no rocksdb_flush_wal on
+     * this platform), synchronous as before.
+     */
+    status = cairn_txn_commit_once(thread, ctxn, durable,
+                                   grouping ? durable : 1);
 
     /* The core owns and frees the handle (cairn_txn) at end-completion; here we
      * only released the rocksdb txn/batch it held. */
