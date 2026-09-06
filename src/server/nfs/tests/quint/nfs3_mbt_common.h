@@ -507,9 +507,15 @@ mbt_gss_establish(
     struct mbt_gss_wait w = { 0 };
     int                 spins;
 
+    /* The initiator provider takes an *identity*, not the realm.  A realm holds
+     * one service key and one acceptor credential; what a client needs is a
+     * principal with its own ticket and credential, and libevpl grew a separate
+     * accessor for that when it learned to hold several.  Passing the realm
+     * here leaves the initiator with nothing to authenticate as, which shows up
+     * as "rpcsec_gss: initiator would not start a context". */
     evpl_rpc2_gss_client_create(env->evpl, program, conn,
                                 krb5_local_initiator_provider(),
-                                krb5_local_arg(env->krb5),
+                                krb5_local_initiator_arg(env->krb5),
                                 mbt_sec_service(env->sec),
                                 MBT_KRB5_PRINCIPAL, mbt_gss_ready, &w);
 
