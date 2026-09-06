@@ -116,7 +116,7 @@ chimera_nfs4_listxattrs_open_callback(
         return;
     }
 
-    chimera_vfs_list_xattrs(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_list_xattrs(req->thread->vfs_thread, &req->cred, req->compound,
                             handle,
                             args->lxa_cookie,
                             buffer,
@@ -140,7 +140,7 @@ chimera_nfs4_listxattrs(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,

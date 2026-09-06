@@ -82,7 +82,7 @@ chimera_nfs4_setxattr_open_callback(
         chimera_nfs4_compound_complete(req, res->sxr_status);
         return;
     }
-    chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred, req->compound,
                           handle,
                           args->sxa_option,
                           name,
@@ -118,7 +118,7 @@ chimera_nfs4_setxattr(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,

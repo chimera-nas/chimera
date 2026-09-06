@@ -69,6 +69,20 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
             return NFS4ERR_SYMLINK;
         case CHIMERA_VFS_ELOOP:
             return NFS4ERR_SERVERFAULT;
+        /* Engine-compound contention surfacing on a member op.  The v4 server
+         * runs its VFS compound in the grouping lane (not RETRYABLE) because a
+         * COMPOUND can never be replayed -- OPEN seqids advance, stateids
+         * install, replay-cache slots record, WRITE iovecs are released -- so
+         * a conflict is never delivered for replay; it surfaces per-op as the
+         * retriable ECOMPOUND_EXHAUSTED, which maps to NFS4ERR_DELAY exactly
+         * like the delegation-recall precedent (the client backs off and
+         * retries the op).  ECOMPOUND_CONFLICT is mapped identically, purely
+         * defensively: the core rewrites conflicts to EXHAUSTED for
+         * non-retryable compounds, so it should never reach here. */
+        case CHIMERA_VFS_ECOMPOUND_EXHAUSTED:
+            return NFS4ERR_DELAY;
+        case CHIMERA_VFS_ECOMPOUND_CONFLICT:
+            return NFS4ERR_DELAY;
         default:
             chimera_nfs_error("Unknown VFS error code: %d", err);
             return NFS4ERR_SERVERFAULT;

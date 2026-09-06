@@ -44,6 +44,13 @@ chimera_nfs4_write_same_complete(
         memcpy(res->resok4.wr_writeverf,
                &req->thread->shared->nfs_verifier,
                sizeof(res->resok4.wr_writeverf));
+
+        /* The reply promises DATA_SYNC4/FILE_SYNC4 durability (tracked on
+         * the achieved level, as WRITE does): the wire compound's VFS
+         * compound must end with COMMIT_DURABLE before this reply is sent. */
+        if (sync != CHIMERA_VFS_WRITE_UNSTABLE) {
+            req->compound_durable = 1;
+        }
     } else {
         res->wsr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
@@ -68,7 +75,7 @@ chimera_nfs4_write_same_issue(
 {
     struct WRITE_SAME4args *args = &req->args_compound->argarray[req->index].opwrite_same;
 
-    chimera_vfs_write_same(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_write_same(req->thread->vfs_thread, &req->cred, req->compound,
                            handle,
                            args->wsa_adb.adb_offset,
                            (uint32_t) args->wsa_adb.adb_block_size,
@@ -178,7 +185,7 @@ chimera_nfs4_write_same(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED,
                             chimera_nfs4_write_same_open_callback,
@@ -214,7 +221,7 @@ chimera_nfs4_write_same(
             chimera_nfs4_compound_complete(req, res->wsr_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED,
                             chimera_nfs4_write_same_open_callback,

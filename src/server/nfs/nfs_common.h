@@ -253,6 +253,12 @@ struct nfs_request {
     uint64_t                     compound_ts;
     int                          compound_attempt;
     enum chimera_vfs_error       compound_op_status;
+    /* NFSv4 only: an op that ran under this wire COMPOUND promised durability
+     * on the wire -- a WRITE/WRITE_SAME whose reply reports DATA_SYNC4 or
+     * FILE_SYNC4, or a wire COMMIT -- so the VFS compound must end with
+     * COMMIT_DURABLE rather than plain COMMIT.  Reset per request at v4
+     * compound entry; set by the op completion paths as ops run. */
+    uint8_t                      compound_durable;
     uint32_t                     write_length;
     uint32_t                     write_sync;
     /* Shared NFS3 compound driver (chimera_nfs3_compound_run/finish): fh+mode the

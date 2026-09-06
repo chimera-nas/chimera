@@ -95,7 +95,7 @@ chimera_nfs4_clone_issue(
         return;
     }
 
-    chimera_vfs_clone_range(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_clone_range(req->thread->vfs_thread, &req->cred, req->compound,
                             src_handle, args->cl_src_offset,
                             dst_handle, args->cl_dst_offset,
                             length,
@@ -189,7 +189,7 @@ chimera_nfs4_clone(
 
     /* Resolve the source size to bound a clone-to-EOF. */
     src_handle = chimera_nfs4_clone_state_handle(refs->src_state, refs->src_type);
-    chimera_vfs_getattr(thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_getattr(thread->vfs_thread, &req->cred, req->compound,
                         src_handle,
                         CHIMERA_VFS_ATTR_SIZE,
                         chimera_nfs4_clone_getattr_complete,

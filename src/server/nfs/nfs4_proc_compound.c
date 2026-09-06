@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_recovery.h"
+#include "vfs/vfs_procs.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_program.h"
@@ -26,6 +28,105 @@ nfs4_send_cached_reply(
                                      req->replay_slot->cached_buf,
                                      req->replay_slot->cached_len);
 } /* nfs4_send_cached_reply */
+
+/*
+ * One wire COMPOUND == one VFS compound (CHIMERA_VFS_CAP_COMPOUND).
+ *
+ * The compound is begun UNBOUND at COMPOUND entry (there is no current
+ * filehandle yet; req->fhlen == 0) and binds lazily at the first enlisted op
+ * on a compound-capable mount; a PUTFH or junction crossing into another
+ * mount simply ejects the ops that land elsewhere.  Mode is WRITE because the
+ * op mix is unknown at entry.  Flags are 0 -- the GROUPING lane, and that is
+ * mandatory: the v4 server can never replay a COMPOUND (OPEN seqids advance,
+ * stateids install, replay-cache slots record the reply, WRITE iovecs are
+ * released as ops run), so it must never opt into RETRYABLE.  The grouping
+ * lane never delivers ECOMPOUND_CONFLICT; engine contention surfaces per-op
+ * as the retriable ECOMPOUND_EXHAUSTED, which the op handlers map to
+ * NFS4ERR_DELAY (nfs4_status.h) exactly like the delegation-recall DELAY
+ * precedent.
+ *
+ * The end is ALWAYS a COMMIT: RFC truncate-at-first-error semantics KEEP the
+ * effects of the executed prefix, so a COMPOUND that stopped at a failing op
+ * still commits what ran; ABORT is reserved for paths that reply nothing new
+ * (the SEQUENCE replay-from-cache short circuit, where nothing was enlisted).
+ * COMMIT_DURABLE is used iff an op promised durability on the wire
+ * (req->compound_durable: a WRITE/WRITE_SAME/COPY reply reporting
+ * DATA_SYNC4/FILE_SYNC4, or a wire COMMIT).
+ *
+ * State-table side effects -- open-state installs, owner seqid advances, the
+ * session replay cache -- live outside the VFS compound by construction, and
+ * that is safe precisely because a compound that executed member ops always
+ * ends with COMMIT: v4 never ABORTs a compound whose ops installed state, so
+ * installed state can never point at files whose creation was discarded.
+ *
+ * The reply must not be sent before the end completes (a durable end is the
+ * moment write data actually reaches stable storage on an engine backend), so
+ * the reply branch ends the compound first and sends from the end callback.
+ */
+static void
+chimera_nfs4_compound_committed(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
+
+    req->compound = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Should-never-happen backstop: the grouping lane never delivers a
+         * commit-time conflict, so a non-OK end is an EIO-class backend
+         * failure and the compound's staged effects may not have committed.
+         * The per-op results are already built and cannot be retracted, but
+         * silently promising them (FILE_SYNC WRITEs included) would be a
+         * data-integrity lie -- so fail the compound at its tail: rewrite the
+         * last executed op's status (every res union arm leads with its
+         * status discriminant, same trick as chimera_nfs4_compound_complete)
+         * and the overall status, and let the client re-drive. */
+        nfsstat4 status = chimera_nfs4_errno_to_nfsstat4(error_code);
+
+        chimera_nfs_error("NFS4 compound end failed with vfs error %d",
+                          error_code);
+
+        if (req->res_compound.num_resarray > 0) {
+            req->res_compound.resarray[req->res_compound.num_resarray - 1]
+            .opillegal.status = status;
+        }
+        req->res_compound.status = status;
+    }
+
+    rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
+        thread->evpl,
+        NULL,
+        &req->res_compound,
+        req->encoding);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+    /* Advance the SEQUENCE replay slot to CACHED/COMPLETED.  Must run *after*
+     * send_reply because the reply-capture callback (armed in
+     * nfs4_replay_slot_acquire when sa_cachethis was set) fires from inside
+     * send_reply and writes the captured bytes onto slot->cached_buf, which
+     * finalize then promotes to CACHED state. */
+    nfs4_replay_slot_finalize(req);
+
+    nfs_request_free(thread, req);
+} /* chimera_nfs4_compound_committed */
+
+/*
+ * End callback for compound ends whose reply does not depend on the end (the
+ * replay-from-cache short circuit ABORTs a compound that enlisted nothing;
+ * the end is synchronous by construction there).
+ */
+static void
+chimera_nfs4_compound_discarded(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) error_code;
+    (void) private_data;
+} /* chimera_nfs4_compound_discarded */
 
 static void
 nfs4_release_write_args(
@@ -150,7 +251,6 @@ chimera_nfs4_compound_process(
     nfsstat4            status)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_argop4                *argop;
     struct nfs_resop4                *resop;
     int                               rc;
@@ -174,7 +274,18 @@ chimera_nfs4_compound_process(
          * we are about to discard had its args unmarshalled but will
          * never dispatch, so release any cloned iovecs here. */
         nfs4_release_write_args(thread, req, req->args_compound);
-        rc = nfs4_send_cached_reply(thread, req);
+        /* This execution replies from the cache and ran nothing itself, so
+         * ABORT the VFS compound.  SEQUENCE is the first op, issues no VFS
+         * work, and replay detection happens inside it -- nothing was ever
+         * enlisted, the compound is still unbound, and this end is a
+         * synchronous local retire of the handle (so sending the cached
+         * reply right after cannot outrun it). */
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred,
+                                 req->compound,
+                                 CHIMERA_VFS_COMPOUND_ABORT,
+                                 chimera_nfs4_compound_discarded, NULL);
+        req->compound = NULL;
+        rc            = nfs4_send_cached_reply(thread, req);
         chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
         /* Release the slot the retransmit path claimed (IN_PROGRESS) back to
         * CACHED now that the pinned buffer has been sent; this re-arms the
@@ -204,22 +315,20 @@ chimera_nfs4_compound_process(
             return;
         }
 
-        rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
-            thread->evpl,
-            NULL,
-            &req->res_compound,
-            req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-
-        /* Advance the SEQUENCE replay slot to CACHED/COMPLETED.  Must
-         * run *after* send_reply because the reply-capture callback
-         * (armed in nfs4_replay_slot_acquire when sa_cachethis was set)
-         * fires from inside send_reply and writes the captured bytes
-         * onto slot->cached_buf, which finalize then promotes to
-         * CACHED state. */
-        nfs4_replay_slot_finalize(req);
-
-        nfs_request_free(thread, req);
+        /* End the VFS compound BEFORE the reply goes out, and send from the
+        * end callback: a durable end is the moment the compound's staged
+        * effects actually commit on an engine backend.  Always COMMIT --
+        * truncate-at-first-error keeps the executed prefix -- durably iff an
+        * op promised durability on the wire.  This is the single end site
+        * for every COMPOUND that reaches the op loop; the only other end is
+        * the replay-from-cache ABORT above, and the two are mutually
+        * exclusive (the short circuit returns without ever coming here). */
+        chimera_vfs_compound_end(thread->vfs_thread, &req->cred,
+                                 req->compound,
+                                 req->compound_durable ?
+                                 CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                                 CHIMERA_VFS_COMPOUND_COMMIT,
+                                 chimera_nfs4_compound_committed, req);
         return;
     }
 
@@ -343,6 +452,10 @@ chimera_nfs4_compound_process(
                     chimera_nfs4_copy(thread, req, argop, resop);
                     break;
                 case OP_COMMIT:
+                    /* A wire COMMIT promises that prior writes are durable
+                     * once it replies; the VFS compound end must carry the
+                     * durability barrier. */
+                    req->compound_durable = 1;
                     chimera_nfs4_commit(thread, req, argop, resop);
                     break;
                 case OP_CLOSE:
@@ -584,7 +697,13 @@ chimera_nfs4_compound(
     /* Requests are recycled from a per-thread free list without being zeroed,
      * and only SAVEFH ever writes saved_export_id -- reset it so a policy
      * check on the saved side cannot read a previous compound's export. */
-    req->saved_export_id             = 0;
+    req->saved_export_id = 0;
+    /* Same recycle discipline for the VFS-compound fields: clear the stale
+     * handle pointer from the previous request occupying this slot (the
+     * early-error reply paths below run before compound_begin and must not
+     * see it) and the durable-promise tracker the op completions set. */
+    req->compound                    = NULL;
+    req->compound_durable            = 0;
     req->minorversion                = (uint8_t) args->minorversion;
     req->seen_sequence               = false;
     req->current_stateid_valid       = false;
@@ -668,6 +787,22 @@ chimera_nfs4_compound(
         nfs_request_free(thread, req);
         return;
     }
+
+    /* Begin the VFS compound (see the block comment above
+     * chimera_nfs4_compound_committed).  Placed after every decode-time error
+     * reply above, so any path that replies without reaching the op loop has
+     * no compound to end; from here on, exactly one of the two ends in
+     * chimera_nfs4_compound_process runs.  Begin is synchronous, never NULL,
+     * and unbound (no current filehandle exists yet).  The ts is the wait-die
+     * priority; the compound is never replayed, so it is allocated fresh per
+     * wire COMPOUND. */
+    req->compound_ts = chimera_vfs_compound_alloc_ts(thread->vfs_thread);
+    req->compound    = chimera_vfs_compound_begin(thread->vfs_thread,
+                                                  &req->cred,
+                                                  NULL, 0,
+                                                  CHIMERA_VFS_COMPOUND_WRITE,
+                                                  req->compound_ts,
+                                                  0);
 
     req->index = 0;
 

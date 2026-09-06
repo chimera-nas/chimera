@@ -45,6 +45,15 @@ chimera_nfs4_write_complete(
          * metadata, reporting DATA_SYNC4. */
         res->resok4.committed = sync;
 
+        /* The reply promises DATA_SYNC4/FILE_SYNC4 durability -- tracked on
+         * the achieved level, not the requested one, so a backend upgrading
+         * UNSTABLE4 to sync is honored too.  The compound driver must then
+         * end the VFS compound with COMMIT_DURABLE before this reply is
+         * sent. */
+        if (sync != CHIMERA_VFS_WRITE_UNSTABLE) {
+            req->compound_durable = 1;
+        }
+
         memcpy(res->resok4.writeverf,
                &req->thread->shared->nfs_verifier,
                sizeof(res->resok4.writeverf));
@@ -102,7 +111,8 @@ chimera_nfs4_write_open_callback(
             },
         };
 
-        chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+                                req->compound,
                                 handle,
                                 args->offset,
                                 args->data.length,
@@ -117,7 +127,7 @@ chimera_nfs4_write_open_callback(
         return;
     }
 
-    chimera_vfs_write(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_write(req->thread->vfs_thread, &req->cred, req->compound,
                       handle,
                       args->offset,
                       args->data.length,
@@ -168,7 +178,7 @@ chimera_nfs4_write_typecheck_complete(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -194,7 +204,7 @@ chimera_nfs4_write_typecheck_open_callback(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->compound,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_write_typecheck_complete,
@@ -271,7 +281,7 @@ chimera_nfs4_write(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -319,7 +329,7 @@ chimera_nfs4_write(
          * not recall the client's own delegation. */
         req->io_owner_from_deleg = (req->session &&
                                     req->session->client_unified);
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -404,7 +414,7 @@ chimera_nfs4_write(
         },
     };
 
-    chimera_vfs_write_owned(thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_write_owned(thread->vfs_thread, &req->cred, req->compound,
                             state_handle,
                             args->offset,
                             args->data.length,

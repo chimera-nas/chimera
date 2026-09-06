@@ -117,6 +117,9 @@ chimera_nfs4_copy_finish(
         res->cr_resok4.cr_response.wr_callback_id     = NULL;
         res->cr_resok4.cr_response.wr_count           = refs->copied;
         res->cr_resok4.cr_response.wr_committed       = FILE_SYNC4;
+        /* The reply promises FILE_SYNC4: the wire compound's VFS compound
+         * must end with COMMIT_DURABLE before this reply is sent. */
+        req->compound_durable = 1;
         memcpy(res->cr_resok4.cr_response.wr_writeverf,
                &req->thread->shared->nfs_verifier,
                sizeof(res->cr_resok4.cr_response.wr_writeverf));
@@ -215,7 +218,7 @@ chimera_nfs4_copy_read_complete(
         },
     };
 
-    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, req->compound,
                             dst_handle,
                             refs->dst_offset,
                             count,
@@ -229,6 +232,18 @@ chimera_nfs4_copy_read_complete(
                             refs);
 } /* chimera_nfs4_copy_read_complete */
 
+/* Interior read/write fallback for a COPY the backend cannot offload.
+*
+* The loop runs under the wire compound's VFS compound (req->compound):
+* same-module chunks enlist so an engine backend can amortize one commit
+* over the transfer, while a cross-module source's reads simply eject and
+* run standalone.  Bounding: with ca_count != 0 the loop is capped by the
+* wire-supplied count (validated against the source size), but ca_count == 0
+* means copy-to-EOF, so the chunk count is bounded by the SOURCE FILE SIZE,
+* not by any wire limit -- a large file makes a long compound.  That is
+* legal (the grouping lane holds no engine locks across the caller's turns,
+* and backend contention surfaces per-op as retriable ECOMPOUND_EXHAUSTED
+* -> NFS4ERR_DELAY), just worth knowing when reading engine traces. */
 static void
 chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
 {
@@ -259,7 +274,7 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
         },
     };
 
-    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred, req->compound,
                            src_handle,
                            refs->src_offset,
                            (uint32_t) chunk,
@@ -292,6 +307,9 @@ chimera_nfs4_copy_complete(
         res->cr_resok4.cr_response.wr_callback_id     = NULL;
         res->cr_resok4.cr_response.wr_count           = length;
         res->cr_resok4.cr_response.wr_committed       = FILE_SYNC4;
+        /* The reply promises FILE_SYNC4: the wire compound's VFS compound
+         * must end with COMMIT_DURABLE before this reply is sent. */
+        req->compound_durable = 1;
         memcpy(res->cr_resok4.cr_response.wr_writeverf,
                &req->thread->shared->nfs_verifier,
                sizeof(res->cr_resok4.cr_response.wr_writeverf));
@@ -415,7 +433,7 @@ chimera_nfs4_copy_begin(struct nfs4_copy_state_refs *refs)
     refs->src_handle = src_handle;
     refs->dst_handle = dst_handle;
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->compound,
                         src_handle,
                         CHIMERA_VFS_ATTR_SIZE,
                         chimera_nfs4_copy_srcattr_complete,
@@ -433,7 +451,7 @@ chimera_nfs4_copy_start(struct nfs4_copy_state_refs *refs)
 
     if (src_handle->vfs_module == dst_handle->vfs_module &&
         (dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
-        chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred, req->compound,
                                src_handle,
                                refs->src_offset,
                                dst_handle,
@@ -485,7 +503,7 @@ chimera_nfs4_copy_open_dst(struct nfs4_copy_state_refs *refs)
 {
     struct nfs_request *req = refs->req;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -598,7 +616,7 @@ chimera_nfs4_copy(
     }
 
     if (refs->src_special) {
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->compound,
                             req->saved_fh,
                             req->saved_fhlen,
                             CHIMERA_VFS_OPEN_INFERRED |
