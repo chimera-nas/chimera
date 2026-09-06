@@ -279,7 +279,12 @@ chimera_vfs_remove(
     request->remove.flags        = flags;
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
-    request->compound            = compound;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
+    request->compound = compound;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         request->remove.name_offset = 0;

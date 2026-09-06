@@ -152,9 +152,11 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
      * memory.  After CHIMERA_VFS_COMPOUND_BULK_CAP bytes the remaining
      * writes are ejected: they run standalone (autocommit) -- the
      * best-effort degradation the compound contract sanctions (a compound
-     * must not pin an unbounded payload).  The dispatch guard never sees a
-     * NULL compound pointer, so each ejected write is counted here instead,
-     * bumping ejected_mutating_ops and deliberately forfeiting the
+     * must not pin an unbounded payload).  Ejected writes run under the
+     * per-thread LOOSE sentinel (never a NULL compound -- forbidden by the
+     * never-NULL contract); the guard ejects that sentinel without touching
+     * the real parent, so each ejected write is counted on the parent here
+     * instead, bumping ejected_mutating_ops and deliberately forfeiting the
      * compound's replay right: a standalone write commits immediately, and
      * a from-the-top replay re-invokes this proc and re-runs the whole
      * expansion, re-executing writes that already committed.  Conflicts on
@@ -163,7 +165,13 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
     hop_compound = ctx->compound;
     if (hop_compound) {
         if (ctx->compound_bytes >= CHIMERA_VFS_COMPOUND_BULK_CAP) {
-            hop_compound = NULL;
+            /* Past the cap: run the remaining writes standalone.  The
+             * never-NULL contract forbids a NULL compound on a compoundable
+             * op, so "standalone" is the per-thread LOOSE sentinel (its ops
+             * eject to autocommit) rather than NULL.  The guard only ejects the
+             * sentinel, so account the real parent's mutating ejection here --
+             * forfeiting its replay right. */
+            hop_compound = chimera_vfs_compound_loose(ctx->thread);
             ctx->compound->ejected_ops++;
             ctx->compound->ejected_mutating_ops++;
         } else {
@@ -344,7 +352,12 @@ chimera_vfs_write_same(
         return;
     }
 
-    request->opcode                             = CHIMERA_VFS_OP_WRITE_SAME;
+    request->opcode = CHIMERA_VFS_OP_WRITE_SAME;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound                           = compound;
     request->complete                           = chimera_vfs_write_same_complete;
     request->write_same.handle                  = handle;

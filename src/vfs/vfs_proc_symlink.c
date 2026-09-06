@@ -150,12 +150,17 @@ chimera_vfs_symlink(
     memcpy(request->plugin_data, path, pathlen);
     ((char *) request->plugin_data)[pathlen] = '\0';
 
-    request->symlink.path         = request->plugin_data;
-    request->symlink.pathlen      = pathlen;
-    request->symlink.target       = target;
-    request->symlink.targetlen    = targetlen;
-    request->symlink.set_attr     = set_attr;
-    request->symlink.attr_mask    = attr_mask;
+    request->symlink.path      = request->plugin_data;
+    request->symlink.pathlen   = pathlen;
+    request->symlink.target    = target;
+    request->symlink.targetlen = targetlen;
+    request->symlink.set_attr  = set_attr;
+    request->symlink.attr_mask = attr_mask;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound             = compound;
     request->symlink.callback     = callback;
     request->symlink.private_data = private_data;

@@ -214,7 +214,12 @@ chimera_vfs_link(
     request->link.attr_mask    = attr_mask;
     request->link.callback     = callback;
     request->link.private_data = private_data;
-    request->compound          = compound;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
+    request->compound = compound;
 
     if (chimera_vfs_module_is_path_only(request->module)) {
         /* Hardlink needs a stable source fh, which a path-only backend cannot

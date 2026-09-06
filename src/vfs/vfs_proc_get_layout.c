@@ -54,6 +54,11 @@ chimera_vfs_get_layout(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound = compound;
 
     if (max_segments > CHIMERA_VFS_LAYOUT_MAX_SEGMENTS) {

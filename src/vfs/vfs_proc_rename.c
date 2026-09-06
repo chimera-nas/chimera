@@ -309,7 +309,12 @@ chimera_vfs_rename(
     request->rename.new_pathlen  = new_pathlen;
     request->rename.callback     = callback;
     request->rename.private_data = private_data;
-    request->compound            = compound;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
+    request->compound = compound;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         /* Fast path: pass full paths directly, kernel resolves */

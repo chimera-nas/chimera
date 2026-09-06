@@ -139,8 +139,11 @@ chimera_vfs_gate_fh_obj(
 
     ctx->any_type = 1;
 
-    /* No compound-threading caller yet: probes run standalone. */
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, NULL, fh, fhlen, required,
+    /* No compound-threading caller yet: probes run standalone under the LOOSE
+     * sentinel (ctx->compound feeds the probe's open_fh/getattr, which the
+     * never-NULL contract forbids from receiving NULL). */
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, chimera_vfs_compound_loose(thread),
+                             fh, fhlen, required,
                              chimera_vfs_gate_needed(module->capabilities, cred),
                              callback, private_data);
 } /* chimera_vfs_gate_fh_obj */
@@ -186,7 +189,9 @@ chimera_vfs_gate_fh(
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data)
 {
-    chimera_vfs_gate_fh_compound(ctx, thread, cred, NULL, fh, fhlen, required,
+    /* Legacy no-compound entry: run standalone under the LOOSE sentinel. */
+    chimera_vfs_gate_fh_compound(ctx, thread, cred, chimera_vfs_compound_loose(thread),
+                                 fh, fhlen, required,
                                  callback, private_data);
 } /* chimera_vfs_gate_fh */
 
@@ -252,8 +257,9 @@ chimera_vfs_gate_fh_dac(
 
     ctx->any_type = 0;
 
-    /* No compound-threading caller yet: probes run standalone. */
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, NULL, fh, fhlen, required,
+    /* No compound-threading caller yet: probes run standalone (LOOSE sentinel). */
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, chimera_vfs_compound_loose(thread),
+                             fh, fhlen, required,
                              chimera_vfs_gate_needed_dac(module->capabilities, cred),
                              callback, private_data);
 } /* chimera_vfs_gate_fh_dac */
@@ -285,8 +291,9 @@ chimera_vfs_gate_fh_prefix(
 
     ctx->any_type = 0;
 
-    /* No compound-threading caller yet: probes run standalone. */
-    chimera_vfs_gate_fh_impl(ctx, thread, cred, NULL, fh, fhlen, required,
+    /* No compound-threading caller yet: probes run standalone (LOOSE sentinel). */
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, chimera_vfs_compound_loose(thread),
+                             fh, fhlen, required,
                              chimera_vfs_gate_needed_prefix(module->capabilities, cred),
                              callback, private_data);
 } /* chimera_vfs_gate_fh_prefix */

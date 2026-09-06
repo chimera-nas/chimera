@@ -203,10 +203,13 @@ chimera_vfs_copy_fallback_read_cb(
     /* Release the backend's read buffers now that the data is copied out. */
     evpl_iovecs_release(ctx->thread->evpl, iov, niov);
 
-    /* An ejected hop's write is a MUTATING ejection: count it (the guard
-     * never sees the NULL pointer we pass) so the compound's replay right
-     * is forfeited -- see the cap comment in chimera_vfs_copy_fallback_step. */
-    if (ctx->compound && !ctx->hop_compound) {
+    /* An ejected hop's write is a MUTATING ejection: count it (the guard only
+     * ejects the LOOSE sentinel and never touches the real parent) so the
+     * compound's replay right is forfeited -- see the cap comment in
+     * chimera_vfs_copy_fallback_step.  hop_compound != compound means this hop
+     * was ejected to the LOOSE sentinel rather than enlisted in the real
+     * compound (and is trivially false when the caller itself ran LOOSE). */
+    if (ctx->hop_compound != ctx->compound) {
         ctx->compound->ejected_ops++;
         ctx->compound->ejected_mutating_ops++;
     }
@@ -249,9 +252,11 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
      * After CHIMERA_VFS_COMPOUND_BULK_CAP bytes the remaining hops are
      * ejected: they run standalone (autocommit) -- the best-effort
      * degradation the compound contract sanctions (a compound must not pin
-     * an unbounded payload).  The dispatch guard never sees a NULL compound
-     * pointer, so each ejected hop is counted here instead, and the ejected
-     * WRITES (in the read callback below) bump ejected_mutating_ops,
+     * an unbounded payload).  Ejected hops run under the per-thread LOOSE
+     * sentinel (never a NULL compound -- forbidden by the never-NULL
+     * contract); the guard ejects that sentinel without touching the real
+     * parent, so each ejected hop is counted on the parent here instead, and
+     * the ejected WRITES (in the read callback below) bump ejected_mutating_ops,
      * deliberately forfeiting the compound's replay right: a standalone
      * chunk write commits immediately, and a from-the-top replay re-invokes
      * this proc and re-runs the whole loop -- re-executing writes that
@@ -263,8 +268,14 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
     ctx->hop_compound = ctx->compound;
     if (ctx->hop_compound) {
         if (ctx->compound_bytes >= CHIMERA_VFS_COMPOUND_BULK_CAP) {
-            ctx->hop_compound = NULL;
-            /* This hop's read: a read-only ejection (observability only). */
+            /* Past the cap: run the remaining hops standalone.  The never-NULL
+             * contract forbids handing a compoundable op a NULL compound, so
+             * "standalone" is expressed with the per-thread LOOSE sentinel
+             * (every op attached to it ejects to autocommit) rather than NULL. */
+            ctx->hop_compound = chimera_vfs_compound_loose(ctx->thread);
+            /* This hop's read: a read-only ejection (observability only).  The
+             * guard only touches the LOOSE singleton, so account the real
+             * parent compound's ejection here. */
             ctx->compound->ejected_ops++;
         } else {
             ctx->compound_bytes += chunk;
@@ -416,8 +427,13 @@ chimera_vfs_copy_range(
         return;
     }
 
-    request->opcode                             = CHIMERA_VFS_OP_COPY_RANGE;
-    request->complete                           = chimera_vfs_copy_range_complete;
+    request->opcode   = CHIMERA_VFS_OP_COPY_RANGE;
+    request->complete = chimera_vfs_copy_range_complete;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound                           = compound;
     request->copy_range.src_handle              = src_handle;
     request->copy_range.dst_handle              = dst_handle;

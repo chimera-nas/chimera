@@ -82,6 +82,11 @@ chimera_vfs_write_dispatch(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound = compound;
 
     request->opcode       = CHIMERA_VFS_OP_WRITE;

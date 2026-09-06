@@ -106,9 +106,12 @@ chimera_vfs_find_dispatch(
         parent->child_request = find_request;
     }
 
+    /* find is an unbounded recursive directory walk with no caller compound to
+     * join, so every op it issues runs standalone: pass the per-thread LOOSE
+     * sentinel (every op attached to it ejects to autocommit). */
     chimera_vfs_open_fh(
         thread,
-        cred, NULL,
+        cred, chimera_vfs_compound_loose(thread),
         find_request->fh,
         find_request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -219,9 +222,11 @@ chimera_vfs_find_open_callback(
         return;
     }
 
+    /* Standalone like the open above: find has no caller compound (unbounded
+     * recursive walk), so its readdir runs under the LOOSE sentinel. */
     chimera_vfs_readdir(
         thread,
-        find_request->cred, NULL,
+        find_request->cred, chimera_vfs_compound_loose(thread),
         oh,
         find_request->find.attr_mask,
         0,

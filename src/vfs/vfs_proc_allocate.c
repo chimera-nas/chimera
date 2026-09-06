@@ -68,8 +68,13 @@ chimera_vfs_allocate(
         return;
     }
 
-    request->opcode                           = CHIMERA_VFS_OP_ALLOCATE;
-    request->complete                         = chimera_vfs_allocate_complete;
+    request->opcode   = CHIMERA_VFS_OP_ALLOCATE;
+    request->complete = chimera_vfs_allocate_complete;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound                         = compound;
     request->allocate.handle                  = handle;
     request->allocate.offset                  = offset;

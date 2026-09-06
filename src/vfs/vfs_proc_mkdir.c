@@ -198,7 +198,12 @@ chimera_vfs_mkdir(
     request->mkdir.attr_mask    = attr_mask;
     request->mkdir.callback     = callback;
     request->mkdir.private_data = private_data;
-    request->compound           = compound;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
+    request->compound = compound;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         /* Fast path: pass full path to _at operation, kernel resolves */

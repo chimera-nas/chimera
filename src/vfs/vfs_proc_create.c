@@ -216,6 +216,11 @@ chimera_vfs_create(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     cp_request->compound = compound;
 
     cp_request->create.path         = cp_request->plugin_data;

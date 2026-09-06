@@ -415,6 +415,11 @@ chimera_vfs_lookup(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     lp_request->compound             = compound;
     lp_request->lookup.path          = lp_request->plugin_data;
     lp_request->lookup.pathlen       = pathlen;

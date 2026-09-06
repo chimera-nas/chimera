@@ -106,6 +106,11 @@ chimera_vfs_create_unlinked(
     chimera_vfs_abort_if(!(request->module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED),
                          "module does not support create_unlinked");
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound = compound;
 
     request->opcode                             = CHIMERA_VFS_OP_CREATE_UNLINKED;

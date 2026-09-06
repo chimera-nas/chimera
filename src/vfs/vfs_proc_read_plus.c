@@ -47,7 +47,12 @@ chimera_vfs_read_plus(
         return;
     }
 
-    request->opcode              = CHIMERA_VFS_OP_READ_PLUS;
+    request->opcode = CHIMERA_VFS_OP_READ_PLUS;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound            = compound;
     request->complete            = chimera_vfs_read_plus_complete;
     request->read_plus.handle    = handle;

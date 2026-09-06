@@ -246,7 +246,8 @@ chimera_vfs_root_lookup_open_callback(
 
     chimera_vfs_getattr(
         lookup_request->thread,
-        lookup_request->cred, NULL,
+        lookup_request->cred,
+        chimera_vfs_compound_loose(lookup_request->thread),
         oh,
         lookup_request->lookup_at.r_attr.va_req_mask,
         chimera_vfs_root_lookup_getattr_callback,
@@ -278,7 +279,8 @@ chimera_vfs_root_lookup_at(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred, NULL,
+        request->cred,
+        chimera_vfs_compound_loose(thread),
         ctx->mount_id,
         ctx->mount_id_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -436,7 +438,8 @@ chimera_vfs_root_readdir_open_callback(
 
     chimera_vfs_getattr(
         entry->request->thread,
-        entry->request->cred, NULL,
+        entry->request->cred,
+        chimera_vfs_compound_loose(entry->request->thread),
         oh,
         entry->attr.va_req_mask,
         chimera_vfs_root_readdir_getattr_callback,
@@ -517,7 +520,8 @@ chimera_vfs_root_readdir(
 
         chimera_vfs_open_fh(
             thread,
-            request->cred, NULL,
+            request->cred,
+            chimera_vfs_compound_loose(thread),
             entry->mount_id,
             entry->mount_id_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,

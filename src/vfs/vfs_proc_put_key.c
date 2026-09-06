@@ -38,6 +38,11 @@ chimera_vfs_put_key(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound = compound;
 
     request->opcode             = CHIMERA_VFS_OP_PUT_KEY;
@@ -95,6 +100,11 @@ chimera_vfs_put_key_at(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound = compound;
 
     scratch = request->plugin_data;

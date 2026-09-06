@@ -475,6 +475,11 @@ chimera_vfs_open(
             return;
         }
 
+#ifdef CHIMERA_SANITIZE
+        chimera_vfs_abort_if(!compound,
+                             "compoundable op %s dispatched with NULL compound",
+                             __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
         request->compound           = compound;
         request->open.callback      = callback;
         request->open.private_data  = private_data;
@@ -517,7 +522,12 @@ chimera_vfs_open(
     request->open.callback      = callback;
     request->open.private_data  = private_data;
     request->open.granted_valid = 0;
-    request->compound           = compound;
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
+    request->compound = compound;
 
     /* A non-create open may pass no set_attr, but open_at (the path-op / deep
      * path-only dispatch) requires a non-NULL one; hand it a zeroed stand-in. */

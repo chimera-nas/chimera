@@ -323,7 +323,16 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
         request->thread->vfs->kv_module &&
         (request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
 
-        chimera_vfs_put_key_at(request->thread, request->cred, NULL,
+        /* Enlist the durable handle-state write in the open's compound when the
+         * open enlisted (request->compound survives completion only for an
+         * enlisted op; it is NULL for an ejected/standalone open).  Backends
+         * with native/atomic handle-state (CAP_ATOMIC_HANDLE_STATE) never reach
+         * here, so this fallback KV put routes to the default KV module and its
+         * own dispatch guard ejects it to standalone anyway -- but the contract
+         * still forbids a NULL compound, so fall back to the LOOSE sentinel. */
+        chimera_vfs_put_key_at(request->thread, request->cred,
+                               request->compound ? request->compound :
+                               chimera_vfs_compound_loose(request->thread),
                                request->open_at.r_attr.va_fh,
                                request->open_at.r_attr.va_fh_len,
                                hs->key, hs->key_len,
@@ -373,6 +382,11 @@ chimera_vfs_open_at_hs(
         return;
     }
 
+#ifdef CHIMERA_SANITIZE
+    chimera_vfs_abort_if(!compound,
+                         "compoundable op %s dispatched with NULL compound",
+                         __func__);
+#endif /* ifdef CHIMERA_SANITIZE */
     request->compound = compound;
 
     request->opcode                     = CHIMERA_VFS_OP_OPEN_AT;
