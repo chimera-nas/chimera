@@ -19,6 +19,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_metadata.h"
 
 /*
@@ -219,7 +220,10 @@ chimera_s3_meta_store_set_callback(
     struct chimera_s3_meta_store_ctx *ctx = private_data;
 
     if (error_code) {
-        ctx->error = 1;
+        /* Propagate the VFS code (not a bare flag): the PUT metadata phase
+         * runs this machine inside its RETRYABLE compound, and its driver
+         * must see ECOMPOUND_CONFLICT to replay. */
+        ctx->error = (int) error_code;
         chimera_s3_meta_store_finish(ctx);
         return;
     }
@@ -241,7 +245,8 @@ chimera_s3_meta_store_next(struct chimera_s3_meta_store_ctx *ctx)
 
     kv = &ctx->kv[ctx->cur];
 
-    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
+                          chimera_s3_req_compound(ctx->request),
                           ctx->handle,
                           CHIMERA_VFS_XATTR_EITHER,
                           kv->name,
@@ -374,7 +379,8 @@ chimera_s3_meta_attach_next(struct chimera_s3_meta_attach_ctx *ctx)
         return;
     }
 
-    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred,
+                          chimera_s3_req_compound(ctx->request),
                           ctx->handle,
                           ctx->names[ctx->cur],
                           ctx->name_lens[ctx->cur],
@@ -440,7 +446,8 @@ chimera_s3_metadata_attach_headers(
     ctx->done         = done;
     ctx->private_data = private_data;
 
-    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+                            chimera_s3_req_compound(request),
                             handle,
                             0,
                             ctx->list_buf,
@@ -498,7 +505,9 @@ chimera_s3_meta_copy_set_callback(
     struct chimera_s3_meta_copy_ctx *ctx = private_data;
 
     if (error_code) {
-        ctx->error = 1;
+        /* Propagate the VFS code so a compound-aware caller can tell a
+         * conflict/exhaustion from a real failure. */
+        ctx->error = (int) error_code;
         chimera_s3_meta_copy_finish(ctx);
         return;
     }
@@ -523,7 +532,8 @@ chimera_s3_meta_copy_get_callback(
         return;
     }
 
-    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
+                          chimera_s3_req_compound(ctx->request),
                           ctx->dst_handle,
                           CHIMERA_VFS_XATTR_EITHER,
                           ctx->names[ctx->cur],
@@ -544,7 +554,8 @@ chimera_s3_meta_copy_next(struct chimera_s3_meta_copy_ctx *ctx)
         return;
     }
 
-    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred,
+                          chimera_s3_req_compound(ctx->request),
                           ctx->src_handle,
                           ctx->names[ctx->cur],
                           ctx->name_lens[ctx->cur],
@@ -610,7 +621,8 @@ chimera_s3_metadata_copy(
     ctx->done         = done;
     ctx->private_data = private_data;
 
-    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+                            chimera_s3_req_compound(request),
                             src_handle,
                             0,
                             ctx->list_buf,

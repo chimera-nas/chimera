@@ -81,20 +81,57 @@ struct chimera_s3_io {
 };
 
 struct chimera_s3_request {
-    enum chimera_s3_status           status;
-    enum chimera_s3_vfs_state        vfs_state;
-    enum chimera_s3_http_state       http_state;
-    /* Explicit-compound bookkeeping (CHIMERA_VFS_CAP_COMPOUND).  The
-     * metadata phase of a request -- GET's path lookup, PUT's directory create +
-     * unlinked-file create -- runs under one compound committed before any
-     * HTTP output or request-body consumption, so a wait-die / optimistic
-     * conflict can safely replay it.  The streaming data phase that follows is
-     * autocommit (it cannot be replayed once bytes are on the wire or consumed).
-     * compound is NULL for a non-transactional backend. */
+    enum chimera_s3_status     status;
+    enum chimera_s3_vfs_state  vfs_state;
+    enum chimera_s3_http_state http_state;
+    /* Explicit-compound state (CHIMERA_VFS_CAP_COMPOUND).  Each request's
+     * replayable METADATA phase runs under one compound: path resolution,
+     * intermediate-dir creates, the staged-file create for PUT/UploadPart/
+     * Copy (the ._chimera_* temp) and its header-metadata xattrs.  That
+     * phase is RETRYABLE -- driven by the shared driver in s3_compound.h
+     * (mirroring nfs3_compound.c / client_compound.h): begin -> the chain
+     * (every call passes request->compound) -> commit before any body byte
+     * is consumed or any result escapes, replaying the whole chain from
+     * compound_start on ECOMPOUND_CONFLICT with the stable compound_ts.
+     *
+     * The phases that CANNOT replay use a grouping compound (flags 0)
+     * instead: the publish phase after body consumption (rename_at/link_at
+     * + the ETag getattr + tagging xattrs) and CompleteMultipartUpload's
+     * assemble+finalize.  A conflict there surfaces as the retriable
+     * ECOMPOUND_EXHAUSTED, answered as 503 SlowDown.  Read-only flows
+     * (GET/HEAD, ?tagging GET) wrap their chain in a grouping READ
+     * compound ended fire-and-forget before the response.  The streaming
+     * body lanes (PUT/UploadPart writes, GET reads, the copy/assemble
+     * read+write fallbacks) and every background flow (async part
+     * destruction, the CMU create-retry timer) run under the per-thread
+     * LOOSE singleton -- enlisting them would serialize parallel I/O onto
+     * the compound's thread and pin the payload in engine state.
+     *
+     * compound is non-NULL exactly while a phase's compound is open; it is
+     * NULLed the moment compound_end is issued, and the refcount-zero
+     * teardown in chimera_s3_request_put aborts any compound a dead-end
+     * path left open so a bound compound always ends exactly once. */
     struct chimera_vfs_compound     *compound;
-    uint64_t                         compound_ts;
-    int                              compound_attempt;
-    struct chimera_vfs_attrs         compound_attr;     /* lookup result, kept across compound_end */
+    uint64_t                         compound_ts;        /* wait-die ts, stable across replays */
+    int                              compound_attempt;   /* replays consumed for this phase */
+    struct chimera_vfs_attrs         compound_attr;      /* publish-phase getattr result, kept
+                                                          * across compound_end so the response
+                                                          * (ETag/LastModified) is built only
+                                                          * from a committed state */
+    enum chimera_vfs_compound_mode   compound_mode;      /* begin mode for this phase */
+    uint32_t                         compound_flags;     /* CHIMERA_VFS_COMPOUND_* begin flags */
+    enum chimera_vfs_error           compound_op_status; /* chain status at compound_end */
+    int                              compound_fhlen;     /* begin hint (routing affinity) */
+    /* Driver callbacks: start runs (or re-runs, on replay) the phase's VFS
+     * chain; reply consumes compound_op_status after the end settles.
+     * compound_arg carries a flow's heap ctx (copy/upload-copy/complete)
+     * across driver callbacks that only receive the request. */
+    void                             ( *compound_start )(
+        struct chimera_s3_request *request);
+    void                             ( *compound_reply )(
+        struct chimera_s3_request *request);
+    void                            *compound_arg;
+    uint8_t                          compound_fh[CHIMERA_VFS_FH_SIZE];
     const char                      *bucket_name;
     int                              bucket_namelen;
     int                              bucket_fhlen;
@@ -177,6 +214,11 @@ struct chimera_s3_request {
              * xattrs land and published latches the first fire. */
             int                      meta_pending;
             int                      published;
+            /* Parent-dir path of the object key, split once in
+             * chimera_s3_put and reused by every metadata-compound replay
+             * (points into request->path, or the "/" literal). */
+            const char              *dirpath;
+            int                      dirpathlen;
             struct chimera_vfs_attrs set_attr;
             char                     tmp_name[64];
         } put;
@@ -209,6 +251,11 @@ struct chimera_s3_request {
             int                                 tmp_name_len;
             int                                 part_number;
             int                                 upload_idlen;
+            /* Parent-dir path of the object key, split once at flow entry
+             * and reused by every metadata-compound replay (points into
+             * request->path / path_buf, or the "/" literal). */
+            const char                         *dirpath;
+            int                                 dirpathlen;
             struct chimera_s3_multipart_upload *upload;
             char                               *rp;
             struct evpl_iovec                   response;
@@ -248,9 +295,19 @@ struct chimera_s3_request {
             /* Trampoline flags so inline VFS completions don't recurse. */
             int                             pending;
             int                             synchronous;
-            /* Working state for the key currently being removed. */
+            /* Working state for the key currently being removed.  The
+             * dirpath/name split points into the body buffer, which
+             * outlives every replay of the key's compound. */
             const char                     *cur_name;
             int                             cur_name_len;
+            const char                     *cur_dirpath;
+            int                             cur_dirpathlen;
+            /* Outcome of the current key's compound, recorded by the
+             * chain terminal and consumed once the per-key compound_end
+             * settles (chimera_s3_del_key_reply). */
+            int                             cur_deleted;
+            const char                     *cur_code;
+            const char                     *cur_msg;
             /* Response (<DeleteResult>) builder. */
             char                           *resp_buf;
             int                             resp_len;

@@ -13,6 +13,7 @@
 #include "common/macros.h"
 #include "common/misc.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_status.h"
 #include "s3_procs.h"
 #include "s3_dump.h"
@@ -158,6 +159,13 @@ chimera_s3_request_put(
     if (--request->refcount > 0) {
         return;
     }
+
+    /* Safety net: a dead-end path (an abandoned connection whose chain just
+     * stopped) may leave a phase compound open.  Nothing can reach the
+     * request any more, so no member op is in flight; abort it fire-and-
+     * forget so a bound compound always ends exactly once.  Every normal
+     * path has already ended (and NULLed) it. */
+    chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_ABORT);
 
     chimera_s3_tagging_request_cleanup(request);
 
@@ -378,8 +386,15 @@ s3_server_notify(
                     s3_server_drain_body(evpl, s3_request);
                 } else {
                     chimera_s3_delete_objects_recv(evpl, s3_request);
-                    /* Body fully in hand: parse keys + remove them. */
-                    chimera_s3_delete_objects_body_done(evpl, s3_request);
+                    /* Parse keys + remove them once the bucket FH is resolved.
+                     * If the bucket lookup is still in flight (async backend
+                     * like cairn), its callback drives body_done instead --
+                     * the per-key removes need bucket_fh, and driving here with
+                     * an empty fh would ESTALE every key.  Mirrors the
+                     * PutObjectTagging arm above. */
+                    if (s3_request->bucket_fhlen != 0) {
+                        chimera_s3_delete_objects_body_done(evpl, s3_request);
+                    }
                 }
             } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
                 s3_server_drain_body(evpl, s3_request);
@@ -671,6 +686,12 @@ s3_server_dispatch(
      * Clear them here so a fresh request always starts with no held handles. */
     s3_request->file_handle = NULL;
     s3_request->dir_handle  = NULL;
+
+    /* No phase compound is open on a fresh request; the flows begin (and
+     * end) their own.  A recycled request could otherwise carry a stale
+     * pointer into the teardown safety net. */
+    s3_request->compound     = NULL;
+    s3_request->compound_arg = NULL;
 
     *notify_callback = s3_server_notify;
     *notify_data     = s3_request;
@@ -1157,8 +1178,13 @@ s3_server_dispatch(
 
         chimera_s3_request_get(s3_request);
 
+        /* The bucket resolution precedes routing, so no flow compound
+         * exists yet; it is a read-only, name-cache-served hop whose result
+         * (the bucket dir FH) is stable, so it runs loose rather than
+         * dragging the routing decision into every flow's replay loop. */
         chimera_vfs_lookup(thread->vfs,
-                           &thread->shared->cred, NULL,
+                           &thread->shared->cred,
+                           chimera_vfs_compound_loose(thread->vfs),
                            shared->root_fh,
                            shared->root_fh_len,
                            bucket->path,

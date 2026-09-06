@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "s3_status.h"
+
 struct evpl;
 struct chimera_s3_request;
 struct chimera_server_s3_thread;
@@ -39,6 +41,15 @@ struct chimera_s3_tagging_ctx {
     int                             total;
     /* Which subresource operation is in flight (enum chimera_s3_tagging_op). */
     int                             op;
+    /* Set while the op runs under the shared compound driver (PUT/DELETE
+     * ?tagging): chain terminals then route through
+     * chimera_s3_compound_finish instead of responding directly, and the
+     * clear machine treats a compound conflict as terminal rather than
+     * swallowing it. */
+    int                             compound_driven;
+    /* The S3 status the driver's reply answers with once the compound
+     * settles (the success status, or the error a chain terminal chose). */
+    enum chimera_s3_status          pending_status;
     /* The composed xattr name of the set currently in flight.  It must
      * live here, not on a caller's stack: chimera_vfs_set_xattr keeps the
      * caller's pointer until the completion callback, and an asynchronous

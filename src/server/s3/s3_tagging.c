@@ -30,6 +30,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_procs.h"
 #include "s3_tagging.h"
 
@@ -412,6 +413,15 @@ chimera_s3_tagging_finish(
     struct chimera_server_s3_thread *thread = request->thread;
     struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
 
+    /* Retire the GET flow's read compound (fire-and-forget; NULL-safe --
+     * the PUT/DELETE flows arrive here with theirs already ended by the
+     * compound driver). */
+    chimera_s3_compound_release(request,
+                                (status == CHIMERA_S3_STATUS_OK ||
+                                 status == CHIMERA_S3_STATUS_NO_CONTENT) ?
+                                CHIMERA_VFS_COMPOUND_COMMIT :
+                                CHIMERA_VFS_COMPOUND_ABORT);
+
     if (ctx && ctx->handle) {
         chimera_vfs_release(thread->vfs, ctx->handle);
         ctx->handle = NULL;
@@ -433,6 +443,31 @@ chimera_s3_tagging_finish(
     }
 } /* chimera_s3_tagging_finish */
 
+/*
+ * Error terminal shared by the lookup/open prelude and the mutating
+ * machines: a GET (grouping read compound, fire-and-forget) answers
+ * directly, while a compound-driven PUT/DELETE stages the S3 status and
+ * hands the VFS code to the driver so a conflict replays instead of
+ * answering.
+ */
+static void
+chimera_s3_tagging_op_fail(
+    struct chimera_s3_request *request,
+    enum chimera_s3_status     status,
+    enum chimera_vfs_error     error_code)
+{
+    struct chimera_s3_tagging_ctx *ctx = request->tagging;
+
+    if (ctx->compound_driven) {
+        ctx->pending_status = status;
+        chimera_s3_compound_finish(request,
+                                   error_code ? error_code : CHIMERA_VFS_EIO);
+        return;
+    }
+
+    chimera_s3_tagging_finish(request->thread->evpl, request, status);
+} /* chimera_s3_tagging_op_fail */
+
 /* ----- removal of the existing tag xattrs (shared set/delete prelude) -----
  * Walk the names returned by list_xattrs and remove every "user.s3.tag.*".
  * On completion calls ctx->after (set new tags, or finish). */
@@ -450,6 +485,17 @@ chimera_s3_tagging_remove_cb(
 {
     CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request *request = private_data;
+
+    /* A compound conflict is terminal for a driver-run flow (the compound
+     * is already doomed; hand it back so the driver replays) rather than a
+     * per-name error to skip. */
+    if ((error_code == CHIMERA_VFS_ECOMPOUND_CONFLICT ||
+         error_code == CHIMERA_VFS_ECOMPOUND_EXHAUSTED) &&
+        request->tagging->compound_driven) {
+        chimera_s3_tagging_op_fail(request, CHIMERA_S3_STATUS_INTERNAL_ERROR,
+                                   error_code);
+        return;
+    }
 
     /* Ignore per-name errors (ENOENT from a racing remove); keep going. */
     chimera_s3_tagging_remove_next(request->thread->evpl, request);
@@ -474,7 +520,8 @@ chimera_s3_tagging_remove_next(
             memcmp(name, CHIMERA_S3_TAG_PREFIX, CHIMERA_S3_TAG_PREFIX_LEN) == 0) {
             chimera_s3_request_get(request);
 
-            chimera_vfs_remove_xattr(thread->vfs, &thread->shared->cred, NULL,
+            chimera_vfs_remove_xattr(thread->vfs, &thread->shared->cred,
+                                     chimera_s3_req_compound(request),
                                      ctx->handle, name, namelen,
                                      chimera_s3_tagging_remove_cb, request);
             return;
@@ -540,7 +587,8 @@ chimera_s3_tagging_clear_existing(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+                            chimera_s3_req_compound(request),
                             ctx->handle, 0,
                             ctx->names, CHIMERA_S3_TAG_XATTR_BUFSZ,
                             chimera_s3_tagging_list_for_remove_cb, request);
@@ -563,8 +611,8 @@ chimera_s3_tagging_set_cb(
     struct chimera_s3_request *request = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_s3_tagging_finish(request->thread->evpl, request,
-                                  CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        chimera_s3_tagging_op_fail(request, CHIMERA_S3_STATUS_INTERNAL_ERROR,
+                                   error_code);
         return;
     }
 
@@ -583,8 +631,10 @@ chimera_s3_tagging_set_next(
     int                              namelen;
 
     if (ctx->cur >= ctx->n_tags) {
-        /* All tags written. PUT tagging returns 200 with no body. */
-        chimera_s3_tagging_finish(evpl, request, CHIMERA_S3_STATUS_OK);
+        /* All tags written; commit the compound.  PUT tagging returns 200
+         * with no body once the commit settles (the driver's reply). */
+        ctx->pending_status = CHIMERA_S3_STATUS_OK;
+        chimera_s3_compound_finish(request, CHIMERA_VFS_OK);
         return;
     }
 
@@ -594,7 +644,8 @@ chimera_s3_tagging_set_next(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
+                          chimera_s3_req_compound(request),
                           ctx->handle, 0 /* create-or-replace */,
                           ctx->set_name, namelen,
                           t->val, strlen(t->val),
@@ -662,7 +713,8 @@ chimera_s3_tagging_get_next(
             ctx->cur     += namelen + 1;
             chimera_s3_request_get(request);
 
-            chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred, NULL,
+            chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred,
+                                  chimera_s3_req_compound(request),
                                   ctx->handle, name, namelen,
                                   ctx->valbuf, CHIMERA_S3_TAG_VAL_BUFSZ - 1,
                                   chimera_s3_tagging_get_value_cb, request);
@@ -679,7 +731,10 @@ chimera_s3_tagging_get_next(
         return;
     }
 
-    /* All tag values gathered: emit the response and finish. */
+    /* All tag values gathered: retire the read compound, then emit the
+     * response and finish. */
+    chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_COMMIT);
+
     chimera_s3_tagging_send_xml(evpl, request);
 
     if (ctx->handle) {
@@ -741,13 +796,15 @@ chimera_s3_tagging_put_after_clear(
     chimera_s3_tagging_set_next(evpl, request);
 } /* chimera_s3_tagging_put_after_clear */
 
-/* DELETE: existing tags cleared, respond 204 No Content. */
+/* DELETE: existing tags cleared; commit the compound.  204 No Content once
+ * the commit settles (the driver's reply). */
 static void
 chimera_s3_tagging_delete_after_clear(
     struct evpl               *evpl,
     struct chimera_s3_request *request)
 {
-    chimera_s3_tagging_finish(evpl, request, CHIMERA_S3_STATUS_NO_CONTENT);
+    request->tagging->pending_status = CHIMERA_S3_STATUS_NO_CONTENT;
+    chimera_s3_compound_finish(request, CHIMERA_VFS_OK);
 } /* chimera_s3_tagging_delete_after_clear */
 
 /* The handle is open: drive the requested operation. */
@@ -766,7 +823,8 @@ chimera_s3_tagging_begin_op(
             }
             chimera_s3_request_get(request);
 
-            chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
+            chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+                                    chimera_s3_req_compound(request),
                                     ctx->handle, 0,
                                     ctx->names, CHIMERA_S3_TAG_XATTR_BUFSZ,
                                     chimera_s3_tagging_get_list_cb, request);
@@ -795,8 +853,8 @@ chimera_s3_tagging_open_cb(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_s3_tagging_finish(thread->evpl, request,
-                                  CHIMERA_S3_STATUS_NO_SUCH_KEY);
+        chimera_s3_tagging_op_fail(request, CHIMERA_S3_STATUS_NO_SUCH_KEY,
+                                   error_code);
         return;
     }
 
@@ -816,14 +874,15 @@ chimera_s3_tagging_lookup_cb(
 
     if (error_code != CHIMERA_VFS_OK ||
         !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        chimera_s3_tagging_finish(thread->evpl, request,
-                                  CHIMERA_S3_STATUS_NO_SUCH_KEY);
+        chimera_s3_tagging_op_fail(request, CHIMERA_S3_STATUS_NO_SUCH_KEY,
+                                   error_code);
         return;
     }
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+                        chimera_s3_req_compound(request),
                         attr->va_fh, attr->va_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_s3_tagging_open_cb, request);
@@ -847,7 +906,8 @@ chimera_s3_tagging_dispatch(
         /* Bucket-level tagging: the bucket directory FH is already in hand. */
         chimera_s3_request_get(request);
 
-        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
+        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+                            chimera_s3_req_compound(request),
                             request->bucket_fh, request->bucket_fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
                             chimera_s3_tagging_open_cb, request);
@@ -856,13 +916,57 @@ chimera_s3_tagging_dispatch(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+                       chimera_s3_req_compound(request),
                        request->bucket_fh, request->bucket_fhlen,
                        request->path, request->path_len,
                        CHIMERA_VFS_ATTR_FH,
                        CHIMERA_VFS_LOOKUP_FOLLOW,
                        chimera_s3_tagging_lookup_cb, request);
 } /* chimera_s3_tagging_dispatch */
+
+/* ----- compound driver plumbing for the mutating subresource ops ----- */
+
+/* Compound start for PUT/DELETE ?tagging: reset the per-attempt walker
+ * state (the parsed tag set is the retained input) and (re)run the
+ * resolve -> clear -> set/finish chain. */
+static void
+chimera_s3_tagging_write_start(struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
+
+    if (ctx->handle) {
+        chimera_vfs_release(thread->vfs, ctx->handle);
+        ctx->handle = NULL;
+    }
+    ctx->compound_driven = 1;
+    ctx->pending_status  = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+    ctx->cur             = 0;
+    ctx->names_len       = 0;
+
+    chimera_s3_tagging_dispatch(thread->evpl, thread, request, ctx->op);
+} /* chimera_s3_tagging_write_start */
+
+/* Compound reply for PUT/DELETE ?tagging: the commit/abort has settled. */
+static void
+chimera_s3_tagging_write_reply(struct chimera_s3_request *request)
+{
+    struct chimera_s3_tagging_ctx *ctx    = request->tagging;
+    enum chimera_s3_status         status = ctx->pending_status;
+
+    if (request->compound_op_status != CHIMERA_VFS_OK) {
+        if (request->compound_op_status == CHIMERA_VFS_ECOMPOUND_EXHAUSTED) {
+            status = CHIMERA_S3_STATUS_SLOW_DOWN;
+        } else if (status == CHIMERA_S3_STATUS_OK ||
+                   status == CHIMERA_S3_STATUS_NO_CONTENT) {
+            /* The chain succeeded but the commit itself failed. */
+            status = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        }
+    }
+
+    chimera_s3_tagging_finish(request->thread->evpl, request, status);
+} /* chimera_s3_tagging_write_reply */
 
 /* ----- public entry points ----- */
 
@@ -872,6 +976,15 @@ chimera_s3_get_tagging(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
+    /* Read-only chain (lookup -> open -> list/get xattrs): one grouping
+     * READ compound, retired fire-and-forget at the terminals. */
+    request->compound = chimera_vfs_compound_begin(
+        thread->vfs, &thread->shared->cred,
+        request->bucket_fh, request->bucket_fhlen,
+        CHIMERA_VFS_COMPOUND_READ,
+        chimera_vfs_compound_alloc_ts(thread->vfs),
+        0);
+
     chimera_s3_tagging_dispatch(evpl, thread, request, CHIMERA_S3_TAGGING_GET);
 } /* chimera_s3_get_tagging */
 
@@ -881,7 +994,18 @@ chimera_s3_delete_tagging(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    chimera_s3_tagging_dispatch(evpl, thread, request, CHIMERA_S3_TAGGING_DELETE);
+    struct chimera_s3_tagging_ctx *ctx = chimera_s3_tagging_ctx_alloc(request);
+
+    ctx->op = CHIMERA_S3_TAGGING_DELETE;
+
+    /* Mutating, but every input (the key path) is retained and nothing
+     * escapes before commit: one RETRYABLE WRITE compound per request. */
+    chimera_s3_compound_run(request,
+                            request->bucket_fh, request->bucket_fhlen,
+                            CHIMERA_VFS_COMPOUND_WRITE,
+                            CHIMERA_VFS_COMPOUND_RETRYABLE,
+                            chimera_s3_tagging_write_start,
+                            chimera_s3_tagging_write_reply);
 } /* chimera_s3_delete_tagging */
 
 void
@@ -890,10 +1014,21 @@ chimera_s3_put_tagging(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
+    struct chimera_s3_tagging_ctx *ctx = chimera_s3_tagging_ctx_alloc(request);
+
     /* The <Tagging> body has been accumulated and parsed by
-     * chimera_s3_put_tagging_body_done; the parsed/validated tag set lives in
-     * request->tagging. */
-    chimera_s3_tagging_dispatch(evpl, thread, request, CHIMERA_S3_TAGGING_PUT);
+     * chimera_s3_put_tagging_body_done; the parsed/validated tag set lives
+     * in request->tagging and is the input every replay reuses (the body
+     * was consumed, but its parsed form is retained, so the phase still
+     * genuinely replays). */
+    ctx->op = CHIMERA_S3_TAGGING_PUT;
+
+    chimera_s3_compound_run(request,
+                            request->bucket_fh, request->bucket_fhlen,
+                            CHIMERA_VFS_COMPOUND_WRITE,
+                            CHIMERA_VFS_COMPOUND_RETRYABLE,
+                            chimera_s3_tagging_write_start,
+                            chimera_s3_tagging_write_reply);
 } /* chimera_s3_put_tagging */
 
 /* ----- PutObjectTagging request-body accumulation ----- */
@@ -1024,7 +1159,8 @@ chimera_s3_tagging_store_set_next(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
+                          chimera_s3_req_compound(request),
                           ctx->handle, 0,
                           ctx->set_name, namelen,
                           t->val, strlen(t->val),
@@ -1091,7 +1227,8 @@ chimera_s3_tagging_store_lookup_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+                        chimera_s3_req_compound(request),
                         attr->va_fh, attr->va_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_s3_tagging_store_open_cb, request);
@@ -1120,7 +1257,10 @@ chimera_s3_tagging_store_by_path(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
+    /* Enlisted in the caller's publish compound (PutObject / CMU finalize)
+     * via the request; loose when no phase compound is open. */
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+                       chimera_s3_req_compound(request),
                        request->bucket_fh, request->bucket_fhlen,
                        request->path, request->path_len,
                        CHIMERA_VFS_ATTR_FH,
@@ -1206,7 +1346,8 @@ chimera_s3_tagging_count_open_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+                            chimera_s3_req_compound(request),
                             ctx->handle, 0,
                             ctx->names, CHIMERA_S3_TAG_XATTR_BUFSZ,
                             chimera_s3_tagging_count_list_cb, request);
@@ -1229,7 +1370,9 @@ chimera_s3_tagging_count_for_head(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
+    /* Rides the HEAD flow's read compound via the request. */
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+                        chimera_s3_req_compound(request),
                         fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_s3_tagging_count_open_cb, request);

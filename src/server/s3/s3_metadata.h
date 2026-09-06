@@ -34,6 +34,10 @@ struct chimera_vfs_open_handle;
 #define CHIMERA_S3_XATTR_META       "user.s3.meta."
 #define CHIMERA_S3_XATTR_META_LEN   (sizeof(CHIMERA_S3_XATTR_META) - 1)
 
+/* `error` is 0 on success, else the enum chimera_vfs_error of the failing
+ * xattr op (so a caller running the machine inside a compound can recognize
+ * CHIMERA_VFS_ECOMPOUND_CONFLICT / _EXHAUSTED); plain truthiness still means
+ * "failed" for callers that don't care which. */
 typedef void (*chimera_s3_metadata_done_t)(
     struct chimera_s3_request *request,
     int                        error,

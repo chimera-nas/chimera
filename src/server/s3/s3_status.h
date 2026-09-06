@@ -33,6 +33,9 @@ enum chimera_s3_status {
     CHIMERA_S3_STATUS_INVALID_ARGUMENT,
     CHIMERA_S3_STATUS_INVALID_TAG,
     CHIMERA_S3_STATUS_NO_SUCH_TAG_SET,
+    /* 503 SlowDown: a compound commit lost a conflict it may not replay
+     * (CHIMERA_VFS_ECOMPOUND_EXHAUSTED).  Retriable by the client. */
+    CHIMERA_S3_STATUS_SLOW_DOWN,
 };
 
 const char *

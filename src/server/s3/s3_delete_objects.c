@@ -22,6 +22,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_procs.h"
 
 #define CHIMERA_S3_DEL_BODY_HARD_CAP (4 * 1024 * 1024)
@@ -377,6 +378,28 @@ chimera_s3_del_record(
     }
 } /* chimera_s3_del_record */
 
+/*
+ * Terminal of the current key's VFS chain: stash the wire outcome and hand
+ * the key's compound to the driver.  A CHIMERA_VFS_ECOMPOUND_CONFLICT
+ * replays the key from chimera_s3_del_key_start (the outcome fields are
+ * simply overwritten by the replay's terminal); anything else settles in
+ * chimera_s3_del_key_reply.
+ */
+static void
+chimera_s3_del_key_outcome(
+    struct chimera_s3_request *request,
+    int                        deleted,
+    const char                *code,
+    const char                *msg,
+    enum chimera_vfs_error     vfs_status)
+{
+    request->del.cur_deleted = deleted;
+    request->del.cur_code    = code;
+    request->del.cur_msg     = msg;
+
+    chimera_s3_compound_finish(request, vfs_status);
+} /* chimera_s3_del_key_outcome */
+
 static void
 chimera_s3_del_remove_cb(
     enum chimera_vfs_error    error_code,
@@ -389,15 +412,18 @@ chimera_s3_del_remove_cb(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     chimera_vfs_release(thread->vfs, request->dir_handle);
+    request->dir_handle = NULL;
 
     if (error_code == CHIMERA_VFS_OK || error_code == CHIMERA_VFS_ENOENT) {
-        /* Removed, or already absent: both count as success. */
-        chimera_s3_del_record(request, 1, NULL, NULL);
+        /* Removed, or already absent: both count as success (committed). */
+        chimera_s3_del_key_outcome(request, 1, NULL, NULL, CHIMERA_VFS_OK);
     } else if (error_code == CHIMERA_VFS_EACCES) {
-        chimera_s3_del_record(request, 0, "AccessDenied", "Access Denied");
+        chimera_s3_del_key_outcome(request, 0, "AccessDenied", "Access Denied",
+                                   error_code);
     } else {
-        chimera_s3_del_record(request, 0, "InternalError",
-                              "We encountered an internal error. Please try again.");
+        chimera_s3_del_key_outcome(request, 0, "InternalError",
+                                   "We encountered an internal error. Please try again.",
+                                   error_code);
     }
 } /* chimera_s3_del_remove_cb */
 
@@ -414,9 +440,10 @@ chimera_s3_del_open_cb(
     if (error_code) {
         /* The parent existed a moment ago (its lookup succeeded); any
         * failure to open it is a real error, not an absent object. */
-        chimera_s3_del_record(request, 0, "InternalError",
-                              "We encountered an internal error. "
-                              "Please try again.");
+        chimera_s3_del_key_outcome(request, 0, "InternalError",
+                                   "We encountered an internal error. "
+                                   "Please try again.",
+                                   error_code);
         return;
     }
 
@@ -424,7 +451,7 @@ chimera_s3_del_open_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred, request->compound,
                           oh,
                           request->del.cur_name,
                           request->del.cur_name_len,
@@ -446,26 +473,65 @@ chimera_s3_del_lookup_cb(
 
     if (error_code == CHIMERA_VFS_ENOENT || error_code == CHIMERA_VFS_ENOTDIR) {
         /* Parent path does not exist: object is effectively gone. */
-        chimera_s3_del_record(request, 1, NULL, NULL);
+        chimera_s3_del_key_outcome(request, 1, NULL, NULL, CHIMERA_VFS_OK);
         return;
     } else if (error_code) {
         /* Any other lookup failure (ESTALE, EIO, ...) must not masquerade
          * as a successful delete: the object may well still exist. */
-        chimera_s3_del_record(request, 0, "InternalError",
-                              "We encountered an internal error. "
-                              "Please try again.");
+        chimera_s3_del_key_outcome(request, 0, "InternalError",
+                                   "We encountered an internal error. "
+                                   "Please try again.",
+                                   error_code);
         return;
     }
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, request->compound,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
                         chimera_s3_del_open_cb,
                         request);
 } /* chimera_s3_del_lookup_cb */
+
+/* Compound start for the CURRENT key: (re)issue its lookup -> open ->
+ * remove chain.  The dirpath/name split points into the request body
+ * buffer, which outlives every replay. */
+static void
+chimera_s3_del_key_start(struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+
+    chimera_s3_request_get(request);
+
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, request->compound,
+                       request->bucket_fh,
+                       request->bucket_fhlen,
+                       request->del.cur_dirpath,
+                       request->del.cur_dirpathlen,
+                       CHIMERA_VFS_ATTR_FH,
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_s3_del_lookup_cb,
+                       request);
+} /* chimera_s3_del_key_start */
+
+/* The key's compound has settled (commit, abort, or replay exhaustion):
+ * record the wire outcome and let the trampoline advance the batch. */
+static void
+chimera_s3_del_key_reply(struct chimera_s3_request *request)
+{
+    if (request->compound_op_status == CHIMERA_VFS_ECOMPOUND_EXHAUSTED) {
+        /* The key's compound lost a conflict it may not replay: report the
+         * standard retriable per-key error. */
+        request->del.cur_deleted = 0;
+        request->del.cur_code    = "SlowDown";
+        request->del.cur_msg     = "Please reduce your request rate.";
+    }
+
+    chimera_s3_del_record(request, request->del.cur_deleted,
+                          request->del.cur_code, request->del.cur_msg);
+} /* chimera_s3_del_key_reply */
 
 static void
 chimera_s3_del_drive(struct chimera_s3_request *request)
@@ -510,23 +576,27 @@ chimera_s3_del_drive(struct chimera_s3_request *request)
             continue;
         }
 
-        request->del.cur_name     = name;
-        request->del.cur_name_len = name_len;
+        request->del.cur_name       = name;
+        request->del.cur_name_len   = name_len;
+        request->del.cur_dirpath    = dirpath;
+        request->del.cur_dirpathlen = dirpathlen;
+        request->del.cur_deleted    = 0;
+        request->del.cur_code       = NULL;
+        request->del.cur_msg        = NULL;
 
         request->del.synchronous = 1;
         request->del.pending     = 1;
 
-        chimera_s3_request_get(request);
-
-        chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
-                           request->bucket_fh,
-                           request->bucket_fhlen,
-                           dirpath,
-                           dirpathlen,
-                           CHIMERA_VFS_ATTR_FH,
-                           CHIMERA_VFS_LOOKUP_FOLLOW,
-                           chimera_s3_del_lookup_cb,
-                           request);
+        /* One compound PER KEY, matching the per-key wire results: each
+         * key's lookup -> open -> remove chain commits (durably) before
+         * its <Deleted>/<Error> entry is decided, and a conflict replays
+         * only that key. */
+        chimera_s3_compound_run(request,
+                                request->bucket_fh, request->bucket_fhlen,
+                                CHIMERA_VFS_COMPOUND_WRITE,
+                                CHIMERA_VFS_COMPOUND_RETRYABLE,
+                                chimera_s3_del_key_start,
+                                chimera_s3_del_key_reply);
 
         if (request->del.pending) {
             /* Completion is asynchronous; the callback chain will resume the
@@ -550,12 +620,22 @@ chimera_s3_delete_objects(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    (void) evpl;
     (void) thread;
 
     /* Body/response accumulators were initialized during request parsing.
      * The real work begins once the <Delete> body is fully received. */
     request->vfs_state = CHIMERA_S3_VFS_STATE_INIT;
+
+    /* Reached here from the bucket-resolution callback with bucket_fh now in
+     * hand.  On an async backend (cairn) that resolution can land AFTER the
+     * body's RECEIVE_COMPLETE, whose delete-objects arm deferred to us because
+     * bucket_fhlen was still 0; drive the per-key removes now.  If the body is
+     * not yet received, the RECEIVE_COMPLETE arm drives it (bucket_fh is set
+     * by then). */
+    if (request->bucket_fhlen != 0 &&
+        request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        chimera_s3_delete_objects_body_done(evpl, request);
+    }
 } /* chimera_s3_delete_objects */
 
 void

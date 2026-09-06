@@ -20,6 +20,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3.h"
 #include "s3_procs.h"
 
@@ -99,17 +100,84 @@ chimera_s3_create_bucket_mkdir_cb(
     void                     *private_data)
 {
     CHIMERA_S3_HOLD_REQUEST(private_data);
+    struct chimera_s3_request *request = private_data;
+
+    /* EEXIST is success in us-east-1: recreating your own bucket is a no-op. */
+    if (error_code == CHIMERA_VFS_EEXIST) {
+        error_code = CHIMERA_VFS_OK;
+    }
+
+    chimera_s3_compound_finish(request, error_code);
+} /* chimera_s3_create_bucket_mkdir_cb */
+
+static void
+chimera_s3_create_bucket_lookup_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
-    struct chimera_server_s3_shared *shared  = thread->shared;
+
+    if (error_code || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        /* Bucket root path is missing/unresolvable. */
+        chimera_s3_compound_finish(request,
+                                   error_code ? error_code : CHIMERA_VFS_EIO);
+        return;
+    }
+
+    /* Stash the bucket-root directory fh and create the new bucket dir. */
+    memcpy(request->bucket_fh, attr->va_fh, attr->va_fh_len);
+    request->bucket_fhlen = attr->va_fh_len;
+
+    memset(&request->set_attr, 0, sizeof(request->set_attr));
+    request->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+    request->set_attr.va_mode = S_IFDIR | 0755;
+    request->set_attr.va_uid  = 0;
+    request->set_attr.va_gid  = 0;
+
+    chimera_s3_request_get(request);
+
+    chimera_vfs_mkdir(thread->vfs, &thread->shared->cred, request->compound,
+                      request->bucket_fh, request->bucket_fhlen,
+                      request->bucket_name, request->bucket_namelen,
+                      &request->set_attr, CHIMERA_VFS_ATTR_FH,
+                      chimera_s3_create_bucket_mkdir_cb, request);
+} /* chimera_s3_create_bucket_lookup_cb */
+
+/* Compound start: (re)run the bucket-root lookup -> mkdir chain. */
+static void
+chimera_s3_create_bucket_start(struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct chimera_server_s3_shared *shared = thread->shared;
+
+    chimera_s3_request_get(request);
+
+    chimera_vfs_lookup(thread->vfs, &shared->cred, request->compound,
+                       shared->root_fh, shared->root_fh_len,
+                       shared->bucket_root_path, shared->bucket_root_pathlen,
+                       CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_s3_create_bucket_lookup_cb, request);
+} /* chimera_s3_create_bucket_start */
+
+/* Compound reply: only after the mkdir has durably committed does the
+ * bucket enter the bucket map (a mapped bucket must exist on disk) and the
+ * response go out. */
+static void
+chimera_s3_create_bucket_reply(struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct evpl                     *evpl   = thread->evpl;
+    struct chimera_server_s3_shared *shared = thread->shared;
     char                             name[256];
     char                             path[512];
     char                             location[300];
 
-    /* EEXIST is success in us-east-1: recreating your own bucket is a no-op. */
-    if (error_code && error_code != CHIMERA_VFS_EEXIST) {
-        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+    if (request->compound_op_status != CHIMERA_VFS_OK) {
+        chimera_s3_compound_map_error(request, request->compound_op_status);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -136,48 +204,7 @@ chimera_s3_create_bucket_mkdir_cb(
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
-} /* chimera_s3_create_bucket_mkdir_cb */
-
-static void
-chimera_s3_create_bucket_lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    CHIMERA_S3_HOLD_REQUEST(private_data);
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
-
-    if (error_code || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        /* Bucket root path is missing/unresolvable. */
-        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(evpl, request);
-        }
-        return;
-    }
-
-    /* Stash the bucket-root directory fh and create the new bucket dir. */
-    memcpy(request->bucket_fh, attr->va_fh, attr->va_fh_len);
-    request->bucket_fhlen = attr->va_fh_len;
-
-    memset(&request->set_attr, 0, sizeof(request->set_attr));
-    request->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
-        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-    request->set_attr.va_mode = S_IFDIR | 0755;
-    request->set_attr.va_uid  = 0;
-    request->set_attr.va_gid  = 0;
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_mkdir(thread->vfs, &thread->shared->cred, NULL,
-                      request->bucket_fh, request->bucket_fhlen,
-                      request->bucket_name, request->bucket_namelen,
-                      &request->set_attr, CHIMERA_VFS_ATTR_FH,
-                      chimera_s3_create_bucket_mkdir_cb, request);
-} /* chimera_s3_create_bucket_lookup_cb */
+} /* chimera_s3_create_bucket_reply */
 
 void
 chimera_s3_create_bucket(
@@ -194,13 +221,14 @@ chimera_s3_create_bucket(
         return;
     }
 
-    chimera_s3_request_get(request);
-
-    chimera_vfs_lookup(thread->vfs, &shared->cred, NULL,
-                       shared->root_fh, shared->root_fh_len,
-                       shared->bucket_root_path, shared->bucket_root_pathlen,
-                       CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_s3_create_bucket_lookup_cb, request);
+    /* Metadata-only, fully replayable (inputs are the request path; nothing
+     * escapes before the commit): one RETRYABLE WRITE compound. */
+    chimera_s3_compound_run(request,
+                            shared->root_fh, shared->root_fh_len,
+                            CHIMERA_VFS_COMPOUND_WRITE,
+                            CHIMERA_VFS_COMPOUND_RETRYABLE,
+                            chimera_s3_create_bucket_start,
+                            chimera_s3_create_bucket_reply);
 } /* chimera_s3_create_bucket */
 
 /* --------------------------------------------------------------- DeleteBucket
@@ -223,6 +251,8 @@ struct s3_delbucket_ctx {
     int                        capdirs;
     char                     **dirs;   /* relative dir paths, no leading slash */
     int                        cur;
+    /* Outcome staged across the compound end (see delbucket_finish). */
+    enum chimera_s3_status status;
 };
 
 static void chimera_s3_delbucket_finish(
@@ -303,7 +333,13 @@ chimera_s3_delbucket_root_removed(
 {
     struct s3_delbucket_ctx *ctx = private_data;
 
-    /* ENOENT (already gone) is fine; anything else maps to internal error. */
+    /* ENOENT (already gone) is fine; a compound conflict this grouping
+     * compound may not replay is the retriable SlowDown; anything else maps
+     * to internal error. */
+    if (error_code == CHIMERA_VFS_ECOMPOUND_EXHAUSTED) {
+        chimera_s3_delbucket_finish(ctx, CHIMERA_S3_STATUS_SLOW_DOWN);
+        return;
+    }
     if (error_code && error_code != CHIMERA_VFS_ENOENT) {
         chimera_s3_delbucket_finish(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         return;
@@ -335,7 +371,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     struct chimera_server_s3_shared *shared  = thread->shared;
 
     if (ctx->cur < ctx->ndirs) {
-        chimera_vfs_remove(thread->vfs, &shared->cred, NULL,
+        chimera_vfs_remove(thread->vfs, &shared->cred, request->compound,
                            ctx->bucket_fh, ctx->bucket_fhlen,
                            ctx->dirs[ctx->cur], strlen(ctx->dirs[ctx->cur]), 0,
                            chimera_s3_delbucket_dir_removed, ctx);
@@ -343,7 +379,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     }
 
     /* All scaffolding gone; remove the bucket directory from the bucket root. */
-    chimera_vfs_remove(thread->vfs, &shared->cred, NULL,
+    chimera_vfs_remove(thread->vfs, &shared->cred, request->compound,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len, 0,
                        chimera_s3_delbucket_root_removed, ctx);
@@ -398,15 +434,29 @@ chimera_s3_delbucket_lookup_cb(
                      ctx);
 } /* chimera_s3_delbucket_lookup_cb */
 
+/* The purge compound has settled: only now may the bucket leave the map (a
+ * mapped bucket must exist on disk, so an uncommitted removal must not drop
+ * it) and the response go out. */
 static void
-chimera_s3_delbucket_finish(
-    struct s3_delbucket_ctx *ctx,
-    enum chimera_s3_status   status)
+chimera_s3_delbucket_ended(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
 {
+    struct s3_delbucket_ctx         *ctx     = private_data;
     struct chimera_s3_request       *request = ctx->request;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
+    enum chimera_s3_status           status  = ctx->status;
     int                              i;
+
+    if (status == CHIMERA_S3_STATUS_NO_CONTENT &&
+        error_code != CHIMERA_VFS_OK) {
+        /* The removals were staged but the commit failed: the bucket is
+         * still there.  EXHAUSTED (a conflict this grouping compound may
+         * not replay) is the retriable SlowDown. */
+        status = error_code == CHIMERA_VFS_ECOMPOUND_EXHAUSTED ?
+            CHIMERA_S3_STATUS_SLOW_DOWN : CHIMERA_S3_STATUS_INTERNAL_ERROR;
+    }
 
     /* On success the bucket no longer exists; drop it from the map. */
     if (status == CHIMERA_S3_STATUS_NO_CONTENT) {
@@ -430,6 +480,28 @@ chimera_s3_delbucket_finish(
     }
     chimera_s3_request_drop(ctx->request);
     free(ctx);
+} /* chimera_s3_delbucket_ended */
+
+static void
+chimera_s3_delbucket_finish(
+    struct s3_delbucket_ctx *ctx,
+    enum chimera_s3_status   status)
+{
+    struct chimera_s3_request       *request  = ctx->request;
+    struct chimera_server_s3_thread *thread   = request->thread;
+    struct chimera_vfs_compound     *compound = request->compound;
+
+    ctx->status       = status;
+    request->compound = NULL;
+
+    /* End the purge compound (durably on success, abort on failure) and
+     * finish once it settles.  ctx holds a request reference, so the end
+     * callback's dereference is safe. */
+    chimera_vfs_compound_end(thread->vfs, &thread->shared->cred, compound,
+                             status == CHIMERA_S3_STATUS_NO_CONTENT ?
+                             CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                             CHIMERA_VFS_COMPOUND_ABORT,
+                             chimera_s3_delbucket_ended, ctx);
 } /* chimera_s3_delbucket_finish */
 
 void
@@ -459,8 +531,22 @@ chimera_s3_delete_bucket(
                                     shared->bucket_root_pathlen, shared->bucket_root_path,
                                     request->bucket_namelen, request->bucket_name);
 
+    /* One grouping WRITE compound over the purge (the resolve, the
+     * deepest-first rmdir sweep, and the final bucket rmdir), committed
+     * durably before the 204.  Grouping, not RETRYABLE: the emptiness
+     * evidence comes from a find whose driver ops are outside the compound,
+     * and the sweep swallows per-dir errors, so a faithful whole-flow
+     * replay is not well-defined -- a conflict surfaces as EXHAUSTED and is
+     * answered 503 SlowDown. */
+    request->compound = chimera_vfs_compound_begin(
+        thread->vfs, &shared->cred,
+        shared->root_fh, shared->root_fh_len,
+        CHIMERA_VFS_COMPOUND_WRITE,
+        chimera_vfs_compound_alloc_ts(thread->vfs),
+        0);
+
     /* Resolve the bucket directory, then walk + purge it. */
-    chimera_vfs_lookup(thread->vfs, &shared->cred, NULL,
+    chimera_vfs_lookup(thread->vfs, &shared->cred, request->compound,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,

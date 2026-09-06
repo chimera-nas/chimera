@@ -10,6 +10,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_etag.h"
 #include "s3_procs.h"
 #include "s3_metadata.h"
@@ -23,6 +24,10 @@ chimera_s3_head_respond(
     struct chimera_s3_request *request)
 {
     struct chimera_server_s3_thread *thread = request->thread;
+
+    /* End of the HEAD metadata chain: retire the read compound before the
+     * response (fire-and-forget; a read compound gates nothing). */
+    chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_COMMIT);
 
     if (request->file_handle) {
         chimera_vfs_release(thread->vfs, request->file_handle);
@@ -121,8 +126,13 @@ chimera_s3_get_send(
 
     request->io_pending++;
 
+    /* Body streaming: the reads run in parallel (io_pending) and arrive
+     * from WANT_DATA events, so they cannot ride the (already-retired)
+     * metadata compound -- enlisting them would serialize the stream onto
+     * one backend thread.  Loose = plain autocommit. */
     chimera_vfs_read(request->thread->vfs,
-                     &request->thread->shared->cred, NULL,
+                     &request->thread->shared->cred,
+                     chimera_vfs_compound_loose(request->thread->vfs),
                      request->file_handle,
                      request->file_cur_offset,
                      left,
@@ -161,13 +171,17 @@ chimera_s3_get_metadata_done(
     if (is_head) {
         /* HEAD: no body. Attach the x-amz-tagging-count header (S3 reports the
          * object's tag count on HEAD), then release the handle and finish in
-         * chimera_s3_head_respond. */
+         * chimera_s3_head_respond (which retires the read compound). */
         chimera_s3_tagging_count_for_head(evpl, thread, request,
                                           request->file_handle->fh,
                                           request->file_handle->fh_len,
                                           chimera_s3_head_respond);
         return;
     }
+
+    /* GET metadata chain complete: retire the read compound before the
+     * response headers go out and the loose body reads start. */
+    chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_COMMIT);
 
     request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
 
@@ -192,9 +206,9 @@ chimera_s3_get_open_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
+        chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_ABORT);
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        chimera_vfs_release(thread->vfs, request->dir_handle);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
         }
@@ -220,6 +234,7 @@ chimera_s3_get_lookup_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
+        chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_ABORT);
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -240,6 +255,7 @@ chimera_s3_get_lookup_callback(
             (attr->va_mode & S_IFMT) == S_IFDIR;
 
         if (is_dir || (attr->va_set_mask & need) != need) {
+            chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_ABORT);
             request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
             request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
             if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -265,6 +281,7 @@ chimera_s3_get_lookup_callback(
         if (request->file_real_length == 0 ||
             (request->file_offset >= 0 &&
              request->file_offset >= request->file_real_length)) {
+            chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_ABORT);
             request->status    = CHIMERA_S3_STATUS_INVALID_RANGE;
             request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
             if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -324,7 +341,7 @@ chimera_s3_get_lookup_callback(
      * the object is open. The body is only streamed for GET. */
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, request->compound,
                         attr->va_fh,
                         attr->va_fh_len,
                         0,
@@ -340,9 +357,21 @@ chimera_s3_get(
 {
     request->io_pending = 0;
 
+    /* GET/HEAD metadata chain (lookup -> open -> metadata/tag xattrs): one
+     * grouping READ compound so an engine backend can serve the whole chain
+     * from one context.  Grouping (not RETRYABLE): nothing here mutates and
+     * no result gates on the commit, so the end is fire-and-forget at the
+     * chain terminals; the streamed body reads run loose. */
+    request->compound = chimera_vfs_compound_begin(
+        thread->vfs, &thread->shared->cred,
+        request->bucket_fh, request->bucket_fhlen,
+        CHIMERA_VFS_COMPOUND_READ,
+        chimera_vfs_compound_alloc_ts(thread->vfs),
+        0);
+
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, request->compound,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,
@@ -376,6 +405,7 @@ chimera_s3_get_object_attributes_lookup_callback(
     char                            *bp, *body_start;
 
     if (error_code) {
+        chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_ABORT);
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -383,6 +413,10 @@ chimera_s3_get_object_attributes_lookup_callback(
         }
         return;
     }
+
+    /* The chain is the single lookup: retire the read compound before the
+     * response is built. */
+    chimera_s3_compound_release(request, CHIMERA_VFS_COMPOUND_COMMIT);
 
     /* Mirror the regular-object guard in chimera_s3_get_lookup_callback: only
      * a regular file with the attributes the ETag is built from is an object. */
@@ -444,9 +478,18 @@ chimera_s3_get_object_attributes(
 {
     request->io_pending = 0;
 
+    /* Read-only single-lookup flow: same grouping READ compound shape as
+     * GET/HEAD (fire-and-forget end at the terminals). */
+    request->compound = chimera_vfs_compound_begin(
+        thread->vfs, &thread->shared->cred,
+        request->bucket_fh, request->bucket_fhlen,
+        CHIMERA_VFS_COMPOUND_READ,
+        chimera_vfs_compound_alloc_ts(thread->vfs),
+        0);
+
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, request->compound,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,

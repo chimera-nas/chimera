@@ -57,6 +57,8 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Invalid Tag";
         case CHIMERA_S3_STATUS_NO_SUCH_TAG_SET:
             return "No Such Tag Set";
+        case CHIMERA_S3_STATUS_SLOW_DOWN:
+            return "Slow Down";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         case CHIMERA_S3_STATUS_INVALID_ARGUMENT:
@@ -203,6 +205,12 @@ chimera_s3_prepare_error_response(
             bp  += sprintf(bp, "  <Code>NoSuchTagSet</Code>\n");
             bp  += sprintf(bp, "  <Message>The TagSet does not exist.</Message>\n");
             code = 404;
+            break;
+        case CHIMERA_S3_STATUS_SLOW_DOWN:
+            bp += sprintf(bp, "  <Code>SlowDown</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>Please reduce your request rate.</Message>\n");
+            code = 503;
             break;
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             bp += sprintf(bp, "  <Code>NotImplemented</Code>\n");
