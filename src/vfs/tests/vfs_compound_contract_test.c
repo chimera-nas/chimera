@@ -31,6 +31,26 @@
  *   g. a RETRYABLE compound that suffered an ejection but no engine
  *      conflict still commits OK (the EXHAUSTED rewrite only applies to
  *      a conflict raised by the engine).
+ *   h. mutating vs read-only ejection accounting: bound to cairn, a memfs
+ *      getattr ejects read-only (bumps ejected_ops only) and a memfs
+ *      mkdir ejects mutating (bumps ejected_ops AND ejected_mutating_ops,
+ *      the counter the conflict-replay veto keys on); the binding is
+ *      unaffected and end(COMMIT) is OK.
+ *   i. data read-your-writes on cairn: a file created under a compound,
+ *      an enlisted WRITE then -- strictly after its completion -- an
+ *      enlisted READ of the same range through the same compound returns
+ *      the just-written bytes BEFORE the compound ends; after
+ *      end(COMMIT_DURABLE) a plain standalone read returns them too.
+ *   j. widened procs: set_xattr/get_xattr take the compound parameter
+ *      (after cred); a pair on a cairn file inside one compound enlists
+ *      (enlisted_ops += 2) and round-trips; the same pair with a NULL
+ *      compound still works standalone.
+ *   k. single-op fold liveness: begin cairn-hinted, one mkdir, then
+ *      end(COMMIT_DURABLE) -- and again with end(COMMIT).  The end
+ *      callback must fire (the harness pumps until it does) and the dir
+ *      must persist: the regression canary for the backend's
+ *      deferred-completion (cycle-commit) machinery -- a hang here means
+ *      the cycle commit never scheduled.
  *
  * Deterministic: single VFS thread, no delegation pools, completions are
  * pumped with evpl_continue() -- no wall-clock waits.  The conflict path
@@ -70,6 +90,10 @@ struct test_ctx {
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        fh_len;
     uint64_t                        last_mode;
+    const uint8_t                  *expect;      /* read_cb comparison buffer */
+    uint32_t                        expect_len;
+    int                             verify_ok;
+    uint32_t                        xattr_len;   /* get_xattr_cb value length */
 };
 
 static void
@@ -168,6 +192,107 @@ end_cb(
     ctx->done   = 1;
 } /* end_cb */
 
+static void
+openat_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->handle = oh;
+    if (error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
+        ctx->fh_len = attr->va_fh_len;
+    }
+    ctx->done = 1;
+} /* openat_cb */
+
+static void
+write_cb(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  length,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* write_cb */
+
+static void
+read_cb(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  count,
+    uint32_t                  eof,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+    uint32_t         off = 0;
+
+    ctx->status    = error_code;
+    ctx->verify_ok = 0;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* The backend may return one zero-copy iovec per block; gather and
+         * compare against the expected pattern. */
+        ctx->verify_ok = (count == ctx->expect_len);
+        for (int i = 0; i < niov; i++) {
+            uint32_t n = iov[i].length;
+            if (off + n > ctx->expect_len) {
+                n = ctx->expect_len - off;
+            }
+            if (memcmp(iov[i].data, ctx->expect + off, n) != 0) {
+                ctx->verify_ok = 0;
+            }
+            off += iov[i].length;
+        }
+        /* The read iovecs are caller-owned references; release them. */
+        if (niov) {
+            evpl_iovecs_release(ctx->evpl, iov, niov);
+        }
+    }
+    ctx->done = 1;
+} /* read_cb */
+
+static void
+set_xattr_cb(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* set_xattr_cb */
+
+static void
+get_xattr_cb(
+    enum chimera_vfs_error error_code,
+    uint32_t               value_len,
+    void                  *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status    = error_code;
+    ctx->xattr_len = value_len;
+    ctx->done      = 1;
+} /* get_xattr_cb */
+
 /* Resolve `name` under the fh in parent_fh into ctx->fh. */
 static void
 lookup_child(
@@ -222,6 +347,127 @@ mkdir_under(
     assert(ctx->status == CHIMERA_VFS_OK);
 } /* mkdir_under */
 
+/* Create `name` under `dir` (a regular file), optionally enlisted in
+ * `compound`; returns the open handle (kept open) and leaves the new fh in
+ * ctx->fh. */
+static struct chimera_vfs_open_handle *
+create_file(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name)
+{
+    struct chimera_vfs_attrs sattr;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = 0644;
+
+    chimera_vfs_open_at(ctx->vfs_thread, cred, compound, dir,
+                        name, (int) strlen(name),
+                        CHIMERA_VFS_OPEN_CREATE, &sattr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                        0, 0, openat_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    return ctx->handle;
+} /* create_file */
+
+/* One awaited write of buf[0..len) at `offset`, optionally enlisted in
+ * `compound`; asserts OK.  Unstable (sync == 0): durability is the
+ * compound end's business, which is exactly what scenario (i) exercises. */
+static void
+write_data(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *h,
+    uint64_t                        offset,
+    const uint8_t                  *buf,
+    uint32_t                        len)
+{
+    struct evpl_iovec iov;
+    int               niov;
+
+    niov = evpl_iovec_alloc(ctx->evpl, len, 0, 1, 0, &iov);
+    assert(niov == 1);
+    memcpy(iov.data, buf, len);
+
+    chimera_vfs_write(ctx->vfs_thread, cred, compound, h, offset, len,
+                      0, 0, 0, &iov, 1, write_cb, ctx);
+    wait_done(ctx);
+    if (ctx->status != CHIMERA_VFS_OK) {
+        fprintf(stderr, "write_data: status %d\n", (int) ctx->status);
+    }
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    /* The backend takes its own reference into the data buffers; drop the
+     * caller's reference on the staged write iovec. */
+    evpl_iovec_release(ctx->evpl, &iov);
+} /* write_data */
+
+#define TEST_READ_MAX_IOV 8
+
+/* One awaited read of len bytes at `offset`, optionally enlisted in
+* `compound`; asserts OK and that the bytes equal expect[0..len). */
+static void
+read_verify(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *h,
+    uint64_t                        offset,
+    const uint8_t                  *expect,
+    uint32_t                        len)
+{
+    struct evpl_iovec iov[TEST_READ_MAX_IOV];
+
+    ctx->expect     = expect;
+    ctx->expect_len = len;
+
+    chimera_vfs_read(ctx->vfs_thread, cred, compound, h, offset, len,
+                     iov, TEST_READ_MAX_IOV, 0, read_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(ctx->verify_ok);
+} /* read_verify */
+
+/* set_xattr(name=value) then get_xattr(name), both optionally enlisted in
+ * `compound` (the widened signatures: compound right after cred, NULL
+ * permitted); asserts the value round-trips. */
+static void
+xattr_roundtrip(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *h,
+    const char                     *name,
+    const char                     *value)
+{
+    char     buf[64];
+    uint32_t namelen   = (uint32_t) strlen(name);
+    uint32_t value_len = (uint32_t) strlen(value);
+
+    assert(value_len <= sizeof(buf));
+
+    chimera_vfs_set_xattr(ctx->vfs_thread, cred, compound, h,
+                          CHIMERA_VFS_XATTR_EITHER, name, namelen,
+                          value, value_len, set_xattr_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    memset(buf, 0, sizeof(buf));
+    ctx->xattr_len = 0;
+    chimera_vfs_get_xattr(ctx->vfs_thread, cred, compound, h,
+                          name, namelen, buf, (uint32_t) sizeof(buf),
+                          get_xattr_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(ctx->xattr_len == value_len);
+    assert(memcmp(buf, value, value_len) == 0);
+} /* xattr_roundtrip */
+
 /* End a compound that the contract promises to complete SYNCHRONOUSLY
  * (unbound / LOOSE): the callback must have run before end returns, with
  * no event-loop pump. */
@@ -273,6 +519,7 @@ test_begin_no_hint(
     assert(!(compound->flags & CHIMERA_VFS_COMPOUND_LOOSE));
     assert(compound->enlisted_ops == 0);
     assert(compound->ejected_ops == 0);
+    assert(compound->ejected_mutating_ops == 0);
     assert(compound->inflight_ops == 0);
 
     end_sync_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
@@ -306,13 +553,14 @@ test_non_capable_hint(
                                           chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
                                           0);
     assert(compound != NULL);
-    assert(compound->module == NULL);           /* memfs cannot bind it */
+    assert(compound->module == NULL);            /* memfs cannot bind it */
 
     mkdir_under(ctx, cred, compound, mem_root, "b1");
 
-    assert(compound->module == NULL);           /* still unbound */
+    assert(compound->module == NULL);            /* still unbound */
     assert(compound->enlisted_ops == 0);
     assert(compound->ejected_ops == 1);
+    assert(compound->ejected_mutating_ops == 1); /* mkdir mutates */
     assert(compound->inflight_ops == 0);
 
     end_sync_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
@@ -353,6 +601,7 @@ test_lazy_bind_and_eject(
     assert(strcmp(compound->module->name, "cairn") == 0);
     assert(compound->enlisted_ops == 1);
     assert(compound->ejected_ops == 0);
+    assert(compound->ejected_mutating_ops == 0);
     assert(compound->inflight_ops == 0);
 
     /* Same compound, other mount: the op ejects and runs standalone. */
@@ -361,6 +610,7 @@ test_lazy_bind_and_eject(
     assert(strcmp(compound->module->name, "cairn") == 0);   /* ownership fixed */
     assert(compound->enlisted_ops == 1);
     assert(compound->ejected_ops == 1);
+    assert(compound->ejected_mutating_ops == 1);        /* mkdir mutates */
     assert(compound->inflight_ops == 0);
 
     end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
@@ -410,6 +660,7 @@ test_eager_bind_durable(
     assert(compound->enlisted_ops == 2);
     assert(compound->inflight_ops == 0);
     assert(compound->ejected_ops == 0);
+    assert(compound->ejected_mutating_ops == 0);
 
     end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT_DURABLE);
 
@@ -535,13 +786,14 @@ test_retryable_eject_commit_ok(
                                           CHIMERA_VFS_COMPOUND_RETRYABLE);
     assert(compound != NULL);
     assert(compound->flags & CHIMERA_VFS_COMPOUND_RETRYABLE);
-    assert(compound->module != NULL);           /* eagerly bound */
+    assert(compound->module != NULL);            /* eagerly bound */
 
     mkdir_under(ctx, cred, compound, cairn_root, "g1");
     assert(compound->enlisted_ops == 1);
 
     mkdir_under(ctx, cred, compound, mem_root, "g2");
     assert(compound->ejected_ops == 1);
+    assert(compound->ejected_mutating_ops == 1); /* forfeits replay */
     assert(compound->inflight_ops == 0);
 
     end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
@@ -551,6 +803,235 @@ test_retryable_eject_commit_ok(
 
     TEST_PASS("RETRYABLE compound with an ejection still commits OK absent an engine conflict");
 } /* test_retryable_eject_commit_ok */
+
+/* (h) mutating vs read-only ejection accounting: on a cairn-bound compound,
+ * a getattr on the memfs mount is a read-only ejection (ejected_ops only)
+ * and a mkdir on memfs is a mutating ejection (ejected_ops AND
+ * ejected_mutating_ops -- the counter the conflict-replay veto keys on).
+ * Neither disturbs the binding. */
+static void
+test_mutating_vs_readonly_eject(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    const uint8_t                  *cairn_fh,
+    uint32_t                        cairn_fh_len,
+    const uint8_t                  *mem_fh,
+    uint32_t                        mem_fh_len,
+    struct chimera_vfs_open_handle *mem_root)
+{
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_vfs_compound_begin(ctx->vfs_thread, cred,
+                                          cairn_fh, cairn_fh_len,
+                                          CHIMERA_VFS_COMPOUND_WRITE,
+                                          chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                          0);
+    assert(compound != NULL);
+    assert(compound->module != NULL);           /* eagerly bound */
+    assert(strcmp(compound->module->name, "cairn") == 0);
+    assert(compound->ejected_ops == 0);
+    assert(compound->ejected_mutating_ops == 0);
+
+    /* Read-only cross-mount op: ejects, but does not forfeit replay. */
+    ctx->last_mode = 0;
+    chimera_vfs_getattr(ctx->vfs_thread, cred, compound, mem_root,
+                        CHIMERA_VFS_ATTR_MASK_STAT, getattr_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert((ctx->last_mode & S_IFMT) == S_IFDIR);
+
+    assert(compound->enlisted_ops == 0);
+    assert(compound->ejected_ops == 1);
+    assert(compound->ejected_mutating_ops == 0);        /* read-only eject */
+    assert(compound->inflight_ops == 0);
+
+    /* Mutating cross-mount op: ejects and bumps both counters. */
+    mkdir_under(ctx, cred, compound, mem_root, "h1");
+
+    assert(compound->enlisted_ops == 0);
+    assert(compound->ejected_ops == 2);
+    assert(compound->ejected_mutating_ops == 1);
+    assert(compound->inflight_ops == 0);
+    assert(compound->module != NULL);           /* still bound to cairn */
+    assert(strcmp(compound->module->name, "cairn") == 0);
+
+    end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
+
+    /* The mutating ejection committed standalone: its effect is visible. */
+    lookup_child(ctx, cred, mem_fh, mem_fh_len, "h1");
+
+    TEST_PASS("read-only eject bumps ejected_ops only; mutating eject bumps ejected_mutating_ops too");
+} /* test_mutating_vs_readonly_eject */
+
+/* (i) data read-your-writes on cairn: a file created under the compound, an
+ * enlisted WRITE, then -- strictly after its completion -- an enlisted READ
+ * of the same range through the same compound returns the just-written
+ * bytes BEFORE the compound ends.  After end(COMMIT_DURABLE) a plain
+ * standalone read (fresh handle, NULL compound) returns them too. */
+#define RYW_LEN 64
+
+static void
+test_data_read_your_writes(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    const uint8_t                  *cairn_fh,
+    uint32_t                        cairn_fh_len,
+    struct chimera_vfs_open_handle *cairn_root)
+{
+    struct chimera_vfs_compound    *compound;
+    struct chimera_vfs_open_handle *h;
+    struct chimera_vfs_open_handle *h2;
+    uint8_t                         pattern[RYW_LEN];
+    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                        file_fh_len;
+    uint32_t                        base_enlisted;
+    uint32_t                        base_ejected;
+
+    for (int i = 0; i < RYW_LEN; i++) {
+        pattern[i] = (uint8_t) (0xA5 ^ (i * 7));
+    }
+
+    compound = chimera_vfs_compound_begin(ctx->vfs_thread, cred,
+                                          cairn_fh, cairn_fh_len,
+                                          CHIMERA_VFS_COMPOUND_WRITE,
+                                          chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                          0);
+    assert(compound != NULL);
+    assert(compound->module != NULL);           /* eagerly bound */
+    assert(strcmp(compound->module->name, "cairn") == 0);
+
+    h = create_file(ctx, cred, compound, cairn_root, "i_file");
+
+    base_enlisted = compound->enlisted_ops;
+    base_ejected  = compound->ejected_ops;
+
+    /* Enlisted write; the read is issued only after its completion. */
+    write_data(ctx, cred, compound, h, 0, pattern, RYW_LEN);
+    assert(compound->enlisted_ops == base_enlisted + 1);
+    assert(compound->ejected_ops == base_ejected);
+    assert(compound->inflight_ops == 0);
+
+    /* Read-your-writes through the same compound, before it ends. */
+    read_verify(ctx, cred, compound, h, 0, pattern, RYW_LEN);
+    assert(compound->enlisted_ops == base_enlisted + 2);
+    assert(compound->ejected_ops == base_ejected);
+    assert(compound->inflight_ops == 0);
+
+    end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT_DURABLE);
+
+    /* Persistence: a plain standalone lookup + read on a fresh handle sees
+     * the committed bytes. */
+    lookup_child(ctx, cred, cairn_fh, cairn_fh_len, "i_file");
+    memcpy(file_fh, ctx->fh, ctx->fh_len);
+    file_fh_len = ctx->fh_len;
+
+    h2 = open_handle(ctx, cred, file_fh, file_fh_len);
+    read_verify(ctx, cred, NULL, h2, 0, pattern, RYW_LEN);
+    chimera_vfs_release(ctx->vfs_thread, h2);
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+
+    TEST_PASS("enlisted write then enlisted read returns the bytes in-compound; durable after end");
+} /* test_data_read_your_writes */
+
+/* (j) widened procs: set_xattr/get_xattr now take the compound parameter
+ * (right after cred).  Enlisted on a cairn file inside one compound the
+ * pair round-trips and advances enlisted_ops by 2; with a NULL compound
+ * the same pair still works standalone. */
+static void
+test_widened_xattr_enlist(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    const uint8_t                  *cairn_fh,
+    uint32_t                        cairn_fh_len,
+    struct chimera_vfs_open_handle *cairn_root)
+{
+    struct chimera_vfs_compound    *compound;
+    struct chimera_vfs_open_handle *h;
+
+    /* The file itself is created standalone; scenario (j) is about the
+     * widened proc signatures, not about creation under a compound. */
+    h = create_file(ctx, cred, NULL, cairn_root, "j_file");
+
+    compound = chimera_vfs_compound_begin(ctx->vfs_thread, cred,
+                                          cairn_fh, cairn_fh_len,
+                                          CHIMERA_VFS_COMPOUND_WRITE,
+                                          chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                          0);
+    assert(compound != NULL);
+    assert(compound->module != NULL);           /* eagerly bound */
+    assert(strcmp(compound->module->name, "cairn") == 0);
+    assert(compound->enlisted_ops == 0);
+
+    xattr_roundtrip(ctx, cred, compound, h, "user.j_enlisted", "quux-compound");
+
+    assert(compound->enlisted_ops == 2);        /* set + get both enlisted */
+    assert(compound->ejected_ops == 0);
+    assert(compound->ejected_mutating_ops == 0);
+    assert(compound->inflight_ops == 0);
+
+    end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
+
+    /* The widened signature's NULL path: the same pair standalone. */
+    xattr_roundtrip(ctx, cred, NULL, h, "user.j_standalone", "quux-null");
+
+    /* And the enlisted value is still there after the commit. */
+    xattr_roundtrip(ctx, cred, NULL, h, "user.j_enlisted", "quux-compound");
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+
+    TEST_PASS("set_xattr/get_xattr enlist under a compound (enlisted_ops += 2) and work with NULL");
+} /* test_widened_xattr_enlist */
+
+/* (k) single-op fold liveness: a cairn-hinted compound with exactly one
+ * mkdir must complete its end for both COMMIT_DURABLE and COMMIT -- the
+ * harness pumps until the end callback fires, so a hang here means the
+ * backend's deferred-completion (cycle-commit) machinery never scheduled.
+ * The dir must persist afterwards.  No timing assertions. */
+static void
+test_single_op_fold_liveness(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    const uint8_t                  *cairn_fh,
+    uint32_t                        cairn_fh_len,
+    struct chimera_vfs_open_handle *cairn_root)
+{
+    struct chimera_vfs_compound *compound;
+
+    /* COMMIT_DURABLE leg */
+    compound = chimera_vfs_compound_begin(ctx->vfs_thread, cred,
+                                          cairn_fh, cairn_fh_len,
+                                          CHIMERA_VFS_COMPOUND_WRITE,
+                                          chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                          0);
+    assert(compound != NULL);
+    assert(compound->module != NULL);           /* eagerly bound */
+
+    mkdir_under(ctx, cred, compound, cairn_root, "k1");
+    assert(compound->enlisted_ops == 1);
+    assert(compound->inflight_ops == 0);
+
+    end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT_DURABLE);
+    lookup_child(ctx, cred, cairn_fh, cairn_fh_len, "k1");
+
+    /* COMMIT leg */
+    compound = chimera_vfs_compound_begin(ctx->vfs_thread, cred,
+                                          cairn_fh, cairn_fh_len,
+                                          CHIMERA_VFS_COMPOUND_WRITE,
+                                          chimera_vfs_compound_alloc_ts(ctx->vfs_thread),
+                                          0);
+    assert(compound != NULL);
+    assert(compound->module != NULL);
+
+    mkdir_under(ctx, cred, compound, cairn_root, "k2");
+    assert(compound->enlisted_ops == 1);
+    assert(compound->inflight_ops == 0);
+
+    end_wait_ok(ctx, cred, compound, CHIMERA_VFS_COMPOUND_COMMIT);
+    lookup_child(ctx, cred, cairn_fh, cairn_fh_len, "k2");
+
+    TEST_PASS("single-op compound ends fire for COMMIT_DURABLE and COMMIT; effects persist");
+} /* test_single_op_fold_liveness */
 
 int
 main(
@@ -658,6 +1139,14 @@ main(
     test_loose_flagged_begin(&ctx, &cred, cairn_fh, cairn_fh_len, cairn_root);
     test_retryable_eject_commit_ok(&ctx, &cred, cairn_fh, cairn_fh_len,
                                    cairn_root, mem_fh, mem_fh_len, mem_root);
+    test_mutating_vs_readonly_eject(&ctx, &cred, cairn_fh, cairn_fh_len,
+                                    mem_fh, mem_fh_len, mem_root);
+    test_data_read_your_writes(&ctx, &cred, cairn_fh, cairn_fh_len,
+                               cairn_root);
+    test_widened_xattr_enlist(&ctx, &cred, cairn_fh, cairn_fh_len,
+                              cairn_root);
+    test_single_op_fold_liveness(&ctx, &cred, cairn_fh, cairn_fh_len,
+                                 cairn_root);
 
     chimera_vfs_release(ctx.vfs_thread, mem_root);
     chimera_vfs_release(ctx.vfs_thread, cairn_root);
