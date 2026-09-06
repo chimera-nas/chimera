@@ -1061,6 +1061,8 @@ main(
             const char *access_key = json_string_value(json_object_get(key_entry, "access_key"));
             const char *secret_key = json_string_value(json_object_get(key_entry, "secret_key"));
             const char *key_user   = json_string_value(json_object_get(key_entry, "username"));
+            const char *key_canon  = json_string_value(json_object_get(key_entry, "user_id"));
+            const char *key_disp   = json_string_value(json_object_get(key_entry, "display_name"));
 
             if (!access_key || !secret_key) {
                 chimera_server_error("S3 access key entry missing access_key or secret_key, skipping");
@@ -1069,7 +1071,8 @@ main(
 
             chimera_server_info("Adding S3 access key %s (user %s)", access_key,
                                 key_user ? key_user : "<unbound>");
-            chimera_server_add_s3_cred(server, access_key, secret_key, key_user, 1);
+            chimera_server_add_s3_cred(server, access_key, secret_key, key_user,
+                                       key_canon, key_disp, 1);
         }
     }
 

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -15,6 +16,10 @@
 
 #define CHIMERA_S3_ACCESS_KEY_MAX 128
 #define CHIMERA_S3_SECRET_KEY_MAX 256
+/* S3 identity strings echoed in ACL XML; distinct from the POSIX ids below,
+ * which are what the store actually enforces against. */
+#define CHIMERA_S3_CANON_ID_MAX   128
+#define CHIMERA_S3_DISPLAY_MAX    128
 
 struct chimera_s3_cred {
     int                     access_key_len;
@@ -32,6 +37,12 @@ struct chimera_s3_cred {
     uint32_t                gids[CHIMERA_VFS_CRED_MAX_GIDS];
     struct rcu_head         rcu;
     struct chimera_s3_cred *next;
+    /* Canonical user id and display name reported as the <Owner> of an object
+     * or bucket.  S3 identifies principals by these opaque strings, which have
+     * no POSIX equivalent, so they are carried alongside the uid/gid rather
+     * than derived from it. */
+    char                    canon_id[CHIMERA_S3_CANON_ID_MAX];
+    char                    display_name[CHIMERA_S3_DISPLAY_MAX];
     char                    access_key[CHIMERA_S3_ACCESS_KEY_MAX];
     char                    secret_key[CHIMERA_S3_SECRET_KEY_MAX];
 };
@@ -251,6 +262,8 @@ chimera_s3_cred_cache_add(
     uint32_t                      gid,
     uint32_t                      ngids,
     const uint32_t               *gids,
+    const char                   *canon_id,
+    const char                   *display_name,
     int                           pinned)
 {
     struct chimera_s3_cred *cred, *existing;
@@ -277,6 +290,16 @@ chimera_s3_cred_cache_add(
     if (ngids && gids) {
         memcpy(cred->gids, gids, ngids * sizeof(*gids));
     }
+
+    /* Both default to the access key: it is the only principal name every
+     * configuration is guaranteed to have.  snprintf rather than strncpy --
+     * it always terminates, and strncpy(dst, src, sizeof - 1) trips gcc's
+     * -Wstringop-truncation here because the source can be exactly as long as
+     * the bound. */
+    snprintf(cred->canon_id, sizeof(cred->canon_id), "%s",
+             (canon_id && *canon_id) ? canon_id : access_key);
+    snprintf(cred->display_name, sizeof(cred->display_name), "%s",
+             (display_name && *display_name) ? display_name : cred->canon_id);
 
     if (!pinned) {
         chimera_s3_cred_cache_now(cache, &now);

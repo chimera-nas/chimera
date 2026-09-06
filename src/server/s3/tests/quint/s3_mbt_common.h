@@ -690,7 +690,8 @@ s3_mbt_env_open_module(
     chimera_server_add_user(env->server, S3_MBT_USER, "", "", NULL,
                             0, 0, 0, NULL, 1);
     chimera_server_add_s3_cred(env->server, S3_MBT_ACCESS_KEY,
-                               S3_MBT_SECRET_KEY, S3_MBT_USER, 1);
+                               S3_MBT_SECRET_KEY, S3_MBT_USER,
+                               NULL, NULL, 1);
 
     /* Client half: its own evpl loop; the response callbacks run inside
      * evpl_continue() on this (the only) test thread.  The 1 ms wait bound

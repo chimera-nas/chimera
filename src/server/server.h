@@ -992,6 +992,8 @@ chimera_server_add_s3_cred(
     const char            *access_key,
     const char            *secret_key,
     const char            *username,
+    const char            *canon_id,
+    const char            *display_name,
     int                    pinned);
 
 int

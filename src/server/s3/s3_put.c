@@ -8,6 +8,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_acl.h"
 #include "s3_etag.h"
 #include "s3_metadata.h"
 #include "s3_tagging.h"
@@ -455,6 +456,16 @@ chimera_s3_put_open_dir_callback(
 
     request->set_attr.va_req_mask = 0;
     request->set_attr.va_set_mask = 0;
+
+    /* Project the canned ACL onto the new object's mode.  An S3 object is
+     * private unless its creator says otherwise, so an absent x-amz-acl means
+     * "private" (0600) rather than whatever the backend would default to --
+     * inheriting a world-readable default would publish every object. */
+    request->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+    request->set_attr.va_mode      =
+        chimera_s3_canned_acl_to_mode(
+            request->canned_acl == CHIMERA_S3_CANNED_NONE ?
+            CHIMERA_S3_CANNED_PRIVATE : request->canned_acl, 0);
 
     module = chimera_vfs_get_module(thread->vfs, oh->fh, oh->fh_len);
 
