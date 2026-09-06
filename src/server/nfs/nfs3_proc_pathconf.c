@@ -21,38 +21,49 @@
  * the GETATTR is what actually catches a freed object; its returned attributes
  * are discarded and the constants are returned. */
 static void
+chimera_nfs3_pathconf_reply(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
+
+    if (req->compound_op_status != CHIMERA_VFS_OK) {
+        req->res_pathconf.status = chimera_vfs_error_to_nfsstat3(req->
+                                                                 compound_op_status);
+        req->res_pathconf.resfail.obj_attributes.attributes_follow = 0;
+    }
+
+    if (req->handle) {
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+    }
+
+    rc = shared->nfs_v3.send_reply_NFSPROC3_PATHCONF(thread->evpl, NULL,
+                                                     &req->res_pathconf, req->encoding);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+    nfs_request_free(thread, req);
+} /* chimera_nfs3_pathconf_reply */
+
+static void
 chimera_nfs3_pathconf_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct PATHCONF3res               res;
-    int                               rc;
+    struct nfs_request *req = private_data;
 
-    res.status = chimera_vfs_error_to_nfsstat3(error_code);
-
-    if (res.status == NFS3_OK) {
-        res.resok.obj_attributes.attributes_follow = 0;
-        res.resok.case_insensitive                 = 0;
-        res.resok.case_preserving                  = 1;
-        res.resok.no_trunc                         = 1;
-        res.resok.linkmax                          = UINT32_MAX;
-        res.resok.name_max                         = 255;
-        res.resok.chown_restricted                 = 1;   /* POSIX: chown is superuser-only */
-    } else {
-        res.resfail.obj_attributes.attributes_follow = 0;
+    if (error_code == CHIMERA_VFS_OK) {
+        req->res_pathconf.status                                 = NFS3_OK;
+        req->res_pathconf.resok.obj_attributes.attributes_follow = 0;
+        req->res_pathconf.resok.case_insensitive                 = 0;
+        req->res_pathconf.resok.case_preserving                  = 1;
+        req->res_pathconf.resok.no_trunc                         = 1;
+        req->res_pathconf.resok.linkmax                          = UINT32_MAX;
+        req->res_pathconf.resok.name_max                         = 255;
+        req->res_pathconf.resok.chown_restricted                 = 1; /* POSIX: chown is superuser-only */
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
-
-    rc = shared->nfs_v3.send_reply_NFSPROC3_PATHCONF(evpl, NULL, &res, req->encoding);
-    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-
-    nfs_request_free(thread, req);
+    chimera_nfs3_compound_finish(req, error_code);
 } /* chimera_nfs3_pathconf_complete */
 
 static void
@@ -61,30 +72,32 @@ chimera_nfs3_pathconf_open_callback(
     struct chimera_vfs_open_handle *handle,
     void                           *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct PATHCONF3res               res;
-    int                               rc;
+    struct nfs_request *req = private_data;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
-
-        chimera_vfs_getattr(thread->vfs_thread, &req->cred, NULL,
-                            handle,
-                            CHIMERA_NFS3_ATTR_MASK,
-                            chimera_nfs3_pathconf_complete,
-                            req);
-    } else {
-        res.status                                   = chimera_vfs_error_to_nfsstat3(error_code);
-        res.resfail.obj_attributes.attributes_follow = 0;
-        rc                                           = shared->nfs_v3.send_reply_NFSPROC3_PATHCONF(evpl, NULL, &res,
-                                                                                                   req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs3_compound_finish(req, error_code);
+        return;
     }
+
+    req->handle = handle;
+
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->compound,
+                        handle,
+                        CHIMERA_NFS3_ATTR_MASK,
+                        chimera_nfs3_pathconf_complete,
+                        req);
 } /* chimera_nfs3_pathconf_open_callback */
+
+static void
+chimera_nfs3_pathconf_start(struct nfs_request *req)
+{
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, req->compound,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_nfs3_pathconf_open_callback,
+                        req);
+} /* chimera_nfs3_pathconf_start */
 
 void
 chimera_nfs3_pathconf(
@@ -118,10 +131,7 @@ chimera_nfs3_pathconf(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs3_pathconf_open_callback,
-                        req);
+    chimera_nfs3_compound_run(req, req->fh, req->fhlen,
+                              CHIMERA_VFS_COMPOUND_READ,
+                              chimera_nfs3_pathconf_start, chimera_nfs3_pathconf_reply);
 } /* chimera_nfs3_pathconf */

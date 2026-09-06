@@ -934,8 +934,11 @@ chimera_nfs_nlm4_do_test(
     }
 
     /* Conflict detection is delegated to vfs_state — the test_open_cb
-     * does the lookup and probe synchronously once the FH is validated. */
-    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred, NULL,
+     * does the lookup and probe synchronously once the FH is validated.
+     * NLM is an aux protocol outside the per-RPC compound driver; this
+     * open is deliberately standalone (autocommit). */
+    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
+                        chimera_vfs_compound_loose(thread->vfs_thread),
                         vfh,
                         vfh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -1145,7 +1148,10 @@ chimera_nfs_nlm4_do_lock(
         pthread_mutex_unlock(&shared->nlm_state.mutex);
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred, NULL,
+    /* NLM is an aux protocol outside the per-RPC compound driver; this
+     * open is deliberately standalone (autocommit). */
+    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
+                        chimera_vfs_compound_loose(thread->vfs_thread),
                         vfh,
                         vfh_len,
                         CHIMERA_VFS_OPEN_INFERRED,

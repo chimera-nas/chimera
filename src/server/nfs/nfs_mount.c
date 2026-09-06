@@ -295,8 +295,10 @@ chimera_nfs_mount_mnt(
     chimera_nfs_mount_record(shared, hostname, directory);
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    /* MOUNT is an aux protocol outside the per-RPC compound driver; this
+     * lookup is deliberately standalone (autocommit). */
     chimera_vfs_lookup(thread->vfs_thread,
-                       &req->cred, NULL,
+                       &req->cred, chimera_vfs_compound_loose(thread->vfs_thread),
                        root_fh,
                        root_fh_len,
                        full_path,
