@@ -356,59 +356,28 @@ set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
 # profile with copy_file_range mandatory (SMB2 FSCTL_SRV_COPYCHUNK) but no
 # reflink or SEEK_DATA/SEEK_HOLE -- what the smb_memfs backend actually does.
 #
-# OFF by default, and it is not a flake: the SMB2 loopback cannot yet satisfy
-# the whole POSIX model, and the batch still fails ~40 of 53 traces.  Most of
-# the original SD1-SD5 blockers below are fixed (real owner/mode/nlink via
-# modefromsid, path-id fh re-open, readdir paging, symlink + specfile create);
-# the residual is the symlink-resolution / name-cache cascade (stepLinks),
-# the loopback backend clock not being harness-synced (stepPerms atime), and
-# assorted namespace-cascade edges.  The blockers are properties of src/vfs/smb
-# and the server, not of the harness:
-#
-#   SD1  a session is bound to the connection that authenticated it.  A second
-#        client thread opens its own connection and replays the mount's session
-#        id on it, and the server answers one of the session/connection-gone
-#        statuses, which the proxy maps to ESTALE -- so the first operation
-#        after the mount fails whenever it lands on another thread.  The driver
-#        pins core_threads=1 to work around it; SMB3 multichannel session
-#        binding is what would actually fix it.
-#   SD2  readdir returns exactly ONE entry per directory, whatever its size.
-#        The QUERY_DIRECTORY buffer is walked until the emit callback reports
-#        full, and the unconsumed remainder is freed; the resume query asks the
-#        server for the NEXT batch, which is empty, so entries 2..N are lost.
-#   SD3  symlink_at directly under the mount root reports SUCCESS without
-#        creating anything: lstat of the new name then answers ENOENT, readlink
-#        answers ELOOP, and it is absent from readdir.
-#   SD4  no POSIX owner or mode.  chmod/chown are accepted and dropped, getattr
-#        reports the CALLING credential as the owner and a synthesized mode
-#        (0755/0644), and directory nlink is always 1.  Every EACCES/EPERM the
-#        model expects therefore does not happen.
-#   SD5  only the mount-root handle is re-openable by fh (chimera_smb_open_fh),
-#        so every op the client routes through a resolved PARENT handle rather
-#        than through its path-op strategy answers ESTALE: link and utimens at
-#        any depth, and symlink/mknod below the first level.  ESTALE is also
-#        the wrong answer for an operation the backend simply does not
-#        implement -- mknod at the first level, which does reach the module,
-#        correctly answers ENOTSUP.
-#
-# Turn it on with -DCHIMERA_POSIX_MBT_SMB=ON to measure progress against that
-# list; it joins the quick tier only once it can pass.
-option(CHIMERA_POSIX_MBT_SMB
-       "Register the POSIX MBT batch over the SMB2 loopback (known failing)" OFF)
-if(CHIMERA_POSIX_MBT_SMB)
-    add_test(NAME chimera/posix/mbt/batch_smb_memfs
-        COMMAND $<TARGET_FILE:posix_mbt_replay>
-                --backend smb_memfs
-                --trace-dir ${SPECS_BUNDLE_DIR}/posix
-                --exclude-prefix step --exclude-prefix disk_
-                --exclude-prefix fuse_ --exclude-prefix nfs3_
-                --exclude-prefix nfs4_)
-    set_tests_properties(chimera/posix/mbt/batch_smb_memfs PROPERTIES
-        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_smb_memfs"
-        LABELS "quint;posix_mbt;memfs;smb_mbt"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 600)
-endif()
+# The original SD1-SD5 blockers are fixed (real owner/mode/nlink via
+# modefromsid, path-id fh re-open, readdir paging, symlink + specfile create,
+# stale-open-cache eviction on path-id reuse); the whole corpus now replays
+# clean.  Two properties of the loopback remain reconciled rather than fixed,
+# handled in posix_mbt_replay.c's KNOWN_DEVIATIONS: the SMB fh is a reused
+# interned path-id (not a stable per-object identity), so a dirfd captured
+# before its target is replaced resolves to the replacement (SD-DFD-REUSE); and
+# the driver pins core_threads=1 because a session is bound to the connection
+# that authenticated it (SD1 -- SMB3 multichannel session binding is what would
+# lift that).
+add_test(NAME chimera/posix/mbt/batch_smb_memfs
+    COMMAND $<TARGET_FILE:posix_mbt_replay>
+            --backend smb_memfs
+            --trace-dir ${SPECS_BUNDLE_DIR}/posix
+            --exclude-prefix step --exclude-prefix disk_
+            --exclude-prefix fuse_ --exclude-prefix nfs3_
+            --exclude-prefix nfs4_)
+set_tests_properties(chimera/posix/mbt/batch_smb_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_smb_memfs"
+    LABELS "quint;posix_mbt;memfs;smb_mbt"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
 
 # The disk_ profile replayed against the host-passthrough backends.  The
 # backing store is a fresh directory per trace under $CHIMERA_MBT_SCRATCH
