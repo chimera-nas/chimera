@@ -23,6 +23,7 @@ chimera_vfs_search_keys_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_search_keys(
     struct chimera_vfs_thread         *thread,
+    struct chimera_vfs_compound       *compound,
     const void                        *start_key,
     uint32_t                           start_key_len,
     const void                        *end_key,
@@ -40,6 +41,8 @@ chimera_vfs_search_keys(
         complete(CHIMERA_VFS_PTR_ERR(request), private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode                    = CHIMERA_VFS_OP_SEARCH_KEYS;
     request->complete                  = chimera_vfs_search_keys_complete;
@@ -103,6 +106,7 @@ SYMBOL_EXPORT void
 chimera_vfs_search_keys_at(
     struct chimera_vfs_thread         *thread,
     const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_compound       *compound,
     const void                        *fh,
     int                                fhlen,
     const void                        *start_key,
@@ -134,6 +138,8 @@ chimera_vfs_search_keys_at(
         complete(CHIMERA_VFS_PTR_ERR(request), private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode   = CHIMERA_VFS_OP_SEARCH_KEYS;
     request->complete = chimera_vfs_search_keys_complete;

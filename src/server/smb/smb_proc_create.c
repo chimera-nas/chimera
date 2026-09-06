@@ -2502,6 +2502,7 @@ chimera_smb_create_open_stream_chain(
     chimera_vfs_open_stream(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         base_oh,
         request->create.stream_name,
         request->create.stream_name_len,

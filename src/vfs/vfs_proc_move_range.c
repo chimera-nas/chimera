@@ -14,16 +14,36 @@ chimera_vfs_move_range_complete(struct chimera_vfs_request *request)
     chimera_vfs_move_range_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
-                                      request->move_range.dst_handle->fh_hash,
-                                      request->move_range.dst_handle->fh,
-                                      request->move_range.dst_handle->fh_len,
-                                      &request->move_range.r_dst_post_attr);
-        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
-                                      request->move_range.src_handle->fh_hash,
-                                      request->move_range.src_handle->fh,
-                                      request->move_range.src_handle->fh_len,
-                                      &request->move_range.r_src_post_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->move_range.dst_handle->fh_hash,
+                                          request->move_range.dst_handle->fh,
+                                          request->move_range.dst_handle->fh_len,
+                                          &request->move_range.r_dst_post_attr);
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->move_range.src_handle->fh_hash,
+                                          request->move_range.src_handle->fh,
+                                          request->move_range.src_handle->fh_len,
+                                          &request->move_range.r_src_post_attr);
+        } else {
+            /* Enlisted: evict the pre-compound entries the commit will make
+             * stale (STAT-less insert = eviction). */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->move_range.dst_handle->fh_hash,
+                                          request->move_range.dst_handle->fh,
+                                          request->move_range.dst_handle->fh_len,
+                                          &inval);
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->move_range.src_handle->fh_hash,
+                                          request->move_range.src_handle->fh,
+                                          request->move_range.src_handle->fh_len,
+                                          &inval);
+        }
     }
 
     chimera_vfs_complete(request);
@@ -41,6 +61,7 @@ SYMBOL_EXPORT void
 chimera_vfs_move_range(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *src_handle,
     uint64_t                          src_offset,
     struct chimera_vfs_open_handle   *dst_handle,
@@ -65,6 +86,8 @@ chimera_vfs_move_range(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode                                 = CHIMERA_VFS_OP_MOVE_RANGE;
     request->complete                               = chimera_vfs_move_range_complete;

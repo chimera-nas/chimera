@@ -24,6 +24,7 @@ chimera_vfs_get_key_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_get_key(
     struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_compound   *compound,
     const void                    *key,
     uint32_t                       key_len,
     chimera_vfs_get_key_callback_t callback,
@@ -37,6 +38,8 @@ chimera_vfs_get_key(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, 0, private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode              = CHIMERA_VFS_OP_GET_KEY;
     request->complete            = chimera_vfs_get_key_complete;

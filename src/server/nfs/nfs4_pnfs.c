@@ -966,7 +966,7 @@ ff_lg_open_cb(
             return;
         }
 
-        chimera_vfs_get_layout(req->thread->vfs_thread, &req->cred, handle,
+        chimera_vfs_get_layout(req->thread->vfs_thread, &req->cred, NULL, handle,
                                args->loga_offset, args->loga_length, args->loga_iomode,
                                want_class, CHIMERA_VFS_LAYOUT_MAX_SEGMENTS,
                                lg_sourced_cb, ctx);

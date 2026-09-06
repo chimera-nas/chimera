@@ -364,11 +364,11 @@ chimera_smb_ea_apply_step(struct chimera_smb_ea_apply *a)
     }
 
     if (entry.value_len == 0) {
-        chimera_vfs_remove_xattr(a->thread->vfs_thread, a->cred, a->handle,
+        chimera_vfs_remove_xattr(a->thread->vfs_thread, a->cred, NULL, a->handle,
                                  a->name, a->name_len,
                                  chimera_smb_ea_apply_op_cb, a);
     } else {
-        chimera_vfs_set_xattr(a->thread->vfs_thread, a->cred, a->handle,
+        chimera_vfs_set_xattr(a->thread->vfs_thread, a->cred, NULL, a->handle,
                               CHIMERA_VFS_XATTR_EITHER, a->name, a->name_len,
                               entry.value, entry.value_len,
                               chimera_smb_ea_apply_op_cb, a);
@@ -433,7 +433,7 @@ chimera_smb_ea_apply(
 
     /* List the existing user.* names first so each set can match case-
      * insensitively and reuse the stored spelling. */
-    chimera_vfs_list_xattrs(thread->vfs_thread, cred, handle, 0,
+    chimera_vfs_list_xattrs(thread->vfs_thread, cred, NULL, handle, 0,
                             a->list, sizeof(a->list),
                             chimera_smb_ea_apply_list_cb, a);
 } /* chimera_smb_ea_apply */

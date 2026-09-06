@@ -28,6 +28,7 @@ SYMBOL_EXPORT void
 chimera_vfs_get_layout(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *handle,
     uint64_t                          offset,
     uint64_t                          length,
@@ -52,6 +53,8 @@ chimera_vfs_get_layout(
         callback(CHIMERA_VFS_PTR_ERR(request), 0, 0, NULL, 0, NULL, private_data);
         return;
     }
+
+    request->compound = compound;
 
     if (max_segments > CHIMERA_VFS_LAYOUT_MAX_SEGMENTS) {
         max_segments = CHIMERA_VFS_LAYOUT_MAX_SEGMENTS;

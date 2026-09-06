@@ -25,6 +25,7 @@ SYMBOL_EXPORT void
 chimera_vfs_remove_stream(
     struct chimera_vfs_thread           *thread,
     const struct chimera_vfs_cred       *cred,
+    struct chimera_vfs_compound         *compound,
     struct chimera_vfs_open_handle      *handle,
     const char                          *name,
     uint32_t                             namelen,
@@ -44,6 +45,8 @@ chimera_vfs_remove_stream(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode                                = CHIMERA_VFS_OP_REMOVE_STREAM;
     request->complete                              = chimera_vfs_remove_stream_complete;

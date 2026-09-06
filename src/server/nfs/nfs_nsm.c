@@ -54,7 +54,7 @@ nsm_state_persist(
     ctx->key_len   = nfs_kv_nsm_state_key(ctx->key);
     ctx->value_len = nsm_state_value_serialize(ctx->value, sizeof(ctx->value),
                                                state_number);
-    chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_put_key(vfs_thread, NULL, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nsm_kv_done, ctx);
 } /* nsm_state_persist */
 
@@ -86,7 +86,7 @@ nsm_monitor(
                                           host_len);
     ctx->value_len = nsm_monitor_value_serialize(ctx->value, sizeof(ctx->value),
                                                  peer_addr);
-    chimera_vfs_put_key(thread->vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_put_key(thread->vfs_thread, NULL, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nsm_kv_done, ctx);
 } /* nsm_monitor */
 
@@ -112,7 +112,7 @@ nsm_unmonitor(
     ctx          = malloc(sizeof(*ctx));
     ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, (const uint8_t *) host,
                                           host_len);
-    chimera_vfs_delete_key(thread->vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_delete_key(thread->vfs_thread, NULL, ctx->key, ctx->key_len,
                            nsm_kv_done, ctx);
 } /* nsm_unmonitor */
 
@@ -443,7 +443,7 @@ nsm_state_load_cb(
     /* Open-ended scan of the monitor band; nsm_monitor_scan_cb stops when the
      * 3-byte type header changes (the same pattern recovery/DRC use). */
     nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NSM_MONITOR);
-    chimera_vfs_search_keys(thread->vfs_thread,
+    chimera_vfs_search_keys(thread->vfs_thread, NULL,
                             ctx->start, CHIMERA_KV_HDR_LEN,
                             NULL, 0, 0,
                             nsm_monitor_scan_cb,
@@ -476,7 +476,7 @@ chimera_nfs_nsm_kickoff(struct chimera_server_nfs_thread *thread)
     ctx->thread = thread;
     ctx->state  = 0;
     klen        = nfs_kv_nsm_state_key(ctx->skey);
-    chimera_vfs_get_key(thread->vfs_thread, ctx->skey, klen,
+    chimera_vfs_get_key(thread->vfs_thread, NULL, ctx->skey, klen,
                         nsm_state_load_cb, ctx);
 } /* chimera_nfs_nsm_kickoff */
 

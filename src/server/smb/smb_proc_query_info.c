@@ -300,6 +300,7 @@ chimera_smb_query_stream_info_open_callback(
     chimera_vfs_list_streams(
         thread->vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         oh,
         0,
         request->query_info.stream_records,
@@ -482,6 +483,7 @@ chimera_smb_query_ea_next(struct chimera_smb_request *request)
 
     chimera_vfs_get_xattr(thread->vfs_thread,
                           &request->session_handle->session->cred,
+                          NULL,
                           request->query_info.stream_base_handle,
                           fullname, flen,
                           request->query_info.ea_out + vpos, vmax,
@@ -538,6 +540,7 @@ chimera_smb_query_ea_open_callback(
     chimera_vfs_list_xattrs(
         thread->vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         oh,
         0,
         request->query_info.stream_records,

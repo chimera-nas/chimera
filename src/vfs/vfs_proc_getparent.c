@@ -27,6 +27,7 @@ SYMBOL_EXPORT void
 chimera_vfs_getparent(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_compound     *compound,
     const void                      *fh,
     int                              fhlen,
     chimera_vfs_getparent_callback_t callback,
@@ -49,6 +50,8 @@ chimera_vfs_getparent(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, 0, NULL, 0, private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode                    = CHIMERA_VFS_OP_GETPARENT;
     request->complete                  = chimera_vfs_getparent_complete;

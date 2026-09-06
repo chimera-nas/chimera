@@ -23,6 +23,7 @@ chimera_vfs_delete_key_complete(struct chimera_vfs_request *request)
 SYMBOL_EXPORT void
 chimera_vfs_delete_key(
     struct chimera_vfs_thread        *thread,
+    struct chimera_vfs_compound      *compound,
     const void                       *key,
     uint32_t                          key_len,
     chimera_vfs_delete_key_callback_t callback,
@@ -36,6 +37,8 @@ chimera_vfs_delete_key(
         callback(CHIMERA_VFS_PTR_ERR(request), private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode             = CHIMERA_VFS_OP_DELETE_KEY;
     request->complete           = chimera_vfs_delete_key_complete;
@@ -58,6 +61,7 @@ SYMBOL_EXPORT void
 chimera_vfs_delete_key_at(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_compound      *compound,
     const void                       *fh,
     int                               fhlen,
     const void                       *key,
@@ -85,6 +89,8 @@ chimera_vfs_delete_key_at(
         callback(CHIMERA_VFS_PTR_ERR(request), private_data);
         return;
     }
+
+    request->compound = compound;
 
     scratch = request->plugin_data;
 

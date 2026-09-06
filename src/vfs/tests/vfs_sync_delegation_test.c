@@ -123,7 +123,7 @@ put_key(
 {
     ctx->search_hits = 0;
     chimera_vfs_put_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         strlen(key),
         value,
@@ -151,7 +151,7 @@ search_for_single_key(
      * start key and stops once a key sorts past the end key, so an end key
      * equal to the start key matches exactly the one stored entry. */
     chimera_vfs_search_keys(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         strlen(key),
         key,
@@ -179,7 +179,7 @@ delete_keys(
 
     for (i = 0; i < count; i++) {
         chimera_vfs_delete_key(
-            ctx->vfs_thread,
+            ctx->vfs_thread, NULL,
             keys[i],
             strlen(keys[i]),
             delete_key_callback,

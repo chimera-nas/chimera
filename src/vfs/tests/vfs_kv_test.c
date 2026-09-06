@@ -127,7 +127,7 @@ test_put_get_delete(struct test_ctx *ctx)
 
     /* Put a key-value pair */
     chimera_vfs_put_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         value,
@@ -140,7 +140,7 @@ test_put_get_delete(struct test_ctx *ctx)
 
     /* Get the value back */
     chimera_vfs_get_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         get_key_callback,
@@ -153,7 +153,7 @@ test_put_get_delete(struct test_ctx *ctx)
 
     /* Delete the key */
     chimera_vfs_delete_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         delete_key_callback,
@@ -164,7 +164,7 @@ test_put_get_delete(struct test_ctx *ctx)
 
     /* Verify key is gone */
     chimera_vfs_get_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         get_key_callback,
@@ -188,7 +188,7 @@ test_update_value(struct test_ctx *ctx)
 
     /* Put initial value */
     chimera_vfs_put_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         value1,
@@ -201,7 +201,7 @@ test_update_value(struct test_ctx *ctx)
 
     /* Update with new value */
     chimera_vfs_put_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         value2,
@@ -214,7 +214,7 @@ test_update_value(struct test_ctx *ctx)
 
     /* Get should return updated value */
     chimera_vfs_get_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         get_key_callback,
@@ -227,7 +227,7 @@ test_update_value(struct test_ctx *ctx)
 
     /* Cleanup */
     chimera_vfs_delete_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         delete_key_callback,
@@ -248,7 +248,7 @@ test_search_keys(struct test_ctx *ctx)
 
     for (int i = 0; i < num_keys; i++) {
         chimera_vfs_put_key(
-            ctx->vfs_thread,
+            ctx->vfs_thread, NULL,
             keys[i],
             strlen(keys[i]),
             values[i],
@@ -263,7 +263,7 @@ test_search_keys(struct test_ctx *ctx)
     /* Search the whole range; results must come back in sorted key order. */
     ctx->search_count = 0;
     chimera_vfs_search_keys(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         "search_aaa",
         strlen("search_aaa"),
         "search_zzz",
@@ -285,7 +285,7 @@ test_search_keys(struct test_ctx *ctx)
     /* Inclusive end: a range ending exactly on "search_ccc" returns it. */
     ctx->search_count = 0;
     chimera_vfs_search_keys(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         "search_aaa",
         strlen("search_aaa"),
         "search_ccc",
@@ -302,7 +302,7 @@ test_search_keys(struct test_ctx *ctx)
     /* Exclusive end: the same range drops the key equal to the end bound. */
     ctx->search_count = 0;
     chimera_vfs_search_keys(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         "search_aaa",
         strlen("search_aaa"),
         "search_ccc",
@@ -327,19 +327,19 @@ test_search_keys(struct test_ctx *ctx)
     int         num_pkeys = sizeof(pkeys) / sizeof(pkeys[0]);
 
     for (int i = 0; i < num_pkeys; i++) {
-        chimera_vfs_put_key(ctx->vfs_thread, pkeys[i], strlen(pkeys[i]),
+        chimera_vfs_put_key(ctx->vfs_thread, NULL, pkeys[i], strlen(pkeys[i]),
                             "v", 1, put_key_callback, ctx);
         wait_for_completion(ctx);
         assert(ctx->status == CHIMERA_VFS_OK);
     }
     /* A key just past the "len_" band (so the [ "len_", "len`" ) bound must
      * exclude it while keeping the longer in-band keys). */
-    chimera_vfs_put_key(ctx->vfs_thread, "lenz", 4, "v", 1, put_key_callback, ctx);
+    chimera_vfs_put_key(ctx->vfs_thread, NULL, "lenz", 4, "v", 1, put_key_callback, ctx);
     wait_for_completion(ctx);
 
     ctx->search_count = 0;
     chimera_vfs_search_keys(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         "len_", 4,
         "len`", 4,               /* 0x60 = '_'(0x5f) + 1: bounds the "len_" band */
         CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE,
@@ -355,17 +355,17 @@ test_search_keys(struct test_ctx *ctx)
     }
 
     for (int i = 0; i < num_pkeys; i++) {
-        chimera_vfs_delete_key(ctx->vfs_thread, pkeys[i], strlen(pkeys[i]),
+        chimera_vfs_delete_key(ctx->vfs_thread, NULL, pkeys[i], strlen(pkeys[i]),
                                delete_key_callback, ctx);
         wait_for_completion(ctx);
     }
-    chimera_vfs_delete_key(ctx->vfs_thread, "lenz", 4, delete_key_callback, ctx);
+    chimera_vfs_delete_key(ctx->vfs_thread, NULL, "lenz", 4, delete_key_callback, ctx);
     wait_for_completion(ctx);
 
     /* Cleanup */
     for (int i = 0; i < num_keys; i++) {
         chimera_vfs_delete_key(
-            ctx->vfs_thread,
+            ctx->vfs_thread, NULL,
             keys[i],
             strlen(keys[i]),
             delete_key_callback,
@@ -387,7 +387,7 @@ test_binary_keys_values(struct test_ctx *ctx)
     uint32_t value_len = sizeof(value);
 
     chimera_vfs_put_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         value,
@@ -399,7 +399,7 @@ test_binary_keys_values(struct test_ctx *ctx)
     assert(ctx->status == CHIMERA_VFS_OK);
 
     chimera_vfs_get_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         get_key_callback,
@@ -411,7 +411,7 @@ test_binary_keys_values(struct test_ctx *ctx)
     assert(memcmp(ctx->value, value, value_len) == 0);
 
     chimera_vfs_delete_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         delete_key_callback,
@@ -430,7 +430,7 @@ test_nonexistent_key(struct test_ctx *ctx)
     uint32_t    key_len = strlen(key);
 
     chimera_vfs_get_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         get_key_callback,
@@ -443,7 +443,7 @@ test_nonexistent_key(struct test_ctx *ctx)
      * (memkv, sqlite) report ENOENT, while those whose delete is a blind
      * tombstone (cairn/RocksDB) report OK.  Either is acceptable. */
     chimera_vfs_delete_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         key_len,
         delete_key_callback,

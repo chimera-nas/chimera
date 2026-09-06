@@ -241,7 +241,7 @@ chimera_s3_meta_store_next(struct chimera_s3_meta_store_ctx *ctx)
 
     kv = &ctx->kv[ctx->cur];
 
-    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred, NULL,
                           ctx->handle,
                           CHIMERA_VFS_XATTR_EITHER,
                           kv->name,
@@ -374,7 +374,7 @@ chimera_s3_meta_attach_next(struct chimera_s3_meta_attach_ctx *ctx)
         return;
     }
 
-    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred, NULL,
                           ctx->handle,
                           ctx->names[ctx->cur],
                           ctx->name_lens[ctx->cur],
@@ -440,7 +440,7 @@ chimera_s3_metadata_attach_headers(
     ctx->done         = done;
     ctx->private_data = private_data;
 
-    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
                             handle,
                             0,
                             ctx->list_buf,
@@ -523,7 +523,7 @@ chimera_s3_meta_copy_get_callback(
         return;
     }
 
-    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred, NULL,
                           ctx->dst_handle,
                           CHIMERA_VFS_XATTR_EITHER,
                           ctx->names[ctx->cur],
@@ -544,7 +544,7 @@ chimera_s3_meta_copy_next(struct chimera_s3_meta_copy_ctx *ctx)
         return;
     }
 
-    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_get_xattr(thread->vfs, &thread->shared->cred, NULL,
                           ctx->src_handle,
                           ctx->names[ctx->cur],
                           ctx->name_lens[ctx->cur],
@@ -610,7 +610,7 @@ chimera_s3_metadata_copy(
     ctx->done         = done;
     ctx->private_data = private_data;
 
-    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred,
+    chimera_vfs_list_xattrs(thread->vfs, &thread->shared->cred, NULL,
                             src_handle,
                             0,
                             ctx->list_buf,

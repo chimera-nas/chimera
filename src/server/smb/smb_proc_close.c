@@ -341,6 +341,7 @@ chimera_smb_close_stream_open_callback(
     chimera_vfs_remove_stream(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         oh,
         open_file->stream_name,
         open_file->stream_name_len,
@@ -608,6 +609,7 @@ chimera_smb_close(struct chimera_smb_request *request)
 
         chimera_vfs_delete_key_at(thread->vfs_thread,
                                   &request->session_handle->session->cred,
+                                  NULL,
                                   request->close.open_file->handle->fh,
                                   request->close.open_file->handle->fh_len,
                                   dkey, dkey_len,

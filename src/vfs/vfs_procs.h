@@ -755,6 +755,7 @@ void
 chimera_vfs_get_layout(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *handle,
     uint64_t                          offset,
     uint64_t                          length,
@@ -875,6 +876,7 @@ chimera_vfs_link_at(
 void
 chimera_vfs_put_key(
     struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_compound   *compound,
     const void                    *key,
     uint32_t                       key_len,
     const void                    *value,
@@ -889,6 +891,7 @@ void
 chimera_vfs_put_key_at(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_compound   *compound,
     const void                    *fh,
     int                            fhlen,
     const void                    *key,
@@ -901,6 +904,7 @@ chimera_vfs_put_key_at(
 void
 chimera_vfs_get_key(
     struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_compound   *compound,
     const void                    *key,
     uint32_t                       key_len,
     chimera_vfs_get_key_callback_t callback,
@@ -918,6 +922,7 @@ chimera_vfs_can_persist_handle_state(
 void
 chimera_vfs_delete_key(
     struct chimera_vfs_thread        *thread,
+    struct chimera_vfs_compound      *compound,
     const void                       *key,
     uint32_t                          key_len,
     chimera_vfs_delete_key_callback_t callback,
@@ -929,6 +934,7 @@ void
 chimera_vfs_delete_key_at(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_compound      *compound,
     const void                       *fh,
     int                               fhlen,
     const void                       *key,
@@ -939,6 +945,7 @@ chimera_vfs_delete_key_at(
 void
 chimera_vfs_search_keys(
     struct chimera_vfs_thread         *thread,
+    struct chimera_vfs_compound       *compound,
     const void                        *start_key,
     uint32_t                           start_key_len,
     const void                        *end_key,
@@ -952,6 +959,7 @@ void
 chimera_vfs_search_keys_at(
     struct chimera_vfs_thread         *thread,
     const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_compound       *compound,
     const void                        *fh,
     int                                fhlen,
     const void                        *start_key,
@@ -1082,6 +1090,7 @@ void
 chimera_vfs_move_range(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_compound      *compound,
     struct chimera_vfs_open_handle   *src_handle,
     uint64_t                          src_offset,
     struct chimera_vfs_open_handle   *dst_handle,
@@ -1122,6 +1131,7 @@ void
 chimera_vfs_getparent(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_compound     *compound,
     const void                      *fh,
     int                              fhlen,
     chimera_vfs_getparent_callback_t callback,
@@ -1140,6 +1150,7 @@ void
 chimera_vfs_get_xattr(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_compound     *compound,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     uint32_t                         namelen,
@@ -1158,6 +1169,7 @@ void
 chimera_vfs_set_xattr(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_compound     *compound,
     struct chimera_vfs_open_handle  *handle,
     uint32_t                         option,
     const char                      *name,
@@ -1180,6 +1192,7 @@ void
 chimera_vfs_list_xattrs(
     struct chimera_vfs_thread         *thread,
     const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_compound       *compound,
     struct chimera_vfs_open_handle    *handle,
     uint64_t                           cookie,
     void                              *buffer,
@@ -1197,6 +1210,7 @@ void
 chimera_vfs_remove_xattr(
     struct chimera_vfs_thread          *thread,
     const struct chimera_vfs_cred      *cred,
+    struct chimera_vfs_compound        *compound,
     struct chimera_vfs_open_handle     *handle,
     const char                         *name,
     uint32_t                            namelen,
@@ -1224,6 +1238,7 @@ void
 chimera_vfs_open_stream(
     struct chimera_vfs_thread         *thread,
     const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_compound       *compound,
     struct chimera_vfs_open_handle    *handle,
     const char                        *name,
     uint32_t                           namelen,
@@ -1250,6 +1265,7 @@ void
 chimera_vfs_list_streams(
     struct chimera_vfs_thread          *thread,
     const struct chimera_vfs_cred      *cred,
+    struct chimera_vfs_compound        *compound,
     struct chimera_vfs_open_handle     *handle,
     uint64_t                            cookie,
     void                               *buffer,
@@ -1268,6 +1284,7 @@ void
 chimera_vfs_remove_stream(
     struct chimera_vfs_thread           *thread,
     const struct chimera_vfs_cred       *cred,
+    struct chimera_vfs_compound         *compound,
     struct chimera_vfs_open_handle      *handle,
     const char                          *name,
     uint32_t                             namelen,

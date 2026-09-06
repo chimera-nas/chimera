@@ -112,7 +112,7 @@ put_key(
 {
     ctx->search_hits = 0;
     chimera_vfs_put_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         strlen(key),
         value,
@@ -141,7 +141,7 @@ search_for_single_key(
     ctx->dispatch_tid = 0;
 
     chimera_vfs_search_keys(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         key,
         strlen(key),
         end_key,
@@ -213,7 +213,7 @@ test_async_delegation_enabled(struct test_ctx *ctx)
     /* Cleanup */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
         chimera_vfs_delete_key(
-            ctx->vfs_thread,
+            ctx->vfs_thread, NULL,
             keys[i],
             strlen(keys[i]),
             delete_key_callback,
@@ -242,7 +242,7 @@ test_async_delegation_disabled(struct test_ctx *ctx)
     assert(pthread_equal(tid, main_tid));
 
     chimera_vfs_delete_key(
-        ctx->vfs_thread,
+        ctx->vfs_thread, NULL,
         "inline_key_a",
         strlen("inline_key_a"),
         delete_key_callback,

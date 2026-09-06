@@ -286,7 +286,7 @@ nfs_recovery_persist(
         return;
     }
 
-    chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_put_key(vfs_thread, NULL, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len,
                         nfs_recovery_kv_done, ctx);
 } /* nfs_recovery_persist */
@@ -320,7 +320,7 @@ nfs_recovery_forget(
 
     ctx          = malloc(sizeof(*ctx));
     ctx->key_len = nfs_kv_recovery_key(ctx->key, rec->node_id, owner, owner_len);
-    chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_delete_key(vfs_thread, NULL, ctx->key, ctx->key_len,
                            nfs_recovery_kv_done, ctx);
 } /* nfs_recovery_forget */
 
@@ -454,7 +454,7 @@ nfs_recovery_epoch_cb(
     ectx->key_len   = ekey_len;
     ectx->value_len = nfs_recovery_epoch_serialize(ectx->value,
                                                    rec->current_boot_id);
-    chimera_vfs_put_key(ctx->thread->vfs_thread, ectx->key, ectx->key_len,
+    chimera_vfs_put_key(ctx->thread->vfs_thread, NULL, ectx->key, ectx->key_len,
                         ectx->value, ectx->value_len,
                         nfs_recovery_kv_done, ectx);
 
@@ -464,7 +464,7 @@ nfs_recovery_epoch_cb(
      * node_id in the prefix is what keeps a node from reloading a live peer's
      * clients out of a shared store. */
     nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_RECOVERY, rec->node_id);
-    chimera_vfs_search_keys(ctx->thread->vfs_thread,
+    chimera_vfs_search_keys(ctx->thread->vfs_thread, NULL,
                             ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nfs_recovery_scan_cb,
@@ -504,7 +504,7 @@ nfs_recovery_kickoff(struct chimera_server_nfs_thread *thread)
     {
         uint32_t ekey_len = nfs_kv_epoch_key(ctx->ekey, rec->node_id);
 
-        chimera_vfs_get_key(thread->vfs_thread, ctx->ekey, ekey_len,
+        chimera_vfs_get_key(thread->vfs_thread, NULL, ctx->ekey, ekey_len,
                             nfs_recovery_epoch_cb, ctx);
     }
 } /* nfs_recovery_kickoff */

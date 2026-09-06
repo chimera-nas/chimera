@@ -419,7 +419,7 @@ nfs3_drc_kv_put(
                                               NFS3_DRC_VALUE_HDR_LEN + body_len,
                                               ts, body, body_len);
 
-    chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_put_key(vfs_thread, NULL, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nfs3_drc_kv_done, ctx);
 } /* nfs3_drc_kv_put */
 
@@ -437,7 +437,7 @@ nfs3_drc_kv_delete(
                                            key->addr_len, key->proc, key->xid,
                                            key->cksum);
 
-    chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
+    chimera_vfs_delete_key(vfs_thread, NULL, ctx->key, ctx->key_len,
                            nfs3_drc_kv_done, ctx);
 } /* nfs3_drc_kv_delete */
 
@@ -763,7 +763,7 @@ nfs3_drc_serve(
     hc->start_len    = nfs_kv_conn_addr_prefix(hc->start, drc->kv_type,
                                                key->addr, key->addr_len);
 
-    chimera_vfs_search_keys(thread->vfs_thread, hc->start, hc->start_len,
+    chimera_vfs_search_keys(thread->vfs_thread, NULL, hc->start, hc->start_len,
                             NULL, 0, 0,
                             nfs3_drc_hydrate_scan_cb,
                             nfs3_drc_hydrate_complete, hc);

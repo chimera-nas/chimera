@@ -24,6 +24,7 @@ SYMBOL_EXPORT void
 chimera_vfs_get_xattr(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_compound     *compound,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     uint32_t                         namelen,
@@ -45,6 +46,8 @@ chimera_vfs_get_xattr(
         callback(CHIMERA_VFS_PTR_ERR(request), 0, private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode                 = CHIMERA_VFS_OP_GET_XATTR;
     request->complete               = chimera_vfs_get_xattr_complete;

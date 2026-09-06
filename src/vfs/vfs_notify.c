@@ -510,6 +510,7 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
 
         chimera_vfs_getparent(worker_thread,
                               NULL, /* cred — internal operation */
+                              NULL,
                               pev->walk_fh,
                               pev->walk_fh_len,
                               chimera_vfs_notify_resolve_getparent_cb,

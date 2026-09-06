@@ -2301,7 +2301,7 @@ chimera_s3_complete_assemble_next(struct chimera_s3_complete_ctx *ctx)
     switch (ctx->assemble_mode) {
         case CHIMERA_S3_ASSEMBLE_MOVE:
             chimera_vfs_move_range(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 part->file_handle,
                 ctx->part_offset,
                 request->file_handle,

@@ -61,7 +61,7 @@ chimera_fuse_getxattr_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred, oh,
+    chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred, NULL, oh,
                           name, strlen(name),
                           chimera_fuse_reply_space(req),
                           CHIMERA_FUSE_XATTR_MAX,
@@ -149,7 +149,7 @@ chimera_fuse_setxattr_open_callback(
             return;
     } /* switch */
 
-    chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred, oh,
+    chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred, NULL, oh,
                           option,
                           name, strlen(name),
                           value, size,
@@ -235,7 +235,7 @@ chimera_fuse_listxattr_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_list_xattrs(req->thread->vfs_thread, &req->cred, oh,
+    chimera_vfs_list_xattrs(req->thread->vfs_thread, &req->cred, NULL, oh,
                             0,
                             chimera_fuse_reply_space(req),
                             CHIMERA_FUSE_XATTR_MAX,
@@ -300,7 +300,7 @@ chimera_fuse_removexattr_open_callback(
 
     req->handle = oh;
 
-    chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred, oh,
+    chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred, NULL, oh,
                              name, strlen(name),
                              chimera_fuse_removexattr_complete, req);
 } /* chimera_fuse_removexattr_open_callback */

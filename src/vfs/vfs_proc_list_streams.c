@@ -28,6 +28,7 @@ SYMBOL_EXPORT void
 chimera_vfs_list_streams(
     struct chimera_vfs_thread          *thread,
     const struct chimera_vfs_cred      *cred,
+    struct chimera_vfs_compound        *compound,
     struct chimera_vfs_open_handle     *handle,
     uint64_t                            cookie,
     void                               *buffer,
@@ -48,6 +49,8 @@ chimera_vfs_list_streams(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, 0, 0, 1, 0, private_data);
         return;
     }
+
+    request->compound = compound;
 
     request->opcode                 = CHIMERA_VFS_OP_LIST_STREAMS;
     request->complete               = chimera_vfs_list_streams_complete;

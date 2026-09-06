@@ -95,7 +95,7 @@ chimera_nfs4_getxattr_open_callback(
         return;
     }
 
-    chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred, NULL,
                           handle,
                           name,
                           namelen,

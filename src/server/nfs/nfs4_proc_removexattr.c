@@ -83,7 +83,7 @@ chimera_nfs4_removexattr_open_callback(
         return;
     }
 
-    chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred, NULL,
                              handle,
                              name,
                              namelen,

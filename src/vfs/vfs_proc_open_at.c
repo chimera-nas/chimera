@@ -41,48 +41,86 @@ chimera_vfs_open_at_hdl_callback(
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        /* A create is a directory content change: raise it for change
-         * watchers and directory-lease holders exactly as mkdir_at does,
-         * whatever protocol it arrived by.  The SMB create path opts out
-         * (CHIMERA_VFS_OPEN_NO_NOTIFY): it emits its own richer event with
-         * disposition policy and directory-lease key sparing. */
-        if (request->open_at.r_created &&
-            !(request->open_at.flags & CHIMERA_VFS_OPEN_NO_NOTIFY)) {
-            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                    request->open_at.handle->fh,
-                                    request->open_at.handle->fh_len,
-                                    CHIMERA_VFS_NOTIFY_FILE_ADDED,
-                                    request->open_at.name,
-                                    request->open_at.namelen,
-                                    NULL, 0);
-        }
+        if (chimera_vfs_request_publishes(request)) {
+            /* A create is a directory content change: raise it for change
+             * watchers and directory-lease holders exactly as mkdir_at does,
+             * whatever protocol it arrived by.  The SMB create path opts out
+             * (CHIMERA_VFS_OPEN_NO_NOTIFY): it emits its own richer event with
+             * disposition policy and directory-lease key sparing. */
+            if (request->open_at.r_created &&
+                !(request->open_at.flags & CHIMERA_VFS_OPEN_NO_NOTIFY)) {
+                chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                        request->open_at.handle->fh,
+                                        request->open_at.handle->fh_len,
+                                        CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                        request->open_at.name,
+                                        request->open_at.namelen,
+                                        NULL, 0);
+            }
 
-        /* A path-only open returns an opaque per-open token, not a stable child
-         * fh; caching name->token would hand out a dead token, so skip it. */
-        if (!chimera_vfs_module_is_path_only(request->module)) {
-            chimera_vfs_name_cache_insert(thread, cache,
+            /* A path-only open returns an opaque per-open token, not a stable child
+             * fh; caching name->token would hand out a dead token, so skip it. */
+            if (!chimera_vfs_module_is_path_only(request->module)) {
+                chimera_vfs_name_cache_insert(thread, cache,
+                                              request->open_at.handle->fh_hash,
+                                              request->open_at.handle->fh,
+                                              request->open_at.handle->fh_len,
+                                              request->open_at.name_hash,
+                                              request->open_at.name,
+                                              request->open_at.namelen,
+                                              request->open_at.r_attr.va_fh,
+                                              request->open_at.r_attr.va_fh_len);
+            }
+
+            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                           request->open_at.handle->fh_hash,
                                           request->open_at.handle->fh,
                                           request->open_at.handle->fh_len,
-                                          request->open_at.name_hash,
-                                          request->open_at.name,
-                                          request->open_at.namelen,
+                                          &request->open_at.r_dir_post_attr);
+
+            chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                          chimera_vfs_hash(request->open_at.r_attr.va_fh, request->open_at.r_attr.
+                                                           va_fh_len),
                                           request->open_at.r_attr.va_fh,
-                                          request->open_at.r_attr.va_fh_len);
+                                          request->open_at.r_attr.va_fh_len,
+                                          &request->open_at.r_attr);
+        } else if (request->open_at.r_created ||
+                   (request->open_at.flags & CHIMERA_VFS_OPEN_TRUNCATE)) {
+            /* Enlisted open that MUTATED (created the entry, or truncated an
+             * existing file): evict instead of publish, or the pre-compound
+             * entries are served stale once the compound commits.  A plain
+             * enlisted open mutates nothing and needs no eviction. */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            if (request->open_at.r_created) {
+                chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                              request->open_at.handle->fh_hash,
+                                              request->open_at.handle->fh,
+                                              request->open_at.handle->fh_len,
+                                              &inval);
+
+                chimera_vfs_name_cache_remove(cache,
+                                              request->open_at.handle->fh_hash,
+                                              request->open_at.handle->fh,
+                                              request->open_at.handle->fh_len,
+                                              request->open_at.name_hash,
+                                              request->open_at.name,
+                                              request->open_at.namelen);
+            }
+
+            if ((request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+                request->open_at.r_attr.va_fh_len > 0) {
+                chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                              chimera_vfs_hash(request->open_at.r_attr.va_fh,
+                                                               request->open_at.r_attr.va_fh_len),
+                                              request->open_at.r_attr.va_fh,
+                                              request->open_at.r_attr.va_fh_len,
+                                              &inval);
+            }
         }
-
-        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
-                                      request->open_at.handle->fh_hash,
-                                      request->open_at.handle->fh,
-                                      request->open_at.handle->fh_len,
-                                      &request->open_at.r_dir_post_attr);
-
-        chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
-                                      chimera_vfs_hash(request->open_at.r_attr.va_fh, request->open_at.r_attr.
-                                                       va_fh_len),
-                                      request->open_at.r_attr.va_fh,
-                                      request->open_at.r_attr.va_fh_len,
-                                      &request->open_at.r_attr);
     }
 
     if (handle) {
@@ -269,7 +307,7 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
         request->thread->vfs->kv_module &&
         (request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
 
-        chimera_vfs_put_key_at(request->thread, request->cred,
+        chimera_vfs_put_key_at(request->thread, request->cred, NULL,
                                request->open_at.r_attr.va_fh,
                                request->open_at.r_attr.va_fh_len,
                                hs->key, hs->key_len,
