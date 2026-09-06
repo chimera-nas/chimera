@@ -1082,14 +1082,25 @@ chimera_nfs4_layoutget(
     }
 
     /* RFC 8881 §18.43.3: once the client holds a layout on this file,
-     * loga_stateid MUST be that layout's stateid, and §12.5.3 makes its seqid
-     * the server's to advance -- so a superseded seqid is NFS4ERR_OLD_STATEID
-     * and one never issued is NFS4ERR_BAD_STATEID (both listed in §18.43.4).
-     * A zero seqid means "the current stateid" (§8.2.2).  Only a layout-typed
-     * stateid is judged here: before the first layout is granted the client
-     * legitimately presents an open, lock, or delegation stateid, about which
-     * the layout state has nothing to say -- and the all-ones READ-bypass
-     * stateid decodes as the layout type without being one. */
+     * loga_stateid MUST be that layout's stateid, so one naming no layout this
+     * client holds is NFS4ERR_BAD_STATEID, as is a seqid the server never
+     * issued.  A zero seqid means "the current stateid" (§8.2.2).  Only a
+     * layout-typed stateid is judged here: before the first layout is granted
+     * the client legitimately presents an open, lock, or delegation stateid,
+     * about which the layout state has nothing to say -- and the all-ones
+     * READ-bypass stateid decodes as the layout type without being one.
+     *
+     * A *lagging* seqid is accepted, unlike LAYOUTRETURN below.  The server
+     * advances the seqid on every LAYOUTGET (§12.5.3), so a client with more
+     * than one LAYOUTGET in flight cannot know the current value -- it can only
+     * echo the last one it was given, and the second of two pipelined
+     * LAYOUTGETs therefore arrives carrying a seqid the server has already
+     * superseded.  Rejecting that breaks a legitimate client, which is what
+     * pynfs FFLOOS (st_flex.testFlexLayoutOldSeqid) checks.  A stale seqid is
+     * still a value this server issued for this layout, so honoring it forges
+     * nothing; NFS4ERR_OLD_STATEID is merely listed as permitted for the op
+     * (§18.43.4), not required for this case.  LAYOUTRETURN is a single ordered
+     * operation with no such ambiguity and keeps the strict check. */
     client = req->session ? req->session->client_unified : NULL;
 
     if (client && !nfs4_stateid_is_special(&args->loga_stateid)) {
@@ -1104,8 +1115,6 @@ chimera_nfs4_layoutget(
 
             if (!layout) {
                 res->logr_status = NFS4ERR_BAD_STATEID;
-            } else if (in_seqid != 0 && in_seqid < layout->seqid) {
-                res->logr_status = NFS4ERR_OLD_STATEID;
             } else if (in_seqid > layout->seqid) {
                 res->logr_status = NFS4ERR_BAD_STATEID;
             } else {
