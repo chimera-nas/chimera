@@ -120,6 +120,17 @@ chimera_smb_async_interim_begin(struct chimera_smb_request *request)
         return;
     }
 
+    /* PARK RULE (liveness): this request is about to wait on an external,
+     * client-controlled event (a break ack, a conflicting lock's release, a
+     * durable holder's yield).  END the chain's VFS compound first: an engine
+     * backend must never sit on staged compound state while the chain idles
+     * (every contender would bounce off it as retriable-busy for the whole
+     * wait), and any notify/lease-break emission the VFS deferred to the
+     * compound end -- possibly the very break whose ack this park awaits --
+     * must actually reach the wire.  VFS work after the resume runs on the
+     * LOOSE singleton via chimera_smb_vfs_compound(). */
+    chimera_smb_compound_vfs_park(compound);
+
     request->async.armed          = 1;
     request->async.credit_charge  = request->smb2_hdr.credit_charge;
     request->async.credit_request = request->smb2_hdr.credit_request_response;

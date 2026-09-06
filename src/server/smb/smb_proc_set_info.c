@@ -46,7 +46,10 @@ chimera_smb_set_info_callback(
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
 
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request,
+                                 error_code ?
+                                 chimera_smb_vfs_internal_status(error_code) :
+                                 SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_callback */
 
 static void
@@ -72,7 +75,10 @@ chimera_smb_set_info_link_callback(
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
 
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request,
+                                 error_code ?
+                                 chimera_smb_vfs_internal_status(error_code) :
+                                 SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_link_callback */
 
 static void
@@ -99,7 +105,8 @@ chimera_smb_set_info_link_open_dir_callback(
 
     chimera_vfs_link_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         open_file->handle->fh,
         open_file->handle->fh_len,
         oh->fh,
@@ -135,7 +142,8 @@ chimera_smb_set_info_link_lookup_parent_callback(
 
     chimera_vfs_open_fh(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -153,7 +161,8 @@ chimera_smb_set_info_link_process(struct chimera_smb_request *request)
     if (rename_info->new_parent_len) {
         chimera_vfs_lookup(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             tree->fh,
             tree->fh_len,
             rename_info->new_parent,
@@ -165,7 +174,8 @@ chimera_smb_set_info_link_process(struct chimera_smb_request *request)
     } else {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             tree->fh,
             tree->fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -214,7 +224,8 @@ chimera_smb_set_info_allocation_getattr_callback(
 
     chimera_vfs_setattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->set_info.open_file->handle,
         &request->set_info.vfs_attrs,
         0,
@@ -251,6 +262,9 @@ chimera_smb_set_info_doc_recall_callback(
 
 struct chimera_smb_ea_apply {
     struct chimera_server_smb_thread *thread;
+    /* The wire chain this apply runs under; always outlives the apply (the
+     * owning request completes only after `done`). */
+    struct chimera_smb_compound      *smb_compound;
     const struct chimera_vfs_cred    *cred;
     struct chimera_vfs_open_handle   *handle;
     const uint8_t                    *ea_buf;
@@ -364,11 +378,15 @@ chimera_smb_ea_apply_step(struct chimera_smb_ea_apply *a)
     }
 
     if (entry.value_len == 0) {
-        chimera_vfs_remove_xattr(a->thread->vfs_thread, a->cred, NULL, a->handle,
+        chimera_vfs_remove_xattr(a->thread->vfs_thread, a->cred,
+                                 chimera_smb_vfs_compound(a->smb_compound),
+                                 a->handle,
                                  a->name, a->name_len,
                                  chimera_smb_ea_apply_op_cb, a);
     } else {
-        chimera_vfs_set_xattr(a->thread->vfs_thread, a->cred, NULL, a->handle,
+        chimera_vfs_set_xattr(a->thread->vfs_thread, a->cred,
+                              chimera_smb_vfs_compound(a->smb_compound),
+                              a->handle,
                               CHIMERA_VFS_XATTR_EITHER, a->name, a->name_len,
                               entry.value, entry.value_len,
                               chimera_smb_ea_apply_op_cb, a);
@@ -401,6 +419,7 @@ chimera_smb_ea_apply_list_cb(
 void
 chimera_smb_ea_apply(
     struct chimera_server_smb_thread *thread,
+    struct chimera_smb_compound      *smb_compound,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
     const uint8_t                    *ea_buf,
@@ -422,18 +441,21 @@ chimera_smb_ea_apply(
         return;
     }
 
-    a             = calloc(1, sizeof(*a));
-    a->thread     = thread;
-    a->cred       = cred;
-    a->handle     = handle;
-    a->ea_buf     = ea_buf;
-    a->ea_buf_len = ea_buf_len;
-    a->done       = done;
-    a->arg        = arg;
+    a               = calloc(1, sizeof(*a));
+    a->thread       = thread;
+    a->smb_compound = smb_compound;
+    a->cred         = cred;
+    a->handle       = handle;
+    a->ea_buf       = ea_buf;
+    a->ea_buf_len   = ea_buf_len;
+    a->done         = done;
+    a->arg          = arg;
 
     /* List the existing user.* names first so each set can match case-
      * insensitively and reuse the stored spelling. */
-    chimera_vfs_list_xattrs(thread->vfs_thread, cred, NULL, handle, 0,
+    chimera_vfs_list_xattrs(thread->vfs_thread, cred,
+                            chimera_smb_vfs_compound(smb_compound),
+                            handle, 0,
                             a->list, sizeof(a->list),
                             chimera_smb_ea_apply_list_cb, a);
 } /* chimera_smb_ea_apply */
@@ -473,6 +495,7 @@ static void
 chimera_smb_set_ea(struct chimera_smb_request *request)
 {
     chimera_smb_ea_apply(request->compound->thread,
+                         request->compound,
                          &request->session_handle->session->cred,
                          request->set_info.open_file->handle,
                          request->set_info.ea_buf,
@@ -560,7 +583,8 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred, NULL,
+                        &request->session_handle->session->cred,
+                        chimera_smb_vfs_compound(request->compound),
                         request->set_info.open_file->handle,
                         &request->set_info.vfs_attrs,
                         0,
@@ -613,7 +637,8 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_setattr(
                         request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred, NULL,
+                        &request->session_handle->session->cred,
+                        chimera_smb_vfs_compound(request->compound),
                         request->set_info.open_file->handle,
                         &request->set_info.vfs_attrs,
                         0,
@@ -657,7 +682,8 @@ chimera_smb_set_info(struct chimera_smb_request *request)
 
                     chimera_vfs_getattr(
                         request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred, NULL,
+                        &request->session_handle->session->cred,
+                        chimera_smb_vfs_compound(request->compound),
                         request->set_info.open_file->handle,
                         CHIMERA_VFS_ATTR_SIZE,
                         chimera_smb_set_info_allocation_getattr_callback,
@@ -697,6 +723,14 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                              * is spared.  This PARKS until the recall drains (the
                              * peer's break is acked), then replies -- so the break
                              * deterministically precedes the SetInfo reply. */
+                            /* PARK RULE: the recall below parks this request
+                             * until every other holder acks its handle-lease
+                             * break -- client-controlled time.  END the chain's
+                             * VFS compound first (also releases any notify
+                             * emission deferred to the compound end, which the
+                             * awaited break may itself be). */
+                            chimera_smb_compound_vfs_park(request->compound);
+
                             chimera_vfs_recall_handle_lease(
                                 request->compound->thread->vfs_thread,
                                 &request->session_handle->session->cred,

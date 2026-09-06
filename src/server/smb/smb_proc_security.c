@@ -780,7 +780,7 @@ chimera_smb_set_security_setattr_callback(
             status = SMB2_STATUS_ACCESS_DENIED;
             break;
         default:
-            status = SMB2_STATUS_INTERNAL_ERROR;
+            status = chimera_smb_vfs_internal_status(error_code);
             break;
     } /* switch */
 
@@ -919,7 +919,8 @@ chimera_smb_set_security_dispatch(struct chimera_smb_request *request)
 
     chimera_vfs_setattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->set_info.open_file->handle,
         vfs_attrs,
         0,
@@ -1113,7 +1114,8 @@ chimera_smb_query_security_getattr_callback(
 
     if (error_code) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -1218,7 +1220,8 @@ chimera_smb_query_security(struct chimera_smb_request *request)
 {
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->query_info.open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
         chimera_smb_query_security_getattr_callback,

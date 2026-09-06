@@ -31,7 +31,7 @@ chimera_smb_set_reparse_create_cb(
     chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -98,7 +98,7 @@ chimera_smb_set_reparse_symlink_cb(
                           request->ioctl.rp_target_len);
         chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
         chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -115,7 +115,8 @@ chimera_smb_set_reparse_symlink_cb(
          * (the close path closes it via chimera_vfs_close). */
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             request->ioctl.rp_new_fh,
             request->ioctl.rp_new_fh_len,
             0,
@@ -148,7 +149,7 @@ chimera_smb_set_reparse_remove_cb(
                           error_code, open_file->name_len, open_file->name);
         chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -158,7 +159,8 @@ chimera_smb_set_reparse_remove_cb(
         case SMB2_NFS_SPECFILE_LNK:
             chimera_vfs_symlink_at(
                 vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -179,7 +181,8 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -198,7 +201,8 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -215,7 +219,8 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -232,7 +237,8 @@ chimera_smb_set_reparse_remove_cb(
             set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE;
             chimera_vfs_mknod_at(
                 vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 request->ioctl.rp_parent_handle,
                 open_file->name,
                 open_file->name_len,
@@ -264,7 +270,7 @@ chimera_smb_set_reparse_open_parent_cb(
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("SET_REPARSE: open_parent failed error=%d", error_code);
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -272,7 +278,8 @@ chimera_smb_set_reparse_open_parent_cb(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         open_file->name,
         open_file->name_len,
@@ -309,7 +316,8 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         open_file->parent_fh,
         open_file->parent_fh_len,
         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -338,7 +346,7 @@ chimera_smb_get_reparse_readlink_cb(
     chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -497,7 +505,7 @@ chimera_smb_get_reparse_getattr_cb(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -505,7 +513,8 @@ chimera_smb_get_reparse_getattr_cb(
         case S_IFLNK:
             chimera_vfs_readlink(
                 vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 request->ioctl.rp_open_file->handle,
                 request->ioctl.rp_target,
                 CHIMERA_VFS_PATH_MAX,
@@ -560,7 +569,8 @@ chimera_smb_ioctl_get_reparse(struct chimera_smb_request *request)
 
     chimera_vfs_getattr(
         vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         open_file->handle,
         CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV,
         chimera_smb_get_reparse_getattr_cb,

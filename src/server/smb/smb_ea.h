@@ -61,6 +61,10 @@ chimera_smb_ea_status(enum chimera_vfs_error err)
         case CHIMERA_VFS_ENOENT:
         case CHIMERA_VFS_ESTALE:
             return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        case CHIMERA_VFS_ECOMPOUND_EXHAUSTED:
+            /* Retriable engine-compound refusal (see
+             * chimera_smb_vfs_retriable_status). */
+            return SMB2_STATUS_FILE_NOT_AVAILABLE;
         default:
             return SMB2_STATUS_INTERNAL_ERROR;
     } /* switch */

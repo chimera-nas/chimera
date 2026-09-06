@@ -14,6 +14,12 @@
 static unsigned int
 chimera_smb_query_directory_status(enum chimera_vfs_error error_code)
 {
+    uint32_t retriable = chimera_smb_vfs_retriable_status(error_code);
+
+    if (retriable) {
+        return retriable;
+    }
+
     switch (error_code) {
         case CHIMERA_VFS_OK:      return SMB2_STATUS_SUCCESS;
         /* QUERY_DIRECTORY against a non-directory open: per MS-SMB2 3.3.5.18
@@ -503,7 +509,8 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
 
     chimera_vfs_readdir(
         thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->query_directory.open_file->handle,
         readdir_mask,
         0, /* dir_attr_mask */

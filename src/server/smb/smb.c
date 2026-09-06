@@ -51,6 +51,61 @@ chimera_smb_is_error_status(unsigned int status)
            status != SMB2_STATUS_NOTIFY_ENUM_DIR;
 } /* chimera_smb_is_error_status */
 
+/* Credential stamped on out-of-band VFS compound END ops (the end commits or
+ * discards work each member op already authorized under its own session cred,
+ * so any stable identity serves; the chain context has no one session -- an
+ * SMB2 chain may hop sessions -- and a session's cred can be recycled while an
+ * orphaned chain's end is still in flight).  Static: the async end op keeps
+ * the pointer until it completes. */
+static const struct chimera_vfs_cred chimera_smb_compound_end_cred = {
+    .flavor = CHIMERA_VFS_AUTH_UNIX,
+    .uid    = 0,
+    .gid    = 0,
+    .ngids  = 0,
+};
+
+/* Fire-and-forget completion for an out-of-band compound END (end-before-park,
+ * teardown ABORT).  Nothing waits on it: for COMMIT the member ops already
+ * carried their own per-op statuses (wire law -- a member failure never voids
+ * what ran), and for ABORT the client is gone.  The grouping lane never
+ * delivers a replayable conflict, so anything but OK here is the retriable
+ * ECOMPOUND_EXHAUSTED (or a backend fault) -- log it and move on. */
+static void
+chimera_smb_compound_vfs_end_discard_callback(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) private_data;
+
+    if (unlikely(error_code != CHIMERA_VFS_OK)) {
+        chimera_smb_error("VFS compound end (discarded) failed: %d", error_code);
+    }
+} /* chimera_smb_compound_vfs_end_discard_callback */
+
+void
+chimera_smb_compound_vfs_end_discard(
+    struct chimera_smb_compound  *compound,
+    enum chimera_vfs_compound_end end_flag)
+{
+    struct chimera_vfs_compound *vfs_compound = compound->vfs_compound;
+
+    if (!vfs_compound) {
+        return;
+    }
+
+    /* Clear the member BEFORE issuing the end: the single-owner rule is that
+     * a bound compound ends exactly once, and the end callback may run inline
+     * (an unbound compound's end is synchronous). */
+    compound->vfs_compound = NULL;
+
+    chimera_vfs_compound_end(compound->thread->vfs_thread,
+                             &chimera_smb_compound_end_cred,
+                             vfs_compound,
+                             end_flag,
+                             chimera_smb_compound_vfs_end_discard_callback,
+                             NULL);
+} /* chimera_smb_compound_vfs_end_discard */
+
 /*
  * Establish the server's ServerGuid (MS-SMB2 2.2.4 / 3.3.5.4).  The ServerGuid
  * must uniquely identify this server AND stay stable across restarts so that
@@ -416,8 +471,89 @@ static inline void
 chimera_smb_compound_advance(
     struct chimera_smb_compound *compound);
 
+/* The connection may have been torn down (and its pooled conn/bind possibly
+ * recycled for a NEW connection) while this compound's VFS work -- or its
+ * VFS compound END -- was still in flight.  Sending then would write a stale
+ * reply into whatever connection currently owns the recycled bind (see the
+ * long-form rationale at the check's original home in the reply builder).
+ * Checked once before the END is issued and again after it completes, since
+ * the teardown can land in between. */
+static inline int
+chimera_smb_compound_reply_dropped(struct chimera_smb_compound *compound)
+{
+    struct chimera_smb_conn *conn = compound->conn;
+
+    return unlikely(conn->generation != compound->conn_generation ||
+                    conn->disconnecting ||
+                    !conn->bind ||
+                    (evpl_bind_is_closing(conn->bind) && !conn->finishing));
+} /* chimera_smb_compound_reply_dropped */
+
+static void
+chimera_smb_compound_reply_send(
+    struct chimera_smb_compound *compound);
+
+/* Completion of the chain's VFS compound END: the commit (and any notify /
+ * lease-break emission the VFS deferred to it) is done, so the framed reply
+ * may now go out.  Wire law made this a COMMIT regardless of member-op
+ * failures, so the end result changes nothing about the per-op statuses
+ * already recorded; the grouping lane never hands back a replayable conflict,
+ * and a retriable ECOMPOUND_EXHAUSTED at commit is logged (the member ops
+ * that reached the backend kept their own statuses). */
+static void
+chimera_smb_compound_reply_end_callback(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_smb_compound *compound = private_data;
+
+    if (unlikely(error_code != CHIMERA_VFS_OK)) {
+        chimera_smb_error("VFS compound end (reply) failed: %d", error_code);
+    }
+
+    chimera_smb_compound_reply_send(compound);
+} /* chimera_smb_compound_reply_end_callback */
+
 static inline void
 chimera_smb_compound_reply(struct chimera_smb_compound *compound)
+{
+    struct chimera_vfs_compound *vfs_compound;
+
+    /* No-reply teardown: chimera_smb_compound_free ABORTs the still-open VFS
+     * compound (best-effort discard -- the client this reply was for is gone). */
+    if (chimera_smb_compound_reply_dropped(compound)) {
+        chimera_smb_compound_free(compound->thread, compound);
+        return;
+    }
+
+    /* END the chain's VFS compound before the framed send: ALWAYS COMMIT
+     * (continue-on-error is wire law -- CREATE-ok + WRITE-fail must leave the
+     * file), COMMIT_DURABLE when the chain carried a FLUSH or a write-through
+     * WRITE.  The end is asynchronous for a bound compound, and the reply must
+     * wait for it: the engine's commit (and the notify emission deferred to
+     * it) must complete before the client can observe the responses.  A chain
+     * that ended early (end-before-park) or never issued a VFS op falls
+     * straight through. */
+    vfs_compound = compound->vfs_compound;
+
+    if (vfs_compound) {
+        compound->vfs_compound = NULL;
+        chimera_vfs_compound_end(compound->thread->vfs_thread,
+                                 &chimera_smb_compound_end_cred,
+                                 vfs_compound,
+                                 compound->vfs_compound_durable ?
+                                 CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                                 CHIMERA_VFS_COMPOUND_COMMIT,
+                                 chimera_smb_compound_reply_end_callback,
+                                 compound);
+        return;
+    }
+
+    chimera_smb_compound_reply_send(compound);
+} /* chimera_smb_compound_reply */
+
+static void
+chimera_smb_compound_reply_send(struct chimera_smb_compound *compound)
 {
     struct chimera_server_smb_thread *thread = compound->thread;
     struct evpl                      *evpl   = thread->evpl;
@@ -435,13 +571,15 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     int                               i, rc, chunk_niov;
     int                               reply_hdr_len, reply_payload_length, left, chunk;
 
-    /* The connection may have been torn down (and its pooled conn/bind
-     * possibly recycled for a NEW connection) while this compound's VFS work
-     * was still in flight.  Sending now would write a stale reply into
-     * whatever connection currently owns the recycled bind, corrupting its
-     * stream from the first message (seen as a fresh smbtorture connection
-     * failing NEGOTIATE with NT_STATUS_INVALID_NETWORK_RESPONSE).  The client
-     * this reply was for is gone; drop it and just release the compound.
+    /* Re-check the teardown guard: chimera_smb_compound_reply checked it
+     * before issuing the (asynchronous) VFS compound END, but the connection
+     * can drop while that end drains.  Sending now would write a stale reply
+     * into whatever connection currently owns the recycled bind, corrupting
+     * its stream from the first message (seen as a fresh smbtorture
+     * connection failing NEGOTIATE with NT_STATUS_INVALID_NETWORK_RESPONSE).
+     * The client this reply was for is gone; drop it and just release the
+     * compound (whose VFS compound has already ended, so the free's ABORT arm
+     * is a no-op).
      *
      * evpl_bind_is_closing() reports our OWN half-close (EVPL_BIND_FINISH)
      * alongside the peer-initiated EVPL_BIND_PENDING_CLOSED / _CLOSED.  The
@@ -450,10 +588,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
      * would silently free exactly the reply that close was meant to deliver,
      * leaving the client a bare FIN.  conn->finishing marks that case; the
      * peer-initiated flags still drop. */
-    if (unlikely(conn->generation != compound->conn_generation ||
-                 conn->disconnecting ||
-                 !conn->bind ||
-                 (evpl_bind_is_closing(conn->bind) && !conn->finishing))) {
+    if (chimera_smb_compound_reply_dropped(compound)) {
         chimera_smb_compound_free(thread, compound);
         return;
     }
@@ -1070,7 +1205,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     chimera_smb_lease_break_flush(thread);
 
     chimera_smb_compound_free(thread, compound);
-} /* chimera_smb_compound_reply */
+} /* chimera_smb_compound_reply_send */
 
 void
 chimera_smb_complete_request(

@@ -71,6 +71,12 @@ chimera_smb_close_durable_delete_callback(
 static inline uint32_t
 chimera_smb_close_doc_status(enum chimera_vfs_error error_code)
 {
+    uint32_t retriable = chimera_smb_vfs_retriable_status(error_code);
+
+    if (retriable) {
+        return retriable;
+    }
+
     switch (error_code) {
         case CHIMERA_VFS_OK:        return SMB2_STATUS_SUCCESS;
         case CHIMERA_VFS_ENOTEMPTY: return SMB2_STATUS_DIRECTORY_NOT_EMPTY;
@@ -156,7 +162,8 @@ chimera_smb_close_doc_open_parent_callback(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->close.doc_info.cred, NULL,
+        &request->close.doc_info.cred,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         request->close.doc_info.name,
         request->close.doc_info.name_len,
@@ -250,10 +257,14 @@ chimera_smb_teardown_doc_open_parent_callback(
      * FH is intentionally not supplied (no cross-client file-lease recall): the
      * delete-on-close lease-recall semantics are owned by the parallel
      * smb-lease-crossclient-rh work, and the clean-CLOSE DOC path likewise does
-     * not recall here. */
+     * not recall here.
+     *
+     * LOOSE compound: this teardown context has no wire chain (the connection
+     * is gone), so its VFS work runs autocommit. */
     chimera_vfs_remove_at(
         ctx->vfs_thread,
-        &ctx->doc_info.cred, NULL,
+        &ctx->doc_info.cred,
+        chimera_vfs_compound_loose(ctx->vfs_thread),
         oh,
         ctx->doc_info.name,
         ctx->doc_info.name_len,
@@ -289,7 +300,8 @@ chimera_smb_teardown_doc_unlink(
 
     chimera_vfs_open_fh(
         ctx->vfs_thread,
-        &ctx->doc_info.cred, NULL,
+        &ctx->doc_info.cred,
+        chimera_vfs_compound_loose(ctx->vfs_thread),
         ctx->doc_info.parent_fh,
         ctx->doc_info.parent_fh_len,
         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -341,7 +353,7 @@ chimera_smb_close_stream_open_callback(
     chimera_vfs_remove_stream(
         vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         open_file->stream_name,
         open_file->stream_name_len,
@@ -397,7 +409,8 @@ chimera_smb_close_stream_base_parent_callback(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         open_file->name,
         open_file->name_len,
@@ -451,7 +464,8 @@ chimera_smb_close_release(struct chimera_smb_request *request)
          * the remove completes. */
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             open_file->base_fh,
             open_file->base_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -472,7 +486,8 @@ chimera_smb_close_release(struct chimera_smb_request *request)
         open_file->parent_fh_len > 0) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             open_file->parent_fh,
             open_file->parent_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -500,7 +515,8 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     if (need_doc && request->close.doc_info.parent_fh_len > 0) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->close.doc_info.cred, NULL,
+            &request->close.doc_info.cred,
+            chimera_smb_vfs_compound(request->compound),
             request->close.doc_info.parent_fh,
             request->close.doc_info.parent_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -607,9 +623,13 @@ chimera_smb_close(struct chimera_smb_request *request)
         uint8_t  dkey[CHIMERA_SMB_DURABLE_KEY_LEN];
         uint32_t dkey_len = chimera_smb_durable_key(dkey, request->close.open_file->file_id.pid);
 
+        /* LOOSE compound: this delete is fire-and-forget (its completion does
+         * not gate the CLOSE reply), so it must not be enlisted in the chain's
+         * compound -- an enlisted op still in flight at compound END violates
+         * the serial issue-after-completion contract. */
         chimera_vfs_delete_key_at(thread->vfs_thread,
                                   &request->session_handle->session->cred,
-                                  NULL,
+                                  chimera_vfs_compound_loose(thread->vfs_thread),
                                   request->close.open_file->handle->fh,
                                   request->close.open_file->handle->fh_len,
                                   dkey, dkey_len,
@@ -625,7 +645,8 @@ chimera_smb_close(struct chimera_smb_request *request)
          * field is CreationTime (BTIME).  MASK_STAT deliberately omits BTIME, so
          * request it explicitly or CreationTime is emitted as 0 (issue #1117). */
         chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred, NULL,
+                            &request->session_handle->session->cred,
+                            chimera_smb_vfs_compound(request->compound),
                             request->close.open_file->handle,
                             CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
                             chimera_smb_close_getattr_callback,

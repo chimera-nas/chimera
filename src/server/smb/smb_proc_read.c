@@ -77,7 +77,8 @@ chimera_smb_read_callback(
      * instead, so those iovecs must be released here to avoid a leak. */
     if (error_code) {
         evpl_iovecs_release(evpl, request->read.iov, niov);
-        chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(private_data,
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -310,7 +311,8 @@ chimera_smb_read(struct chimera_smb_request *request)
      * other holders without recalling the client's own oplock/lease. */
     chimera_vfs_read_owned(
         thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->read.open_file->handle,
         request->read.offset,
         request->read.length,

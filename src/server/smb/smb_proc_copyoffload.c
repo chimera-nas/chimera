@@ -102,6 +102,12 @@ chimera_smb_duplicate_extents_done(
 static uint32_t
 chimera_smb_copy_error_status(enum chimera_vfs_error error_code)
 {
+    uint32_t retriable = chimera_smb_vfs_retriable_status(error_code);
+
+    if (retriable) {
+        return retriable;
+    }
+
     return (error_code == CHIMERA_VFS_ENOTSUP)
            ? SMB2_STATUS_NOT_SUPPORTED
            : SMB2_STATUS_INVALID_PARAMETER;
@@ -146,7 +152,7 @@ chimera_smb_duplicate_extents_clone_cb(
         chimera_vfs_copy_range(
             request->compound->thread->vfs_thread,
             &request->session_handle->session->cred,
-            NULL,
+            chimera_smb_vfs_compound(request->compound),
             request->ioctl.de_src_open_file->handle,
             request->ioctl.de_src_offset,
             request->ioctl.de_dst_open_file->handle,
@@ -199,7 +205,7 @@ chimera_smb_duplicate_extents_getattr_cb(
     chimera_vfs_clone_range(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         request->ioctl.de_src_open_file->handle,
         request->ioctl.de_src_offset,
         request->ioctl.de_dst_open_file->handle,
@@ -237,7 +243,8 @@ chimera_smb_duplicate_extents_dst_getattr_cb(
 
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->ioctl.de_src_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_duplicate_extents_getattr_cb,
@@ -302,7 +309,8 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
      * the source range. */
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         dst_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_duplicate_extents_dst_getattr_cb,
@@ -385,7 +393,8 @@ chimera_smb_ioctl_offload_read(struct chimera_smb_request *request)
 
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         src_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_offload_read_getattr_cb,
@@ -447,7 +456,7 @@ chimera_smb_offload_write_clone_cb(
         chimera_vfs_copy_range(
             request->compound->thread->vfs_thread,
             &request->session_handle->session->cred,
-            NULL,
+            chimera_smb_vfs_compound(request->compound),
             request->ioctl.od_src_open_file->handle,
             request->ioctl.od_transfer_offset,
             request->ioctl.od_dst_open_file->handle,
@@ -543,7 +552,7 @@ chimera_smb_ioctl_offload_write(struct chimera_smb_request *request)
     chimera_vfs_clone_range(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         src_open_file->handle,
         request->ioctl.od_transfer_offset,
         dst_open_file->handle,

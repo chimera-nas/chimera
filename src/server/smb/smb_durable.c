@@ -216,7 +216,9 @@ chimera_smb_durable_doc_open_parent_cb(
         return;
     }
     ctx->parent_handle = oh;
-    chimera_vfs_remove_at_match_fh(ctx->vfs_thread, &ctx->doc_info.cred, NULL, oh,
+    /* LOOSE compound: sweeper/teardown flow, no wire chain. */
+    chimera_vfs_remove_at_match_fh(ctx->vfs_thread, &ctx->doc_info.cred,
+                                   chimera_vfs_compound_loose(ctx->vfs_thread), oh,
                                    ctx->doc_info.name, ctx->doc_info.name_len,
                                    ctx->file_fh, ctx->file_fh_len, 0, 0,
                                    NULL, /* parent_lease_skip */
@@ -263,7 +265,9 @@ chimera_smb_durable_release_handle(
     ctx->file_fh_len   = file_fh_len;
     memcpy(ctx->file_fh, file_fh, file_fh_len);
 
-    chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred, NULL,
+    /* LOOSE compound: sweeper/teardown flow, no wire chain. */
+    chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred,
+                        chimera_vfs_compound_loose(thread->vfs_thread),
                         ctx->doc_info.parent_fh, ctx->doc_info.parent_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_smb_durable_doc_open_parent_cb, ctx);
@@ -1019,7 +1023,10 @@ chimera_smb_durable_recover_share(
 
     ctx->shared = thread->shared;
 
-    chimera_vfs_search_keys_at(thread->vfs_thread, NULL, NULL, fh, fh_len,
+    /* LOOSE compound: recovery scan runs outside any wire chain. */
+    chimera_vfs_search_keys_at(thread->vfs_thread, NULL,
+                               chimera_vfs_compound_loose(thread->vfs_thread),
+                               fh, fh_len,
                                CHIMERA_SMB_DURABLE_KEY_PREFIX,
                                CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN,
                                NULL, 0, 0,

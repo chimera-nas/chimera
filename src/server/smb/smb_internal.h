@@ -30,6 +30,7 @@
 #include "smb_sharemode.h"
 #include "smb_notify.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_procs.h"
 #include "vfs/vfs_claim.h"
 #include "common/tcp_flavor.h"
 #include "vfs/sdk/vfs_acl.h"
@@ -1140,8 +1141,29 @@ struct chimera_smb_request {
 
 #define CHIMERA_SMB_COMPOUND_MAX_REQUESTS 64
 struct chimera_smb_compound {
-    int                                num_requests;
-    int                                complete_requests;
+    int num_requests;
+    int complete_requests;
+    /* The VFS compound (grouping token) this wire chain runs under: one wire
+     * chain == one VFS compound.  Begun UNBOUND at chain alloc (the first
+     * VFS-op-bearing request's fh binds it lazily) and ENDed exactly once:
+     * COMMIT (COMMIT_DURABLE when vfs_compound_durable is set) before the
+     * framed reply is sent, or ABORT on the no-reply teardown paths
+     * (chimera_smb_compound_free ends it if still present).  A handler that
+     * must park for client-controlled time ends it early via
+     * chimera_smb_compound_vfs_park(); the member is then NULL and
+     * chimera_smb_vfs_compound() hands every later call site the per-thread
+     * LOOSE singleton instead.  Single-owner: this chain context alone holds
+     * the pointer -- never stash it on per-op structures that can outlive the
+     * chain (parked requests, open files, durable records).
+     *
+     * Historical note: the name collision is unfortunate -- struct
+     * chimera_smb_compound is the SMB2 wire chain, struct chimera_vfs_compound
+     * the VFS grouping token -- hence the vfs_ prefix on the member. */
+    struct chimera_vfs_compound       *vfs_compound;
+    /* Set when the chain contained a FLUSH or a write-through-flagged WRITE:
+     * the END then uses COMMIT_DURABLE so the durability the client was
+     * promised is not lost to the compound's deferred commit. */
+    uint8_t                            vfs_compound_durable;
     /* Set when this compound arrived wrapped in a TRANSFORM header; its reply
      * MUST then be encrypted (MS-SMB2 §3.3.4.1.4). */
     int                                received_encrypted;
@@ -2897,6 +2919,73 @@ chimera_smb_tree_free(
     pthread_mutex_unlock(&shared->trees_lock);
 } /* chimera_smb_tree_free */
 
+/* End a wire chain's VFS compound out-of-band (smb.c): the result is discarded
+ * -- COMMIT keeps what ran (wire law: member-op failures never void earlier
+ * members), ABORT is only used on no-reply teardowns where the client is gone.
+ * Clears compound->vfs_compound so the end can never be issued twice; a NULL
+ * member is a no-op.  Must run on the chain's owning thread (it is only ever
+ * called from chain dispatch / teardown paths, which all run there). */
+void
+chimera_smb_compound_vfs_end_discard(
+    struct chimera_smb_compound  *compound,
+    enum chimera_vfs_compound_end end_flag);
+
+/* PARK RULE: a handler that is about to park its request for client-controlled
+ * time (a lease/oplock break ack, a blocking byte-range lock, a share-mode
+ * park, a durable-yield retry timer) must first END the chain's VFS compound
+ * (COMMIT -- the work that ran stays, and any notify emission deferred to the
+ * compound end is released so the peer whose ack we are waiting on actually
+ * receives its break).  VFS work issued after the resume then runs on the
+ * LOOSE singleton via chimera_smb_vfs_compound(). */
+static inline void
+chimera_smb_compound_vfs_park(struct chimera_smb_compound *compound)
+{
+    if (compound->vfs_compound) {
+        chimera_smb_compound_vfs_end_discard(compound,
+                                             compound->vfs_compound_durable ?
+                                             CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                                             CHIMERA_VFS_COMPOUND_COMMIT);
+    }
+} /* chimera_smb_compound_vfs_park */
+
+/* The VFS compound to attach to a VFS operation issued under this wire chain.
+ * Returns the chain's compound, or the calling thread's LOOSE singleton when
+ * the chain's compound was already ended (end-before-park) -- so call sites
+ * never have to know whether a park happened earlier in the chain. */
+static inline struct chimera_vfs_compound *
+chimera_smb_vfs_compound(struct chimera_smb_compound *compound)
+{
+    return compound->vfs_compound ? compound->vfs_compound
+           : chimera_vfs_compound_loose(compound->thread->vfs_thread);
+} /* chimera_smb_vfs_compound */
+
+/* Retriable engine-backend refusal of an enlisted op: the grouping lane never
+ * delivers a replayable conflict, so backend contention surfaces per-op as
+ * CHIMERA_VFS_ECOMPOUND_EXHAUSTED.  Map it to FILE_NOT_AVAILABLE -- the status
+ * this server already uses for "resource transiently unavailable, retry"
+ * (deferred-create replays, stale ChannelSequence), which clients demonstrably
+ * retry -- rather than letting a handler's default collapse it into a
+ * permanent-looking error.  Returns 0 for every other code (caller keeps its
+ * own mapping). */
+static inline uint32_t
+chimera_smb_vfs_retriable_status(enum chimera_vfs_error error_code)
+{
+    return unlikely(error_code == CHIMERA_VFS_ECOMPOUND_EXHAUSTED) ?
+           SMB2_STATUS_FILE_NOT_AVAILABLE : 0;
+} /* chimera_smb_vfs_retriable_status */
+
+/* Fallback for VFS-callback error paths that collapse every unexpected error
+ * to INTERNAL_ERROR: keep that collapse, but let the retriable engine-compound
+ * exhaustion through as FILE_NOT_AVAILABLE so the client retries instead of
+ * surfacing a permanent failure. */
+static inline uint32_t
+chimera_smb_vfs_internal_status(enum chimera_vfs_error error_code)
+{
+    uint32_t retriable = chimera_smb_vfs_retriable_status(error_code);
+
+    return retriable ? retriable : SMB2_STATUS_INTERNAL_ERROR;
+} /* chimera_smb_vfs_internal_status */
+
 static inline struct chimera_smb_compound *
 chimera_smb_compound_alloc(struct chimera_server_smb_thread *thread)
 {
@@ -2907,6 +2996,21 @@ chimera_smb_compound_alloc(struct chimera_server_smb_thread *thread)
     } else {
         compound = calloc(1, sizeof(*compound));
     }
+
+    /* One wire chain == one VFS compound.  Begin UNBOUND (no fh hint: the
+     * chain's content is unknown until dispatch; the first VFS-op-bearing
+     * request's fh binds it lazily) in WRITE mode (ditto) on the GROUPING lane
+     * (flags 0): SMB can never replay a chain -- WRITE iovecs are consumed,
+     * lease breaks externalized, SESSION_SETUP legs folded into the preauth
+     * hash -- so conflicts must surface per-op as the retriable
+     * ECOMPOUND_EXHAUSTED, never as a replay obligation.  Begin never fails
+     * and an unbound compound ends at zero backend cost, so non-VFS chains
+     * (NEGOTIATE / SESSION_SETUP / the SMB1 shim) pay nothing. */
+    compound->vfs_compound = chimera_vfs_compound_begin(
+        thread->vfs_thread, NULL /* cred: unused for an unbound begin */,
+        NULL, 0, CHIMERA_VFS_COMPOUND_WRITE,
+        chimera_vfs_compound_alloc_ts(thread->vfs_thread), 0);
+    compound->vfs_compound_durable = 0;
 
     /* Root span for this SMB2 compound; parent the VFS ops its requests issue
      * (propagation in chimera_vfs_complete keeps the linkage across async ops). */
@@ -2921,6 +3025,15 @@ chimera_smb_compound_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_compound      *compound)
 {
+    /* A chain torn down without replying (parse failure before dispatch, the
+     * conn-generation-mismatch drop, signing/encryption send failures after
+     * the reply path already ended it -- then this is a no-op) must still END
+     * its VFS compound exactly once.  ABORT: nobody will see the reply, so
+     * best-effort discard of staged effects is the right disposition. */
+    if (unlikely(compound->vfs_compound != NULL)) {
+        chimera_smb_compound_vfs_end_discard(compound, CHIMERA_VFS_COMPOUND_ABORT);
+    }
+
     otel_span_end(&compound->otel);
     thread->vfs_thread->otel_parent = NULL;
 

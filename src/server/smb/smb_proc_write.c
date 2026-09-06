@@ -92,7 +92,8 @@ chimera_smb_write_callback(
         request->write.restore_attrs.va_mtime    = pre_attr->va_mtime;
 
         chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred, NULL,
+                            &request->session_handle->session->cred,
+                            chimera_smb_vfs_compound(request->compound),
                             request->write.open_file->handle,
                             &request->write.restore_attrs,
                             0,
@@ -103,7 +104,10 @@ chimera_smb_write_callback(
     }
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
-    chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(private_data,
+                                 error_code ?
+                                 chimera_smb_vfs_internal_status(error_code) :
+                                 SMB2_STATUS_SUCCESS);
 } /* chimera_smb_write_callback */
 
 static void
@@ -156,7 +160,8 @@ chimera_smb_rdma_read_callback(
 
         chimera_vfs_write_owned(
             thread->vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             request->write.open_file->handle,
             request->write.offset,
             request->write.length,
@@ -330,6 +335,14 @@ chimera_smb_write(struct chimera_smb_request *request)
      * the lease is broken on every self-write, which races a server-initiated
      * OPLOCK_BREAK notification with the WRITE response and surfaces as
      * INVALID_NETWORK_RESPONSE on the client. */
+    /* A write-through write carries a durability promise; propagate it to the
+     * chain's VFS compound END (COMMIT_DURABLE), since an engine backend
+     * defers member-op durability to the compound end.  Set before either
+     * dispatch branch (the RDMA leg issues its write from a later callback). */
+    if (request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH) {
+        request->compound->vfs_compound_durable = 1;
+    }
+
     struct chimera_claim_actor io_owner;
     memset(&io_owner, 0, sizeof(io_owner));
     io_owner.owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
@@ -389,7 +402,8 @@ chimera_smb_write(struct chimera_smb_request *request)
     } else {
         chimera_vfs_write_owned(
             thread->vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             request->write.open_file->handle,
             request->write.offset,
             request->write.length,

@@ -66,7 +66,8 @@ chimera_smb_query_info_getattr_callback(
     chimera_smb_open_file_release(request, request->query_info.open_file);
 
     if (unlikely(error_code)) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_vfs_internal_status(error_code));
     } else {
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
     }
@@ -230,7 +231,8 @@ chimera_smb_query_stream_info_default_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -271,7 +273,7 @@ chimera_smb_query_stream_info_list_callback(
         chimera_smb_complete_request(request,
                                      error_code == CHIMERA_VFS_ERANGE ?
                                      SMB2_STATUS_INFO_LENGTH_MISMATCH :
-                                     SMB2_STATUS_INTERNAL_ERROR);
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -291,7 +293,8 @@ chimera_smb_query_stream_info_open_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -300,7 +303,7 @@ chimera_smb_query_stream_info_open_callback(
     chimera_vfs_list_streams(
         thread->vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         0,
         request->query_info.stream_records,
@@ -323,7 +326,8 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
     if (!thread->shared->config.named_streams ||
         !(open_file->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
         chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred, NULL,
+                            &request->session_handle->session->cred,
+                            chimera_smb_vfs_compound(request->compound),
                             open_file->handle,
                             CHIMERA_VFS_ATTR_MASK_STAT,
                             chimera_smb_query_stream_info_default_callback,
@@ -345,7 +349,8 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
 
     chimera_vfs_open_fh(
         thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         base_fh,
         base_fh_len,
         CHIMERA_VFS_OPEN_PATH,
@@ -483,7 +488,7 @@ chimera_smb_query_ea_next(struct chimera_smb_request *request)
 
     chimera_vfs_get_xattr(thread->vfs_thread,
                           &request->session_handle->session->cred,
-                          NULL,
+                          chimera_smb_vfs_compound(request->compound),
                           request->query_info.stream_base_handle,
                           fullname, flen,
                           request->query_info.ea_out + vpos, vmax,
@@ -531,7 +536,8 @@ chimera_smb_query_ea_open_callback(
     struct chimera_server_smb_thread *thread  = request->compound->thread;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_query_ea_finish(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_query_ea_finish(request,
+                                    chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -540,7 +546,7 @@ chimera_smb_query_ea_open_callback(
     chimera_vfs_list_xattrs(
         thread->vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         0,
         request->query_info.stream_records,
@@ -589,7 +595,7 @@ chimera_smb_query_full_ea_info(struct chimera_smb_request *request)
     chimera_vfs_open_fh(
         thread->vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         base_fh,
         base_fh_len,
         CHIMERA_VFS_OPEN_PATH,
@@ -918,7 +924,8 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     if (getattr_mask) {
         /* Get the file attributes */
         chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred, NULL,
+                            &request->session_handle->session->cred,
+                            chimera_smb_vfs_compound(request->compound),
                             request->query_info.open_file->handle,
                             getattr_mask,
                             chimera_smb_query_info_getattr_callback,

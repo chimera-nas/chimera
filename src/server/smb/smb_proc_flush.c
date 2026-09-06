@@ -16,6 +16,12 @@
 static inline uint32_t
 chimera_smb_flush_error_status(enum chimera_vfs_error error_code)
 {
+    uint32_t retriable = chimera_smb_vfs_retriable_status(error_code);
+
+    if (retriable) {
+        return retriable;
+    }
+
     switch (error_code) {
         case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
         case CHIMERA_VFS_ENOSPC:
@@ -74,9 +80,15 @@ chimera_smb_flush(struct chimera_smb_request *request)
         return;
     }
 
+    /* The chain carried an explicit FLUSH: its durability promise must ride
+     * through to the VFS compound's END (COMMIT_DURABLE), since an engine
+     * backend defers member-op durability to the compound end. */
+    request->compound->vfs_compound_durable = 1;
+
     chimera_vfs_commit(
         thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         request->flush.open_file->handle,
         0,
         0xffffffffffffffffULL,

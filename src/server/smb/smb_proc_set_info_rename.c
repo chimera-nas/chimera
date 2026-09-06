@@ -174,7 +174,7 @@ chimera_smb_set_info_rename_callback(
         case CHIMERA_VFS_ENOTEMPTY: status = SMB2_STATUS_DIRECTORY_NOT_EMPTY; break;
         case CHIMERA_VFS_EISDIR:    status = SMB2_STATUS_FILE_IS_A_DIRECTORY; break;
         case CHIMERA_VFS_ENOTDIR:   status = SMB2_STATUS_NOT_A_DIRECTORY; break;
-        default:                    status = SMB2_STATUS_INTERNAL_ERROR; break;
+        default:                    status = chimera_smb_vfs_internal_status(error_code); break;
     } /* switch */
 
     chimera_smb_complete_request(request, status);
@@ -213,7 +213,8 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
 
     chimera_vfs_rename_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         open_file->parent_fh,
         open_file->parent_fh_len,
         open_file->name,
@@ -334,6 +335,13 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
     request->set_info.dp_probe.policy_tag = open_file->file_id.pid;
 
     struct chimera_server_smb_thread *thread = request->compound->thread;
+
+    /* PARK RULE: the deny-probe acquire below may park this request until the
+    * dst parent's handle-lease holder closes or acks -- client-controlled
+    * time -- and the break it triggers may itself be deferred to the VFS
+    * compound's END.  END the chain's compound before the acquire; the
+    * rename after the resume runs on the LOOSE singleton via the accessor. */
+    chimera_smb_compound_vfs_park(request->compound);
 
     chimera_vfs_claim_acquire(request->compound->thread->vfs_thread,
                               vfs_state, fs, &request->set_info.dp_probe,
@@ -543,7 +551,7 @@ chimera_smb_set_info_rename_recall_readdir_complete(
         chimera_vfs_readdir(
             request->compound->thread->vfs_thread,
             &request->session_handle->session->cred,
-            NULL,
+            chimera_smb_vfs_compound(request->compound),
             request->set_info.open_file->handle,
             CHIMERA_VFS_ATTR_FH,
             0,
@@ -594,7 +602,7 @@ chimera_smb_set_info_rename_recall_scan(struct chimera_smb_request *request)
     chimera_vfs_readdir(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
-        NULL,
+        chimera_smb_vfs_compound(request->compound),
         request->set_info.open_file->handle,
         CHIMERA_VFS_ATTR_FH, /* per-entry attr: need the child FH */
         0,                   /* dir_attr_mask */
@@ -629,6 +637,12 @@ chimera_smb_set_info_rename_recall_children(struct chimera_smb_request *request)
         return;
     }
 
+    /* PARK RULE: the recall sweep below parks on each contained holder's
+     * handle-lease break ack (client-controlled time).  END the chain's VFS
+     * compound before entering the wave; the scan readdirs and the rename
+     * afterwards run on the LOOSE singleton via the accessor. */
+    chimera_smb_compound_vfs_park(request->compound);
+
     chimera_smb_set_info_rename_recall_scan(request);
 } /* chimera_smb_set_info_rename_recall_children */
 
@@ -648,7 +662,8 @@ chimera_smb_set_info_rename_open_dest_dir_callback(
                                 request->set_info.parent_handle);
         }
         chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
@@ -660,7 +675,8 @@ chimera_smb_set_info_rename_open_dest_dir_callback(
     /* Check if source filename exists in this directory */
     chimera_vfs_lookup_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         open_file->name,
         open_file->name_len,
@@ -700,7 +716,8 @@ chimera_smb_set_info_rename_check_dest_callback(
             /* Open the directory so we can use it as the new parent */
             chimera_vfs_open_fh(
                 request->compound->thread->vfs_thread,
-                &request->session_handle->session->cred, NULL,
+                &request->session_handle->session->cred,
+                chimera_smb_vfs_compound(request->compound),
                 attr->va_fh,
                 attr->va_fh_len,
                 CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -760,7 +777,8 @@ chimera_smb_set_info_rename_open_dest_parent_callback(
     /* Check if destination exists */
     chimera_vfs_lookup_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         dest_name,
         dest_name_len,
@@ -788,7 +806,8 @@ chimera_smb_set_info_rename_lookup_dest_parent_callback(
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -811,14 +830,16 @@ chimera_smb_set_info_rename_open_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_vfs_internal_status(error_code));
         return;
     }
 
     /* Check if destination exists */
     chimera_vfs_lookup_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred, NULL,
+        &request->session_handle->session->cred,
+        chimera_smb_vfs_compound(request->compound),
         oh,
         dest_name,
         dest_name_len,
@@ -853,7 +874,8 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
         /* Moving to a different directory - lookup the new parent path */
         chimera_vfs_lookup(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             tree->fh,
             tree->fh_len,
             rename_info->new_parent,
@@ -866,7 +888,8 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
         /* Destination is in tree root (no parent path specified) */
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred, NULL,
+            &request->session_handle->session->cred,
+            chimera_smb_vfs_compound(request->compound),
             tree->fh,
             tree->fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

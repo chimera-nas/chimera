@@ -200,9 +200,13 @@ void chimera_smb_set_info(
 
 /* Apply a client FILE_FULL_EA_INFORMATION buffer to an open object's xattrs,
  * one EA at a time (shared by SetInfo and CREATE ExtA).  The caller owns ea_buf
- * for the duration; `done` is invoked with the resulting NTSTATUS. */
+ * for the duration; `done` is invoked with the resulting NTSTATUS.
+ * `smb_compound` is the wire chain the apply runs under (its VFS ops enlist in
+ * the chain's VFS compound via chimera_smb_vfs_compound); the apply always
+ * completes before the owning request does, so the chain ctx outlives it. */
 void chimera_smb_ea_apply(
     struct chimera_server_smb_thread *thread,
+    struct chimera_smb_compound      *smb_compound,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
     const uint8_t                    *ea_buf,
