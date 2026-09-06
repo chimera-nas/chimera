@@ -935,64 +935,6 @@ jobs:
   # run gate-free (CHIMERA_LIMITS_TESTING passes vacuously off Linux) and the
   # genuinely networked suites serialize under the chimera_net lock.
   # ---------------------------------------------------------------------------
-  # Standing diagnostic for the KVM suites.  The kvm shard in the extended
-  # workflow has never produced a passing run on the hosted runners, and each
-  # attempt costs six hours to observe nothing: guests either never boot (no
-  # rootfs where the registered test looks) or boot and hang, wedging ctest
-  # until the job limit.  Neither leaves a usable log.
-  #
-  # This boots one guest, once, with a hard bound, and prints where the images
-  # actually are against where the tests expect them.  Minutes, not hours.
-  #
-  # continue-on-error: it reports, it does not gate.  Nothing depends on the
-  # KVM suites today and a diagnostic that can block a merge is one people
-  # learn to route around.
-  kvm-diagnostic:
-    needs: build-devcontainer
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Report the runner's own KVM support
-        run: |
-          echo "=== runner (outside the container) ==="
-          uname -srm
-          ls -l /dev/kvm 2>&1 || echo "/dev/kvm ABSENT on the runner"
-          grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2-
-          grep -com1 -E '^flags.*\b(vmx|svm)\b' /proc/cpuinfo \
-            && echo "virtualisation extensions present" \
-            || echo "no vmx/svm in /proc/cpuinfo"
-
-      - name: Diagnose KVM inside the dev container
-        run: |
-          docker run --rm --privileged \
-            -v "${{ github.workspace }}:/workspace" \
-            -v /build \
-            -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
-            bash -euxc '
-              # Configure exactly as the test jobs do, so IMAGE_DIR resolves the
-              # same way they resolve it -- the point is to observe that path,
-              # not to pick a better one.
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                    -DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF /workspace
-              # One image, not the whole set: this asks whether the mechanism
-              # works at all.
-              ninja kvm_ubuntu2404_image || echo "IMAGE FETCH FAILED (continuing to report)"
-              bash /workspace/kvm/kvm_diagnose.sh /build ubuntu2404'
-
-
   macos:
     name: Test macOS ${{ matrix.build_type }}
     runs-on: macos-14
