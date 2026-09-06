@@ -415,6 +415,15 @@ jobs:
           build-args: |
             UBUNTU_MIRROR=azure
 
+      # The guest images are an OCI artifact in GHCR, so the KVM build needs
+      # oras to pull them -- and CMake's KVM_TESTING=ON check refuses outright
+      # without it.  Fetched onto the runner and mounted into the container,
+      # the way the test jobs do it.
+      - name: Fetch oras CLI
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: amd64
+
       # Reported before entering the container, so a missing /dev/kvm can be
       # attributed to the runner rather than to how we invoke docker.
       - name: Report the runner's own KVM support
@@ -431,6 +440,7 @@ jobs:
         run: |
           docker run --rm --privileged \
             -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ env.DEV_IMAGE }} \
@@ -442,6 +452,9 @@ jobs:
                     -DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF /workspace
               # One image, not the whole set: this asks whether the mechanism
               # works at all.
+              # Report rather than abort: where the fetch puts the images, and
+              # whether that is where the registered tests look, is the whole
+              # question -- so the diagnostic below must run either way.
               ninja kvm_ubuntu2404_image || echo "IMAGE FETCH FAILED (continuing to report)"
               bash /workspace/kvm/kvm_diagnose.sh /build ubuntu2404'
 
