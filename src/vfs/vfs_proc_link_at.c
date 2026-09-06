@@ -82,8 +82,27 @@ chimera_vfs_link_at_complete(struct chimera_vfs_request *request)
             /* Enlisted: evict instead of publish -- the target dir's attrs,
              * the new name's cached entry, the linked object's attrs (its
              * nlink/ctime change on commit), and any replaced victim's attrs
-             * would all be stale once the compound commits. */
+             * would all be stale once the compound commits.  The FILE_ADDED
+             * emission is deferred to COMPOUND_END, not skipped
+             * (chimera_vfs_notify_defer), keeping the caller's
+             * directory-lease self-exemption for the replay. */
             struct chimera_vfs_attrs inval;
+            uint64_t                 skip_lo = 0, skip_hi = 0;
+
+            if (request->link_at.parent_lease_skip_valid) {
+                memcpy(&skip_lo, request->link_at.parent_lease_skip, 8);
+                memcpy(&skip_hi, request->link_at.parent_lease_skip + 8, 8);
+            }
+            chimera_vfs_notify_defer(request,
+                                     CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                     request->link_at.dir_fh,
+                                     request->link_at.dir_fhlen,
+                                     CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                     request->link_at.name,
+                                     request->link_at.namelen,
+                                     NULL, 0,
+                                     skip_lo, skip_hi,
+                                     request->link_at.parent_lease_skip_valid);
 
             inval.va_req_mask = 0;
             inval.va_set_mask = 0;

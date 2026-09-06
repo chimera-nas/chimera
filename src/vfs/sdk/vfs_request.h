@@ -456,6 +456,7 @@ struct chimera_vfs_stream_entry {
 #define CHIMERA_VFS_WRITE_FILESYNC 2
 
 struct chimera_vfs_notify_gate;
+struct chimera_vfs_deferred_notify;
 
 /* Explicit multi-operation compounds (CHIMERA_VFS_CAP_COMPOUND).
  *
@@ -574,27 +575,46 @@ struct chimera_vfs_compound {
      * replay right.  For the per-thread LOOSE singleton
      * (chimera_vfs_compound_loose) the counters are meaningless -- it is
      * shared by every caller on the thread and never consulted at end. */
-    uint32_t                     enlisted_ops;
-    uint32_t                     ejected_ops;
-    uint32_t                     ejected_mutating_ops;
-    uint32_t                     inflight_ops;
+    uint32_t                            enlisted_ops;
+    uint32_t                            ejected_ops;
+    uint32_t                            ejected_mutating_ops;
+    uint32_t                            inflight_ops;
+
+    /* Deferred change-notify emission (core-owned).  An ENLISTED namespace
+     * mutation must not wake change-notify watchers or break directory
+     * leases at op completion -- its effect is provisional -- so each
+     * suppressed emission is RECORDED here (chimera_vfs_notify_defer,
+     * vfs_internal.h) and replayed in recorded order at COMPOUND_END once
+     * the commit outcome is known (vfs_proc_compound_end.c); ABORT and a
+     * rolled-back commit free the records unemitted.  Pooled nodes owned by
+     * the beginning thread (single-thread-owned, like the counters above).
+     * Bounded per compound: past CHIMERA_VFS_COMPOUND_NOTIFY_MAX
+     * fine-grained records each affected fh degrades to a single coarse
+     * rescan record (chimera_vfs_notify_emit_overflow), and notify_dropped
+     * counts anything beyond even that (logged at end).  Always empty for
+     * an unbound or LOOSE compound (their ops never enlist). */
+    struct chimera_vfs_deferred_notify *notify_events;
+    struct chimera_vfs_deferred_notify *notify_events_tail;
+    uint32_t                            notify_event_count;
+    uint32_t                            notify_overflow_count;
+    uint32_t                            notify_dropped;
 
     /* The owning backend.  NULL = unbound: a compound is BOUND iff module is
      * non-NULL.  An unbound compound binds lazily at the first enlisted op
      * whose module is compound-capable (or ends without ever binding, at
      * zero backend cost). */
-    struct chimera_vfs_module   *module;   /* core-owned */
+    struct chimera_vfs_module          *module; /* core-owned */
     /* The named filesystem the binding FH belongs to, captured at bind so
      * every enlisted op and the end op are routed with the same context
      * (core-owned). */
-    void                        *mount_private;
+    void                               *mount_private;
 
     /* Core-owned linkage: the beginning thread's active-compound registry (a
      * DL list, walked at thread destroy) while the compound is live, its
      * free pool (an LL list) between uses.  The LOOSE singleton is on
      * neither. */
-    struct chimera_vfs_compound *prev;
-    struct chimera_vfs_compound *next;
+    struct chimera_vfs_compound        *prev;
+    struct chimera_vfs_compound        *next;
 };
 
 typedef void (*chimera_vfs_compound_end_callback_t)(

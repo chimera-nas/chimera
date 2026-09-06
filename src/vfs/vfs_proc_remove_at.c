@@ -109,8 +109,47 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
              * drop the entry outright, asserting nothing either way.  The
              * parent dir's attr entry likewise goes stale on commit
              * (mtime/nlink), so evict it too; the removed object's own attr
-             * entries are already evicted unconditionally below. */
+             * entries are already evicted unconditionally below.
+             *
+             * The FILE/DIR_REMOVED emission and the removed object's
+             * DELETE_PENDING wakeup are deferred to COMPOUND_END, not
+             * skipped (chimera_vfs_notify_defer): watchers and
+             * directory-lease holders learn of the remove when it commits,
+             * never of a provisional one. */
             struct chimera_vfs_attrs inval;
+            uint64_t                 skip_lo = 0, skip_hi = 0;
+
+            if (request->remove_at.parent_lease_skip_valid) {
+                memcpy(&skip_lo, request->remove_at.parent_lease_skip, 8);
+                memcpy(&skip_hi, request->remove_at.parent_lease_skip + 8, 8);
+            }
+            chimera_vfs_notify_defer(request,
+                                     CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                     request->remove_at.handle->fh,
+                                     request->remove_at.handle->fh_len,
+                                     action,
+                                     request->remove_at.name,
+                                     request->remove_at.namelen,
+                                     NULL, 0,
+                                     skip_lo, skip_hi,
+                                     request->remove_at.parent_lease_skip_valid);
+
+            if (request->remove_at.child_fh && request->remove_at.child_fh_len > 0) {
+                chimera_vfs_notify_defer(request,
+                                         CHIMERA_VFS_DEFERRED_NOTIFY_DELETE,
+                                         request->remove_at.child_fh,
+                                         request->remove_at.child_fh_len,
+                                         0, NULL, 0, NULL, 0,
+                                         0, 0, 0);
+            } else if (request->remove_at.r_removed_attr.va_set_mask &
+                       CHIMERA_VFS_ATTR_FH) {
+                chimera_vfs_notify_defer(request,
+                                         CHIMERA_VFS_DEFERRED_NOTIFY_DELETE,
+                                         request->remove_at.r_removed_attr.va_fh,
+                                         request->remove_at.r_removed_attr.va_fh_len,
+                                         0, NULL, 0, NULL, 0,
+                                         0, 0, 0);
+            }
 
             inval.va_req_mask = 0;
             inval.va_set_mask = 0;

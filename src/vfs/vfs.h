@@ -75,6 +75,47 @@ struct chimera_vfs_find_result {
     char                            path[CHIMERA_VFS_PATH_MAX];
 };
 
+/* One deferred change-notify emission recorded by an ENLISTED namespace
+ * mutation (see the notify_events list in struct chimera_vfs_compound and
+ * chimera_vfs_notify_defer in vfs_internal.h).  `kind` selects the replay
+ * call at COMPOUND_END:
+ *
+ *   EMIT     -> chimera_vfs_notify_emit_lease(fh, action, name, old_name,
+ *               skip_lo/skip_hi/has_skip).  has_skip == 0 replays exactly
+ *               the plain chimera_vfs_notify_emit (no lease self-exemption).
+ *   DELETE   -> chimera_vfs_notify_emit_delete(fh): the object at fh was
+ *               itself removed (DELETE_PENDING wakeup for watches armed on
+ *               it, plus the late-arm tombstone).
+ *   OVERFLOW -> chimera_vfs_notify_emit_overflow(fh): coarse degradation
+ *               once the compound exceeded its record cap -- every watch on
+ *               fh is marked overflowed (upstream: STATUS_NOTIFY_ENUM_DIR,
+ *               i.e. "rescan") and fh's directory leases are broken. */
+#define CHIMERA_VFS_DEFERRED_NOTIFY_EMIT         1
+#define CHIMERA_VFS_DEFERRED_NOTIFY_DELETE       2
+#define CHIMERA_VFS_DEFERRED_NOTIFY_OVERFLOW     3
+
+/* Per-compound bounds: at most NOTIFY_MAX fine-grained (EMIT/DELETE)
+ * records; past that each affected fh gets one OVERFLOW record, at most
+ * NOTIFY_OVERFLOW_MAX of them (anything beyond even that is counted in
+ * compound->notify_dropped and logged once at end). */
+#define CHIMERA_VFS_COMPOUND_NOTIFY_MAX          64
+#define CHIMERA_VFS_COMPOUND_NOTIFY_OVERFLOW_MAX 8
+
+struct chimera_vfs_deferred_notify {
+    struct chimera_vfs_deferred_notify *next;
+    uint8_t                             kind;         /* CHIMERA_VFS_DEFERRED_NOTIFY_* */
+    uint8_t                             has_skip;     /* EMIT: spare the lease named below */
+    uint16_t                            fh_len;
+    uint16_t                            name_len;
+    uint16_t                            old_name_len;
+    uint32_t                            action;       /* CHIMERA_VFS_NOTIFY_* */
+    uint64_t                            skip_lo;      /* ParentLeaseKey to spare (EMIT) */
+    uint64_t                            skip_hi;
+    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
+    char                                name[CHIMERA_VFS_NAME_MAX];
+    char                                old_name[CHIMERA_VFS_NAME_MAX];
+};
+
 /* mount->attrs.flags bits */
 #define CHIMERA_VFS_MOUNT_ATTR_READONLY (1ULL << 0)
 
@@ -203,6 +244,10 @@ struct chimera_vfs_thread {
     struct chimera_vfs_request          *active_requests;
     uint64_t                             num_active_requests;
     struct chimera_vfs_open_handle      *free_synth_handles;
+    /* Pool for the deferred change-notify records enlisted mutations hang
+     * on their compound (chimera_vfs_notify_defer); recorded and emitted on
+     * this thread only, so the list is unlocked like the pools above. */
+    struct chimera_vfs_deferred_notify  *free_deferred_notify;
 
     /* Explicit-compound machinery (vfs_proc_compound_begin.c / _end.c):
      * the registry of live compounds this thread began (a DL list; any

@@ -355,6 +355,22 @@ chimera_vfs_notify_emit_delete(
     const uint8_t             *fh,
     uint16_t                   fh_len);
 
+/*
+ * The directory at `dir_fh` changed in ways the caller could not enumerate
+ * (a compound recorded more mutations than its deferred-notify cap; see
+ * chimera_vfs_notify_defer).  Break the directory's SMB3 leases and mark
+ * every watch on it overflowed -- upstream that is STATUS_NOTIFY_ENUM_DIR,
+ * the "too many changes, rescan" signal -- rather than delivering an
+ * incomplete event list a client would trust.  Subtree watches on the same
+ * mount are overflowed too (no per-event names exist to resolve relative
+ * paths with), matching the coarse fallbacks emit_body already uses.
+ */
+void
+chimera_vfs_notify_emit_overflow(
+    struct chimera_vfs_notify *notify,
+    const uint8_t             *dir_fh,
+    uint16_t                   dir_fh_len);
+
 /* ----------------------------------------------------------------
  * Synchronous coherence: sync watches and completion gates
  * ----------------------------------------------------------------

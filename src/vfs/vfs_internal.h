@@ -140,6 +140,62 @@ chimera_vfs_find_result_free(
     LL_PREPEND(thread->free_find_results, result);
 } /* chimera_vfs_find_result_free */
 
+static inline struct chimera_vfs_deferred_notify *
+chimera_vfs_deferred_notify_alloc(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_deferred_notify *node;
+
+    if (thread->free_deferred_notify) {
+        node = thread->free_deferred_notify;
+        LL_DELETE(thread->free_deferred_notify, node);
+    } else {
+        node = calloc(1, sizeof(struct chimera_vfs_deferred_notify));
+    }
+
+    return node;
+} /* chimera_vfs_deferred_notify_alloc */
+
+static inline void
+chimera_vfs_deferred_notify_free(
+    struct chimera_vfs_thread          *thread,
+    struct chimera_vfs_deferred_notify *node)
+{
+    LL_PREPEND(thread->free_deferred_notify, node);
+} /* chimera_vfs_deferred_notify_free */
+
+/* vfs_proc_compound_end.c: record one suppressed change-notify emission on
+ * the request's compound for replay at COMPOUND_END.  Called from the
+ * publish-gated notify sites in the vfs_proc_*.c completions in place of the
+ * immediate chimera_vfs_notify_emit* call when the request is enlisted
+ * (chimera_vfs_request_publishes() == 0, so request->compound is non-NULL).
+ * `kind` is CHIMERA_VFS_DEFERRED_NOTIFY_EMIT or _DELETE; for DELETE only
+ * fh/fh_len are meaningful.  Runs on the compound's beginning thread (the
+ * proc completion's thread), like the emission itself. */
+void
+chimera_vfs_notify_defer(
+    struct chimera_vfs_request *request,
+    int                         kind,
+    const uint8_t              *fh,
+    uint16_t                    fh_len,
+    uint32_t                    action,
+    const char                 *name,
+    uint16_t                    name_len,
+    const char                 *old_name,
+    uint16_t                    old_name_len,
+    uint64_t                    skip_lo,
+    uint64_t                    skip_hi,
+    uint8_t                     has_skip);
+
+/* vfs_proc_compound_end.c: replay (when `emit` is non-zero) and free a
+ * compound's deferred change-notify records, in recorded order, returning
+ * the nodes to the thread pool.  `emit` == 0 (ABORT / rolled-back commit /
+ * defensive drains) frees without emitting. */
+void
+chimera_vfs_compound_notify_flush(
+    struct chimera_vfs_thread   *thread,
+    struct chimera_vfs_compound *compound,
+    int                          emit);
+
 /*
  * Resolve the mount that owns `fh` into the two things a request needs from
  * it: the module to route to, and the backend's mount_private for the named

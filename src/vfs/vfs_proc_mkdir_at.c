@@ -61,8 +61,22 @@ chimera_vfs_mkdir_at_complete(struct chimera_vfs_request *request)
              * commit would make stale -- the parent dir's attr entry, any
              * cached (positive or negative) entry for the new name, and any
              * recycled-inode attr entry keyed by the new child's FH.  A
-             * STAT-less insert builds no entry and evicts the slot. */
+             * STAT-less insert builds no entry and evicts the slot.  The
+             * DIR_ADDED emission is not skipped but DEFERRED: recorded on
+             * the compound and replayed at COMPOUND_END if it commits, so
+             * change watchers and directory-lease holders learn of the
+             * mkdir exactly when it becomes observable. */
             struct chimera_vfs_attrs inval;
+
+            chimera_vfs_notify_defer(request,
+                                     CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                     request->mkdir_at.handle->fh,
+                                     request->mkdir_at.handle->fh_len,
+                                     CHIMERA_VFS_NOTIFY_DIR_ADDED,
+                                     request->mkdir_at.name,
+                                     request->mkdir_at.name_len,
+                                     NULL, 0,
+                                     0, 0, 0);
 
             inval.va_req_mask = 0;
             inval.va_set_mask = 0;

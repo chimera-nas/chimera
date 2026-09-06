@@ -79,6 +79,43 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
                                               NULL, 0,
                                               skip_lo, skip_hi, has_skip);
             }
+        } else {
+            /* Enlisted rename: the emission(s) are deferred to COMPOUND_END,
+             * not skipped (chimera_vfs_notify_defer) -- the same shapes as
+             * the immediate path above (one two-name event intra-directory,
+             * one per parent cross-directory), with the caller's
+             * directory-lease self-exemption preserved for the replay. */
+            if (!cross_dir) {
+                chimera_vfs_notify_defer(request,
+                                         CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                         request->fh,
+                                         request->fh_len,
+                                         rn_class,
+                                         request->rename_at.new_name,
+                                         request->rename_at.new_namelen,
+                                         request->rename_at.name,
+                                         request->rename_at.namelen,
+                                         skip_lo, skip_hi, has_skip);
+            } else {
+                chimera_vfs_notify_defer(request,
+                                         CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                         request->fh,
+                                         request->fh_len,
+                                         rn_class,
+                                         NULL, 0,
+                                         request->rename_at.name,
+                                         request->rename_at.namelen,
+                                         skip_lo, skip_hi, has_skip);
+                chimera_vfs_notify_defer(request,
+                                         CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                         request->rename_at.new_fh,
+                                         request->rename_at.new_fhlen,
+                                         rn_class,
+                                         request->rename_at.new_name,
+                                         request->rename_at.new_namelen,
+                                         NULL, 0,
+                                         skip_lo, skip_hi, has_skip);
+            }
         }
 
         /* Remove cache entries for both old and new paths.

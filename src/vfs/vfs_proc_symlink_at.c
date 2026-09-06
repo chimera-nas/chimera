@@ -60,8 +60,20 @@ chimera_vfs_symlink_at_complete(struct chimera_vfs_request *request)
         } else {
             /* Enlisted: evict instead of publish -- parent dir attrs, the
              * new name's cached entry, and any recycled-inode attr entry on
-             * the link's FH would all be stale once the compound commits. */
+             * the link's FH would all be stale once the compound commits.
+             * The FILE_ADDED emission is deferred to COMPOUND_END, not
+             * skipped (chimera_vfs_notify_defer). */
             struct chimera_vfs_attrs inval;
+
+            chimera_vfs_notify_defer(request,
+                                     CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                     request->fh,
+                                     request->fh_len,
+                                     CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                     request->symlink_at.name,
+                                     request->symlink_at.namelen,
+                                     NULL, 0,
+                                     0, 0, 0);
 
             inval.va_req_mask = 0;
             inval.va_set_mask = 0;

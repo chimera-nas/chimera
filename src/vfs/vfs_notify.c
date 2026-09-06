@@ -1395,6 +1395,87 @@ chimera_vfs_notify_emit_delete(
     pthread_mutex_unlock(&bucket->lock);
 } /* chimera_vfs_notify_emit_delete */
 
+SYMBOL_EXPORT void
+chimera_vfs_notify_emit_overflow(
+    struct chimera_vfs_notify *notify,
+    const uint8_t             *dir_fh,
+    uint16_t                   dir_fh_len)
+{
+    struct chimera_vfs_notify_bucket      *bucket;
+    struct chimera_vfs_notify_watch       *watch;
+    struct chimera_vfs_notify_mount_entry *me;
+    uint64_t                               fh_hash;
+    int                                    bi;
+
+    if (!notify) {
+        return;
+    }
+
+    /* The directory's contents changed in unenumerated ways: break every
+     * SMB3 directory lease on it (no self-exemption -- the enumeration was
+     * lost, so no client's cached view of it can be trusted).  As in the
+     * emit wrappers, the break runs before any notify registry lock. */
+    chimera_vfs_notify_dir_lease_break(notify, dir_fh, dir_fh_len, 0, 0, false);
+
+    /* Exact watches: mark each one overflowed so its next drain reports
+     * the rescan signal.  Filter masks do not apply -- overflow is
+     * class-agnostic, exactly as chimera_vfs_notify_mark_overflow. */
+    fh_hash = chimera_vfs_hash(dir_fh, dir_fh_len);
+    bi      = chimera_vfs_notify_bucket_index(fh_hash);
+    bucket  = &notify->buckets[bi];
+
+    pthread_mutex_lock(&bucket->lock);
+
+    for (watch = bucket->watches; watch; watch = watch->next) {
+        if (watch->dir_fh_len == dir_fh_len &&
+            memcmp(watch->dir_fh, dir_fh, dir_fh_len) == 0) {
+
+            chimera_vfs_notify_watch_overflow(watch);
+
+            if (watch->callback) {
+                watch->callback(watch, watch->private_data);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&bucket->lock);
+
+    /* Subtree watches: with no per-event names there is no relative path to
+     * resolve, so overflow every subtree watch on the mount -- the same
+     * coarse fallback the !has_rpl and resolver-exhausted paths in
+     * emit_body use.  When the affected directory IS the mount root no
+     * subtree watch can be a proper ancestor of it (they live at or below
+     * the root; a root-keyed watch was handled by the exact pass above), so
+     * skip the pass entirely, mirroring emit_body's at-root short-circuit. */
+    pthread_mutex_lock(&notify->mount_entries_lock);
+
+    HASH_FIND(hh, notify->mount_entries,
+              chimera_vfs_fh_mount_id(dir_fh),
+              CHIMERA_VFS_MOUNT_ID_SIZE, me);
+
+    if (me &&
+        !(me->root_fh_len > 0 &&
+          dir_fh_len == me->root_fh_len &&
+          memcmp(dir_fh, me->root_fh, dir_fh_len) == 0)) {
+        for (watch = me->subtree_watches; watch; watch = watch->subtree_next) {
+            /* Keyed on the affected directory itself: covered by the exact
+             * pass above. */
+            if (watch->dir_fh_len == dir_fh_len &&
+                memcmp(watch->dir_fh, dir_fh, dir_fh_len) == 0) {
+                continue;
+            }
+
+            chimera_vfs_notify_watch_overflow(watch);
+
+            if (watch->callback) {
+                watch->callback(watch, watch->private_data);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&notify->mount_entries_lock);
+} /* chimera_vfs_notify_emit_overflow */
+
 /* ----------------------------------------------------------------
  * Synchronous coherence: sync watches and completion gates
  * ----------------------------------------------------------------

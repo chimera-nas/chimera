@@ -1276,13 +1276,14 @@ chimera_vfs_thread_init(
 SYMBOL_EXPORT void
 chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 {
-    struct chimera_vfs_module      *module;
-    struct chimera_vfs_request     *request;
-    struct chimera_vfs_open_handle *handle;
-    struct chimera_vfs_find_result *find_result;
-    struct chimera_vfs_compound    *compound;
-    int                             leaked_compounds = 0;
-    int                             i;
+    struct chimera_vfs_module          *module;
+    struct chimera_vfs_request         *request;
+    struct chimera_vfs_open_handle     *handle;
+    struct chimera_vfs_find_result     *find_result;
+    struct chimera_vfs_compound        *compound;
+    struct chimera_vfs_deferred_notify *deferred_notify;
+    int                                 leaked_compounds = 0;
+    int                                 i;
 
     evpl_remove_doorbell(thread->evpl, &thread->doorbell);
 
@@ -1300,6 +1301,14 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
             compound->enlisted_ops,
             compound->ejected_ops,
             compound->inflight_ops);
+        /* Any deferred change-notify records leak with their compound:
+         * free them (unemitted -- the compound never reached a commit
+         * outcome) so the blob's reclamation is complete. */
+        while (compound->notify_events) {
+            deferred_notify         = compound->notify_events;
+            compound->notify_events = deferred_notify->next;
+            free(deferred_notify);
+        }
         DL_DELETE(thread->active_compounds, compound);
         free(compound);
         leaked_compounds++;
@@ -1347,6 +1356,12 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         compound = thread->free_compounds;
         LL_DELETE(thread->free_compounds, compound);
         free(compound);
+    }
+
+    while (thread->free_deferred_notify) {
+        deferred_notify = thread->free_deferred_notify;
+        LL_DELETE(thread->free_deferred_notify, deferred_notify);
+        free(deferred_notify);
     }
 
     free(thread->loose_compound);

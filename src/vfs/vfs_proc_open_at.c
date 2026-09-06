@@ -89,11 +89,27 @@ chimera_vfs_open_at_hdl_callback(
             /* Enlisted open that MUTATED (created the entry, or truncated an
              * existing file): evict instead of publish, or the pre-compound
              * entries are served stale once the compound commits.  A plain
-             * enlisted open mutates nothing and needs no eviction. */
+             * enlisted open mutates nothing and needs no eviction.  The
+             * FILE_ADDED emission for a create is deferred to COMPOUND_END,
+             * not skipped (chimera_vfs_notify_defer), under the same
+             * disposition tests as the immediate emit above. */
             struct chimera_vfs_attrs inval;
 
             inval.va_req_mask = 0;
             inval.va_set_mask = 0;
+
+            if (request->open_at.r_created &&
+                !(request->open_at.flags & CHIMERA_VFS_OPEN_NO_NOTIFY)) {
+                chimera_vfs_notify_defer(request,
+                                         CHIMERA_VFS_DEFERRED_NOTIFY_EMIT,
+                                         request->open_at.handle->fh,
+                                         request->open_at.handle->fh_len,
+                                         CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                         request->open_at.name,
+                                         request->open_at.namelen,
+                                         NULL, 0,
+                                         0, 0, 0);
+            }
 
             if (request->open_at.r_created) {
                 chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
