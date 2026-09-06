@@ -456,7 +456,7 @@ nfs3_drc_capture_reply(
     const struct evpl_iovec *iov,
     int                      niov,
     int                      total_length,
-    uint32_t                 rpc_offset,
+    uint32_t                 body_offset,
     void                    *private_data)
 {
     struct nfs3_drc_capture_ctx      *ctx    = private_data;
@@ -468,19 +468,19 @@ nfs3_drc_capture_reply(
     uint64_t                          ts;
     int                               i, nev;
 
-    if (total_length <= (int) rpc_offset ||
+    if (total_length <= (int) body_offset ||
         (uint32_t) total_length > NFS3_DRC_MAX_REPLY_SIZE) {
         return;
     }
 
-    rpc_len = (uint32_t) total_length - rpc_offset;
+    rpc_len = (uint32_t) total_length - body_offset;
 
     buf = malloc(rpc_len);
     if (!buf) {
         return;  /* OOM: skip caching this reply (degrade to a cache miss) */
     }
 
-    if (nfs_drc_copy_rpc_reply(iov, niov, rpc_offset, buf, rpc_len) != rpc_len) {
+    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, buf, rpc_len) != rpc_len) {
         free(buf);
         return;
     }
