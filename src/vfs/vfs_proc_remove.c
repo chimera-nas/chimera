@@ -102,8 +102,7 @@ chimera_vfs_remove_child_lookup_complete(
          * at the entry -- so a caller who may not write the directory gets
          * EACCES, not EISDIR/ENOTDIR.  Checking the type first told a
          * caller what was in a directory they had no right to read.  The
-         * authoritative gate still runs in remove_at (with the sticky rule,
-         * which POSIX orders after the type check); this only settles which
+         * authoritative gate still runs in remove_at; this only settles which
          * error the caller sees.  Found by the quint POSIX suite once the
          * model stopped carrying both orders as a policy knob. */
         if (dir_attr && (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
@@ -118,6 +117,33 @@ chimera_vfs_remove_child_lookup_complete(
             chimera_vfs_request_free(thread, request);
             callback(CHIMERA_VFS_EACCES, priv);
             return;
+        }
+
+        /* The sticky rule is judged next, still ahead of the type assertion:
+         * may_delete() reaches check_sticky() before either of its d_is_dir()
+         * arms, so removing a file you do not own from a sticky directory is
+         * EPERM whether or not the caller's rmdir/unlink matches its type.
+         * POSIX orders these no more than it orders the permission check
+         * above.  Duplicated from chimera_vfs_delete_allowed() rather than
+         * called through it because that helper folds the sticky refusal in
+         * with the permission one, and the two answer different errnos. */
+        if (dir_attr && (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            (dir_attr->va_mode & S_ISVTX) && request->cred->uid != 0) {
+            uint64_t child_uid = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?
+                attr->va_uid : (uint64_t) -1;
+            uint64_t parent_uid = (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?
+                dir_attr->va_uid : (uint64_t) -1;
+
+            if ((uint64_t) request->cred->uid != child_uid &&
+                (uint64_t) request->cred->uid != parent_uid) {
+                chimera_vfs_remove_callback_t callback = request->remove.callback;
+                void                         *priv     = request->remove.private_data;
+
+                chimera_vfs_release(thread, request->remove.parent_handle);
+                chimera_vfs_request_free(thread, request);
+                callback(CHIMERA_VFS_EPERM, priv);
+                return;
+            }
         }
 
         /* Enforce the caller's type assertion (rmdir vs unlink) here, once, for
