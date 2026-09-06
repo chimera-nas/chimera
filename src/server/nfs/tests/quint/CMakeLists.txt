@@ -500,6 +500,23 @@ foreach(rback memfs diskfs cairn linux io_uring)
     if(rback STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING)
         continue()
     endif()
+    # And under krb5p on memfs.  This is the suite whose whole subject is
+    # replaying a cached reply, so it is the one that says a cached reply is
+    # still correct when the service reframes what carries it.
+    if(rback STREQUAL "memfs")
+        add_test(NAME chimera/server/nfs/mbtdrc/batch_memfs_krb5p
+            COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
+                    --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
+                    --exclude-prefix nfsdrcNoV3
+                    --backend memfs --sec krb5p)
+        set_tests_properties(chimera/server/nfs/mbtdrc/batch_memfs_krb5p
+            PROPERTIES
+            ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_memfs_krb5p"
+            LABELS "quint;nfsdrc_mbt;memfs;gss"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 600)
+    endif()
+
     add_test(NAME chimera/server/nfs/mbtdrc/batch_${rback}
         COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
                 --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
@@ -550,6 +567,21 @@ endforeach()
 # SKIP_RETURN_CODE 77 still applies to NFS4: a trace whose capability profile
 # does not match the live server exits 77 individually; the batch reports SKIP
 # only if every trace skips, otherwise the runnable traces gate it.
+# The NFSv4 corpus under krb5p.  It names no per-operation credential, so the
+# whole corpus runs -- and it is the one suite that retransmits enough to work
+# the session reply cache, which is where a cached reply and a service that
+# reframes the payload meet.  That combination was broken until the cache was
+# taught to keep the results rather than the wire message; this is the cell
+# that would have caught it.
+add_test(NAME chimera/server/nfs/mbt4/batch_memfs_krb5p
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+            --sec krb5p)
+set_tests_properties(chimera/server/nfs/mbt4/batch_memfs_krb5p PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_memfs_krb5p"
+    LABELS "quint;nfs4_mbt;memfs;gss"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
+
 add_test(NAME chimera/server/nfs/mbt4/batch_memfs
     COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4)
 set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES

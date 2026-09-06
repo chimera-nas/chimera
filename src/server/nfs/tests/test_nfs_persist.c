@@ -27,6 +27,7 @@
 #include "nfs3_drc.h"
 #include "nfs4_v40_drc.h"
 #include "nfs_drc_reply.h"
+#include "evpl/evpl.h"
 #include "nfs4_state.h"
 #include "nfs_kv_keys.h"
 
@@ -712,12 +713,11 @@ test_nfs4_v40_compound_cacheable(void)
 } /* test_nfs4_v40_compound_cacheable */
 
 /* Build a minimal well-formed RPC reply: xid, REPLY, MSG_ACCEPTED, an empty
- * verifier, SUCCESS, then `body`.
- *
- * No record marker: the capture hooks strip the transport framing before
- * storing (see nfs_drc_copy_rpc_reply), because it differs per transport and is
- * rebuilt for the retransmit anyway.  nfs_drc_reply_body_offset therefore
- * parses from the RPC message. */
+* verifier, SUCCESS, then `body`.
+*
+* Only the cache-insert tests below use this now: what a capture stores is the
+* results alone, so a reply header no longer appears in a cached entry.  It is
+* kept because those tests need some bytes of a plausible size to insert. */
 static uint32_t
 v40_make_reply(
     uint8_t   *out,
@@ -833,46 +833,56 @@ test_nfs4_v40_conn_cache(void)
     printf("ok: nfs4_v40_conn_cache\n");
 } /* test_nfs4_v40_conn_cache */
 
-/* The capture hook gates every insert on nfs_drc_reply_body_offset, so only a
- * MSG_ACCEPTED/SUCCESS reply is ever cached.  That is what keeps a COMPOUND
- * which fails XDR decode out of the cache: the generated dispatcher answers
- * GARBAGE_ARGS without reaching chimera_nfs4_compound, so nothing disarms the
- * capture, and an unauthenticated peer could otherwise evict real entries. */
+/* What a cache stores is what the capture callback was shown, minus the
+ * reserved headroom in front of it -- nothing else.  The filter that used to
+ * live here (only a MSG_ACCEPTED/SUCCESS reply is ever cached) is now rpc2's:
+ * it runs the capture for no other kind, so there is no longer a chimera-side
+ * gate to test.  What is left worth pinning is the copy itself, and in
+ * particular that it works when the results are scattered -- the headroom and
+ * the answer can land in different iovecs, and an off-by-one there would cache
+ * a reply that decodes to nothing.
+ */
 static void
-test_nfs4_v40_reply_filter(void)
+test_nfs_drc_copy_results(void)
 {
-    uint8_t  buf[64];
-    uint32_t len,offset;
+    struct evpl_iovec iov[3];
+    uint8_t           a[16],b[16],c[16];
+    uint8_t           out[64];
+    uint32_t          n;
 
-    /* SUCCESS: accepted, and the body starts right after the header. */
-    len = v40_make_reply(buf,sizeof(buf),7,"CREATE4res NFS4_OK",0);
-    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == true);
-    CHECK(offset == 24);
+    memset(a,0xAA,sizeof(a));     /* headroom */
+    memcpy(b,"0123456789abcdef",16);
+    memcpy(c,"ghijklmnopqrstuv",16);
 
-    /* GARBAGE_ARGS (accept_stat 4) is MSG_ACCEPTED but not SUCCESS. */
-    len = v40_make_reply(buf,sizeof(buf),7,"",4);
-    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+    /* One iovec: headroom then results. */
+    iov[0].data   = a;
+    iov[0].length = 8;
+    iov[1].data   = b;
+    iov[1].length = 16;
 
-    /* PROG_UNAVAIL (1) likewise. */
-    len = v40_make_reply(buf,sizeof(buf),7,"",1);
-    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+    n = nfs_drc_copy_rpc_reply(iov,2,8,out,16);
+    CHECK(n == 16);
+    CHECK(memcmp(out,b,16) == 0);
 
-    /* MSG_DENIED: reply_stat at [8..11] is non-zero. */
-    len     = v40_make_reply(buf,sizeof(buf),7,"body",0);
-    buf[11] = 1;
-    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+    /* The offset landing inside the second iovec, with a third to follow: the
+     * copy has to resume mid-buffer and then keep going. */
+    iov[0].data   = a;
+    iov[0].length = 4;
+    iov[1].data   = b;
+    iov[1].length = 16;
+    iov[2].data   = c;
+    iov[2].length = 16;
 
-    /* A CALL, not a REPLY. */
-    len    = v40_make_reply(buf,sizeof(buf),7,"body",0);
-    buf[7] = 0;
-    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+    n = nfs_drc_copy_rpc_reply(iov,3,10,out,26);
+    CHECK(n == 26);
+    CHECK(memcmp(out,b + 6,10) == 0);
+    CHECK(memcmp(out + 10,c,16) == 0);
 
-    /* Truncated below a bare header. */
-    len = v40_make_reply(buf,sizeof(buf),7,"",0);
-    CHECK(nfs_drc_reply_body_offset(buf,len - 8,&offset) == false);
+    /* A destination too small is refused rather than truncated. */
+    CHECK(nfs_drc_copy_rpc_reply(iov,3,10,out,25) == 0);
 
-    printf("ok: nfs4_v40_reply_filter\n");
-} /* test_nfs4_v40_reply_filter */
+    printf("ok: nfs_drc_copy_results\n");
+} /* test_nfs_drc_copy_results */
 
 /* ------------------------------------------------------------------ *
 *  Multi-node namespacing (N instances over one shared backing store) *
@@ -977,7 +987,7 @@ main(void)
     test_nfs4_v40_peek_minorversion();
     test_nfs4_v40_compound_cacheable();
     test_nfs4_v40_conn_cache();
-    test_nfs4_v40_reply_filter();
+    test_nfs_drc_copy_results();
 
     test_node_scoped_identifiers();
     test_two_node_key_isolation();

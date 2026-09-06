@@ -358,44 +358,40 @@ nfs4_v40_drc_capture_reply(
     const struct evpl_iovec *iov,
     int                      niov,
     int                      total_length,
-    uint32_t                 rpc_offset,
+    uint32_t                 body_offset,
     void                    *private_data)
 {
     struct nfs4_v40_drc_capture_ctx *ctx = private_data;
     uint8_t                         *buf;
     uint32_t                         rpc_len;
-    uint32_t                         body_offset;
 
-    if (total_length <= (int) rpc_offset ||
+    if (total_length <= (int) body_offset ||
         (uint32_t) total_length > NFS4_V40_DRC_MAX_REPLY_SIZE) {
         return;
     }
 
     /* Store the RPC reply without its transport framing; see
      * nfs_drc_copy_rpc_reply. */
-    rpc_len = (uint32_t) total_length - rpc_offset;
+    rpc_len = (uint32_t) total_length - body_offset;
 
     buf = malloc(rpc_len);
     if (!buf) {
         return;  /* OOM: skip caching this reply (degrade to a cache miss) */
     }
 
-    if (nfs_drc_copy_rpc_reply(iov, niov, rpc_offset, buf, rpc_len) != rpc_len) {
+    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, buf, rpc_len) != rpc_len) {
         free(buf);
         return;
     }
 
-    /* Only a MSG_ACCEPTED/SUCCESS reply can ever be replayed --
-     * nfs_drc_send_cached_reply rejects anything else -- so never spend a slot
-     * on one.  This is also what keeps a COMPOUND that fails XDR decode out of
-     * the cache: the generated dispatcher answers GARBAGE_ARGS without ever
-     * reaching chimera_nfs4_compound, so nothing disarms the capture, and an
-     * unauthenticated peer could otherwise evict every real entry with a stream
-     * of malformed requests. */
-    if (nfs_drc_reply_body_offset(buf, rpc_len, &body_offset)) {
-        nfs4_v40_drc_cache_insert(ctx->drc, ctx->conn, ctx->xid, ctx->cksum,
-                                  buf, rpc_len);
-    }
+    /* rpc2 runs the capture only for a MSG_ACCEPTED/SUCCESS reply, so a slot is
+     * never spent on one that carries no results.  That is also what keeps a
+     * COMPOUND that fails XDR decode out of the cache: the generated dispatcher
+     * answers GARBAGE_ARGS without ever reaching chimera_nfs4_compound, so
+     * nothing disarms the capture, and an unauthenticated peer could otherwise
+     * evict every real entry with a stream of malformed requests. */
+    nfs4_v40_drc_cache_insert(ctx->drc, ctx->conn, ctx->xid, ctx->cksum,
+                              buf, rpc_len);
 
     free(buf);
 } /* nfs4_v40_drc_capture_reply */
