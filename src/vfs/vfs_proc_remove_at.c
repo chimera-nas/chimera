@@ -10,6 +10,7 @@
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
+#include "vfs/vfs_open_cache.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
@@ -124,6 +125,38 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
                                           request->remove_at.child_fh,
                                           request->remove_at.child_fh_len,
                                           &inval);
+        }
+
+        /* A path-only backend's fh is a reused interned-path id: after this
+         * remove, a create at the same name reuses that id, so a cached open
+         * handle (holding the now-dead server file id) would be handed back for
+         * the new object and every op through it fails.  Evict the removed
+         * object's handle from both open caches so the next open re-resolves.
+         * Handle-based backends have stable per-object fhs and are unaffected;
+         * an in-use handle is detached, so an unlinked-but-open file keeps
+         * working for its current holders (POSIX). */
+        if (chimera_vfs_module_is_path_only(request->module)) {
+            const void *rfh    = NULL;
+            int         rfhlen = 0;
+
+            if (request->remove_at.child_fh &&
+                request->remove_at.child_fh_len > 0) {
+                rfh    = request->remove_at.child_fh;
+                rfhlen = request->remove_at.child_fh_len;
+            } else if (request->remove_at.r_removed_attr.va_set_mask &
+                       CHIMERA_VFS_ATTR_FH) {
+                rfh    = request->remove_at.r_removed_attr.va_fh;
+                rfhlen = request->remove_at.r_removed_attr.va_fh_len;
+            }
+
+            if (rfh) {
+                chimera_vfs_open_cache_evict(thread,
+                                             thread->vfs->vfs_open_path_cache,
+                                             rfh, rfhlen);
+                chimera_vfs_open_cache_evict(thread,
+                                             thread->vfs->vfs_open_file_cache,
+                                             rfh, rfhlen);
+            }
         }
     }
 

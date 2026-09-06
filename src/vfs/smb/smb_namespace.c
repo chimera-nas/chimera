@@ -9,7 +9,35 @@
 
 #include "smb_internal.h"
 #include "vfs/sdk/vfs_attrs.h"
+#include "vfs/vfs_open_cache.h"
 #include "evpl/evpl.h"
+
+/* A namespace op retargets a path-id: after a rename the source resolves to
+ * nothing and an overwritten destination is gone; after a create at a name
+ * whose prior object was removed-and-forgotten the id maps to a new object.
+ * Either way a cached open handle keyed by that path-id holds a dead server
+ * file id, so the next open of the path would fail.  Evict it (both follow
+ * variants, both open caches) so the next open re-resolves.  The path id is the
+ * SMB proxy's, so this lives here rather than in the backend-agnostic core. */
+void
+smb_evict_pathid(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *path,
+    int                             pathlen)
+{
+    struct chimera_vfs *vfs = request->thread->vfs;
+    uint64_t            id  = chimera_smb_path_intern(conn->server, path, pathlen);
+    uint8_t             fh[CHIMERA_VFS_FH_SIZE];
+    int                 nf;
+
+    for (nf = 0; nf <= 1; nf++) {
+        int len = chimera_smb_encode_open_fh(request->fh, id, nf, fh);
+
+        chimera_vfs_open_cache_evict(request->thread, vfs->vfs_open_path_cache, fh, len);
+        chimera_vfs_open_cache_evict(request->thread, vfs->vfs_open_file_cache, fh, len);
+    }
+} /* smb_evict_pathid */
 
 /*
  * SMB2 namespace operations for the path-only SMB client: rename, symlink, and
@@ -78,6 +106,13 @@ chimera_smb_rename_set_info_reply(
     (void) body_len;
 
     request->status = chimera_smb_status_to_errno(status);
+
+    if (request->status == CHIMERA_VFS_OK) {
+        smb_evict_pathid(conn, request, request->rename_at.name,
+                         request->rename_at.namelen);
+        smb_evict_pathid(conn, request, request->rename_at.new_name,
+                         request->rename_at.new_namelen);
+    }
 
     /* Always CLOSE the transient source open, even if the rename failed. */
     smb_send_close(conn, request, &state->file_id, chimera_smb_rename_close_reply);
