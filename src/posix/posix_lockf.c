@@ -9,11 +9,21 @@
 #include "posix.h"
 #include "posix_internal.h"
 
-/* lockf() takes exclusive locks only, so POSIX requires the descriptor be
- * open for writing ("the file shall be opened with write-only permission or
- * with read/write permission") and names EBADF for it.  fcntl() cannot make
- * this check on our behalf: F_ULOCK reaches it as F_UNLCK and F_TEST as
- * F_GETLK, and neither of those is access-constrained there. */
+/* lockf() takes exclusive locks, so a descriptor that cannot be written
+ * cannot take one -- but only for the two commands that DO take one.  XSH
+ * lockf's EBADF condition is "The fildes argument is not a valid open file
+ * descriptor; or function is F_LOCK or F_TLOCK and fildes is not a valid
+ * file descriptor open for writing": F_ULOCK and F_TEST are deliberately
+ * absent from that list, and Linux (where lockf is a glibc wrapper over
+ * fcntl) accepts both on a read-only descriptor.  fcntl() cannot make the
+ * check on our behalf, since F_ULOCK reaches it as F_UNLCK and F_TEST as
+ * F_GETLK and neither is access-constrained there. */
+static int
+chimera_posix_lockf_takes_lock(int cmd)
+{
+    return cmd == F_LOCK || cmd == F_TLOCK;
+} /* chimera_posix_lockf_takes_lock */
+
 static int
 chimera_posix_lockf_writable(int fd)
 {
@@ -45,18 +55,9 @@ chimera_posix_lockf(
     int                            fcntl_cmd;
     int                            rc;
 
-    /* lockf(3): "The fildes argument is an open file descriptor ... open for
-     * writing"; every command -- F_ULOCK and F_TEST included -- fails EBADF
-     * on a descriptor without write access.  fcntl below cannot enforce this
-     * (its rules differ: read locks want readability, F_GETLK/F_UNLCK are
-     * ungated), so gate here. */
+    /* The descriptor must be open at all, whatever the command. */
     entry = chimera_posix_fd_acquire(posix, fd, 0);
     if (!entry) {
-        errno = EBADF;
-        return -1;
-    }
-    if (!chimera_posix_fd_may_write(entry)) {
-        chimera_posix_fd_release(entry, 0);
         errno = EBADF;
         return -1;
     }
@@ -88,7 +89,9 @@ chimera_posix_lockf(
             return -1;
     } /* switch */
 
-    if (!chimera_posix_lockf_writable(fd)) {
+    /* ... and open for WRITING only when the command takes a lock. */
+    if (chimera_posix_lockf_takes_lock(cmd) &&
+        !chimera_posix_lockf_writable(fd)) {
         errno = EBADF;
         return -1;
     }

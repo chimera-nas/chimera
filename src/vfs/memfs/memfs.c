@@ -2887,9 +2887,17 @@ memfs_mkdir_at(
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
 
-    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    /* POSIX: a set-group-ID parent directory forces the new node's group,
+     * and a new SUBDIRECTORY also inherits the bit itself, so the property
+     * propagates down a tree instead of stopping at the first level.  XSH
+     * mkdir leaves the bit to the implementation, but Linux and the BSDs
+     * both propagate it (inode_init_owner: "if (S_ISDIR(mode)) mode |=
+     * S_ISGID"), and pjdfstest is written around that behaviour.  Inheriting
+     * the group without the bit was a half-measure: it gave the first level
+     * the right group and every level below it the creator's. */
     if (parent_inode->mode & S_ISGID) {
-        inode->gid = parent_inode->gid;
+        inode->gid   = parent_inode->gid;
+        inode->mode |= S_ISGID;
     }
 
     /* Inherit the parent's inheritable ACEs (or seed a Windows default DACL for

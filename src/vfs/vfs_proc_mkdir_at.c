@@ -233,6 +233,19 @@ chimera_vfs_mkdir_at(
         return;
     }
 
+    /* mkdir cannot set the set-user-ID bit.  XSH mkdir initializes "the file
+     * permission bits" from mode and gives S_ISUID no meaning on a directory,
+     * and the implementations mask it off before the filesystem is reached:
+     * Linux in vfs_mkdir() (mode &= S_IRWXUGO|S_ISVTX) and FreeBSD in
+     * ufs_mkdir() (va_mode & 0777).  Doing it here rather than in each backend
+     * keeps memfs, diskfs and cairn from each having to remember.
+     *
+     * S_ISGID is deliberately left alone: it is how a set-group-ID parent
+     * propagates the bit to a new subdirectory, which the backends apply. */
+    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        attr->va_mode &= ~S_ISUID;
+    }
+
     if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;

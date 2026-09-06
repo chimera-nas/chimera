@@ -95,6 +95,57 @@ chimera_vfs_remove_child_lookup_complete(
         memcpy(request->remove.child_fh, attr->va_fh, attr->va_fh_len);
         request->remove.child_fh_len = attr->va_fh_len;
 
+        /* Permission on the PARENT is judged before what the child is.
+         * POSIX lists both conditions for unlink and rmdir and orders
+         * neither, but Linux's may_delete() runs
+         * inode_permission(MAY_WRITE) on the directory and only then looks
+         * at the entry -- so a caller who may not write the directory gets
+         * EACCES, not EISDIR/ENOTDIR.  Checking the type first told a
+         * caller what was in a directory they had no right to read.  The
+         * authoritative gate still runs in remove_at; this only settles which
+         * error the caller sees.  Found by the quint POSIX suite once the
+         * model stopped carrying both orders as a policy knob. */
+        if (dir_attr && (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            !chimera_vfs_access_allowed(dir_attr, request->cred,
+                                        CHIMERA_ACE_DELETE_CHILD) &&
+            !chimera_vfs_access_allowed(attr, request->cred,
+                                        CHIMERA_ACE_DELETE)) {
+            chimera_vfs_remove_callback_t callback = request->remove.callback;
+            void                         *priv     = request->remove.private_data;
+
+            chimera_vfs_release(thread, request->remove.parent_handle);
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_EACCES, priv);
+            return;
+        }
+
+        /* The sticky rule is judged next, still ahead of the type assertion:
+         * may_delete() reaches check_sticky() before either of its d_is_dir()
+         * arms, so removing a file you do not own from a sticky directory is
+         * EPERM whether or not the caller's rmdir/unlink matches its type.
+         * POSIX orders these no more than it orders the permission check
+         * above.  Duplicated from chimera_vfs_delete_allowed() rather than
+         * called through it because that helper folds the sticky refusal in
+         * with the permission one, and the two answer different errnos. */
+        if (dir_attr && (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            (dir_attr->va_mode & S_ISVTX) && request->cred->uid != 0) {
+            uint64_t child_uid = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?
+                attr->va_uid : (uint64_t) -1;
+            uint64_t parent_uid = (dir_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?
+                dir_attr->va_uid : (uint64_t) -1;
+
+            if ((uint64_t) request->cred->uid != child_uid &&
+                (uint64_t) request->cred->uid != parent_uid) {
+                chimera_vfs_remove_callback_t callback = request->remove.callback;
+                void                         *priv     = request->remove.private_data;
+
+                chimera_vfs_release(thread, request->remove.parent_handle);
+                chimera_vfs_request_free(thread, request);
+                callback(CHIMERA_VFS_EPERM, priv);
+                return;
+            }
+        }
+
         /* Enforce the caller's type assertion (rmdir vs unlink) here, once, for
          * every backend.  Engine backends re-check it themselves, but the NFS
          * proxy backends cannot: NFSv4 REMOVE is type-agnostic on the wire, and
@@ -192,8 +243,12 @@ chimera_vfs_remove_parent_open_complete(
         oh,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,
-        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
-        0,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID,
+        /* The parent's owner and mode, so the type assertion below can be
+         * ordered behind the permission check the way every implementation
+         * orders it.  Free: this lookup already happens. */
+        CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID,
         chimera_vfs_remove_child_lookup_complete,
         request);
 } /* chimera_vfs_remove_parent_open_complete */

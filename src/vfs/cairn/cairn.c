@@ -3025,6 +3025,14 @@ cairn_mkdir_at(
 
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
+    /* ...and a new SUBDIRECTORY inherits the set-group-ID bit itself, so the
+     * property propagates down a tree instead of stopping at the first
+     * level.  After apply_attrs, which sets the requested mode.  Matches
+     * memfs/diskfs and Linux (inode_init_owner). */
+    if (parent_inode->mode & S_ISGID) {
+        inode.mode |= S_ISGID;
+    }
+
     cairn_inherit_acl(thread, &inode, parent_inode->inum,
                       new_acl_mkdir,
                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
