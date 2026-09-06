@@ -112,12 +112,17 @@ chimera_vfs_compound_begin(
 
     compound = chimera_vfs_compound_alloc(thread);
 
-    compound->ts    = ts;
-    compound->mode  = mode;
-    compound->flags = flags;
+    compound->ts          = ts;
+    compound->mode        = mode;
+    compound->flags       = flags;
+    compound->begin_ticks = chimera_vfs_now_ticks();
     /* module stays NULL: UNBOUND.  An unbound compound binds lazily in
      * chimera_vfs_dispatch at the first enlisted op on a compound-capable
      * mount, or ends without ever binding at zero backend cost. */
+
+    if (thread->metrics.compound_begin) {
+        prometheus_counter_increment(thread->metrics.compound_begin);
+    }
 
     /* Every live compound (bound or not) is registered so thread destroy can
      * flag a consumer that leaked one; end removes it. */

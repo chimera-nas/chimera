@@ -282,6 +282,20 @@ chimera_vfs_compound_end(
         return;
     }
 
+    /* Lifecycle observability for every real begun compound (bound and
+     * unbound alike; the LOOSE singleton returned above never reaches here).
+     * end_flag matches enum chimera_vfs_compound_end (ABORT/COMMIT/
+     * COMMIT_DURABLE = 0/1/2), so it indexes the disposition series directly.
+     * Age is clamped to >= 1 ns because the exponential histogram bucketing is
+     * undefined at 0. */
+    if (thread->metrics.compound_end[end_flag]) {
+        uint64_t age_ns = chimera_vfs_elapsed_ns(compound->begin_ticks);
+
+        prometheus_counter_increment(thread->metrics.compound_end[end_flag]);
+        prometheus_counter_add(thread->metrics.compound_ejected_ops, compound->ejected_ops);
+        prometheus_histogram_sample(thread->metrics.compound_age, age_ns ? (int64_t) age_ns : 1);
+    }
+
     if (!compound->module) {
         /* Never bound: no backend ever saw this compound, so there is
          * nothing to commit or abort -- a synchronous OK at zero backend

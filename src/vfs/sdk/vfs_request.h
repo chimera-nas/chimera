@@ -560,6 +560,13 @@ struct chimera_vfs_compound {
     enum chimera_vfs_compound_mode mode; /* core-owned */
     uint32_t flags;                      /* CHIMERA_VFS_COMPOUND_* (core-owned) */
 
+    /* Monotonic stopwatch tick (chimera_vfs_now_ticks) stamped at
+     * chimera_vfs_compound_begin, for age observability (core-owned): the
+     * thread-destroy leak diagnostic reports how long a leaked compound lived,
+     * and the end path samples compound age into a metric.  The per-thread
+     * LOOSE singleton leaves it 0 -- it is never begun and never ends. */
+    uint64_t begin_ticks;
+
     /* Op accounting (core-owned).  Single-thread-owned by the beginning
      * thread -- the contract requires every member op and the end to be
      * issued from it -- so plain (non-atomic) fields suffice.  enlisted and

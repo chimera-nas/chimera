@@ -588,6 +588,44 @@ chimera_vfs_init(
             },
                                                                                    1);
         }
+
+        /* Explicit-compound lifecycle metrics (created together with the op
+         * latency series, so vfs->metrics.op_latency being non-NULL implies
+         * all of these are too -- the destroy path relies on that). */
+        vfs->metrics.compound_begin = prometheus_metrics_create_counter(metrics,
+                                                                        "chimera_vfs_compound_begin_total",
+                                                                        "Explicit VFS compounds begun");
+        vfs->metrics.compound_begin_series = prometheus_counter_create_series(vfs->metrics.compound_begin,
+                                                                              NULL, NULL, 0);
+
+        vfs->metrics.compound_end = prometheus_metrics_create_counter(metrics,
+                                                                      "chimera_vfs_compound_end_total",
+                                                                      "Explicit VFS compounds ended, by disposition");
+        {
+            static const char *dispositions[3] = { "abort", "commit", "commit_durable" };
+            for (int d = 0; d < 3; d++) {
+                vfs->metrics.compound_end_series[d] = prometheus_counter_create_series(vfs->metrics.compound_end,
+                                                                                       (const char *[]) {
+                    "disposition"
+                },
+                                                                                       (const char *[]) { dispositions[d
+                                                                                                          ] },
+                                                                                       1);
+            }
+        }
+
+        vfs->metrics.compound_ejected_ops = prometheus_metrics_create_counter(metrics,
+                                                                              "chimera_vfs_compound_ejected_ops_total",
+                                                                              "Ops ejected from an explicit VFS compound (ran standalone)");
+        vfs->metrics.compound_ejected_ops_series = prometheus_counter_create_series(vfs->metrics.compound_ejected_ops,
+                                                                                    NULL, NULL, 0);
+
+        vfs->metrics.compound_age = prometheus_metrics_create_histogram_exponential(metrics,
+                                                                                    "chimera_vfs_compound_age_nanoseconds",
+                                                                                    "Age of an explicit VFS compound at end, in nanoseconds",
+                                                                                    34);
+        vfs->metrics.compound_age_series = prometheus_histogram_create_series(vfs->metrics.compound_age,
+                                                                              NULL, NULL, 0);
     }
 
     vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024, metrics,
@@ -1017,6 +1055,19 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         }
         free(vfs->metrics.op_latency_series);
         prometheus_histogram_destroy(vfs->metrics.metrics, vfs->metrics.op_latency);
+
+        /* Compound lifecycle metrics, created together with op_latency above. */
+        prometheus_counter_destroy_series(vfs->metrics.compound_begin, vfs->metrics.compound_begin_series);
+        prometheus_counter_destroy(vfs->metrics.metrics, vfs->metrics.compound_begin);
+        for (int d = 0; d < 3; d++) {
+            prometheus_counter_destroy_series(vfs->metrics.compound_end, vfs->metrics.compound_end_series[d]);
+        }
+        prometheus_counter_destroy(vfs->metrics.metrics, vfs->metrics.compound_end);
+        prometheus_counter_destroy_series(vfs->metrics.compound_ejected_ops,
+                                          vfs->metrics.compound_ejected_ops_series);
+        prometheus_counter_destroy(vfs->metrics.metrics, vfs->metrics.compound_ejected_ops);
+        prometheus_histogram_destroy_series(vfs->metrics.compound_age, vfs->metrics.compound_age_series);
+        prometheus_histogram_destroy(vfs->metrics.metrics, vfs->metrics.compound_age);
     }
 
     chimera_vfs_clock_shutdown();
@@ -1242,6 +1293,15 @@ chimera_vfs_thread_init(
             thread->metrics.op_latency_series[i] = prometheus_histogram_series_create_instance(vfs->metrics.
                                                                                                op_latency_series[i]);
         }
+
+        thread->metrics.compound_begin = prometheus_counter_series_create_instance(vfs->metrics.compound_begin_series);
+        for (int d = 0; d < 3; d++) {
+            thread->metrics.compound_end[d] = prometheus_counter_series_create_instance(
+                vfs->metrics.compound_end_series[d]);
+        }
+        thread->metrics.compound_ejected_ops = prometheus_counter_series_create_instance(
+            vfs->metrics.compound_ejected_ops_series);
+        thread->metrics.compound_age = prometheus_histogram_series_create_instance(vfs->metrics.compound_age_series);
     }
 
     if (chimera_vfs_rcu_refs++ == 0) {
@@ -1295,9 +1355,12 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     while (thread->active_compounds) {
         compound = thread->active_compounds;
         chimera_vfs_error(
-            "compound %p leaked at thread destroy: module %s, enlisted %u ejected %u inflight %u",
+            "compound %p leaked at thread destroy: %s (module %s), age %lu ns, "
+            "enlisted %u ejected %u inflight %u",
             (void *) compound,
-            compound->module ? compound->module->name : "(unbound)",
+            compound->module ? "bound" : "unbound",
+            compound->module ? compound->module->name : "(none)",
+            (unsigned long) chimera_vfs_elapsed_ns(compound->begin_ticks),
             compound->enlisted_ops,
             compound->ejected_ops,
             compound->inflight_ops);
@@ -1372,6 +1435,17 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
                                                          thread->metrics.op_latency_series[i]);
         }
         free(thread->metrics.op_latency_series);
+
+        prometheus_counter_series_destroy_instance(thread->vfs->metrics.compound_begin_series,
+                                                   thread->metrics.compound_begin);
+        for (int d = 0; d < 3; d++) {
+            prometheus_counter_series_destroy_instance(thread->vfs->metrics.compound_end_series[d],
+                                                       thread->metrics.compound_end[d]);
+        }
+        prometheus_counter_series_destroy_instance(thread->vfs->metrics.compound_ejected_ops_series,
+                                                   thread->metrics.compound_ejected_ops);
+        prometheus_histogram_series_destroy_instance(thread->vfs->metrics.compound_age_series,
+                                                     thread->metrics.compound_age);
     }
 
     /* Return this thread's recycled RCU cache entries to their pool depots so

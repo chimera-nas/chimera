@@ -52,10 +52,27 @@ struct chimera_vfs_metrics {
     struct prometheus_metrics           *metrics;
     struct prometheus_histogram         *op_latency;
     struct prometheus_histogram_series **op_latency_series;
+
+    /* Explicit-compound lifecycle observability.  compound_end is labeled by
+    * disposition (abort/commit/commit_durable), indexed by
+    * enum chimera_vfs_compound_end (ABORT/COMMIT/COMMIT_DURABLE = 0/1/2). */
+    struct prometheus_counter           *compound_begin;
+    struct prometheus_counter_series    *compound_begin_series;
+    struct prometheus_counter           *compound_end;
+    struct prometheus_counter_series    *compound_end_series[3];
+    struct prometheus_counter           *compound_ejected_ops;
+    struct prometheus_counter_series    *compound_ejected_ops_series;
+    struct prometheus_histogram         *compound_age;
+    struct prometheus_histogram_series  *compound_age_series;
 };
 
 struct chimera_vfs_thread_metrics {
     struct prometheus_histogram_instance **op_latency_series;
+
+    struct prometheus_counter_instance    *compound_begin;
+    struct prometheus_counter_instance    *compound_end[3];
+    struct prometheus_counter_instance    *compound_ejected_ops;
+    struct prometheus_histogram_instance  *compound_age;
 };
 
 /* Drop the per-file lease-state reference an open handle holds in
