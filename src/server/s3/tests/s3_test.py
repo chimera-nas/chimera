@@ -69,10 +69,24 @@ class ChimeraServer:
                 "s3_enabled": True,
                 "s3_port": 5000,
             },
+            # Bind the key to the identity that owns the backing store.  An
+            # S3 key naming no user is unbound and acts as the anonymous
+            # identity (nobody), which cannot write into the temp directory the
+            # passthrough backends serve -- every mutating operation comes back
+            # AccessDenied.  memfs and cairn do not enforce ownership the same
+            # way, which is why only the linux/io_uring variants noticed.
+            "users": [
+                {
+                    "username": "s3test",
+                    "uid": os.getuid(),
+                    "gid": os.getgid()
+                }
+            ],
             "s3_access_keys": [
                 {
                     "access_key": "myaccessid",
-                    "secret_key": "mysecretkey"
+                    "secret_key": "mysecretkey",
+                    "username": "s3test"
                 }
             ],
             "mounts": {},

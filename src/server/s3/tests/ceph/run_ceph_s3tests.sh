@@ -70,13 +70,20 @@ case "$BACKEND" in
         ;;
 esac
 
+# All three keys bind to one user, which is what they effectively were before
+# keys carried an identity: an unbound key now acts as nobody and cannot write
+# to the backing store.  Giving them three distinct uids would be a behaviour
+# change rather than a fix -- the suite has always run them as one identity.
 cat > "$WORK/chimera.conf" <<EOF
 {
   "server": { "s3_enabled": true, "s3_port": $PORT },
+  "users": [
+    { "username": "s3test", "uid": $(id -u), "gid": $(id -g) }
+  ],
   "s3_access_keys": [
-    { "access_key": "mainaccesskey0001", "secret_key": "mainsecretkey0001" },
-    { "access_key": "altaccesskey0002",  "secret_key": "altsecretkey0002" },
-    { "access_key": "tenantaccesskey03", "secret_key": "tenantsecretkey03" }
+    { "access_key": "mainaccesskey0001", "secret_key": "mainsecretkey0001", "username": "s3test" },
+    { "access_key": "altaccesskey0002",  "secret_key": "altsecretkey0002",  "username": "s3test" },
+    { "access_key": "tenantaccesskey03", "secret_key": "tenantsecretkey03", "username": "s3test" }
   ],
   $FS_SECTION
   "mounts": { "share": { "module": "$BACKEND", "path": "$MOUNT_PATH" } },
