@@ -85,6 +85,7 @@ the canonical place to set them.
 | `slab_size` | size | libevpl default | libevpl memory slab size. |
 | `preallocate_slabs` | int | libevpl default | Number of memory slabs to preallocate at startup. |
 | `preallocate_threads` | int | libevpl default | Threads used to preallocate slabs in parallel. |
+| `io_uring_entries` | int | `8192` | io_uring submission/completion ring depth, per event-loop thread. Each ring costs roughly 1.5 MB of kernel-accounted memory at the default (`SQE128`/`CQE32` double both entry sizes) and SQPOLL adds a kernel thread per ring, so a host running many threads or many Chimera processes can be refused with `ENOMEM`. The value is honoured or the ring fails; it is never reduced silently. Can also be set with `EVPL_IO_URING_ENTRIES`. |
 | `rdmacm_tos` | int | `0` | RoCEv2 traffic class stamped on every RDMA QP. ToS = DSCP x 4 (e.g. `104` for DSCP 26) so the fabric's lossless/PFC class carries Chimera traffic. |
 | `metrics_file` | string | - | On shutdown, write a final Prometheus scrape to this file (so short runs keep their metrics). |
 | `umount_timeout_ms` | int | `1000` | How long an unmount waits for the mount's open handles to be closed and released before giving up and returning `EBUSY`. Raise it for backends whose closes are slow; it exists so that unmounting a genuinely busy mount fails rather than hanging. |
