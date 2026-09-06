@@ -89,6 +89,23 @@ if [ "${STATUS}" -gt 128 ]; then
                 printf '  isa:     %s ABSENT\n' "${f}" >&2
             fi
         done
+        # The ISA data has since ruled the hardware out -- avx2/bmi2/fma are all
+        # present on the runners that fail, so -march=x86-64-v3 is satisfied.
+        # What is left is the binary and the plugin it dlopens, which come from
+        # the container image and are built against each other's headers
+        # (src/fio builds with include_directories(/fio)).  Name the version of
+        # the binary that died, so a drift between the image's fio and the one
+        # the plugin was compiled for is visible rather than inferred.
+        echo "  binary:  $1" >&2
+        # Bounded: this runs on an already-failing path and must not be the
+        # thing that hangs.  Falls back when timeout(1) is unavailable rather
+        # than reporting its own absence as the version.
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 5 "$1" --version 2>&1 | head -2 | sed 's/^/  version: /' >&2 || true
+        else
+            "$1" --version 2>&1 | head -2 | sed 's/^/  version: /' >&2 || true
+        fi
+
         # The plugin is dlopened, so a mismatch there is invisible to ldd on the
         # host binary; name it explicitly when the job file points at one.
         for arg in "$@"; do
