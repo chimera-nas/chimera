@@ -3240,6 +3240,8 @@ chimera_server_add_s3_cred(
     const char            *access_key,
     const char            *secret_key,
     const char            *username,
+    const char            *canon_id,
+    const char            *display_name,
     int                    pinned)
 {
     const struct chimera_vfs_user *user;
@@ -3275,8 +3277,14 @@ chimera_server_add_s3_cred(
         }
     }
 
+    /* A key bound to a user displays as that user by default: the operator
+     * already named the principal there, and echoing the access key would leak
+     * a credential into every ACL reply. */
     return chimera_s3_add_cred(server->s3_shared, access_key, secret_key,
-                               has_identity, uid, gid, ngids, gids, pinned);
+                               has_identity, uid, gid, ngids, gids,
+                               canon_id,
+                               (display_name && *display_name) ? display_name : username,
+                               pinned);
 } /* chimera_server_add_s3_cred */
 
 SYMBOL_EXPORT int

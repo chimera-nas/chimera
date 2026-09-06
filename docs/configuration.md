@@ -344,6 +344,8 @@ entry.
 | `access_key` | string | S3 access key ID. |
 | `secret_key` | string | S3 secret access key. |
 | `username` | string | Name of a `users` entry this key acts as. |
+| `user_id` | string | S3 canonical user id reported as the `<Owner>` in ACL replies. Defaults to the access key. |
+| `display_name` | string | Display name reported alongside it. Defaults to `username`. |
 
 Every request authenticated with a key runs against the store as that user's
 uid/gid, and objects and buckets it creates are owned by them. Authorization is
@@ -363,6 +365,10 @@ write the other's buckets.
 ]
 ```
 
+`user_id` and `display_name` are S3 identity strings with no POSIX equivalent;
+they name the principal in `GET ?acl` output and nowhere else. Access is decided
+by the uid/gid `username` resolves to, never by these.
+
 A key with no `username` — or one naming a user that does not exist — is
 **unbound**: it acts as the anonymous identity below rather than as root, and is
 logged at startup. Such a key authenticates successfully but will be denied
@@ -376,6 +382,32 @@ Identity an unbound S3 access key acts as. Defaults to nobody/nogroup.
 |---|---|---|---|
 | `uid` | int | `65534` | POSIX user ID for unbound keys. |
 | `gid` | int | `65534` | POSIX group ID for unbound keys. |
+
+### S3 access control
+
+Buckets and objects are ordinary directories and files, so S3 access control is
+projected onto their mode bits and enforced by the same VFS permission gate NFS
+and SMB go through — there is no separate S3 ACL store to keep in agreement.
+
+`x-amz-acl` on PutObject, CreateBucket and `PUT ?acl` maps to a mode:
+
+| canned ACL | file | directory |
+|---|---|---|
+| `private` | 0600 | 0700 |
+| `public-read` | 0644 | 0755 |
+| `public-read-write` | 0666 | 0777 |
+| `authenticated-read` | 0644 | 0755 |
+
+An object created with no `x-amz-acl` is **private** (0600), matching S3's
+default. A bucket created with none stays world-traversable (0755), because
+reaching a public object requires search permission on the directory holding it.
+
+`authenticated-read` is an approximation: a POSIX mode has no bit that
+distinguishes "any authenticated principal" from "everyone", so it is treated as
+`public-read` — slightly more permissive than S3.
+
+`GET ?acl` reverses the projection, reporting the owner with FULL_CONTROL plus
+an AllUsers READ or WRITE grant when the world bits are set.
 
 ### Full server example
 

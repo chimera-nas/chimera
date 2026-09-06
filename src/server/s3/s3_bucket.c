@@ -20,6 +20,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "s3_internal.h"
+#include "s3_acl.h"
 #include "s3.h"
 #include "s3_procs.h"
 
@@ -166,9 +167,15 @@ chimera_s3_create_bucket_lookup_cb(
     memset(&request->set_attr, 0, sizeof(request->set_attr));
     request->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
         CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-    request->set_attr.va_mode = S_IFDIR | 0755;
-    request->set_attr.va_uid  = request->cred.uid;
-    request->set_attr.va_gid  = request->cred.gid;
+    /* A bucket created with no x-amz-acl stays world-traversable (0755): a
+     * private bucket root would hide public objects inside it, since reaching
+     * an object requires search permission on the directory. */
+    request->set_attr.va_mode = S_IFDIR |
+        chimera_s3_canned_acl_to_mode(
+        request->canned_acl == CHIMERA_S3_CANNED_NONE ?
+        CHIMERA_S3_CANNED_PUBLIC_READ : request->canned_acl, 1);
+    request->set_attr.va_uid = request->cred.uid;
+    request->set_attr.va_gid = request->cred.gid;
 
     chimera_s3_request_get(request);
 

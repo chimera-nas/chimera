@@ -99,6 +99,11 @@ struct chimera_s3_request {
      * every valid key root over every bucket.
      */
     struct chimera_vfs_cred          cred;
+    /* S3 identity of the authenticated requester, reported as the <Owner> in
+    * an ACL reply.  Copied out of the credential cache at authentication time
+    * because the cached entry is only valid inside that RCU read section. */
+    char                             owner_id[CHIMERA_S3_CANON_ID_MAX];
+    char                             owner_display[CHIMERA_S3_DISPLAY_MAX];
     const char                      *bucket_name;
     int                              bucket_namelen;
     int                              bucket_fhlen;
@@ -133,6 +138,11 @@ struct chimera_s3_request {
     int                              has_part_number;
     /* ?tagging subresource (object/bucket tag get/put/delete). */
     int                              has_tagging;
+    /* ?acl subresource (Get/PutObjectAcl, Get/PutBucketAcl). */
+    int                              has_acl;
+    /* The x-amz-acl canned ACL parsed into an id; CHIMERA_S3_CANNED_NONE when
+     * the header is absent, in which case the backend default mode stands. */
+    int                              canned_acl;
     /* Set when the request targets a bucket itself (Create/Delete/Head/List
      * bucket, ListBuckets) rather than an object; tells the body notifier to
      * drain any request body instead of treating it as object data. */

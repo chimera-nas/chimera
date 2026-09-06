@@ -63,6 +63,8 @@ chimera_s3_add_cred(
     uint32_t        gid,
     uint32_t        ngids,
     const uint32_t *gids,
+    const char     *canon_id,
+    const char     *display_name,
     int             pinned);
 
 int
