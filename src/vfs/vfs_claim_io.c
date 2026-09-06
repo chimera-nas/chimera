@@ -143,6 +143,34 @@ chimera_vfs_claim_drive_breaks(
     return result;
 } /* chimera_vfs_claim_drive_breaks */
 
+/* Eject `request` from its compound at a CROSS-ACTOR park: the wait ends
+ * only when another actor (a lease-holding client, or the backend server
+ * behind a proxy mount) acks, i.e. after client-controlled time, and the
+ * contract's liveness rule forbids an enlisted op from parking in a core
+ * layer that long.  Claim mediation runs BEFORE dispatch (io_next is
+ * chimera_vfs_dispatch), so the request has not passed the enlistment
+ * guard: compound_enlisted == 0, nothing enlisted/inflight to unwind, and
+ * clearing the pointer simply makes the eventual dispatch see a
+ * standalone (autocommit) op.  A mutating op's ejection forfeits the
+ * compound's replay right exactly as a guard ejection would.
+ * Single-thread-safe: the initial acquire/recall parks run on the issuing
+ * thread, and resume-time re-parks run in the owning thread's
+ * pending_io_resume drain (chimera_vfs_process_completion).  (The
+ * compound control ops never traverse the claim layer.) */
+static void
+chimera_vfs_io_eject_compound(struct chimera_vfs_request *request)
+{
+    if (request->compound) {
+        struct chimera_vfs_compound *compound = request->compound;
+
+        request->compound = NULL;
+        compound->ejected_ops++;
+        if (chimera_vfs_op_is_mutating(request)) {
+            compound->ejected_mutating_ops++;
+        }
+    }
+} /* chimera_vfs_io_eject_compound */
+
 /* Park `request` on the file's I/O wait queue.  Caller holds file->lock.
  *
  * The queue doubles as the file's I/O SUBMISSION-ORDER BARRIER: a parked
@@ -165,6 +193,17 @@ chimera_vfs_io_park_locked(
 {
     struct chimera_vfs_pending_acquire *ticket = &request->io_lease_ticket;
 
+    /* Compound liveness rule (sdk/vfs_request.h): the core must not park an
+     * enlisted op in a core layer while the compound holds backend state --
+     * this park may last client-controlled time.  Cross-actor parks eject
+     * the op from its compound (see chimera_vfs_io_eject_compound at the
+     * arms that wait on another actor's ack); purely local ordering parks
+     * (the drain/submission-order barrier) keep the compound -- they
+     * resolve autonomously within the local pump, and on wave-1 engines a
+     * parked compound holds no backend locks.  (Wave-2 note: once a
+     * lock-holding engine declares the capability, a barrier park queued
+     * BEHIND a cross-actor waiter is transitively client-controlled and
+     * may need the same ejection.) */
     if (ticket->queued) {
         ticket->wait = false;
         return;
@@ -281,6 +320,7 @@ chimera_vfs_io_sync_gate(
     request->io_next           = next;
     request->io_sync_write     = 1;
     request->io_owns_lease_ref = 1;
+    chimera_vfs_io_eject_compound(request); /* awaits peers' invalidation acks */
     chimera_vfs_io_park_locked(file, request);
     request->io_lease_file = file;
     pthread_mutex_unlock(&file->lock);
@@ -391,6 +431,7 @@ chimera_vfs_io_try(
                                                 request->io_handle,
                                                 request->io_recall_retain)) {
             pthread_mutex_lock(&file->lock);
+            chimera_vfs_io_eject_compound(request); /* awaits client break acks */
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
             pthread_mutex_unlock(&file->lock);
@@ -414,6 +455,7 @@ chimera_vfs_io_try(
                                               request->io_handle,
                                               request->io_recall_flush_only)) {
             pthread_mutex_lock(&file->lock);
+            chimera_vfs_io_eject_compound(request); /* awaits client break acks */
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
             pthread_mutex_unlock(&file->lock);
@@ -495,6 +537,10 @@ chimera_vfs_io_try(
                 return;
             }
             file->bl_want_used |= need;
+            /* No compound ejection here: the cover wait is infrastructure
+             * latency (an engine grants locally; a proxy waits one backend
+             * RPC), not a client-controlled ack -- the request keeps its
+             * compound across this transient park. */
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
             pthread_mutex_unlock(&file->lock);
@@ -558,6 +604,7 @@ chimera_vfs_io_try(
 
     /* BREAKING: park atomically with the conflict observation, then drive
      * the recalls outside the lock (no lost wakeup). */
+    chimera_vfs_io_eject_compound(request); /* awaits client break acks */
     chimera_vfs_io_park_locked(file, request);
     request->io_lease_file = file;
     pthread_mutex_unlock(&file->lock);

@@ -39,6 +39,11 @@ struct chimera_vfs_write_same_fallback {
     uint32_t                          block_size;
     uint32_t                          sync;
     uint32_t                          r_sync;
+    /* Compound bulk-payload cap bookkeeping: cumulative bytes issued under
+     * the caller's compound; once it reaches CHIMERA_VFS_COMPOUND_BULK_CAP
+     * the remaining writes run standalone.  See the cap comment in
+     * chimera_vfs_write_same_fallback_step. */
+    uint64_t                          compound_bytes;
     uint64_t                          post_attr_mask;
     struct chimera_vfs_attrs          r_pre_attr;
     struct chimera_vfs_attrs          r_post_attr;
@@ -113,8 +118,9 @@ chimera_vfs_write_same_fallback_write_cb(
 static void
 chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx)
 {
-    uint64_t blocks, k;
-    uint32_t chunk;
+    struct chimera_vfs_compound *hop_compound;
+    uint64_t                     blocks, k;
+    uint32_t                     chunk;
 
     if (ctx->remaining == 0) {
         chimera_vfs_write_same_fallback_finish(ctx, CHIMERA_VFS_OK);
@@ -140,10 +146,35 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
     ctx->chunk_niov = (int) k;
     chunk           = (uint32_t) (k * ctx->block_size);
 
+    /* Compound bulk-payload ejection cap.  Every enlisted write is staged in
+     * the owning engine's compound state until COMPOUND_END, so an enlisted
+     * WRITE_SAME expansion would otherwise pin its whole expanded payload in
+     * memory.  After CHIMERA_VFS_COMPOUND_BULK_CAP bytes the remaining
+     * writes are ejected: they run standalone (autocommit) -- the
+     * best-effort degradation the compound contract sanctions (a compound
+     * must not pin an unbounded payload).  The dispatch guard never sees a
+     * NULL compound pointer, so each ejected write is counted here instead,
+     * bumping ejected_mutating_ops and deliberately forfeiting the
+     * compound's replay right: a standalone write commits immediately, and
+     * a from-the-top replay re-invokes this proc and re-runs the whole
+     * expansion, re-executing writes that already committed.  Conflicts on
+     * such a compound therefore surface as the retriable-but-never-replayed
+     * ECOMPOUND_EXHAUSTED, exactly as for any other mutating ejection. */
+    hop_compound = ctx->compound;
+    if (hop_compound) {
+        if (ctx->compound_bytes >= CHIMERA_VFS_COMPOUND_BULK_CAP) {
+            hop_compound = NULL;
+            ctx->compound->ejected_ops++;
+            ctx->compound->ejected_mutating_ops++;
+        } else {
+            ctx->compound_bytes += chunk;
+        }
+    }
+
     chimera_vfs_write(
         ctx->thread,
         &ctx->cred,
-        ctx->compound,
+        hop_compound,
         ctx->handle,
         ctx->offset,
         chunk,
@@ -232,12 +263,28 @@ chimera_vfs_write_same_complete(struct chimera_vfs_request *request)
     chimera_vfs_write_same_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread,
-                                      request->thread->vfs->vfs_attr_cache,
-                                      request->write_same.handle->fh_hash,
-                                      request->write_same.handle->fh,
-                                      request->write_same.handle->fh_len,
-                                      &request->write_same.r_post_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(request->thread,
+                                          request->thread->vfs->vfs_attr_cache,
+                                          request->write_same.handle->fh_hash,
+                                          request->write_same.handle->fh,
+                                          request->write_same.handle->fh_len,
+                                          &request->write_same.r_post_attr);
+        } else {
+            /* Enlisted: evict the pre-compound entry the commit will make
+             * stale (STAT-less insert = eviction). */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(request->thread,
+                                          request->thread->vfs->vfs_attr_cache,
+                                          request->write_same.handle->fh_hash,
+                                          request->write_same.handle->fh,
+                                          request->write_same.handle->fh_len,
+                                          &inval);
+        }
     }
 
     chimera_vfs_complete(request);

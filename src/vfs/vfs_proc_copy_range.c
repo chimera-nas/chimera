@@ -43,6 +43,13 @@ struct chimera_vfs_copy_fallback {
      * exhausted. */
     int                               src_exhausted;
     uint32_t                          read_len;     /* current hop's ask */
+    /* Compound bulk-payload cap bookkeeping: cumulative bytes issued under
+     * the caller's compound by interior hops, and the compound (or NULL,
+     * once the cap is reached) that the CURRENT hop's read and write both
+     * carry -- decided once per hop in _step so the pair never splits.
+     * See the cap comment in chimera_vfs_copy_fallback_step. */
+    uint64_t                          compound_bytes;
+    struct chimera_vfs_compound      *hop_compound;
     uint64_t                          post_attr_mask;
     struct chimera_vfs_attrs          r_pre_attr;
     struct chimera_vfs_attrs          r_post_attr;
@@ -196,9 +203,17 @@ chimera_vfs_copy_fallback_read_cb(
     /* Release the backend's read buffers now that the data is copied out. */
     evpl_iovecs_release(ctx->thread->evpl, iov, niov);
 
+    /* An ejected hop's write is a MUTATING ejection: count it (the guard
+     * never sees the NULL pointer we pass) so the compound's replay right
+     * is forfeited -- see the cap comment in chimera_vfs_copy_fallback_step. */
+    if (ctx->compound && !ctx->hop_compound) {
+        ctx->compound->ejected_ops++;
+        ctx->compound->ejected_mutating_ops++;
+    }
+
     chimera_vfs_write(
         ctx->thread,
-        &ctx->cred, ctx->compound,
+        &ctx->cred, ctx->hop_compound,
         ctx->dst_handle,
         ctx->dst_offset,
         count,
@@ -228,9 +243,37 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
     ctx->hold_niov = 0;
     ctx->read_len  = chunk;
 
+    /* Compound bulk-payload ejection cap.  Every enlisted chunk write is
+     * staged in the owning engine's compound state until COMPOUND_END, so an
+     * enlisted bulk copy would otherwise pin its whole payload in memory.
+     * After CHIMERA_VFS_COMPOUND_BULK_CAP bytes the remaining hops are
+     * ejected: they run standalone (autocommit) -- the best-effort
+     * degradation the compound contract sanctions (a compound must not pin
+     * an unbounded payload).  The dispatch guard never sees a NULL compound
+     * pointer, so each ejected hop is counted here instead, and the ejected
+     * WRITES (in the read callback below) bump ejected_mutating_ops,
+     * deliberately forfeiting the compound's replay right: a standalone
+     * chunk write commits immediately, and a from-the-top replay re-invokes
+     * this proc and re-runs the whole loop -- re-executing writes that
+     * already committed, which is not deterministic in general (a same-file
+     * overlapping copy re-read atop the first attempt's committed chunks
+     * yields different bytes).  Conflicts on such a compound therefore
+     * surface as the retriable-but-never-replayed ECOMPOUND_EXHAUSTED,
+     * exactly as for any other mutating ejection. */
+    ctx->hop_compound = ctx->compound;
+    if (ctx->hop_compound) {
+        if (ctx->compound_bytes >= CHIMERA_VFS_COMPOUND_BULK_CAP) {
+            ctx->hop_compound = NULL;
+            /* This hop's read: a read-only ejection (observability only). */
+            ctx->compound->ejected_ops++;
+        } else {
+            ctx->compound_bytes += chunk;
+        }
+    }
+
     chimera_vfs_read(
         ctx->thread,
-        &ctx->cred, ctx->compound,
+        &ctx->cred, ctx->hop_compound,
         ctx->src_handle,
         ctx->src_offset,
         chunk,
@@ -292,11 +335,26 @@ chimera_vfs_copy_range_complete(struct chimera_vfs_request *request)
     chimera_vfs_copy_range_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
-                                      request->copy_range.dst_handle->fh_hash,
-                                      request->copy_range.dst_handle->fh,
-                                      request->copy_range.dst_handle->fh_len,
-                                      &request->copy_range.r_post_attr);
+        if (chimera_vfs_request_publishes(request)) {
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->copy_range.dst_handle->fh_hash,
+                                          request->copy_range.dst_handle->fh,
+                                          request->copy_range.dst_handle->fh_len,
+                                          &request->copy_range.r_post_attr);
+        } else {
+            /* Enlisted: evict the pre-compound entry the commit will make
+             * stale (STAT-less insert = eviction). */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+
+            chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
+                                          request->copy_range.dst_handle->fh_hash,
+                                          request->copy_range.dst_handle->fh,
+                                          request->copy_range.dst_handle->fh_len,
+                                          &inval);
+        }
     }
 
     chimera_vfs_complete(request);

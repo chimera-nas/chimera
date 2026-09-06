@@ -530,6 +530,43 @@ chimera_vfs_synth_handle_free(
     LL_PREPEND(thread->free_synth_handles, handle);
 } /* chimera_vfs_synth_handle_free */
 
+/*
+ * May this request's completion PUBLISH into the shared observation layer
+ * (attr-cache inserts/refreshes, name-cache inserts, change-notify emits)?
+ *
+ * An op ENLISTED in an explicit compound completes before its compound
+ * commits: its effects are provisional, staged in the owning engine, and a
+ * commit that loses optimistic validation rolls them back.  Publishing them
+ * at op completion would let every other consumer observe state that may
+ * never commit -- phantom cache/notify entries that later path walks resolve
+ * through, surfacing as intermittent ESTALE/ENOENT/EEXIST against committed
+ * state.  Worse, an enlisted read's results (GETATTR/LOOKUP) may reflect the
+ * compound's own uncommitted staging (engine read-your-writes), so they must
+ * not populate the shared caches even when the compound later commits.
+ *
+ * The discriminator is the post-guard compound pointer: an enlisted request
+ * keeps request->compound through completion (the chokepoint consumes only
+ * the enlisted mark), while ejected and standalone requests reach completion
+ * with NULL there (the dispatch guard clears it on every ejection and
+ * core-layer failure).  Ejected/standalone ops autocommit, so they MUST keep
+ * publishing.  The compound control ops also carry the pointer (for object
+ * recovery) but publish nothing.
+ *
+ * This gates PUBLICATIONS only.  Invalidations/removals on a provisional
+ * effect stay unconditional: removing a possibly-valid entry is safe;
+ * leaving a phantom is not.  A gated MUTATION site must therefore fall back
+ * to invalidating the same key(s) it would have published (else the
+ * pre-compound entries survive the compound's COMMIT and are served stale);
+ * gated READ-ONLY sites (getattr/lookup/read/commit refreshes) need no such
+ * arm -- reads change no state, so the pre-compound entry remains valid for
+ * standalone observers until a mutation lands.
+ */
+static inline int
+chimera_vfs_request_publishes(const struct chimera_vfs_request *request)
+{
+    return request->compound == NULL;
+} /* chimera_vfs_request_publishes */
+
 static inline void
 chimera_vfs_complete(struct chimera_vfs_request *request)
 {
@@ -702,6 +739,36 @@ chimera_vfs_op_is_mutating(const struct chimera_vfs_request *request)
     } /* switch */
 } /* chimera_vfs_op_is_mutating */
 
+/* Returns 1 for the KV-class opcodes (the put/get/delete/search key family).
+ * KV requests are allocated against the pool-wide kv_module with
+ * mount_private == NULL (chimera_vfs_request_alloc_kv): KV namespaces are
+ * pool-wide, so mount identity does not apply to them.  The dispatch
+ * enlistment guard uses this to match KV ops on module equality alone. */
+static inline int
+chimera_vfs_op_is_kv(uint32_t opcode)
+{
+    switch (opcode) {
+        case CHIMERA_VFS_OP_PUT_KEY:
+        case CHIMERA_VFS_OP_GET_KEY:
+        case CHIMERA_VFS_OP_DELETE_KEY:
+        case CHIMERA_VFS_OP_SEARCH_KEYS:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_op_is_kv */
+
+/* Byte cap on the interior payload a single streaming-emulation fallback
+ * (vfs_proc_copy_range.c / vfs_proc_write_same.c) may enlist in one
+ * compound.  An enlisted chunk write is staged in the owning engine's
+ * compound state until COMPOUND_END (a cairn compound's data batch holds
+ * every enlisted write payload in memory), so an enlisted bulk op would
+ * otherwise pin its entire payload there.  Once a fallback has issued this
+ * many bytes under its caller's compound, the remaining chunks run
+ * standalone -- the best-effort degradation the compound contract sanctions
+ * (see the ejection rules in sdk/vfs_request.h). */
+#define CHIMERA_VFS_COMPOUND_BULK_CAP (8 * 1024 * 1024)
+
 /* Returns 1 if the request targets a read-only mount, 0 otherwise (including
  * when the mount cannot be resolved -- such requests fall through to normal
  * dispatch which surfaces ESTALE).  The relevant fh for every mutating op is in
@@ -809,8 +876,10 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
      *     unbound for a later capable op.
      *
      *   - Bound compound: enlistment requires the op's {module,
-     *     mount_private} to match the owner.  On mismatch -- e.g. a path
-     *     walk carried the caller's compound across a mount/junction
+     *     mount_private} to match the owner.  KV-class ops are the one
+     *     carve-out: they match on module equality alone (see the clause
+     *     below).  On mismatch -- e.g. a path walk carried the caller's
+     *     compound across a mount/junction
      *     boundary -- the op is EJECTED: it runs standalone (autocommit),
      *     routes by its own fh_hash below, and its effects are independent
      *     of the compound's commit/abort.  This is deliberate best-effort
@@ -861,9 +930,21 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
             } else {
                 request->compound = NULL;
                 compound->ejected_ops++;
+                if (chimera_vfs_op_is_mutating(request)) {
+                    compound->ejected_mutating_ops++;
+                }
             }
         } else if (module == compound->module &&
-                   request->mount_private == compound->mount_private) {
+                   (request->mount_private == compound->mount_private ||
+                    /* KV clause: KV requests are allocated against the
+                     * pool-wide kv_module with mount_private == NULL
+                     * (chimera_vfs_request_alloc_kv).  KV namespaces are
+                     * pool-wide -- mount identity does not apply to them --
+                     * so when the KV module owns the compound, a KV-class
+                     * op enlists on module equality alone; the plain
+                     * {module, mount_private} test could otherwise never
+                     * enlist one. */
+                    chimera_vfs_op_is_kv(request->opcode))) {
 #ifdef CHIMERA_SANITIZE
             chimera_vfs_abort_if(compound->inflight_ops != 0,
                                  "compound op %s issued with %u enlisted op(s) still in flight",

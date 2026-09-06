@@ -478,8 +478,11 @@ struct chimera_vfs_notify_gate;
  *
  * Visibility and isolation: none promised.  The system observation layer (the
  * shared attr/name caches, change-notify, the open-handle cache) publishes each
- * op's effects immediately, enlisted or not.  A backend MAY provide
- * read-your-writes inside a compound; consumers must not rely on it, and no
+ * op's effects immediately, enlisted or not.  Engine backends (cairn) DO
+ * provide read-your-writes inside a compound -- an enlisted read observes the
+ * compound's own staged metadata and file data -- and the engine conformance
+ * tests pin that; portable consumers still must not rely on it across backend
+ * classes (proxies and non-compound backends make no such promise), and no
  * compound -- read-only included -- is promised a consistent snapshot.
  *
  * Atomicity: permitted, never promised.  An engine MAY apply a compound
@@ -551,10 +554,10 @@ enum chimera_vfs_compound_end {
 #define CHIMERA_VFS_COMPOUND_LOOSE     (1U << 1)
 
 struct chimera_vfs_compound {
-    uint64_t ts;                   /* wait-die priority (core-owned) */
-    uint64_t route_hash;                   /* dispatch affinity key (core-owned) */
-    enum chimera_vfs_compound_mode mode;        /* core-owned */
-    uint32_t flags;                        /* CHIMERA_VFS_COMPOUND_* (core-owned) */
+    uint64_t ts;                         /* wait-die priority (core-owned) */
+    uint64_t route_hash;                 /* dispatch affinity key (core-owned) */
+    enum chimera_vfs_compound_mode mode; /* core-owned */
+    uint32_t flags;                      /* CHIMERA_VFS_COMPOUND_* (core-owned) */
 
     /* Op accounting (core-owned).  Single-thread-owned by the beginning
      * thread -- the contract requires every member op and the end to be
