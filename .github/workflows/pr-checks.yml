@@ -474,16 +474,26 @@ jobs:
               # Both are run even if the first fails (|| true): a control that
               # fails is itself the answer, and stopping there would hide it.
               ninja
-              ctest -R "nfstest_posix_memfs_nfs3" --output-on-failure --timeout 420 -j 1 || true
-              ctest -R "nfstest_posix_diskfs_io_uring_nfs3" --output-on-failure --timeout 420 -j 1 || true
+              # -C extended: the KVM suites are registered in the extended
+              # configuration, and without it ctest matches nothing and reports
+              # "No tests were found!!!" -- which, with the || true below, is a
+              # green job that tested nothing at all.
+              ctest -C extended -N -R "nfstest_posix_(memfs|diskfs_io_uring)_nfs3"
+              ctest -C extended -R "nfstest_posix_memfs_nfs3" \
+                    --output-on-failure --timeout 420 -j 1 || true
+              ctest -C extended -R "nfstest_posix_diskfs_io_uring_nfs3" \
+                    --output-on-failure --timeout 420 -j 1 || true
 
               # Whatever ctest could not reclaim is still running.  12 of the 13
               # wrappers launch qemu in the foreground and never kill it, so a
               # guest outliving its test is the mechanism that turns one hang
               # into a six-hour wedge -- name any survivor here rather than
               # inferring it from a cancelled job.
+              # -x matches the process name exactly.  A -f pattern matches this
+              # very shell, whose command line quotes the string, and reports
+              # itself as the survivor.
               echo "=== qemu processes still alive after ctest ==="
-              pgrep -af "qemu-system-" || echo "  none (nothing was left behind)"'
+              pgrep -a -x "qemu-system-x86_64" || echo "  none (nothing was left behind)"'
 
 
   analyze-macos:
