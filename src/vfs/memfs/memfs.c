@@ -3416,6 +3416,29 @@ memfs_open_fh(
         return;
     }
 
+    /* CHIMERA_VFS_OPEN_TRUNCATE: replace the file's contents on open.  A
+     * non-create O_TRUNC open arrives here via the open-by-fh leg of the VFS
+     * open path.  Mirrors the setattr(SIZE=0) semantics -- named streams
+     * survive (POSIX truncate does not discard them; SMB's OVERWRITE/
+     * SUPERSEDE dispositions arrive via open_at, never here) and the POSIX
+     * truncate side effects apply: mtime/ctime marked, set-user/group-ID
+     * cleared for unprivileged callers.  The VFS open gate has already
+     * required WRITE_DATA for a TRUNCATE open, so no extra access check
+     * belongs here. */
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_TRUNCATE) &&
+        S_ISREG(inode->mode)) {
+        memfs_inode_truncate_blocks(thread, inode);
+        inode->size       = 0;
+        inode->space_used = 0;
+        /* AUTH_ATTR (SMB/Windows) callers manage the write time themselves. */
+        if (request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+            chimera_vfs_realtime(&inode->mtime);
+        }
+        chimera_vfs_realtime(&inode->ctime);
+        inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+        inode->change++;
+    }
+
     inode->refcnt++;
     pthread_mutex_unlock(&inode->lock);
 

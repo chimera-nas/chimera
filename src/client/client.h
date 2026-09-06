@@ -82,6 +82,59 @@ chimera_client_thread_shutdown(
     struct evpl                  *evpl,
     struct chimera_client_thread *thread);
 
+/*
+ * Caller-owned SDK compounds.
+ *
+ * A single client operation already runs as one VFS compound internally.  A
+ * caller that issues SEVERAL client/VFS operations that belong to one logical
+ * action (one POSIX call, say) can group them under one caller-owned compound
+ * instead: begin here, pass the handle to each dispatch (the *_in dispatch
+ * variants, or directly as the `compound` argument of raw chimera_vfs_* calls),
+ * then end exactly once.
+ *
+ * chimera_client_compound_begin() is synchronous, never returns NULL, and
+ * captures `cred` (NULL = the client-global credential) as the compound's
+ * credential -- pass the SAME credential to chimera_client_compound_end().
+ * The compound is begun in the GROUPING lane (no replay opt-in): it groups the
+ * member ops for backend amortization but never obligates the caller to replay
+ * -- a backend conflict is rewritten by the VFS core into the retriable,
+ * never-replayed CHIMERA_VFS_ECOMPOUND_EXHAUSTED (EAGAIN at the POSIX layer).
+ *
+ * Threading: the compound header is single-thread-owned.  Every operation
+ * enlisted in the compound, and the end itself, MUST be issued from the one
+ * client thread that begin ran on, and each op only after the previous op's
+ * completion was observed.
+ *
+ * chimera_client_compound_end() commits (COMMIT/COMMIT_DURABLE) or discards
+ * (ABORT) and retires the handle; it must be called exactly once for every
+ * begin, on the beginning thread, and the handle must not be used afterwards.
+ *
+ * chimera_client_compound_loose() returns the calling thread's LOOSE
+ * singleton: a compound-shaped handle with pure autocommit semantics that
+ * needs no begin/end pairing -- for teardown/background work that wants a
+ * non-NULL compound argument at zero cost.
+ */
+struct chimera_vfs_compound *
+chimera_client_compound_begin(
+    struct chimera_client_thread  *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *hint_fh,
+    int                            hint_fhlen,
+    enum chimera_vfs_compound_mode mode);
+
+void
+chimera_client_compound_end(
+    struct chimera_client_thread       *thread,
+    const struct chimera_vfs_cred      *cred,
+    struct chimera_vfs_compound        *compound,
+    enum chimera_vfs_compound_end       end_flag,
+    chimera_vfs_compound_end_callback_t callback,
+    void                               *private_data);
+
+struct chimera_vfs_compound *
+chimera_client_compound_loose(
+    struct chimera_client_thread *thread);
+
 typedef void (*chimera_mount_callback_t)(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,

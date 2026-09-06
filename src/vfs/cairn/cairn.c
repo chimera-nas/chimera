@@ -944,8 +944,11 @@ cairn_dirent_get(
     struct cairn_dirent_handle *dh)
 {
     char *err = NULL;
+    int   rc;
 
-    if (cairn_meta_get(thread, key, sizeof(*key), &dh->val, &err)) {
+    rc = cairn_meta_get(thread, key, sizeof(*key), &dh->val, &err);
+
+    if (rc) {
         chimera_cairn_abort_if(err, "Error getting dirent: %s\n", err);
         dh->dirent = NULL;
         return -1;
@@ -4105,6 +4108,35 @@ cairn_open_fh(
         request->status = CHIMERA_VFS_ENOTDIR;
         request->complete(request);
         return;
+    }
+
+    /* CHIMERA_VFS_OPEN_TRUNCATE: replace the file's contents on open.  A
+     * non-create O_TRUNC open arrives here via the open-by-fh leg of the VFS
+     * open path.  Mirrors the setattr(SIZE=0) truncate path -- punch the
+     * extents, kill-priv, mark mtime/ctime -- rather than open_at's
+     * overwrite disposition (no set_attr rides this op; SMB's OVERWRITE/
+     * SUPERSEDE dispositions arrive via open_at, never here).  The VFS open
+     * gate has already required WRITE_DATA for a TRUNCATE open. */
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_TRUNCATE) &&
+        S_ISREG(inode->mode)) {
+        struct timespec now;
+
+        if (inode->size) {
+            cairn_punch_hole(thread, thread->shared, inode, 0, inode->size);
+        }
+        inode->size       = 0;
+        inode->space_used = 0;
+        inode->mode       = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+
+        clock_gettime(CLOCK_REALTIME, &now);
+        /* AUTH_ATTR (SMB/Windows) callers manage the write time themselves. */
+        if (request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+            inode->mtime = now;
+        }
+        inode->ctime = now;
+        inode->change++;
+
+        cairn_put_inode(thread, inode);
     }
 
     /* Record the live open OUTSIDE any transaction (see cairn_openref_adjust):

@@ -71,9 +71,12 @@ chimera_write_reply(
     callback(thread, status, callback_arg);
 } /* chimera_write_reply */
 
-/* Dispatch for chimera_write - allocate evpl_iovec and copy from buffer */
-static inline void
-chimera_dispatch_write(
+/* Allocate the evpl_iovec staging buffers for the chimera_write buffer
+ * variant and copy the caller's data in.  Returns 0 on success; on
+ * allocation failure delivers the EIO user callback, frees the request and
+ * returns -1 (nothing was enlisted in any compound). */
+static inline int
+chimera_write_stage_iov(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
@@ -90,7 +93,7 @@ chimera_dispatch_write(
         request->write.niov = 0;
         chimera_client_request_free(thread, request);
         callback(thread, CHIMERA_VFS_EIO, callback_arg);
-        return;
+        return -1;
     }
 
     request->write.niov = niov;
@@ -110,12 +113,43 @@ chimera_dispatch_write(
         copied += chunk;
     }
 
+    return 0;
+} /* chimera_write_stage_iov */
+
+/* Dispatch for chimera_write - allocate evpl_iovec and copy from buffer */
+static inline void
+chimera_dispatch_write(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    if (chimera_write_stage_iov(thread, request) < 0) {
+        return;
+    }
+
     chimera_client_compound_run(thread, request,
                                 request->write.handle->fh,
                                 request->write.handle->fh_len,
                                 CHIMERA_VFS_COMPOUND_WRITE,
                                 chimera_write_start, chimera_write_reply);
 } /* chimera_dispatch_write */
+
+/* Caller-compound variant of the buffer write: enlist the write in `compound`
+ * (owned and later ended by the caller); the user callback fires with the
+ * bare op status.  On staging failure the EIO callback fires without touching
+ * the compound. */
+static inline void
+chimera_dispatch_write_in(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request,
+    struct chimera_vfs_compound   *compound)
+{
+    if (chimera_write_stage_iov(thread, request) < 0) {
+        return;
+    }
+
+    chimera_client_compound_run_in(thread, request, compound,
+                                   chimera_write_start, chimera_write_reply);
+} /* chimera_dispatch_write_in */
 
 /* ---- chimera_writev (struct iovec variant) ---- */
 

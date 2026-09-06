@@ -41,6 +41,11 @@ struct chimera_posix_completion {
     struct chimera_client_request *request;
     enum chimera_vfs_error status;
     int                            done;
+    /* Per-call pinned worker (chimera_posix_call_worker): chosen once for
+     * the POSIX call this completion belongs to and reused for every SDK
+     * dispatch of that call, so a multi-op call's caller compound begins,
+     * runs and ends on ONE client worker.  NULL until first use. */
+    struct chimera_posix_worker   *worker;
 };
 
 #define CHIMERA_POSIX_FD_IO_ACTIVE 0x01
@@ -453,6 +458,7 @@ chimera_posix_completion_init(
     comp->request = req;
     comp->status  = CHIMERA_VFS_OK;
     comp->done    = 0;
+    comp->worker  = NULL;
 
     req->heap_allocated = 0;
 
@@ -500,6 +506,25 @@ chimera_posix_choose_worker(struct chimera_posix_client *posix)
 
     return &posix->workers[idx % (unsigned int) posix->nworkers];
 } // chimera_posix_choose_worker
+
+/* Per-call worker pinning.  A POSIX call that issues more than one SDK
+ * dispatch -- in particular one that drives a caller-owned compound
+ * (chimera_client_compound_begin) -- must run every dispatch, and the
+ * compound's begin/end, on ONE client worker: the compound header is
+ * single-thread-owned (lazy-bind stamps and the op counters mutate without
+ * locks under that contract).  Choose the worker once per call via this
+ * helper and reuse it for every enqueue of the call; single-dispatch calls
+ * may keep using chimera_posix_choose_worker directly. */
+static FORCE_INLINE struct chimera_posix_worker *
+chimera_posix_call_worker(
+    struct chimera_posix_client     *posix,
+    struct chimera_posix_completion *comp)
+{
+    if (!comp->worker) {
+        comp->worker = chimera_posix_choose_worker(posix);
+    }
+    return comp->worker;
+} // chimera_posix_call_worker
 
 static FORCE_INLINE int
 chimera_posix_wait(

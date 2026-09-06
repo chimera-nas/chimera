@@ -112,6 +112,17 @@ chimera_client_compound_finish(
 {
     request->compound_op_status = status;
 
+    if (request->compound_caller_owned) {
+        /* Caller-owned compound (chimera_client_compound_run_in): the caller
+         * begins/ends it around ALL of its ops, so this op neither commits
+         * nor aborts.  Caller compounds run in the grouping lane (flags 0),
+         * which never delivers ECOMPOUND_CONFLICT, so there is no replay leg
+         * either -- report straight back and let the caller chain its next
+         * op or end the compound. */
+        request->compound_reply(thread, request);
+        return;
+    }
+
     if (status == CHIMERA_VFS_OK) {
         chimera_vfs_compound_end(thread->vfs_thread,
                                  chimera_client_req_cred(request),
@@ -169,8 +180,9 @@ chimera_client_compound_run(
     chimera_client_request_callback start,
     chimera_client_request_callback reply)
 {
-    request->compound_ts      = chimera_vfs_compound_alloc_ts(thread->vfs_thread);
-    request->compound_attempt = 0;
+    request->compound_ts           = chimera_vfs_compound_alloc_ts(thread->vfs_thread);
+    request->compound_attempt      = 0;
+    request->compound_caller_owned = 0;
     if (hint_fhlen) {
         memcpy(request->compound_fh, hint_fh, hint_fhlen);
     }
@@ -181,3 +193,37 @@ chimera_client_compound_run(
 
     chimera_client_compound_attempt(thread, request);
 } /* chimera_client_compound_run */
+
+/*
+ * Run `request`'s op chain inside a CALLER-OWNED compound (from
+ * chimera_client_compound_begin, or the loose singleton).  Unlike
+ * chimera_client_compound_run, the driver performs no begin, no end, and no
+ * conflict replay: `start` runs exactly once with request->compound set to
+ * `caller_compound`, the op's terminal still calls
+ * chimera_client_compound_finish(), and `reply` fires with the bare op status
+ * -- no commit has happened.  The caller chains further ops on the same
+ * compound from `reply` and commits/aborts once, via
+ * chimera_client_compound_end(), after ALL of them; a caller compound is in
+ * the grouping lane (no RETRYABLE), so conflicts cannot arrive -- a backend
+ * conflict surfaces at the caller's end as the retriable, never-replayed
+ * ECOMPOUND_EXHAUSTED.  Every dispatch on the compound, and its begin/end,
+ * must run on the ONE thread that began it (the compound header is
+ * single-thread-owned).
+ */
+static inline void
+chimera_client_compound_run_in(
+    struct chimera_client_thread   *thread,
+    struct chimera_client_request  *request,
+    struct chimera_vfs_compound    *caller_compound,
+    chimera_client_request_callback start,
+    chimera_client_request_callback reply)
+{
+    request->compound              = caller_compound;
+    request->compound_caller_owned = 1;
+    request->compound_attempt      = 0;
+    request->compound_op_status    = CHIMERA_VFS_OK;
+    request->compound_start        = start;
+    request->compound_reply        = reply;
+
+    start(thread, request);
+} /* chimera_client_compound_run_in */

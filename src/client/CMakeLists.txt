@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_client SHARED client.c client_dispatch.c
+add_library(chimera_client SHARED client.c client_dispatch.c client_compound.c
             client_mount.c client_umount.c
             client_mkfs.c client_rmfs.c
             client_open.c client_mkdir.c client_mknod.c client_close.c client_read.c client_read_into.c client_write.c

@@ -112,6 +112,24 @@ chimera_dispatch_open(
                                 chimera_open_start, chimera_open_reply);
 } /* chimera_dispatch_open */
 
+/* Caller-compound variant: enlist the open in `compound` (owned and later
+ * ended by the caller) so follow-up ops on the returned handle -- e.g. the
+ * POSIX O_TRUNC fallback truncate -- share one compound.  The user callback
+ * fires with the bare op status; a caller whose LATER legs or commit fail
+ * must release the delivered handle itself. */
+static inline void
+chimera_dispatch_open_in(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request,
+    struct chimera_vfs_compound   *compound)
+{
+    /* See chimera_dispatch_open: pooled requests, anchor the invariant. */
+    request->sync_open_handle = NULL;
+
+    chimera_client_compound_run_in(thread, request, compound,
+                                   chimera_open_start, chimera_open_reply);
+} /* chimera_dispatch_open_in */
+
 static void
 chimera_open_at_complete(
     enum chimera_vfs_error          error_code,

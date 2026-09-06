@@ -20,10 +20,23 @@
 #define AT_EMPTY_PATH       0x1000
 #endif /* ifndef AT_EMPTY_PATH */
 
+/*
+ * Real-dirfd fchownat: the open_at + setattr chain runs as ONE caller-owned
+ * compound (grouping lane) on the one worker the call was enqueued to --
+ * begun in the exec below, threaded through both raw VFS calls, and
+ * committed/aborted once the chain settles.
+ */
 struct chimera_posix_fchownat_ctx {
     struct chimera_posix_completion comp;
     struct chimera_vfs_open_handle *file_handle;
+    struct chimera_vfs_compound    *compound;
+    enum chimera_vfs_error op_status;
     struct chimera_vfs_attrs        set_attr;
+    /* Scratch set_attr handed to the O_PATH open_at (open_at requires a
+     * non-NULL set_attr; nothing is created, so nothing is applied).  Kept
+     * separate from the uid/gid payload so the open cannot consume or
+     * rewrite it. */
+    struct chimera_vfs_attrs        open_set_attr;
 };
 
 static void
@@ -37,6 +50,41 @@ chimera_posix_fchownat_callback(
     chimera_posix_complete(comp, status);
 } /* chimera_posix_fchownat_callback */
 
+static void
+chimera_posix_fchownat_end_callback(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_posix_fchownat_ctx *ctx = private_data;
+
+    if (ctx->op_status == CHIMERA_VFS_OK && error_code != CHIMERA_VFS_OK) {
+        ctx->op_status = error_code;
+    }
+
+    chimera_posix_complete(&ctx->comp, ctx->op_status);
+} /* chimera_posix_fchownat_end_callback */
+
+/* Commit (durably) on success, abort on failure; the user status is the op
+ * status, upgraded to the commit status when only the commit fails. */
+static void
+chimera_posix_fchownat_finish(
+    struct chimera_posix_fchownat_ctx *ctx,
+    enum chimera_vfs_error             status)
+{
+    struct chimera_client_request *request = ctx->comp.request;
+
+    ctx->op_status = status;
+
+    chimera_client_compound_end(request->thread,
+                                chimera_client_req_cred(request),
+                                ctx->compound,
+                                status == CHIMERA_VFS_OK ?
+                                CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                                CHIMERA_VFS_COMPOUND_ABORT,
+                                chimera_posix_fchownat_end_callback,
+                                ctx);
+} /* chimera_posix_fchownat_finish */
+
 /* Callback after setattr completes - release the file handle */
 static void
 chimera_posix_fchownat_setattr_complete(
@@ -49,7 +97,7 @@ chimera_posix_fchownat_setattr_complete(
     struct chimera_posix_fchownat_ctx *ctx = private_data;
 
     chimera_vfs_release(ctx->comp.request->thread->vfs_thread, ctx->file_handle);
-    chimera_posix_complete(&ctx->comp, error_code);
+    chimera_posix_fchownat_finish(ctx, error_code);
 } /* chimera_posix_fchownat_setattr_complete */
 
 /* Callback after opening the target file - now call setattr */
@@ -67,7 +115,7 @@ chimera_posix_fchownat_open_complete(
     struct chimera_client_request     *request = ctx->comp.request;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
+        chimera_posix_fchownat_finish(ctx, error_code);
         return;
     }
 
@@ -75,7 +123,7 @@ chimera_posix_fchownat_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
+        chimera_client_req_cred(request), ctx->compound,
         oh,
         &ctx->set_attr,
         0,  /* pre_attr_mask */
@@ -93,15 +141,26 @@ chimera_posix_fchownat_at_exec(
 
     /* Note: ctx->set_attr was already initialized by chimera_posix_fchownat */
 
+    ctx->op_status = CHIMERA_VFS_OK;
+    ctx->compound  = chimera_client_compound_begin(
+        thread,
+        chimera_client_req_cred(request),
+        request->setattr.parent_handle->fh,
+        request->setattr.parent_handle->fh_len,
+        CHIMERA_VFS_COMPOUND_WRITE);
+
+    ctx->open_set_attr.va_req_mask = 0;
+    ctx->open_set_attr.va_set_mask = 0;
+
     /* Open the target file relative to the parent directory */
     chimera_vfs_open_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
+        chimera_client_req_cred(request), ctx->compound,
         request->setattr.parent_handle,
         request->setattr.path,
         request->setattr.path_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
-        &ctx->set_attr,
+        &ctx->open_set_attr,
         0,
         0,
         0,
@@ -125,8 +184,8 @@ chimera_posix_fchownat(
     gid_t       group,
     int         flags)
 {
-    struct chimera_posix_client      *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker      *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_client      *posix = chimera_posix_get_global();
+    struct chimera_posix_worker      *worker;
     struct chimera_client_request     req;
     struct chimera_posix_fchownat_ctx ctx;
     struct chimera_posix_fd_entry    *dir_entry = NULL;
@@ -138,6 +197,8 @@ chimera_posix_fchownat(
     (void) flags;
 
     chimera_posix_completion_init(&ctx.comp, &req);
+
+    worker = chimera_posix_call_worker(posix, &ctx.comp);
 
     // Handle AT_FDCWD case - use simple path-based setattr
     if (dirfd == AT_FDCWD) {
@@ -204,6 +265,7 @@ chimera_posix_fchownat(
         req.setattr.private_data = &ctx;
 
         // Store uid/gid in ctx for the async chain
+        ctx.set_attr.va_req_mask = 0;
         ctx.set_attr.va_set_mask = 0;
 
         if (owner != (uid_t) -1) {

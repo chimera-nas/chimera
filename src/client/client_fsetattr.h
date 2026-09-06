@@ -63,3 +63,15 @@ chimera_dispatch_fsetattr(
                                 CHIMERA_VFS_COMPOUND_WRITE,
                                 chimera_fsetattr_start, chimera_fsetattr_reply);
 } /* chimera_dispatch_fsetattr */
+
+/* Caller-compound variant: enlist the setattr in `compound` (owned and later
+ * ended by the caller); the user callback fires with the bare op status. */
+static inline void
+chimera_dispatch_fsetattr_in(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request,
+    struct chimera_vfs_compound   *compound)
+{
+    chimera_client_compound_run_in(thread, request, compound,
+                                   chimera_fsetattr_start, chimera_fsetattr_reply);
+} /* chimera_dispatch_fsetattr_in */

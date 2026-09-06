@@ -162,10 +162,17 @@ chimera_posix_futimens(
  * Once the target file handle is known we open it (O_PATH) and apply the
  * setattr, mirroring the lookup -> open_fh -> setattr chain in
  * client_setattr.h.
+ *
+ * The whole chain runs as ONE caller-owned compound (grouping lane) on the
+ * one worker the call was enqueued to: begun in the exec below, threaded
+ * through the lookup, open and setattr, and committed/aborted once the
+ * chain settles.
  */
 struct chimera_posix_utimensat_ctx {
     struct chimera_posix_completion comp;
     struct chimera_vfs_open_handle *file_handle;
+    struct chimera_vfs_compound    *compound;
+    enum chimera_vfs_error          op_status;
     struct chimera_vfs_attrs        set_attr;
     uint32_t                        lookup_flags;   /* CHIMERA_VFS_LOOKUP_FOLLOW or 0 */
     /* Both timestamps omitted: validate the path resolution, change
@@ -178,6 +185,41 @@ struct chimera_posix_utimensat_ctx {
 };
 
 static void
+chimera_posix_utimensat_end_callback(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_posix_utimensat_ctx *ctx = private_data;
+
+    if (ctx->op_status == CHIMERA_VFS_OK && error_code != CHIMERA_VFS_OK) {
+        ctx->op_status = error_code;
+    }
+
+    chimera_posix_complete(&ctx->comp, ctx->op_status);
+} /* chimera_posix_utimensat_end_callback */
+
+/* Commit (durably) on success, abort on failure; the user status is the op
+ * status, upgraded to the commit status when only the commit fails. */
+static void
+chimera_posix_utimensat_finish(
+    struct chimera_posix_utimensat_ctx *ctx,
+    enum chimera_vfs_error              status)
+{
+    struct chimera_client_request *request = ctx->comp.request;
+
+    ctx->op_status = status;
+
+    chimera_client_compound_end(request->thread,
+                                chimera_client_req_cred(request),
+                                ctx->compound,
+                                status == CHIMERA_VFS_OK ?
+                                CHIMERA_VFS_COMPOUND_COMMIT_DURABLE :
+                                CHIMERA_VFS_COMPOUND_ABORT,
+                                chimera_posix_utimensat_end_callback,
+                                ctx);
+} /* chimera_posix_utimensat_finish */
+
+static void
 chimera_posix_utimensat_setattr_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,
@@ -188,7 +230,7 @@ chimera_posix_utimensat_setattr_complete(
     struct chimera_posix_utimensat_ctx *ctx = private_data;
 
     chimera_vfs_release(ctx->comp.request->thread->vfs_thread, ctx->file_handle);
-    chimera_posix_complete(&ctx->comp, error_code);
+    chimera_posix_utimensat_finish(ctx, error_code);
 } /* chimera_posix_utimensat_setattr_complete */
 
 static void
@@ -201,7 +243,7 @@ chimera_posix_utimensat_open_complete(
     struct chimera_client_request      *request = ctx->comp.request;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
+        chimera_posix_utimensat_finish(ctx, error_code);
         return;
     }
 
@@ -209,7 +251,7 @@ chimera_posix_utimensat_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
+        chimera_client_req_cred(request), ctx->compound,
         oh,
         &ctx->set_attr,
         0,  /* pre_attr_mask */
@@ -228,19 +270,19 @@ chimera_posix_utimensat_lookup_complete(
     struct chimera_client_request      *request = ctx->comp.request;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
+        chimera_posix_utimensat_finish(ctx, error_code);
         return;
     }
 
     if (ctx->validate_only) {
         /* Resolution succeeded; a both-omitted call changes nothing. */
-        chimera_posix_complete(&ctx->comp, CHIMERA_VFS_OK);
+        chimera_posix_utimensat_finish(ctx, CHIMERA_VFS_OK);
         return;
     }
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
+        chimera_client_req_cred(request), ctx->compound,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -255,9 +297,16 @@ chimera_posix_utimensat_exec(
 {
     struct chimera_posix_utimensat_ctx *ctx = request->setattr.private_data;
 
+    ctx->op_status = CHIMERA_VFS_OK;
+    ctx->compound  = chimera_client_compound_begin(thread,
+                                                   chimera_client_req_cred(request),
+                                                   ctx->start_fh,
+                                                   ctx->start_fh_len,
+                                                   CHIMERA_VFS_COMPOUND_WRITE);
+
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
+        chimera_client_req_cred(request), ctx->compound,
         ctx->start_fh,
         ctx->start_fh_len,
         ctx->path,
@@ -275,14 +324,16 @@ chimera_posix_utimensat(
     const struct timespec times[2],
     int                   flags)
 {
-    struct chimera_posix_client       *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker       *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_client       *posix = chimera_posix_get_global();
+    struct chimera_posix_worker       *worker;
     struct chimera_client_request      req;
     struct chimera_posix_utimensat_ctx ctx;
     struct chimera_posix_fd_entry     *dir_entry = NULL;
     int                                err;
 
     chimera_posix_completion_init(&ctx.comp, &req);
+
+    worker = chimera_posix_call_worker(posix, &ctx.comp);
 
     ctx.file_handle   = NULL;
     ctx.validate_only = chimera_posix_utimes_noop(times);

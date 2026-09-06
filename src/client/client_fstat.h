@@ -68,3 +68,15 @@ chimera_dispatch_fstat(
                                 CHIMERA_VFS_COMPOUND_READ,
                                 chimera_fstat_start, chimera_fstat_reply);
 } /* chimera_dispatch_fstat */
+
+/* Caller-compound variant: enlist the getattr in `compound` (owned and later
+ * ended by the caller); the user callback fires with the bare op status. */
+static inline void
+chimera_dispatch_fstat_in(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request,
+    struct chimera_vfs_compound   *compound)
+{
+    chimera_client_compound_run_in(thread, request, compound,
+                                   chimera_fstat_start, chimera_fstat_reply);
+} /* chimera_dispatch_fstat_in */

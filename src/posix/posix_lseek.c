@@ -125,6 +125,12 @@ chimera_posix_lseek(
         return chimera_posix_lseek_hole_data(posix, fd, offset, 1);
     }
 
+    /* SEEK_END: one SDK dispatch (the fstat) plus local offset arithmetic,
+     * so there is nothing to fold into a caller compound.  The size read
+     * here and the offset store below are not atomic against concurrent
+     * writers -- inherent to lseek(SEEK_END) on a shared file, and a
+     * compound would not change it (compounds group ops, they do not
+     * snapshot). */
     if (whence == SEEK_END) {
         struct stat st;
 

@@ -117,6 +117,15 @@ struct chimera_client_request {
     enum chimera_vfs_error             compound_op_status;
     int                                compound_fhlen;
     uint8_t                            compound_mode;
+    /* Set by chimera_client_compound_run_in(): request->compound belongs to
+     * the CALLER (chimera_client_compound_begin), which begins and ends it
+     * around a whole sequence of ops.  The driver then neither begins, ends,
+     * nor replays -- chimera_client_compound_finish() reports straight back
+     * through compound_reply and the caller commits once after all its ops.
+     * Cleared by chimera_client_compound_run() for the default
+     * driver-owned path (requests are pooled, so the flag must be
+     * re-anchored every dispatch). */
+    uint8_t                            compound_caller_owned;
     uint8_t                            compound_fh[CHIMERA_VFS_FH_SIZE];
     chimera_client_request_callback    compound_start;
     chimera_client_request_callback    compound_reply;
