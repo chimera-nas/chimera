@@ -1639,6 +1639,10 @@ chimera_smb_server_handle_smb2(
         if (unlikely(memcmp(request->smb2_hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0)) {
             chimera_smb_error("Received SMB2 message with invalid protocol header");
             chimera_smb_request_free(thread, request);
+            /* This request was never chained into the compound; free it on its
+             * own, then END+recycle the chain's still-open VFS compound (ABORT:
+             * no reply is coming) before dropping the connection. */
+            chimera_smb_compound_free(thread, compound);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -1646,6 +1650,9 @@ chimera_smb_server_handle_smb2(
         if (unlikely(request->smb2_hdr.struct_size != 64)) {
             chimera_smb_error("Received SMB2 message with invalid struct size");
             chimera_smb_request_free(thread, request);
+            /* Not chained yet: free the request, then END+recycle the chain's
+             * VFS compound (ABORT) before the no-reply connection drop. */
+            chimera_smb_compound_free(thread, compound);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -1686,6 +1693,13 @@ chimera_smb_server_handle_smb2(
                     request->smb2_hdr.message_id, charge,
                     conn->seq_low, conn->seq_high);
                 chimera_smb_request_free(thread, request);
+                /* The consumed-/out-of-window-MessageId drop (MS-SMB2 3.3.5.2.3)
+                 * gets no reply.  The request was never chained into the
+                 * compound, so free it on its own, then END+recycle the chain's
+                 * still-open VFS compound (ABORT) before dropping the
+                 * connection -- otherwise the begun VFS compound leaks and trips
+                 * the thread-destroy leak assert. */
+                chimera_smb_compound_free(thread, compound);
                 evpl_close(evpl, conn->bind);
                 return;
             }
@@ -1928,6 +1942,9 @@ chimera_smb_server_handle_smb2(
                 if (unlikely(conn->last_session_handle == NULL)) {
                     chimera_smb_error("Message contains RELATED_OPERATIONS flag but no last session handle exists");
                     chimera_smb_request_free(thread, request);
+                    /* Not chained yet: free the request, then END+recycle the
+                     * chain's VFS compound (ABORT) before the no-reply drop. */
+                    chimera_smb_compound_free(thread, compound);
                     evpl_close(evpl, conn->bind);
                     return;
                 }
@@ -1982,6 +1999,9 @@ chimera_smb_server_handle_smb2(
 
                 chimera_smb_error("Received SMB2 message with invalid signature");
                 chimera_smb_request_free(thread, request);
+                /* Not chained yet: free the request, then END+recycle the
+                 * chain's VFS compound (ABORT) before the no-reply drop. */
+                chimera_smb_compound_free(thread, compound);
                 evpl_close(evpl, conn->bind);
                 return;
             }
@@ -2015,6 +2035,9 @@ chimera_smb_server_handle_smb2(
             chimera_smb_error("Unsigned, unencrypted request (cmd %u) on a protected connection; disconnecting",
                               request->smb2_hdr.command);
             chimera_smb_request_free(thread, request);
+            /* Not chained yet: free the request, then END+recycle the chain's
+             * VFS compound (ABORT) before the no-reply connection drop. */
+            chimera_smb_compound_free(thread, compound);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -2186,6 +2209,10 @@ chimera_smb_server_handle_smb2(
                                         evpl_iovec_cursor_consumed(request_cursor));
             if (unlikely(smb_cursor_seek_to(request_cursor, request->smb2_hdr.next_command) != 0)) {
                 chimera_smb_error("SMB2 compound NextCommand skip out of range; closing connection");
+                /* This request is already chained into the compound; END+recycle
+                 * the whole chain (ABORT -- no reply) rather than freeing the
+                 * request alone, which would leak the begun VFS compound. */
+                chimera_smb_compound_free(thread, compound);
                 evpl_close(evpl, conn->bind);
                 return;
             }
