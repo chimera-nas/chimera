@@ -509,14 +509,27 @@ foreach(image_spec ${KVM_IMAGES})
                                 ${CHIMERA_BINARY} ${backend} ${nfsver} ${prog})
                     set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
                         PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
-                    # nfstest_lock (5296 subtests, ~6.5 min) and nfstest_dio
-                    # (1 MiB direct-I/O transfers, ~5.5 min) run well past the
-                    # CI-wide `ctest --timeout 300`; give them a per-test timeout
-                    # that overrides it so they are not killed mid-run.
-                    if(prog STREQUAL "nfstest_lock" OR prog STREQUAL "nfstest_dio")
-                        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
-                            PROPERTIES TIMEOUT 900)
-                    endif()
+                    # Every nfstest case boots a guest and runs a whole suite
+                    # inside it, which does not fit the CI-wide
+                    # `ctest --timeout 300`.  nfstest_lock (5296 subtests,
+                    # ~6.5 min) and nfstest_dio (1 MiB direct-I/O transfers,
+                    # ~5.5 min) exceed it outright and have carried an override
+                    # for a while; the rest exceed it only under load, which is
+                    # worse, because it looks like a hang rather than a limit.
+                    #
+                    # Measured standalone on a hosted runner, nfstest_posix is
+                    # 50s on memfs and 135s on diskfs_io_uring -- comfortably
+                    # inside 300 on its own.  The extended shard runs
+                    # `ctest -j $(nproc)` with PROCESSORS 2 per case, so several
+                    # guests compete for a 4-vCPU runner and the same work lands
+                    # the far side of the limit: diskfs_io_uring timed out at
+                    # every NFS version there while memfs and cairn, which do
+                    # less I/O, passed.
+                    #
+                    # So the override belongs to the family, not to the two
+                    # cases that happened to be slow enough to notice first.
+                    set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
+                        PROPERTIES TIMEOUT 900)
                 endforeach()
             endforeach()
         endforeach()

@@ -355,6 +355,147 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  # Standing diagnostic for the KVM suites.
+  #
+  # The kvm shard in the extended workflow has never produced a passing run on
+  # the hosted runners, and each attempt costs six hours to observe nothing.  It
+  # fails two ways: guests that never boot, because the rootfs is not where the
+  # registered test looks for it --
+  #
+  #   Could not open '//kvm/ubuntu2404/rootfs.qcow2': No such file or directory
+  #
+  # -- and guests that boot, print kernel messages, and then go silent for five
+  # hours until the job limit cancels them.
+  #
+  # Note the doubled slash.  IMAGE_DIR is <parent of CMAKE_BINARY_DIR>/kvm/
+  # <image>, and the containers configure with `-w /build`, so the parent is `/`.
+  #
+  # This lives here rather than in build-test.yml because that workflow does not
+  # run on pull_request -- it is merge_group and push only -- so a diagnostic
+  # placed there could not be iterated on from a PR at all, which is the whole
+  # point of having one.
+  #
+  # It reports, it does not gate: continue-on-error, and deliberately absent
+  # from ci-complete's needs.  Nothing depends on the KVM suites today, and a
+  # diagnostic that can block a merge is one people learn to route around.
+  kvm-diagnostic:
+    name: KVM diagnostic (informational)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the dev container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .devcontainer
+          file: .devcontainer/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.DEV_IMAGE }}
+          cache-from: type=registry,ref=${{ env.DEV_IMAGE_CACHE }}
+          build-args: |
+            UBUNTU_MIRROR=azure
+
+      # The guest images are an OCI artifact in GHCR, so the KVM build needs
+      # oras to pull them -- and CMake's KVM_TESTING=ON check refuses outright
+      # without it.  Fetched onto the runner and mounted into the container,
+      # the way the test jobs do it.
+      - name: Fetch oras CLI
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: amd64
+
+      # Reported before entering the container, so a missing /dev/kvm can be
+      # attributed to the runner rather than to how we invoke docker.
+      - name: Report the runner's own KVM support
+        run: |
+          echo "=== runner (outside the container) ==="
+          uname -srm
+          ls -l /dev/kvm 2>&1 || echo "/dev/kvm ABSENT on the runner"
+          grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2-
+          grep -qm1 -E '^flags.*\b(vmx|svm)\b' /proc/cpuinfo \
+            && echo "virtualisation extensions present" \
+            || echo "no vmx/svm in /proc/cpuinfo"
+
+      - name: Diagnose KVM inside the dev container
+        run: |
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE }} \
+            bash -euxc '
+              # Configure exactly as the test jobs do, so IMAGE_DIR resolves the
+              # way theirs resolves -- the point is to observe that path, not to
+              # quietly pick a better one.
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                    -DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF /workspace
+              # One image, not the whole set: this asks whether the mechanism
+              # works at all.
+              # Report rather than abort: where the fetch puts the images, and
+              # whether that is where the registered tests look, is the whole
+              # question -- so the diagnostic below must run either way.
+              ninja kvm_ubuntu2404_image || echo "IMAGE FETCH FAILED (continuing to report)"
+              bash /workspace/kvm/kvm_diagnose.sh /build ubuntu2404
+
+              # ---- escalation: the same guest, through the real harness ----
+              #
+              # The check above boots a guest directly: no netns, no tap, no
+              # chimera, no ctest.  It passes, so KVM, the images and the guest
+              # itself are all fine, and whatever breaks the extended kvm shard
+              # is in the part it skips.
+              #
+              # The extended logs point at the backend rather than the guest:
+              # nfstest_posix_memfs_nfs3 passed there while the diskfs variants
+              # timed out, and diskfs_aio_nfs4.1 hung outright.  So run one of
+              # each, memfs first as the control, and let ctest bound them --
+              # this is the comparison, and it is cheap.
+              #
+              # Both are run even if the first fails (|| true): a control that
+              # fails is itself the answer, and stopping there would hide it.
+              ninja
+              # -C extended: the KVM suites are registered in the extended
+              # configuration, and without it ctest matches nothing and reports
+              # "No tests were found!!!" -- which, with the || true below, is a
+              # green job that tested nothing at all.
+              ctest -C extended -N -R "nfstest_posix_(memfs|diskfs_io_uring)_nfs3"
+              ctest -C extended -R "nfstest_posix_memfs_nfs3" \
+                    --output-on-failure --timeout 420 -j 1 || true
+              ctest -C extended -R "nfstest_posix_diskfs_io_uring_nfs3" \
+                    --output-on-failure --timeout 420 -j 1 || true
+
+              # Whatever ctest could not reclaim is still running.  12 of the 13
+              # wrappers launch qemu in the foreground and never kill it, so a
+              # guest outliving its test is the mechanism that turns one hang
+              # into a six-hour wedge -- name any survivor here rather than
+              # inferring it from a cancelled job.
+              # -x matches the process name exactly.  A -f pattern matches this
+              # very shell, whose command line quotes the string, and reports
+              # itself as the survivor.
+              echo "=== qemu processes still alive after ctest ==="
+              pgrep -a -x "qemu-system-x86_64" || echo "  none (nothing was left behind)"'
+
+
   analyze-macos:
     name: Analyze macOS Release (pre-merge)
     runs-on: macos-14
