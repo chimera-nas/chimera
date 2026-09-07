@@ -319,10 +319,16 @@ chimera_nfs4_readdir_attrdir_open_callback(
     struct nfs4_attrdir_readdir_ctx *ctx  = private_data;
     struct nfs_request              *req  = ctx->req;
     struct READDIR4args             *args = &req->args_compound->argarray[req->index].opreaddir;
+    struct READDIR4res              *res  = &req->res_compound.resarray[req->index].opreaddir;
 
     if (error_code != CHIMERA_VFS_OK) {
+        /* Nothing was opened, so there is no handle to release.  Complete the
+         * op directly, as chimera_nfs4_readdir_open_callback does on the same
+         * failure: chimera_nfs4_readdir_complete releases req->handle
+         * unconditionally and would dereference the NULL. */
         req->handle = NULL;
-        chimera_nfs4_readdir_complete(error_code, NULL, 0, 0, 0, NULL, req);
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
         free(ctx);
         return;
     }
