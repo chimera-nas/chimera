@@ -181,8 +181,16 @@ chimera_smb_duplicate_extents_getattr_cb(
     /* Block-cloning a sparse source into a non-sparse destination is not
      * supported (MS-FSCC 2.3.8): the sparse-ness must match.  A sparse source
      * with a sparse destination (or two dense files) clones fine
-     * (smb2.ioctl.dup_extents_sparse_src vs sparse_dest/sparse_both). */
-    if ((attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE) &&
+     * (smb2.ioctl.dup_extents_sparse_src vs sparse_dest/sparse_both).
+     *
+     * The sparse bit lives in the DOS attributes, which a backend reports
+     * only when asked and which the passthrough backends never report.  Read
+     * it only when the reply says it is there: an attribute struct that was
+     * never asked for it holds whatever that field last carried, and a stale
+     * SPARSE from an earlier request turned this into an intermittent
+     * NOT_SUPPORTED on the linux backend (smb2.ioctl.dup_extents_dest_lock). */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE) &&
         !request->ioctl.de_dst_sparse) {
         chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
         return;
@@ -224,9 +232,12 @@ chimera_smb_duplicate_extents_dst_getattr_cb(
         return;
     }
 
-    request->ioctl.de_dst_size   = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
+    request->ioctl.de_dst_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
+    /* Valid only when the reply carries DOS attributes; see the sparse check
+     * in chimera_smb_duplicate_extents_getattr_cb. */
     request->ioctl.de_dst_sparse =
-        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE) ? 1 : 0;
+        ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+         (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE)) ? 1 : 0;
 
     if (request->ioctl.de_dst_offset + request->ioctl.de_length > request->ioctl.de_dst_size) {
         chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
@@ -237,7 +248,7 @@ chimera_smb_duplicate_extents_dst_getattr_cb(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
         request->ioctl.de_src_open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
+        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
         chimera_smb_duplicate_extents_getattr_cb,
         request);
 } /* chimera_smb_duplicate_extents_dst_getattr_cb */
@@ -302,7 +313,7 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
         dst_open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
+        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
         chimera_smb_duplicate_extents_dst_getattr_cb,
         request);
 } /* chimera_smb_ioctl_duplicate_extents */
