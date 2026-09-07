@@ -213,32 +213,18 @@ static const struct {
     const char *trace;      /* trace file basename */
     const char *why;
 } posix_mbt_declines[] = {
-    /* Three traces the unified corpus reaches that the per-backend corpora
-     * never generated.  Each names a defect, not a policy difference; the
-     * sentinel keeps the array non-empty and new declines go above it.
-     *
-     * cairn: a write whose data never lands.  pid1 opens /b, writes 4096
-     * bytes, and the call reports success -- but the file is still size 0 at
-     * the audit.  The model and every other backend grow it.  Both traces are
-     * the same shape and neither depends on the clone the flavor is named
-     * for: the RCloneRange steps around them all expect EBADF or EINVAL, so
-     * reflink is never exercised.  These were invisible until the capability
-     * skip stopped pardoning divergences recorded before it fired. */
-    { "cairn",  "stepClone_128_0x1_0.itf.json",
-      "write reports success but leaves the file at size 0 (audit: /b)" },
-    { "cairn",  "stepClone_128_0x1_2.itf.json",
-      "write reports success but leaves the file at size 0 (audit: /b)" },
-
     /* diskfs: SEEK_HOLE/SEEK_DATA over an allocated-but-unwritten extent.
-     * The model materializes the blocks a fallocate reserves and calls them
-     * data, so it seeks past them; diskfs reports the unwritten remainder as
-     * a hole and stops earlier.  POSIX lets an implementation report an
-     * allocated extent either way, so neither side is wrong -- ext4 takes the
-     * same conservative reading (recorded there as EXT4-5).  A second
-     * implementation choosing it is the argument for widening the model to an
-     * acceptance set rather than recording each one as a deviation; until
-     * then the offset mismatch has no reconciliation to hang on, because
-     * KNOWN_DEVIATIONS keys on errno and both sides here succeed. */
+    * The model materializes the blocks a fallocate reserves and calls them
+    * data, so it seeks past them; diskfs reports the unwritten remainder as
+    * a hole and stops earlier.  POSIX lets an implementation report an
+    * allocated extent either way, so neither side is wrong -- ext4 takes the
+    * same conservative reading (recorded there as EXT4-5).  A second
+    * implementation choosing it is the argument for widening the model to an
+    * acceptance set rather than recording each one as a deviation; until
+    * then the offset mismatch has no reconciliation to hang on, because
+    * KNOWN_DEVIATIONS keys on errno and both sides here succeed.
+    *
+    * The sentinel keeps the array non-empty; new declines go above it. */
     { "diskfs", "stepSparse_128_0x1_1.itf.json",
       "SEEK_HOLE stops at the unwritten part of a fallocate'd extent" },
 
@@ -264,7 +250,22 @@ posix_mbt_declined(const char *path)
     return NULL;
 } /* posix_mbt_declined */
 
-static int         g_strict_atime;     /* harness policy, not from caps  */
+static int g_strict_atime;             /* harness policy, not from caps  */
+
+/* Whether this target marks atime on every read.  That is a property of the
+ * target -- a mount option, or what a transport chooses to carry -- and not
+ * something POSIX settles, so it is harness configuration rather than a model
+ * capability, and the unified corpus no longer ships it in caps.  These are
+ * the values the retired per-backend profiles pinned: the NFS3 loopback and
+ * the FUSE transport mark it, nothing else does.  Reading it out of caps (as
+ * this did while the profiles existed) now silently yields false everywhere,
+ * which turns the atime assertions off instead of running them. */
+static int
+posix_mbt_strict_atime(const char *module)
+{
+    return strncmp(module, "nfs3", 4) == 0 ||
+           strncmp(module, "fuse", 4) == 0;
+} /* posix_mbt_strict_atime */
 /* The errnos the model says POSIX ALSO permits for the condition this step
  * hit, carried in the LCall label (see posix_ops.qnt's Out.alt).  Where the
  * standard names two spellings for one condition -- rmdir on a non-empty
@@ -2118,6 +2119,18 @@ op_lseek(
     rc = chimera_posix_lseek(rfd(pid, tf_field(rv, "fd")),
                              (off_t) tf_field(rv, "off"), whence);
     e = ERRV(rc);
+    /* An absent SEEK_DATA/SEEK_HOLE reaches the caller as EINVAL, not
+     * EOPNOTSUPP: chimera_posix_lseek_hole_data() maps the backend's ENOTSUP
+     * that way because that is what Linux reports for a filesystem without
+     * them.  So the capability skip has to recognise EINVAL here, where for
+     * copy_file_range and reflink it recognises EOPNOTSUPP.  Guarded on the
+     * model not having expected EINVAL itself, which it does for a negative
+     * offset -- that is an argument error and says nothing about support. */
+    if (e == EINVAL && exp_e != EINVAL &&
+        (whence == SEEK_DATA || whence == SEEK_HOLE)) {
+        g_cap_skip = "SEEK_DATA/SEEK_HOLE";
+        return;
+    }
     if (e != exp_e) {
         const char *dev = reconcile("RLseek", rv, (int) exp_e, e);
         if (dev) {              /* e.g. PD22 (ENXIO vs EINVAL) */
@@ -3906,7 +3919,7 @@ replay_trace(const char *path)
         return -1;
     }
     caps           = json_object_get(tf_val(lo0), "caps");
-    g_strict_atime = tf_bool(caps, "strictAtime");
+    g_strict_atime = posix_mbt_strict_atime(g_module);
 
     state_reset();
     g_cap_skip = NULL;
@@ -3944,11 +3957,16 @@ replay_trace(const char *path)
         g_cur_alt  = v;
         g_cur_pid  = pid;
         g_cur_step = (int) i;
-        last_fs    = g_cur_fs;
 
         if (g_cap_skip) {
+            /* Stop BEFORE advancing last_fs.  The skip was set by the
+             * PREVIOUS step, so the backend's filesystem is the one this
+             * trace's previous state describes; taking this state instead
+             * would audit it against an operation it never ran, and every
+             * object that operation touched would read as a divergence. */
             break;
         }
+        last_fs = g_cur_fs;
         alarm(MBT_STEP_TIMEOUT_SEC);
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {
             fprintf(stderr, "%s: step %zu: unimplemented op %s\n", path, i,

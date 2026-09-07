@@ -36,10 +36,13 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # One batched replay of the specs `posixFuse` corpus: the same POSIX model,
 # the same replayer, and a driver that turns every operation into FUSE
-# requests against the server.  The profile differs from posixMemfs only where
-# the FUSE transport forces it to (no reflink ioctl, strict atime, no chgrp to
-# a supplementary group), so a divergence here is the FUSE server's and not
-# the model's or the backend's.
+# requests against the server.  There is no fuse_ profile any more -- the
+# corpus is generated once for everybody -- so the three things the FUSE
+# transport used to have pinned for it are handled where they belong: the
+# absent reflink ioctl is a capability skip, strict atime is harness
+# configuration, and chgrp to a supplementary group is a FUSE defect the
+# replayer reconciles by name (one gid travels on the wire).  A divergence
+# here is still the FUSE server's and not the model's or the backend's.
 #
 # Needs no /dev/fuse, no mount and no privileges -- the harness stands a
 # socketpair in for the device -- so it runs everywhere the build does, ahead
@@ -49,8 +52,7 @@ add_test(NAME chimera/fuse/mbt/batch_memfs
             ${CMAKE_SOURCE_DIR}/src/posix/tests/quint/posix_replay.py
             --backend fuse_memfs
             --driver $<TARGET_FILE:fuse_quint_driver>
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --include-prefix fuse_)
+            --trace-dir ${SPECS_BUNDLE_DIR}/posix)
 set_tests_properties(chimera/fuse/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_batch_memfs"
     LABELS "quint;fuse;posix_mbt;memfs"
