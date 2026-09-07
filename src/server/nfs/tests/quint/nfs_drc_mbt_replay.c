@@ -932,6 +932,7 @@ main(
                 if (sec < 0) {
                     fprintf(stderr, "%s: unknown security flavor '%s'\n",
                             argv[0], optarg);
+                    mbt_free_traces(traces, ntraces);
                     return 2;
                 }
 
