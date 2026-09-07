@@ -36,6 +36,20 @@ else
     QEMU_CONSOLE="ttyS0"
 fi
 
+# Upper bound on a single guest, enforced by a process that is not this shell.
+#
+# ctest kills this wrapper when a test times out, and bash does run the EXIT
+# trap on SIGTERM -- but not on SIGKILL, and a foreground qemu is not a job bash
+# tears down either way.  An orphaned qemu keeps the stdout pipe open, ctest
+# blocks forever waiting for EOF on it, and the whole shard wedges until the
+# six-hour job limit: that is how one hung guest has been costing twelve runner
+# hours a night while reporting nothing.
+#
+# timeout(1) is a separate process, so it keeps enforcing after this shell is
+# gone, whatever killed it.  Generous by design -- it is a backstop, not a test
+# budget; ctest's own per-test TIMEOUT is what should normally fire first.
+KVM_QEMU_DEADLINE="${KVM_QEMU_DEADLINE:-2400}"
+
 VMLINUZ=$1; shift
 ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
@@ -77,6 +91,32 @@ cleanup() {
     ip netns delete "${NETNS_NAME}" 2>/dev/null || true
     rm -f "$LOG_A" "$LOG_B"
     rm -rf "$SESSION_DIR"
+    # Reclaim the guest.  Everything above kills what this shell started by
+    # PID; qemu runs in the foreground -- and in a pipeline, so $! never named
+    # it -- and nothing was killing it at all.
+    #
+    # Walk our own descendants rather than signalling direct children only:
+    # qemu sits under timeout(1) now, so it is a grandchild, and reaching it
+    # that way would depend on timeout forwarding the signal.  It does, but a
+    # reclaim that silently degrades to a 40-minute wait if that ever changes
+    # is not worth the two saved lines.  Scoped to this shell's own tree, so a
+    # sibling test's guest is never touched -- these run under ctest -j.
+    #
+    # Collect the whole tree before killing any of it: killing a parent first
+    # reparents its children away and loses them.
+    kvm_tree=""
+    kvm_frontier="$(pgrep -P $$ 2>/dev/null)"
+    while [ -n "${kvm_frontier}" ]; do
+        kvm_tree="${kvm_tree} ${kvm_frontier}"
+        kvm_next=""
+        for kvm_p in ${kvm_frontier}; do
+            kvm_next="${kvm_next} $(pgrep -P "${kvm_p}" 2>/dev/null)"
+        done
+        kvm_frontier="${kvm_next}"
+    done
+    for kvm_p in ${kvm_tree}; do
+        kill -TERM "${kvm_p}" 2>/dev/null || true
+    done
 }
 trap cleanup EXIT
 
@@ -238,7 +278,7 @@ NFSTEST_MTOPTS="hard,rsize=4096,wsize=4096"
 SSHFIX='mkdir -p /run/sshd; chown root:root /run/sshd; chmod 0755 /run/sshd; chown root:root /root; chmod 700 /root; chown -R root:root /root/.ssh /etc/ssh 2>/dev/null; rm -f /etc/ssh/ssh_config.d/*.conf 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/id_ed25519 /root/.ssh/authorized_keys /root/.ssh/config 2>/dev/null; chmod 600 /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_ecdsa_key 2>/dev/null; /usr/sbin/sshd'
 
 # ----- guest B (secondary client): idle with sshd up -------------------------
-ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
+ip netns exec "${NETNS_NAME}" timeout --foreground --kill-after=10s "${KVM_QEMU_DEADLINE}" "$QEMU_BIN" \
     -enable-kvm -smp 2 -m 1G -cpu host \
     -kernel "$VMLINUZ" $QEMU_INITRD $QEMU_MACHINE -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
@@ -338,7 +378,7 @@ TEST_CMD="${SSHFIX}; mkdir -p /mnt/t; command -v ssh >/dev/null 2>&1 || { echo C
 # 6 GiB is now just comfortable headroom (measured peak with the cap is ~1.5 GiB
 # -- ~1 GiB of rings + ~0.3 GiB of tmpfs captures + the OS); -m is only a
 # ceiling (KVM RAM is demand-paged) so it costs no host memory unless touched.
-ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
+ip netns exec "${NETNS_NAME}" timeout --foreground --kill-after=10s "${KVM_QEMU_DEADLINE}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 6G -cpu host \
     -kernel "$VMLINUZ" $QEMU_INITRD $QEMU_MACHINE -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
