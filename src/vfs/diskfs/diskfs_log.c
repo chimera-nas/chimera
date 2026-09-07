@@ -2035,7 +2035,9 @@ diskfs_intent_log_thread_init(
     il->log_head                    = SM_INTENT_LOG_OFFSET;
     il->log_tail                    = SM_INTENT_LOG_OFFSET;
     il->live_records                = 0;
-    il->log_seq                     = 0;
+    /* Resume past the highest seq crash recovery replayed (0 on a clean mount /
+     * mkfs), so post-recovery records never reuse a still-in-log record's seq. */
+    il->log_seq                     = il->recovered_log_seq;
     il->redo_inflight               = 0;
     il->redo_inflight_high_water    = 0;
     il->push_outstanding            = 0;
@@ -2126,7 +2128,10 @@ diskfs_intent_log_thread_shutdown(
     /* Workers are gone, so no new SQ work arrives.  Drain every in-flight redo
      * write and retire (hand off, in order) every record to the push thread --
      * which is still running and will flush them home before it is itself shut
-     * down (the push thread is destroyed after this one). */
+     * down (the push thread is destroyed after this one).  This runs on the
+     * crash path too: it neither writes home nor trims (both happen in the push
+     * thread), so it only makes acknowledged redo durable + frees the records --
+     * the on-disk log region is left intact for recovery to replay. */
     while (il->redo_inflight || il->retire_head != il->retire_tail) {
         evpl_continue(evpl);
     }
@@ -2193,8 +2198,12 @@ diskfs_il_push_thread_shutdown(
     int                       i;
 
     /* The commit thread is already gone, so no new hand-offs arrive.  Drain
-     * every handed-off record home and trim the log fully (clean unmount => no
-     * replay needed). */
+     * every handed-off record home and trim the log.  On the crash path this
+     * trim is in-memory only (it advances il->log_tail and frees the record
+     * structs); the on-disk log region bytes are untouched and log_tail is not
+     * persisted (the crash skips the clean-superblock write), so the next mount
+     * still finds and replays every record.  Draining here frees the records
+     * cleanly -- avoiding a straggler leak the leak checker would abort on. */
     while (il->handoff_head != __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE) ||
            il->push_head || il->push_outstanding) {
         diskfs_il_push_doorbell_cb(evpl, &il->push_doorbell);
@@ -2244,7 +2253,9 @@ diskfs_il_apply_thread_shutdown(
      * remaining record's deltas and ACK its txns, advancing applied_seq up to
      * the final durable_seq -- so the push thread can finish trimming (its
      * checkpoint frontier reads applied_seq) and the unmount checkpoint persists
-     * a complete free map. */
+     * a complete free map.  Runs on the crash path too, to free the ctxs
+     * cleanly; applied_seq is in-memory and discarded (the crash does not
+     * persist the checkpoint). */
     while (il->apply_head != __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE)) {
         diskfs_il_apply_doorbell_cb(evpl, &il->apply_doorbell);
         evpl_continue(evpl);

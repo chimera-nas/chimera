@@ -1467,6 +1467,14 @@ struct diskfs_intent_log {
     uint64_t                         applied_wm;      /* atomic: 1-past-last txn id applied */
     struct evpl_block_queue         *log_queue;       /* redo writes -> intent-log device */
     uint64_t                         log_seq;         /* next redo seq (commit only) */
+    /* Set by crash recovery (diskfs_recover_log) to one past the highest seq it
+     * replayed; the commit thread seeds log_seq from it so post-recovery records
+     * get seqs strictly above every record still in the (un-trimmed) log.  Zero
+     * on a clean mount / mkfs (empty log, so seq starts at 0).  Without this a
+     * post-crash record reuses a recovered record's seq, and a SECOND crash's
+     * seq-ordered (latest-image-wins) replay picks the wrong image -- freeing a
+     * block a live inode occupies. */
+    uint64_t                         recovered_log_seq;
     /* Records placed in the log and not yet trimmed past (atomic; incremented
      * by the commit thread at placement, decremented by the push thread when
      * the trim point passes the record).  Zero means the log is logically
@@ -1600,6 +1608,7 @@ struct diskfs_shared {
     int                         orphans_created;   /* orphan-shard inodes exist on disk */
     int                         orphans_scanned;   /* mount-time orphan recovery done */
     int                         unsafe_async;      /* config opt-in: submit block writes without FUA/sync (no crash safety) */
+    int                         test_crash;        /* test-only (diskfs_test_crash): destroy skips the free-map persist + CLEAN stamp so the next mount runs recovery */
     int                         noatime;           /* config opt-in: never update atime on read (default: relatime) */
     uint64_t                    mtime_defer_us;    /* coalesce non-FILE_SYNC in-place mtime updates: flush each dirty inode at most once per this many us (0 = disabled, log every write); default 1s */
     int                         mounted;           /* 1 = remounted existing FS (enables inode read-back) */
@@ -2994,6 +3003,14 @@ diskfs_fs_attach(
 void
 diskfs_destroy(
     void *private_data);
+
+/* Module teardown shared by diskfs_destroy (clean=1) and the test-only crash
+ * path (clean=0 skips the free-map persist + SM_SB_CLEAN stamp).  Declared for
+ * the white-box test SDK (diskfs_test.c). */
+void
+diskfs_teardown(
+    struct diskfs_shared *shared,
+    int                   clean);
 
 void
 diskfs_grant_doorbell_cb(

@@ -711,7 +711,10 @@ diskfs_reclaim_thread_shutdown(
 
     /* Feed any still-queued jobs to the drain machinery first;
      * diskfs_thread_destroy pumps until every drain completes, so unmount
-     * finishes the reclaim backlog rather than re-scanning it next mount. */
+     * finishes the reclaim backlog rather than re-scanning it next mount.  Runs
+     * on the crash path too: it only completes already-durable orphan reclaims
+     * (frees blocks whose frees are logged) and leaves the log intact, so it
+     * does not corrupt recovery and it drains the jobs cleanly. */
     diskfs_reclaim_doorbell_cb(evpl, &w->doorbell);
 
     /* Finish in-flight AG-log condensations (their parked journaling ops

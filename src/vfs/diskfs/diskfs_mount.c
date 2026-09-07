@@ -471,12 +471,28 @@ diskfs_mount_io_read(
         uint64_t                    want = length - done;
         uint64_t                    xfer;
 
+        /* One whole GLOBAL buffer per read.  A single iovec holds at most
+         * config->buffer_size bytes, so a request larger than that needs more
+         * than one -- and evpl_iovec_alloc(..., max_iovecs=1, ...) answers such
+         * a request by releasing what it placed and returning -1, which the old
+         * code ignored and then released again (a use-after-free on the intent
+         * log read during crash recovery, whose region is many buffers wide).
+         * Cap each transfer to what the buffer holds and to the device's max
+         * request, and iterate. */
+        evpl_iovec_alloc_global(io->evpl, &iov);
+
         if (want > maxreq) {
             want = maxreq;
         }
+        if (want > iov.length) {
+            want = iov.length;
+        }
         xfer = (want + DISKFS_BLOCK_SIZE - 1) & ~((uint64_t) DISKFS_BLOCK_SIZE - 1);
+        if (xfer > iov.length) {
+            xfer = iov.length;
+        }
+        iov.length = xfer;   /* bound the read to this chunk */
 
-        evpl_iovec_alloc(io->evpl, xfer, DISKFS_BLOCK_SIZE, 1, 0, &iov);
         evpl_block_read(io->evpl, io->queue[device_id], &iov, 1, offset + done,
                         diskfs_mount_io_complete, &w);
         while (!w.done) {
@@ -778,6 +794,13 @@ diskfs_recover_log(
     }
 
     qsort(recs, nrec, sizeof(*recs), diskfs_recover_rec_cmp);
+
+    /* Resume the redo seq counter past every record we are about to replay.  The
+     * log is NOT trimmed on a crash, so these records remain physically in the
+     * log region; a post-recovery record that reused one of their seqs would be
+     * mis-ordered against it by the next crash's seq-ordered (latest-wins)
+     * replay.  recs is sorted ascending, so the last entry carries the max. */
+    shared->intent_log.recovered_log_seq = nrec ? recs[nrec - 1].seq + 1 : 0;
 
     for (i = 0; i < nrec; i++) {
         struct diskfs_redo_header *hdr  = (struct diskfs_redo_header *) (log + recs[i].offset);
@@ -1550,10 +1573,23 @@ diskfs_inode_cache_release(
 } /* diskfs_inode_cache_release */
 
 
+/*
+ * Module teardown, shared by the clean path (diskfs_destroy, clean=1) and the
+ * test-only crash path (diskfs_test_crash -> diskfs_teardown(shared, 0)).
+ *
+ * clean=1 is a normal unmount: after the intent-log threads have drained every
+ * logged block to its home location, the free-space map is persisted and the
+ * superblock stamped SM_SB_CLEAN, so the next mount reloads instead of running
+ * recovery.  clean=0 simulates a crash: the same threads are stopped and the
+ * same structures freed (no leak, no use-after-free), but the persist + CLEAN
+ * stamp are skipped, so the superblock stays !CLEAN and the next mount runs the
+ * intent-log replay recovery path.
+ */
 void
-diskfs_destroy(void *private_data)
+diskfs_teardown(
+    struct diskfs_shared *shared,
+    int                   clean)
 {
-    struct diskfs_shared *shared = private_data;
     struct diskfs_fs     *fs, *fs_tmp;
     int                   i;
 
@@ -1621,8 +1657,12 @@ diskfs_destroy(void *private_data)
      * reloads instead of re-handing-out in-use space.  Driven through the
      * mount-time evpl pump while the devices are still open -- the IL thread
      * (the only other device user) is already gone.  Only mark clean if a root
-     * actually exists (an untouched mkfs has nothing to preserve). */
-    {
+     * actually exists (an untouched mkfs has nothing to preserve).
+     *
+     * Skipped on the crash path (clean=0): leaving the superblock !CLEAN and
+     * the free map un-persisted is exactly the on-disk state a crash leaves,
+     * and is what makes the next mount run recovery. */
+    if (clean) {
         struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
         struct sm_io            smio = diskfs_mount_sm_io(mio);
         /* The apply thread drained at teardown, so applied_seq == the final
@@ -1693,7 +1733,19 @@ diskfs_destroy(void *private_data)
     free(shared->kv_shards);
 
     free(shared);
-} /* diskfs_destroy */ /* diskfs_destroy */
+} /* diskfs_teardown */
+
+
+void
+diskfs_destroy(void *private_data)
+{
+    struct diskfs_shared *shared = private_data;
+
+    /* diskfs_test_crash sets test_crash so this normal teardown -- reached at
+     * the right point, after the VFS has torn down its internal threads -- skips
+     * the clean-unmount finalize, leaving the device in a crash state. */
+    diskfs_teardown(shared, !shared->test_crash);
+} /* diskfs_destroy */
 
 
 void *
