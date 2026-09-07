@@ -2460,6 +2460,39 @@ chimera_smb_create_open_stream_callback(
     chimera_vfs_release(vfs_thread, base_oh);
     request->create.base_oh = NULL;
 
+    /*
+     * A stream that did not exist before now does: MS-FSA 2.1.5.1 raises
+     * FILE_NOTIFY_CHANGE_STREAM_NAME for it, and a client watching the
+     * containing directory expects to be woken (WPTS
+     * BVT_SMB2Basic_ChangeNotify_ChangeStreamName registers exactly that filter
+     * on the directory, with WATCH_TREE, and then has a second client create a
+     * stream on a file that already existed).
+     *
+     * This path returns through chimera_smb_create_finish_with_eas rather than
+     * chimera_smb_create_open_finish, so it never reached the emit there and a
+     * stream create notified nobody at all.
+     *
+     * STREAM_NAME alone: no directory entry appeared.  Raising FILE_ADDED as
+     * the file-create path does would wake FILE_NOTIFY_CHANGE_FILE_NAME
+     * watchers for a file that was already there.  The name reported is the
+     * base file's -- the entry the directory actually holds -- since the stream
+     * is not one of its entries.
+     */
+    if (request->create.r_created && request->create.parent_handle) {
+        uint64_t skip_lo, skip_hi;
+        bool     has_skip = chimera_smb_parent_lease_skip(
+            open_file->parent_lease_key, &skip_lo, &skip_hi);
+
+        chimera_vfs_notify_emit_lease(request->compound->thread->shared->vfs->vfs_notify,
+                                      request->create.parent_handle->fh,
+                                      request->create.parent_handle->fh_len,
+                                      CHIMERA_VFS_NOTIFY_STREAM_NAME,
+                                      request->create.name,
+                                      request->create.name_len,
+                                      NULL, 0,
+                                      skip_lo, skip_hi, has_skip);
+    }
+
     chimera_smb_create_release_parent(request);
     chimera_smb_create_finish_with_eas(request, open_file);
 } /* chimera_smb_create_open_stream_callback */
