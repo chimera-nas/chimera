@@ -2028,13 +2028,13 @@ diskfs_intent_log_thread_init(
     struct diskfs_shared     *shared = container_of(il, struct diskfs_shared, intent_log);
     int                       i;
 
-    il->evpl                        = evpl;
-    il->intent_log_size             = shared->intent_log_size;
-    il->handoff_ring_size           = diskfs_il_pow2((uint32_t) (il->intent_log_size / SM_BLOCK_SIZE) * 2);
-    il->handoff_ring_mask           = il->handoff_ring_size - 1;
-    il->log_head                    = SM_INTENT_LOG_OFFSET;
-    il->log_tail                    = SM_INTENT_LOG_OFFSET;
-    il->live_records                = 0;
+    il->evpl              = evpl;
+    il->intent_log_size   = shared->intent_log_size;
+    il->handoff_ring_size = diskfs_il_pow2((uint32_t) (il->intent_log_size / SM_BLOCK_SIZE) * 2);
+    il->handoff_ring_mask = il->handoff_ring_size - 1;
+    il->log_head          = SM_INTENT_LOG_OFFSET;
+    il->log_tail          = SM_INTENT_LOG_OFFSET;
+    il->live_records      = 0;
     /* Resume past the highest seq crash recovery replayed (0 on a clean mount /
      * mkfs), so post-recovery records never reuse a still-in-log record's seq. */
     il->log_seq                     = il->recovered_log_seq;

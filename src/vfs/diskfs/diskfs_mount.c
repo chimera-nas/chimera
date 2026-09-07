@@ -1590,8 +1590,8 @@ diskfs_teardown(
     struct diskfs_shared *shared,
     int                   clean)
 {
-    struct diskfs_fs     *fs, *fs_tmp;
-    int                   i;
+    struct diskfs_fs *fs, *fs_tmp;
+    int               i;
 
     /* Reclaim workers first: their shutdown finishes the queued drains, which
      * need the inode cache and the intent-log threads still alive. */

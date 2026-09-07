@@ -24,18 +24,18 @@
 #include "diskfs_test_harness.h"
 #include "common/mbt_trace_dir.h"
 
-#define DFS_NDIRS      3               /* numbered work directories d0..d2 */
-#define DFS_MAXLIVE    40000           /* live-file serials tracked per directory */
-#define DFS_MAXFRAG    128
-#define DEV_BYTES  (128ULL * 1024 * 1024)
-#define ILOG_BYTES (4ULL * 1024 * 1024)
+#define DFS_NDIRS   3              /* numbered work directories d0..d2 */
+#define DFS_MAXLIVE 40000          /* live-file serials tracked per directory */
+#define DFS_MAXFRAG 128
+#define DEV_BYTES   (128ULL * 1024 * 1024)
+#define ILOG_BYTES  (4ULL * 1024 * 1024)
 /* Block-cache blocks.  This is split across 256 shards, so the effective
  * per-shard cap is DFS_BCACHE/256; keep it comfortably above the dirty working
  * set a create flood produces per shard, or the synchronous CoW aborts when a
  * shard's LRU head is still pinned (no clean recycle victim).  Cold-cache b+tree
  * faults are still reached: every remount / crash drops the whole cache, so the
  * next access faults from disk. */
-#define DFS_BCACHE     16384
+#define DFS_BCACHE  16384
 #define FRAG_STRIDE 8192           /* frag blocks are non-adjacent (no coalesce) */
 
 static int paranoid = 1;
@@ -92,7 +92,8 @@ state_var(
     json_t     *val;
     size_t      slen = strlen(suffix);
 
-    json_object_foreach(state, key, val) {
+    json_object_foreach(state, key, val)
+    {
         size_t klen = strlen(key);
 
         if (klen >= slen && strcmp(key + klen - slen, suffix) == 0) {
@@ -636,11 +637,11 @@ replay_trace(
     const char *path,
     int         dry)
 {
-    struct rctx   r;
-    json_t       *root, *states, *state, *lastop;
-    json_error_t  err;
-    size_t        idx, nstates;
-    int           d;
+    struct rctx  r;
+    json_t      *root, *states, *state, *lastop;
+    json_error_t err;
+    size_t       idx, nstates;
+    int          d;
 
     root = json_load_file(path, 0, &err);
     if (!root) {
