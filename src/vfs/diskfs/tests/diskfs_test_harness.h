@@ -43,7 +43,15 @@
 
 #include "diskfs_test.h"
 
-#define DH_MAX_DEV 8
+#define DH_MAX_DEV  8
+
+/* Per-device JSON budget, and the whole-config buffer sized to the compile-time
+ * worst case (every device present plus the fixed keys).  Sizing the output
+ * buffer this way keeps GCC's -Wformat-truncation (which clang, and thus the
+ * macOS build and the clang static-analysis gate, do not run) satisfied that the
+ * config snprintf can never truncate. */
+#define DH_DEV_JSON 200
+#define DH_CFG_MAX  (DH_MAX_DEV * DH_DEV_JSON + 256)
 
 struct dh {
     struct evpl                    *evpl;
@@ -269,7 +277,7 @@ dh_build_config(
     char      *out,
     size_t     outlen)
 {
-    char devs[DH_MAX_DEV * 200];
+    char devs[DH_MAX_DEV * DH_DEV_JSON];
     int  n = 0;
     int  i;
 
@@ -300,7 +308,7 @@ dh_open_pool(
     int        initialize)
 {
     struct chimera_vfs_module_cfg cfgs[2];
-    char                          cfg[1024];
+    char                          cfg[DH_CFG_MAX];
 
     memset(cfgs, 0, sizeof(cfgs));
     dh_build_config(dh, initialize, cfg, sizeof(cfg));
