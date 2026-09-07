@@ -22,6 +22,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+/* These tests use assert() (and side-effecting calls inside it, as the other
+ * in-process VFS tests do) as their oracle, so keep it live even in a Release /
+ * NDEBUG build -- otherwise the checks vanish and the assert-only locals become
+ * unused/uninitialized (-Werror).  Must precede <assert.h>, which (re)defines
+ * assert from NDEBUG at each include. */
+#undef NDEBUG
 #include <assert.h>
 
 #include "evpl/evpl.h"
@@ -329,7 +335,7 @@ dh_init(
     uint64_t   intent_log_bytes,
     uint32_t   block_cache_blocks)
 {
-    char tmpl[] = "/tmp/diskfs_mbt_XXXXXX";
+    char  tmpl[] = "/tmp/diskfs_mbt_XXXXXX";
     char *d;
     int   i;
 
@@ -615,7 +621,7 @@ dh_write(
     uint8_t                         byte)
 {
     struct evpl_iovec iov[16];
-    int               niov, i;
+    int niov, i;
 
     niov = evpl_iovec_alloc(dh->evpl, len, 4096, 16, 0, iov);
     assert(niov > 0);

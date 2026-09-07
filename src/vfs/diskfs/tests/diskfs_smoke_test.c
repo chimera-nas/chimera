@@ -15,12 +15,12 @@
 #include "diskfs_test_harness.h"
 
 #define CHECK(dh) do { \
-        char _e[256]; \
-        if (diskfs_test_check((dh)->vfs, _e, sizeof(_e)) != 0) { \
-            fprintf(stderr, "INVARIANT VIOLATION at %s:%d: %s\n", \
-                    __func__, __LINE__, _e); \
-            exit(1); \
-        } \
+            char _e[256]; \
+            if (diskfs_test_check((dh)->vfs, _e, sizeof(_e)) != 0) { \
+                fprintf(stderr, "INVARIANT VIOLATION at %s:%d: %s\n", \
+                        __func__, __LINE__, _e); \
+                exit(1); \
+            } \
 } while (0)
 
 int
