@@ -1857,20 +1857,26 @@ chimera_smb_server_handle_smb2(
              * the session encrypt-all (Session.EncryptData) — every
              * post-authentication request must be either signed or encrypted.
              * An unsigned, unencrypted request (e.g. a bare TREE_CONNECT) is a
-             * protocol violation; tear the connection down.  SESSION_SETUP is
-             * exempt (its signing key is only derived while processing it), as
-             * are NEGOTIATE and ECHO; compound related operations inherit the
-             * lead request's protection so only the unrelated lead is checked.
-             * A null (anonymous) session is exempt entirely: it has no key, so
-             * MS-SMB2 3.3.5.5.3 never enforces signing or encryption on it even
-             * when the connection negotiated signing-required (the client drops
-             * the requirement for the IS_NULL session — smb2.session.anon-
-             * signing2's second TREE_CONNECT is deliberately unsigned). */
-            chimera_smb_error("Unsigned, unencrypted request (cmd %u) on a protected connection; disconnecting",
+             * protocol violation, answer STATUS_ACCESS_DENIED rather than
+             * tearing the connection down: the spec makes ACCESS_DENIED
+             * mandatory here and a disconnect only optional (3.3.5.2.4), and
+             * this connection may carry other, unrelated sessions that a
+             * transport teardown would take down collaterally.  SESSION_SETUP
+             * is exempt (its signing key is only derived while processing it),
+             * as are NEGOTIATE and ECHO; compound related operations inherit
+             * the lead request's protection so only the unrelated lead is
+             * checked.  A null (anonymous) session is exempt entirely: it has
+             * no key, so MS-SMB2 3.3.5.5.3 never enforces signing or
+             * encryption on it even when the connection negotiated
+             * signing-required (the client drops the requirement for the
+             * IS_NULL session — smb2.session.anon-signing2's second
+             * TREE_CONNECT is deliberately unsigned). */
+            chimera_smb_error("Unsigned, unencrypted request (cmd %u) on a protected connection",
                               request->smb2_hdr.command);
-            chimera_smb_request_free(thread, request);
-            evpl_close(evpl, conn->bind);
-            return;
+            request->status                              = SMB2_STATUS_ACCESS_DENIED;
+            request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+            compound->requests[compound->num_requests++] = request;
+            goto next_compound_request;
         }
 
         if (unlikely(!request->session_handle &&
