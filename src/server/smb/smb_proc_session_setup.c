@@ -361,6 +361,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
     if (rc == 0 && mech == SMB_AUTH_MECH_KERBEROS &&
         smb_kerberos_resolve_identity(shared->config.auth.winbind_enabled,
+                                      shared->config.auth.kerberos_anonymous_fallback,
                                       smb_gssapi_get_principal(&conn->gssapi_ctx),
                                       &krb_ident) != 0) {
         /* Do not hand the client the AP-REP of a logon being refused: the

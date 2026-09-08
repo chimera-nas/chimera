@@ -150,6 +150,7 @@ Domain-authentication backends for SMB.
 | `kerberos_enabled` | bool | `false` | Enable Kerberos authentication. |
 | `kerberos_keytab` | string | - | Path to the Kerberos keytab. |
 | `kerberos_realm` | string | - | Kerberos realm. |
+| `kerberos_anonymous_fallback` | bool | `false` | Serve an authenticated Kerberos principal as uid/gid 65534 when `winbind_enabled` is off. Off, a Kerberos logon without winbind is refused with `NT_STATUS_LOGON_FAILURE`. Ignored when `winbind_enabled` is set. |
 
 Winbind and Kerberos both require setup outside chimera (a domain join, a
 keytab, and NSS pointed at winbind). See
