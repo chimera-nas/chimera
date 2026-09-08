@@ -572,11 +572,19 @@ chimera_vfs_complete_delegate(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread *thread = request->thread;
 
+    /* Ring under the lock.  The owning thread pops this list under the same
+     * lock, so it cannot see the request -- and cannot run to completion and
+     * chimera_vfs_thread_destroy() itself -- until this critical section ends,
+     * which is after the last touch of *thread here.  Ringing after the unlock
+     * left a window where a concurrent ring (a close-thread completion during
+     * umount, say) woke the owner first; it drained the list, its synchronous
+     * caller returned, destroyed the thread, and this ring then read the freed
+     * doorbell (ASAN heap-use-after-free in evpl_wakeup_signal from
+     * cairn_thread_commit, seen in batch_pnfs_cairn). */
     pthread_mutex_lock(&thread->lock);
     DL_APPEND(thread->pending_complete_requests, request);
-    pthread_mutex_unlock(&thread->lock);
-
     evpl_ring_doorbell(&thread->doorbell);
+    pthread_mutex_unlock(&thread->lock);
 } /* chimera_vfs_complete_delegate */
 
 /* Marshal a parked I/O request back to its owning thread to resume.  The
@@ -590,11 +598,11 @@ chimera_vfs_io_resume_post(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread *thread = request->thread;
 
+    /* Ring under the lock; see chimera_vfs_complete_delegate. */
     pthread_mutex_lock(&thread->lock);
     DL_APPEND(thread->pending_io_resume, request);
-    pthread_mutex_unlock(&thread->lock);
-
     evpl_ring_doorbell(&thread->doorbell);
+    pthread_mutex_unlock(&thread->lock);
 } /* chimera_vfs_io_resume_post */
 
 static inline void

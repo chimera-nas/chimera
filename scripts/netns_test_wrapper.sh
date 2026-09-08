@@ -119,6 +119,57 @@ if [ "${STATUS}" -gt 128 ]; then
                     ;;
             esac
         done
+
+        # Two probes that turn the next occurrence into an answer instead of
+        # another data point.  Both run on an already-failing path, so both
+        # are bounded and neither can change the reported status.
+        #
+        # fio selects its CRC32C implementation at startup -- cpuid on x86,
+        # AT_HWCAP on arm64 -- and the basic jobs verify with crc32c.  A VM
+        # that advertises an instruction it then traps on would die exactly
+        # like this: in the first fraction of a second, on both architectures,
+        # on whichever runner drew that host.  --crctest exercises every
+        # implementation and nothing else, so it either reproduces the SIGILL
+        # in isolation or rules the dispatch out.
+        case "$1" in
+            *fio)
+                echo "  crctest:" >&2
+                CRC_STATUS=0
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 60 "$1" --crctest > "/tmp/${TEST_NAME}.crctest" 2>&1 || CRC_STATUS=$?
+                else
+                    "$1" --crctest > "/tmp/${TEST_NAME}.crctest" 2>&1 || CRC_STATUS=$?
+                fi
+                sed 's/^/    /' "/tmp/${TEST_NAME}.crctest" >&2
+                rm -f "/tmp/${TEST_NAME}.crctest"
+                echo "    --crctest exit status: ${CRC_STATUS}" >&2
+                ;;
+        esac
+
+        # Then the instruction itself.  Re-run the same command, in the same
+        # namespace with the same preload, under gdb, and print the faulting
+        # PC, its disassembly and a backtrace.  A wild jump into the plugin, a
+        # __builtin_trap, and a genuine unsupported instruction are all
+        # "Illegal instruction" to bash; they are distinct here.  The preload
+        # is handed to the inferior through gdb rather than the environment so
+        # gdb itself does not run under ASAN.  Intermittent failures may not
+        # recur; then the re-run simply passes and says so.
+        if command -v gdb >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+            echo "  gdb re-run:" >&2
+            GDB_ENV=()
+            if [ -n "${SAVED_LD_PRELOAD}" ]; then
+                GDB_ENV=(-ex "set environment LD_PRELOAD=${SAVED_LD_PRELOAD}")
+            fi
+            timeout 300 ip netns exec "${NETNS_NAME}" gdb -q -batch \
+                -ex "set pagination off" \
+                "${GDB_ENV[@]}" \
+                -ex run \
+                -ex "x/3i \$pc" \
+                -ex "info sharedlibrary" \
+                -ex "bt" \
+                -ex "thread apply all bt 8" \
+                --args "$@" 2>&1 | tail -120 | sed 's/^/    /' >&2
+        fi
     fi
 fi
 
