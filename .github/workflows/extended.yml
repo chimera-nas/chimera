@@ -695,14 +695,36 @@ jobs:
         # so every extended test lands in exactly one shard and nothing is
         # silently dropped when a family is added -- a new label with no shard
         # of its own still runs, in `rest`.
-        category: [pynfs, smbtorture, wpts, pjd, posix, s3, quint, pnfs, kvm, rest]
+        #
+        # The KVM guests are sharded further, by guest image: `kvm-<image>`
+        # runs everything labelled with that image, except that an image
+        # carrying the nfstest and ltp suites has those peeled into
+        # `kvm-<image>-nfstest`.  A single kvm shard ran 1267 of its 1764
+        # tests before the six-hour job limit cancelled it -- the shard never
+        # once produced a complete result -- and the split is by image because
+        # that is also what each shard has to download: one ~3.4 GB guest
+        # image instead of all four.  nfstest+ltp is split off because on the
+        # images that carry it those two suites are ~10,800 s of test time
+        # against ~7,300 s for everything else on the same image.
+        #
+        # This list must agree with KVM_SHARDS in the run step below, which
+        # is what the shards check themselves against; keep the two together.
+        category: [pynfs, smbtorture, wpts, pjd, posix, s3, quint, pnfs, rest,
+                   kvm-ubuntu2404, kvm-ubuntu2404-nfstest,
+                   kvm-ubuntu2604, kvm-ubuntu2604-nfstest,
+                   kvm-ubuntu2404_hwe, kvm-ubuntu2204_hwe]
         include:
           - { arch: amd64, runner: ubuntu-24.04     }
           - { arch: arm64, runner: ubuntu-24.04-arm }
         exclude:
           # The devcontainer ships only qemu-system-x86, so KVM acceleration
           # is unavailable on arm64 and the guests never ran there.
-          - { arch: arm64, category: kvm }
+          - { arch: arm64, category: kvm-ubuntu2404 }
+          - { arch: arm64, category: kvm-ubuntu2404-nfstest }
+          - { arch: arm64, category: kvm-ubuntu2604 }
+          - { arch: arm64, category: kvm-ubuntu2604-nfstest }
+          - { arch: arm64, category: kvm-ubuntu2404_hwe }
+          - { arch: arm64, category: kvm-ubuntu2204_hwe }
 
     steps:
       - name: Checkout repository
@@ -739,6 +761,7 @@ jobs:
           # process and takes an unrelated test with it.
           docker run --rm --privileged \
             -e CATEGORY=${{ matrix.category }} \
+            -e KVM_SHARDS="kvm-ubuntu2404 kvm-ubuntu2404-nfstest kvm-ubuntu2604 kvm-ubuntu2604-nfstest kvm-ubuntu2404_hwe kvm-ubuntu2204_hwe" \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
@@ -774,25 +797,54 @@ jobs:
                 # wins over quint.
                 quint)      SEL="-L ^quint$ -LE ^pnfs$" ;;
                 pnfs)       SEL="-L ^pnfs$ -LE ^kvm$" ;;
-                kvm)        SEL="-L ^kvm$" ;;
                 rest)       SEL="-LE $EXCL" ;;
+                # kvm-<image> and kvm-<image>-nfstest: every guest test carries
+                # LABELS "kvm;<image>", and -L selectors are ANDed, so the
+                # image label alone names the shard; the nfstest/ltp split is
+                # on the test path, which is chimera/kvm/<image>/<suite>/....
+                kvm-*)
+                  KVM_IMAGE=${CATEGORY#kvm-}
+                  KVM_IMAGE=${KVM_IMAGE%-nfstest}
+                  SEL="-L ^kvm$ -L ^${KVM_IMAGE}$"
+                  case "$CATEGORY" in
+                    *-nfstest) SEL="$SEL -R /(nfstest|ltp)/" ;;
+                    *)         SEL="$SEL -E /(nfstest|ltp)/" ;;
+                  esac
+                  ;;
                 *)          echo "unknown category $CATEGORY" >&2; exit 1 ;;
               esac
-              # The build job left the guest images unfetched (see build-dev),
-              # and they live in /kvm outside the tree unpacked above, so the
-              # kvm shard has none.  Fetch exactly the images this configure
-              # declares rather than a hardcoded list: the previous incarnation
-              # of this job named three, kvm/CMakeLists.txt now builds four, and
-              # a list that drifts silently fetches the wrong set.
-              if [ "$CATEGORY" = kvm ]; then
-                imgs=$(ninja -t targets all 2>/dev/null \
-                       | grep -oE "^kvm_[a-z0-9_]+_image" | sort -u)
-                if [ -z "$imgs" ]; then
-                  echo "::error::kvm shard: no kvm_*_image targets in this build"
-                  exit 1
-                fi
-                ninja $imgs
-              fi
+              case "$CATEGORY" in
+                kvm-*)
+                  # Nothing may fall between the kvm shards.  `rest` excludes
+                  # the whole kvm label, so a guest image without a shard of
+                  # its own -- or an image that gained nfstest/ltp without a
+                  # -nfstest shard -- would run nowhere and fail nothing.
+                  # Derive what the shard list has to be from this configure
+                  # (the kvm_<image>_image targets, and which images carry
+                  # nfstest/ltp) and compare it with KVM_SHARDS, the list the
+                  # matrix above was written from.
+                  want=""
+                  for img in $(ninja -t targets all 2>/dev/null \
+                               | grep -oE "^kvm_[a-z0-9_]+_image" | sort -u \
+                               | sed -E "s/^kvm_(.*)_image$/\1/"); do
+                    want="$want kvm-$img"
+                    if [ "$(ctest -C extended -N -L ^kvm$ -L ^${img}$ -R "/(nfstest|ltp)/" | tail -1 | grep -oE "[0-9]+" | tail -1)" != "0" ]; then
+                      want="$want kvm-$img-nfstest"
+                    fi
+                  done
+                  want=$(echo $want | tr " " "\n" | sort)
+                  have=$(echo $KVM_SHARDS | tr " " "\n" | sort)
+                  if [ "$want" != "$have" ]; then
+                    echo "::error::kvm shards in the matrix ($(echo $have)) do not cover this configure ($(echo $want)); update KVM_SHARDS and the category list together"
+                    exit 1
+                  fi
+                  # The build job left the guest image unfetched (see
+                  # build-dev), and it lives in /kvm outside the tree unpacked
+                  # above, so this shard has none.  Fetch the one image its
+                  # tests boot.
+                  ninja kvm_${KVM_IMAGE}_image
+                  ;;
+              esac
               # An empty shard is reported, not failed.  It means the label is
               # absent on this platform (pynfs and the KVM guests are not built
               # everywhere), and `rest` picks up anything unlabelled anyway, so
