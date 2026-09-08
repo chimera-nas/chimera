@@ -56,11 +56,13 @@ RUN dnf -y update && \
     libwbclient-devel samba-client krb5-server krb5-workstation samba samba-winbind samba-winbind-clients \
     python3-boto3 which && \
     dnf clean all
+# --disable-native below: see .devcontainer/Dockerfile for why fio must not be
+# tuned to the runner that happens to build this image.
 
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
     git clone --depth 1 --branch fio-3.40 https://github.com/axboe/fio.git /fio && \
     cd /fio && \
-    ./configure --disable-libnfs && \
+    ./configure --disable-libnfs --disable-native && \
     make -j8 && \
     make install ; \
     fi

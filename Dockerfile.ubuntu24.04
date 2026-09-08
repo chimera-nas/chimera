@@ -86,11 +86,13 @@ RUN apt-get -y update && \
     libwbclient-dev smbclient krb5-kdc krb5-admin-server krb5-user samba samba-ad-dc samba-ad-provision samba-dsdb-modules && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+# --disable-native below: see .devcontainer/Dockerfile for why fio must not be
+# tuned to the runner that happens to build this image.
 
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
     git clone --depth 1 --branch fio-3.40 https://github.com/axboe/fio.git /fio && \
     cd /fio && \
-    ./configure --disable-libnfs && \
+    ./configure --disable-libnfs --disable-native && \
     make -j8 && \
     make install ; \
     fi

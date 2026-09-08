@@ -114,10 +114,17 @@ RUN if [ "$ENABLE_CODEX" = "1" ] ; then \
     npm install -g @openai/codex ; \
     fi
 
+# --disable-native: fio's configure otherwise adds -march=native, so the
+# binary is tuned to whichever runner happened to build this image.  Built on
+# a host with AVX-512 it carries EVEX instructions (vpbroadcastd from a GPR in
+# fio_client_hash_init, run from a constructor) and dies with SIGILL at
+# startup on any test runner without it -- the intermittent fio SIGILL that
+# followed the runner move, which hit both amd64 and arm64 and struck before
+# fio had parsed a single argument.
 RUN if [ "$ENABLE_FIO" = "1" ] ; then \
     git clone --depth 1 --branch fio-3.40 https://github.com/axboe/fio.git /fio && \
     cd /fio && \
-    ./configure --disable-libnfs && \
+    ./configure --disable-libnfs --disable-native && \
     make -j8 && \
     make install ; \
     fi
