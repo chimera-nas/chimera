@@ -1111,7 +1111,8 @@ struct diskfs_redo_header {
     uint64_t csum_lo;      /* XXH3-128 of the record, csum fields zeroed */
     uint64_t csum_hi;
     uint64_t seq;          /* monotonically increasing record sequence */
-    uint64_t tail;         /* log_tail (oldest un-pushed offset) at write time */
+    uint64_t tail_seq;     /* seq of the oldest un-trimmed record at write time
+                            * (recovery's live-window lower bound; see log_tail_seq) */
     uint32_t num_blocks;
     uint32_t reclen;       /* total record length, including padding */
     uint32_t num_deltas;   /* space-map deltas carried in this record */
@@ -1546,6 +1547,14 @@ struct diskfs_intent_log {
     uint32_t                         handoff_ring_mask;
     uint64_t                         log_head;        /* atomic: commit-written (next free byte) */
     uint64_t                         log_tail;        /* atomic: push-written (trim point) */
+    /* atomic: seq of the oldest record NOT yet trimmed (push_head->seq), advanced
+     * by the push thread in lockstep with log_tail.  Each redo record stamps this
+     * into hdr->tail_seq at commit; crash recovery reads the highest-seq record's
+     * stamp as the live-window lower bound and skips every physically-surviving
+     * record below it (already trimmed => images home + deltas checkpointed).
+     * Without this bound a ring wrap can leave a stale trimmed record as the
+     * newest survivor of a block and resurrect its superseded image. */
+    uint64_t                         log_tail_seq;
     uint64_t                         intent_log_size; /* active log size (from space_map / superblock) */
     /* atomic: highest redo seq whose record is durably logged (set in-order as
      * records retire in diskfs_redo_write_cb).  Stage B: this no longer implies
