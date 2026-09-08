@@ -706,7 +706,7 @@ test_kerberos_identity_policy(void)
 
     /* No identity source at all: refused by default. */
     rc = smb_kerberos_resolve_identity(0, 0, "testuser1@TEST.LOCAL", &ident);
-    if (rc == -1) {
+    if (rc == -1 && ident.resolved == 0) {
         TEST_PASS("winbind disabled without the fallback knob refuses the logon");
     } else {
         TEST_FAIL("winbind disabled without the fallback knob refuses the logon");
@@ -715,7 +715,7 @@ test_kerberos_identity_policy(void)
     /* The explicit opt-in serves the principal as nobody. */
     rc = smb_kerberos_resolve_identity(0, 1, "testuser1@TEST.LOCAL", &ident);
     if (rc == 0 && ident.uid == 65534 && ident.gid == 65534 &&
-        ident.ngids == 0 && ident.is_ad_user == 0 &&
+        ident.ngids == 0 && ident.is_ad_user == 0 && ident.resolved == 1 &&
         strcmp(ident.sid, "S-1-22-1-65534") == 0) {
         TEST_PASS("anonymous fallback maps the principal to uid/gid 65534");
     } else {

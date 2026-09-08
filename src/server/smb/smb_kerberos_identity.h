@@ -23,6 +23,9 @@ struct smb_kerberos_identity {
      * caller caches the user in the VFS user cache.  0 for the synthesized
      * nobody identity. */
     int      is_ad_user;
+    /* 1 once a policy path filled this identity; the zero value is never a
+     * valid identity. */
+    int      resolved;
 };
 
 /* Decide the Unix identity an accepted Kerberos context stands for.

@@ -41,6 +41,7 @@ smb_kerberos_resolve_identity(
         }
 
         out->is_ad_user = 1;
+        out->resolved   = 1;
         return 0;
     }
 
@@ -61,6 +62,7 @@ smb_kerberos_resolve_identity(
     out->ngids = 0;
     smb_ntlm_synthesize_unix_sid(out->uid, out->sid, sizeof(out->sid));
     out->is_ad_user = 0;
+    out->resolved   = 1;
 
     return 0;
 } /* smb_kerberos_resolve_identity */
