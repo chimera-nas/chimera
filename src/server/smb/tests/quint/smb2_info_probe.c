@@ -751,6 +751,19 @@ probe_security(struct smb2_conn *c)
               off_owner, off_group, off_dacl);
     }
 
+    /* The descriptor decodes, and the mode-derived DACL names the owner by the
+     * same SID the owner field carries. */
+    if (st == ST_SUCCESS) {
+        struct smb2_sd d;
+
+        CHECK(smb2_sd_parse(sd, len, &d) == 0,
+              "  ... the descriptor decodes (SIDs and ACEs)");
+        CHECK(d.have_owner && d.have_group && d.have_dacl,
+              "  ... owner, group and DACL are all present");
+        CHECK(d.nace > 0, "  ... the mode-derived DACL is not empty (%d ACE(s))",
+              d.nace);
+    }
+
     /* AdditionalInformation actually selects: asking for only the owner must
      * leave the group and DACL offsets zero. */
     st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, co.file_id, SEC_OWNER,
@@ -794,6 +807,170 @@ probe_security(struct smb2_conn *c)
 
     smb2_close(c, co.file_id);
 } /* probe_security */
+
+/* ---- native SIDs in a security descriptor -------------------------------
+ *
+ * The descriptor above is one the server authored, so setting it back proves
+ * only that the emitter and the parser agree with each other.  What matters
+ * here is what happens to a descriptor the server did NOT author: a
+ * principal named by a real Windows SID that no identity authority can map
+ * used to be dropped on the way in, because a principal was a uid/gid and an
+ * unmappable SID had no uid.  It is now carried natively -- stored as an
+ * opaque CHIMERA_PRINCIPAL_SID and re-emitted verbatim -- so a Windows ACL
+ * survives a round trip through a POSIX-backed share.
+ *
+ * That is invisible to the trace corpus (the model has no security-descriptor
+ * surface at all) and invisible to the header-level checks above, so it is
+ * pinned here: SET a descriptor naming principals from a domain this server
+ * knows nothing about, and require them back byte-for-byte.
+ *
+ * The session is an anonymous NTLM null session and no identity authority is
+ * configured, so the owner and group SIDs are the algorithmic S-1-5-88 form
+ * (MS-SMB2's modefromsid convention) and an unmappable owner SID has no uid to
+ * resolve to.  Both of those are asserted rather than worked around: the
+ * owner-side behaviour is deliberate, and a regression that silently adopted
+ * an unresolvable SID as the owner would be a real bug. */
+
+#define ACE_ALLOWED 0
+#define ACE_DENIED  1
+
+static void
+probe_security_sids(struct smb2_conn *c)
+{
+    struct smb2_create_out co;
+    struct smb2_sd         d;
+    struct smb2_sd_ace     want[3];
+    uint8_t                sd[2048], built[1024];
+    uint32_t               st, len = 0;
+    int                    nlen, i, found_denied = 0;
+
+    printf("# --- native SIDs in a security descriptor ---\n");
+
+    st = smb2_create(c, "secsid.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "setup: CREATE secsid.bin -> 0x%08x", st);
+
+    if (st != ST_SUCCESS) {
+        return;
+    }
+
+    /* With nothing stored, the owner and group come from the algorithmic
+     * scheme -- S-1-5-88-1-<uid> and S-1-5-88-2-<gid>.  This is the fallback
+     * the stored-SID path must not disturb, so pin it before setting one. */
+    st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                         SEC_OWNER | SEC_GROUP | SEC_DACL, sd, sizeof(sd),
+                         &len);
+
+    if (st == ST_SUCCESS && smb2_sd_parse(sd, len, &d) == 0) {
+        CHECK(strncmp(d.owner, "S-1-5-88-1-", 11) == 0,
+              "a file with no stored SID reports the algorithmic owner (%s)",
+              d.owner);
+        CHECK(strncmp(d.group, "S-1-5-88-2-", 11) == 0,
+              "  ... and the algorithmic group (%s)", d.group);
+    } else {
+        CHECK(0, "QUERY SECURITY before SET -> 0x%08x", st);
+        smb2_close(c, co.file_id);
+        return;
+    }
+
+    /* A DACL from a domain this server has never heard of: an unmappable user,
+     * a well-known SID, and a DENY ace for a second unmappable user.  The DENY
+     * is there because its position is load-bearing -- a canonicalizing
+     * emitter that reorders ACEs changes the file's effective permissions. */
+    memset(want, 0, sizeof(want));
+    want[0].type        = ACE_ALLOWED;
+    want[0].access_mask = 0x001f01ffu;                    /* FILE_ALL_ACCESS */
+    snprintf(want[0].sid, sizeof(want[0].sid), "S-1-5-21-1-2-3-1001");
+    want[1].type        = ACE_ALLOWED;
+    want[1].access_mask = 0x00120089u;                    /* READ            */
+    snprintf(want[1].sid, sizeof(want[1].sid), "S-1-1-0"); /* Everyone       */
+    want[2].type        = ACE_DENIED;
+    want[2].access_mask = 0x00000004u;                    /* APPEND_DATA     */
+    snprintf(want[2].sid, sizeof(want[2].sid), "S-1-5-21-1-2-3-9999");
+
+    nlen = smb2_sd_build(built, sizeof(built), "S-1-5-21-1-2-3-500",
+                         "S-1-5-21-1-2-3-513", want, 3);
+    CHECK(nlen > 0, "built a descriptor with foreign owner/group/DACL (%d bytes)",
+          nlen);
+
+    if (nlen <= 0) {
+        smb2_close(c, co.file_id);
+        return;
+    }
+
+    st = smb2_set_info_addl(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                            SEC_OWNER | SEC_GROUP | SEC_DACL, built,
+                            (uint32_t) nlen);
+    CHECK(st == ST_SUCCESS, "SET SECURITY with foreign SIDs -> 0x%08x", st);
+
+    st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                         SEC_OWNER | SEC_GROUP | SEC_DACL, sd, sizeof(sd),
+                         &len);
+    CHECK(st == ST_SUCCESS, "QUERY SECURITY after the foreign SET -> 0x%08x",
+          st);
+
+    if (st != ST_SUCCESS || smb2_sd_parse(sd, len, &d) != 0) {
+        CHECK(0, "  ... the re-read descriptor decodes");
+        smb2_close(c, co.file_id);
+        return;
+    }
+
+    /* The explicit DACL replaced the mode-derived one entirely. */
+    CHECK(d.nace == 3, "  ... the explicit DACL has all 3 ACEs (%d)", d.nace);
+
+    /* Every ACE came back verbatim, in the order it was set: an unmappable
+     * SID kept as an opaque principal, a well-known SID kept special, and the
+     * DENY still ahead of nothing it must not follow. */
+    for (i = 0; i < d.nace && i < 3; i++) {
+        CHECK(strcmp(d.ace[i].sid, want[i].sid) == 0,
+              "  ... ace[%d] SID round-trips (%s)", i, d.ace[i].sid);
+        CHECK(d.ace[i].type == want[i].type,
+              "  ... ace[%d] type is preserved (%u)", i, d.ace[i].type);
+        CHECK(d.ace[i].access_mask == want[i].access_mask,
+              "  ... ace[%d] access mask is preserved (0x%08x)", i,
+              d.ace[i].access_mask);
+
+        if (d.ace[i].type == ACE_DENIED) {
+            found_denied = 1;
+        }
+    }
+
+    CHECK(found_denied, "  ... the DENY ace survived (not dropped as unmappable)");
+
+    /* An owner SID no identity authority can resolve has no uid to become, so
+     * the owner is NOT adopted -- it stays the algorithmic form.  Pinning this
+     * guards the other direction: silently taking an unresolvable SID as the
+     * owner would detach the file's owner from every POSIX check. */
+    CHECK(strncmp(d.owner, "S-1-5-88-1-", 11) == 0,
+          "  ... an unresolvable owner SID is not adopted (%s)", d.owner);
+    CHECK(strncmp(d.group, "S-1-5-88-2-", 11) == 0,
+          "  ... nor an unresolvable group SID (%s)", d.group);
+
+    /* Setting only the DACL must not disturb owner or group. */
+    nlen = smb2_sd_build(built, sizeof(built), NULL, NULL, want, 2);
+
+    if (nlen > 0) {
+        st = smb2_set_info_addl(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                                SEC_DACL, built, (uint32_t) nlen);
+        CHECK(st == ST_SUCCESS, "SET SECURITY(dacl only) -> 0x%08x", st);
+
+        st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                             SEC_OWNER | SEC_GROUP | SEC_DACL, sd, sizeof(sd),
+                             &len);
+
+        if (st == ST_SUCCESS && smb2_sd_parse(sd, len, &d) == 0) {
+            CHECK(d.nace == 2, "  ... the DACL is replaced (%d ACE(s))", d.nace);
+            CHECK(strncmp(d.owner, "S-1-5-88-1-", 11) == 0 &&
+                  strncmp(d.group, "S-1-5-88-2-", 11) == 0,
+                  "  ... owner and group are untouched (%s / %s)", d.owner,
+                  d.group);
+        } else {
+            CHECK(0, "  ... QUERY after the dacl-only SET -> 0x%08x", st);
+        }
+    }
+
+    smb2_close(c, co.file_id);
+} /* probe_security_sids */
 
 /* ---- directory enumeration ----------------------------------------------
  *
@@ -1218,6 +1395,7 @@ main(
     probe_streams(c);
     probe_link(c);
     probe_security(c);
+    probe_security_sids(c);
     probe_query_directory(c);
     probe_refusals(c);
 

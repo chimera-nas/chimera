@@ -3172,6 +3172,349 @@ smb2_query_info(
                                65536, out, out_cap, out_len);
 } /* smb2_query_info */
 
+/* ---- security descriptors (MS-DTYP 2.4.6) -------------------------------
+ *
+ * InfoType SECURITY carries a self-relative SECURITY_DESCRIPTOR, which is the
+ * one info class whose payload is neither fixed-layout nor a flat list: the
+ * 20-byte header names byte offsets, each of the owner and group is a
+ * variable-length SID, and the DACL is a counted run of variable-length ACEs.
+ * Reading it positionally the way the fixed classes are read stops at the
+ * header, so everything below it -- which SID a principal actually got, and
+ * whether an ACE survived a round trip -- cannot be asserted at all.
+ *
+ * These helpers decode a descriptor into a comparable form.  SIDs are rendered
+ * to their string form rather than compared as bytes because that is what
+ * makes a failure legible ("S-1-5-88-1-0" against "S-1-5-21-1-2-3-1001"), and
+ * because the string is what every other layer of the server logs. */
+
+#define SMB2_SID_STR_MAX      128   /* S-1-<auth>-<15 sub-authorities>   */
+#define SMB2_SD_MAX_ACES      32
+
+#define SMB2_SEC_OWNER        0x00000001u
+#define SMB2_SEC_GROUP        0x00000002u
+#define SMB2_SEC_DACL         0x00000004u
+#define SMB2_SEC_SACL         0x00000008u
+
+#define SMB2_SE_SELF_RELATIVE 0x8000u
+#define SMB2_SE_DACL_PRESENT  0x0004u
+
+struct smb2_sd_ace {
+    uint8_t  type;
+    uint8_t  flags;
+    uint32_t access_mask;
+    char     sid[SMB2_SID_STR_MAX];
+};
+
+struct smb2_sd {
+    uint8_t            revision;
+    uint16_t           control;
+    int                have_owner;
+    int                have_group;
+    int                have_dacl;
+    char               owner[SMB2_SID_STR_MAX];
+    char               group[SMB2_SID_STR_MAX];
+    int                nace;
+    struct smb2_sd_ace ace[SMB2_SD_MAX_ACES];
+};
+
+/* Decode one binary SID (MS-DTYP 2.4.2.2) to its S-R-I-S-S string form.
+ * Returns the number of bytes consumed, or -1 if it does not fit in avail.
+ * The identifier authority is six bytes BIG-endian -- the only big-endian
+ * field in the whole descriptor. */
+static inline int
+smb2_sid_to_str(
+    const uint8_t *p,
+    uint32_t       avail,
+    char          *out,
+    size_t         cap)
+{
+    uint64_t auth = 0;
+    unsigned nsub, i;
+    size_t   n = 0;
+    int      len;
+
+    if (avail < 8) {
+        return -1;
+    }
+
+    nsub = p[1];
+
+    if (nsub > 15 || avail < 8 + nsub * 4) {
+        return -1;
+    }
+
+    for (i = 0; i < 6; i++) {
+        auth = (auth << 8) | p[2 + i];
+    }
+
+    len = snprintf(out, cap, "S-%u-%llu", p[0], (unsigned long long) auth);
+
+    if (len < 0 || (size_t) len >= cap) {
+        return -1;
+    }
+    n = (size_t) len;
+
+    for (i = 0; i < nsub; i++) {
+        len = snprintf(out + n, cap - n, "-%u", g32(p, (int) (8 + i * 4)));
+
+        if (len < 0 || n + (size_t) len >= cap) {
+            return -1;
+        }
+        n += (size_t) len;
+    }
+
+    return (int) (8 + nsub * 4);
+} /* smb2_sid_to_str */
+
+/* Decode a self-relative descriptor.  Returns 0, or -1 if any offset, SID or
+ * ACE runs outside the buffer -- a malformed descriptor is a probe failure,
+ * not something to parse best-effort. */
+static inline int
+smb2_sd_parse(
+    const uint8_t  *sd,
+    uint32_t        len,
+    struct smb2_sd *out)
+{
+    uint32_t off_owner, off_group, off_dacl;
+
+    memset(out, 0, sizeof(*out));
+
+    if (len < 20) {
+        return -1;
+    }
+
+    out->revision = sd[0];
+    out->control  = g16(sd, 2);
+    off_owner     = g32(sd, 4);
+    off_group     = g32(sd, 8);
+    off_dacl      = g32(sd, 16);
+
+    if (off_owner) {
+        if (off_owner >= len ||
+            smb2_sid_to_str(sd + off_owner, len - off_owner,
+                            out->owner, sizeof(out->owner)) < 0) {
+            return -1;
+        }
+        out->have_owner = 1;
+    }
+
+    if (off_group) {
+        if (off_group >= len ||
+            smb2_sid_to_str(sd + off_group, len - off_group,
+                            out->group, sizeof(out->group)) < 0) {
+            return -1;
+        }
+        out->have_group = 1;
+    }
+
+    if (off_dacl) {
+        uint32_t acl_size, pos;
+        uint16_t count, i;
+
+        if (off_dacl + 8 > len) {
+            return -1;
+        }
+
+        acl_size = g16(sd, (int) off_dacl + 2);
+        count    = g16(sd, (int) off_dacl + 4);
+
+        if (acl_size < 8 || off_dacl + acl_size > len) {
+            return -1;
+        }
+
+        out->have_dacl = 1;
+        pos            = off_dacl + 8;
+
+        for (i = 0; i < count; i++) {
+            struct smb2_sd_ace *a;
+            uint16_t            ace_size;
+
+            if (out->nace >= SMB2_SD_MAX_ACES) {
+                return -1;
+            }
+
+            if (pos + 8 > off_dacl + acl_size) {
+                return -1;
+            }
+
+            ace_size = g16(sd, (int) pos + 2);
+
+            if (ace_size < 8 || pos + ace_size > off_dacl + acl_size) {
+                return -1;
+            }
+
+            a              = &out->ace[out->nace];
+            a->type        = sd[pos];
+            a->flags       = sd[pos + 1];
+            a->access_mask = g32(sd, (int) pos + 4);
+
+            if (smb2_sid_to_str(sd + pos + 8, ace_size - 8,
+                                a->sid, sizeof(a->sid)) < 0) {
+                return -1;
+            }
+
+            out->nace++;
+            pos += ace_size;
+        }
+    }
+
+    return 0;
+} /* smb2_sd_parse */
+
+/* Encode an S-R-I-S-S string back to its binary form.  Returns the number of
+ * bytes written, or -1 on a malformed string or insufficient room.  This is
+ * the inverse of smb2_sid_to_str and exists so a probe can SET a descriptor
+ * naming a principal the server did not author. */
+static inline int
+smb2_sid_str_to_bin(
+    const char *str,
+    uint8_t    *out,
+    int         cap)
+{
+    unsigned long long auth;
+    unsigned           rev, nsub = 0;
+    const char        *p;
+    char              *end;
+    int                i;
+
+    if (!str || str[0] != 'S' || str[1] != '-') {
+        return -1;
+    }
+
+    rev = (unsigned) strtoul(str + 2, &end, 10);
+
+    if (end == str + 2 || *end != '-' || rev != 1) {
+        return -1;
+    }
+
+    auth = strtoull(end + 1, &end, 10);
+
+    if (auth > 0xffffffffffffULL || (*end != '-' && *end != '\0')) {
+        return -1;
+    }
+
+    /* Count the sub-authorities before writing anything, so a string that is
+     * too long for the caller's buffer fails before it has scribbled. */
+    for (p = end; *p == '-'; ) {
+        strtoul(p + 1, &end, 10);
+
+        if (end == p + 1) {
+            return -1;
+        }
+        nsub++;
+        p = end;
+    }
+
+    if (*p != '\0' || nsub > 15 || cap < (int) (8 + nsub * 4)) {
+        return -1;
+    }
+
+    out[0] = (uint8_t) rev;
+    out[1] = (uint8_t) nsub;
+
+    for (i = 0; i < 6; i++) {
+        out[2 + i] = (uint8_t) ((auth >> (8 * (5 - i))) & 0xff);
+    }
+
+    p = strchr(str + 2, '-');           /* skip revision */
+    p = strchr(p + 1, '-');             /* skip authority */
+
+    for (i = 0; i < (int) nsub; i++) {
+        p32(out, 8 + i * 4, (uint32_t) strtoul(p + 1, &end, 10));
+        p = end;
+    }
+
+    return (int) (8 + nsub * 4);
+} /* smb2_sid_str_to_bin */
+
+/* Build a minimal self-relative descriptor in canonical body order (owner SID,
+ * group SID, DACL): the order real clients decode positionally, and the order
+ * the server itself emits.  Any of the three may be omitted by passing NULL /
+ * a zero ACE count.  Returns the length written, or -1 if it does not fit. */
+static inline int
+smb2_sd_build(
+    uint8_t                  *out,
+    uint32_t                  cap,
+    const char               *owner,
+    const char               *group,
+    const struct smb2_sd_ace *aces,
+    int                       nace)
+{
+    uint32_t off = 20, dacl_off = 0;
+    uint16_t control = SMB2_SE_SELF_RELATIVE;
+    int      i, n;
+
+    if (cap < 20) {
+        return -1;
+    }
+    memset(out, 0, 20);
+    out[0] = 1;                                 /* Revision */
+
+    if (owner) {
+        n = smb2_sid_str_to_bin(owner, out + off, (int) (cap - off));
+
+        if (n < 0) {
+            return -1;
+        }
+        p32(out, 4, off);
+        off += (uint32_t) n;
+    }
+
+    if (group) {
+        n = smb2_sid_str_to_bin(group, out + off, (int) (cap - off));
+
+        if (n < 0) {
+            return -1;
+        }
+        p32(out, 8, off);
+        off += (uint32_t) n;
+    }
+
+    if (nace > 0) {
+        uint32_t acl_hdr = off;
+
+        control |= SMB2_SE_DACL_PRESENT;
+
+        if (off + 8 > cap) {
+            return -1;
+        }
+        off += 8;
+
+        for (i = 0; i < nace; i++) {
+            uint32_t ace_pos = off;
+
+            if (off + 8 > cap) {
+                return -1;
+            }
+
+            n = smb2_sid_str_to_bin(aces[i].sid, out + off + 8,
+                                    (int) (cap - off - 8));
+
+            if (n < 0) {
+                return -1;
+            }
+
+            out[ace_pos]     = aces[i].type;
+            out[ace_pos + 1] = aces[i].flags;
+            p16(out, (int) ace_pos + 2, (uint16_t) (8 + n));
+            p32(out, (int) ace_pos + 4, aces[i].access_mask);
+            off += 8 + (uint32_t) n;
+        }
+
+        out[acl_hdr]     = 2;                   /* ACL_REVISION */
+        out[acl_hdr + 1] = 0;
+        p16(out, (int) acl_hdr + 2, (uint16_t) (off - acl_hdr));
+        p16(out, (int) acl_hdr + 4, (uint16_t) nace);
+        p16(out, (int) acl_hdr + 6, 0);
+        dacl_off = acl_hdr;
+    }
+
+    p16(out, 2, control);
+    p32(out, 16, dacl_off);
+
+    return (int) off;
+} /* smb2_sd_build */
+
 /* ---- QUERY_DIRECTORY ----------------------------------------------------
  *
  * MS-SMB2 2.2.33: StructureSize 33, FileInformationClass(1), Flags(1),
