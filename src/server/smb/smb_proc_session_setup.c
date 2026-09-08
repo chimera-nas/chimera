@@ -8,6 +8,7 @@
 #include "smb_common/smb_encrypt.h"
 #include "smb_auth.h"
 #include "smb_wbclient.h"
+#include "smb_kerberos_identity.h"
 #include "vfs/vfs.h"
 
 // Process NTLM authentication
@@ -347,6 +348,29 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         rc = -1;
     }
 
+    /* An accepted Kerberos context is not yet a logon.  The principal still has
+     * to map to a Unix identity, and a deployment that configured winbind asked
+     * for real identities: if winbindd is down or cannot map the principal the
+     * logon is refused with STATUS_LOGON_FAILURE, the answer the NTLM
+     * pass-through path gives a logon winbind cannot validate.  Resolved here,
+     * ahead of session allocation, so the refusal takes the ordinary failure
+     * path below -- no session, and a session an earlier interim leg allocated
+     * is torn down -- instead of falling back to an anonymous identity that an
+     * accepted service ticket alone never earned. */
+    struct smb_kerberos_identity krb_ident = { 0 };
+
+    if (rc == 0 && mech == SMB_AUTH_MECH_KERBEROS &&
+        smb_kerberos_resolve_identity(shared->config.auth.winbind_enabled,
+                                      smb_gssapi_get_principal(&conn->gssapi_ctx),
+                                      &krb_ident) != 0) {
+        /* Do not hand the client the AP-REP of a logon being refused: the
+         * failure response carries an empty security buffer, like NTLM's. */
+        free(conn->ntlm_output);
+        conn->ntlm_output     = NULL;
+        conn->ntlm_output_len = 0;
+        rc                    = -1;
+    }
+
     /* Allocate the session (and its SessionId) on the first leg, whether the
      * exchange completes now or needs another round trip. The server MUST
      * return this SessionId in the interim STATUS_MORE_PROCESSING_REQUIRED
@@ -525,32 +549,18 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                 session_key_saved_len = SMB_GSSAPI_SESSION_KEY_SIZE;
             }
 
-            // Map Kerberos principal to Unix credentials via winbind
+            /* Identity resolved before session allocation (see above): a
+             * principal that could not be mapped never reaches this point. */
             const char *principal = smb_gssapi_get_principal(&conn->gssapi_ctx);
             username = principal;
 
-            if (shared->config.auth.winbind_enabled && smb_wbclient_available()) {
-                if (smb_wbclient_map_principal(principal, &uid, &gid, &ngids, gids, sid_buf) == 0) {
-                    sid        = sid_buf;
-                    is_ad_user = 1;
-                } else {
-                    chimera_smb_error("Failed to map Kerberos principal to Unix credentials");
-                    // Use anonymous credentials as fallback
-                    uid   = 65534;
-                    gid   = 65534;
-                    ngids = 0;
-                    smb_ntlm_synthesize_unix_sid(uid, sid_buf, sizeof(sid_buf));
-                    sid = sid_buf;
-                }
-            } else {
-                // No winbind - use anonymous credentials
-                chimera_smb_debug("Kerberos auth without winbind - using anonymous credentials");
-                uid   = 65534;
-                gid   = 65534;
-                ngids = 0;
-                smb_ntlm_synthesize_unix_sid(uid, sid_buf, sizeof(sid_buf));
-                sid = sid_buf;
-            }
+            uid   = krb_ident.uid;
+            gid   = krb_ident.gid;
+            ngids = krb_ident.ngids;
+            memcpy(gids, krb_ident.gids, ngids * sizeof(uint32_t));
+            memcpy(sid_buf, krb_ident.sid, sizeof(sid_buf));
+            sid        = sid_buf;
+            is_ad_user = krb_ident.is_ad_user;
 
             chimera_smb_info("Kerberos auth complete: principal=%s uid=%u gid=%u sid=%s",
                              principal, uid, gid, sid ? sid : "none");

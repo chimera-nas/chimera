@@ -8,7 +8,7 @@ add_subdirectory(quint)
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
-target_link_libraries(smb_auth_test chimera_vfs urcu-cds)
+target_link_libraries(smb_auth_test chimera_server chimera_smb chimera_vfs urcu-cds)
 target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_test(NAME chimera/server/smb/auth_test
@@ -30,6 +30,14 @@ if(CHIMERA_NETNS_TESTING)
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos)
     set_tests_properties(chimera/server/smb/smbclient_kerberos PROPERTIES
+        SKIP_RETURN_CODE 77)
+
+    # Kerberos with winbind_enabled and no winbindd: the accepted context must be
+    # refused with STATUS_LOGON_FAILURE, never established as uid 65534.
+    add_test(NAME chimera/server/smb/smbclient_kerberos_winbind_down
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos-winbind-down)
+    set_tests_properties(chimera/server/smb/smbclient_kerberos_winbind_down PROPERTIES
         SKIP_RETURN_CODE 77)
 
     find_program(SAMBA_TOOL samba-tool)
