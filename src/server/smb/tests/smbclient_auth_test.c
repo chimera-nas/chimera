@@ -806,6 +806,14 @@ main(
             fprintf(stderr, "\nSKIP: KRB5_KTNAME not set; run via scripts/kerberos_test_wrapper.sh\n");
             return 77;
         }
+        if (!getenv("KRB5_CONFIG")) {
+            fprintf(stderr, "\nSKIP: KRB5_CONFIG not set; run via scripts/kerberos_test_wrapper.sh\n");
+            return 77;
+        }
+        if (!getenv("KRB5CCNAME")) {
+            fprintf(stderr, "\nSKIP: KRB5CCNAME not set; run via scripts/kerberos_test_wrapper.sh\n");
+            return 77;
+        }
         if (getenv("WINBINDD_SOCKET_DIR")) {
             fprintf(stderr, "\nSKIP: WINBINDD_SOCKET_DIR is set; this mode needs winbind to be absent\n");
             return 77;
@@ -963,6 +971,18 @@ main(
 
     if (strcmp(mode, "winbind") == 0 || strcmp(mode, "all") == 0) {
         failures += run_winbind_tests(&env);
+    }
+
+    /* A refusal mode asserts a security property (the logon is refused); it
+     * must never report success having asserted nothing.  The early skip above
+     * covers a missing wrapper variable, but this is the backstop: if the one
+     * assertion in run_kerberos_refusal_tests() was itself skipped (e.g.
+     * verify_kerberos_environment() still failed), tests_passed stays 0 with
+     * no failures, and that is a vacuous pass, not a PASS. */
+    if (mode_expects_refusal(mode) && tests_passed == 0 && failures == 0) {
+        fprintf(stderr, "\nSKIP: refusal mode ran no assertion\n");
+        test_cleanup(&env, 1);
+        return 77;
     }
 
     /* Summary */

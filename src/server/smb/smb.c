@@ -234,6 +234,9 @@ chimera_smb_server_init(
                 chimera_smb_error("SMB Auth: Kerberos without winbind and without "
                                   "kerberos_anonymous_fallback: every Kerberos logon will be refused");
             }
+        } else if (shared->config.auth.kerberos_anonymous_fallback) {
+            chimera_smb_info("SMB Auth: kerberos_anonymous_fallback ignored: winbind_enabled is set, "
+                             "winbind maps every Kerberos principal");
         }
     }
 

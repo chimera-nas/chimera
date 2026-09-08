@@ -555,9 +555,17 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             const char *principal = smb_gssapi_get_principal(&conn->gssapi_ctx);
             username = principal;
 
+            /* The resolve above is the only writer; the zero value of krb_ident is
+             * uid 0 / gid 0, so consuming an unresolved identity would be a root
+             * session.  Fail closed if control flow ever decouples the two. */
+            chimera_smb_abort_if(!krb_ident.resolved,
+                                 "Kerberos identity consumed without resolution");
+
             uid   = krb_ident.uid;
             gid   = krb_ident.gid;
             ngids = krb_ident.ngids;
+            _Static_assert(sizeof(gids) == sizeof(krb_ident.gids),
+                           "session gids and Kerberos identity gids must match");
             memcpy(gids, krb_ident.gids, ngids * sizeof(uint32_t));
             memcpy(sid_buf, krb_ident.sid, sizeof(sid_buf));
             sid        = sid_buf;
