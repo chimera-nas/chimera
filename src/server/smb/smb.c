@@ -186,8 +186,10 @@ chimera_smb_server_init(
     snprintf(shared->config.identity, sizeof(shared->config.identity), "chimera");
 
     // Copy SMB auth config from server config
-    shared->config.auth.winbind_enabled  = chimera_server_config_get_smb_winbind_enabled(config);
-    shared->config.auth.kerberos_enabled = chimera_server_config_get_smb_kerberos_enabled(config);
+    shared->config.auth.winbind_enabled             = chimera_server_config_get_smb_winbind_enabled(config);
+    shared->config.auth.kerberos_enabled            = chimera_server_config_get_smb_kerberos_enabled(config);
+    shared->config.auth.kerberos_anonymous_fallback =
+        chimera_server_config_get_smb_kerberos_anonymous_fallback(config);
 
     const char *winbind_domain = chimera_server_config_get_smb_winbind_domain(config);
     if (winbind_domain && winbind_domain[0]) {
@@ -221,6 +223,18 @@ chimera_smb_server_init(
         chimera_smb_info("SMB Auth: Kerberos enabled (realm: %s, keytab: %s)",
                          shared->config.auth.kerberos_realm[0] ? shared->config.auth.kerberos_realm : "(not set)",
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
+
+        /* Say once, at startup, what a Kerberos principal turns into when no
+        * winbind is there to map it; the per-logon lines refer back here. */
+        if (!shared->config.auth.winbind_enabled) {
+            if (shared->config.auth.kerberos_anonymous_fallback) {
+                chimera_smb_info("SMB Auth: Kerberos without winbind: every authenticated principal "
+                                 "is served as uid/gid 65534 (kerberos_anonymous_fallback)");
+            } else {
+                chimera_smb_error("SMB Auth: Kerberos without winbind and without "
+                                  "kerberos_anonymous_fallback: every Kerberos logon will be refused");
+            }
+        }
     }
 
     /* Resolve the identity advertised in NTLM CHALLENGE messages once at

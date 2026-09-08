@@ -1069,6 +1069,18 @@ const char *
 chimera_server_config_get_smb_kerberos_keytab(
     const struct chimera_server_config *config);
 
+/* Serve an authenticated Kerberos principal as uid/gid 65534 when no identity
+ * source can map it (winbind off).  Off by default: a winbind-less Kerberos
+ * logon is then refused.  Ignored when winbind is enabled. */
+void
+chimera_server_config_set_smb_kerberos_anonymous_fallback(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_smb_kerberos_anonymous_fallback(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_nfs_kerberos_enabled(
     struct chimera_server_config *config,

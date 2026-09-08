@@ -956,6 +956,11 @@ main(
             chimera_server_config_set_smb_kerberos_realm(server_config,
                                                          json_string_value(kerberos_realm));
         }
+
+        json_t *kerberos_anonymous_fallback = json_object_get(smb_auth, "kerberos_anonymous_fallback");
+        if (kerberos_anonymous_fallback && json_is_true(kerberos_anonymous_fallback)) {
+            chimera_server_config_set_smb_kerberos_anonymous_fallback(server_config, 1);
+        }
     }
 
     // Parse NFS auth configuration (RPCSEC_GSS / Kerberos)

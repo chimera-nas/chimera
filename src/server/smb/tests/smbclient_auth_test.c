@@ -13,6 +13,8 @@
  *   --mode=kerberos               - Kerberos/GSSAPI authentication (requires KDC setup)
  *   --mode=kerberos-winbind-down  - Kerberos with winbind_enabled and no winbindd:
  *                                   the logon must be REFUSED (requires KDC setup)
+ *   --mode=kerberos-no-fallback   - Kerberos with winbind off and no fallback knob:
+ *                                   the logon must be REFUSED (requires KDC setup)
  *   --mode=winbind                - NTLM via winbind (requires AD environment)
  *   --mode=all                    - Run all available auth tests
  *
@@ -721,6 +723,7 @@ static int
 mode_uses_kerberos(const char *mode)
 {
     return strcmp(mode, "kerberos") == 0 ||
+           strcmp(mode, "kerberos-no-fallback") == 0 ||
            strcmp(mode, "kerberos-winbind-down") == 0 ||
            strcmp(mode, "all") == 0;
 } /* mode_uses_kerberos */
@@ -729,7 +732,8 @@ mode_uses_kerberos(const char *mode)
 static int
 mode_expects_refusal(const char *mode)
 {
-    return strcmp(mode, "kerberos-winbind-down") == 0;
+    return strcmp(mode, "kerberos-no-fallback") == 0 ||
+           strcmp(mode, "kerberos-winbind-down") == 0;
 } /* mode_expects_refusal */
 
 /* ============================================================================
@@ -746,6 +750,8 @@ print_usage(const char *prog)
     fprintf(stderr, "  --mode=kerberos  Test Kerberos (requires KDC setup)\n");
     fprintf(stderr,
             "  --mode=kerberos-winbind-down  Kerberos with winbind_enabled and no winbindd; logon must be refused\n");
+    fprintf(stderr,
+            "  --mode=kerberos-no-fallback   Kerberos with winbind off and no fallback knob; logon must be refused\n");
     fprintf(stderr, "  --mode=winbind   Test winbind NTLM (requires AD)\n");
     fprintf(stderr, "  --mode=all       Run all available tests\n");
     fprintf(stderr, "  -b <backend>     VFS backend (memfs, linux, diskfs)\n");
@@ -838,6 +844,14 @@ main(
         chimera_server_config_set_smb_kerberos_enabled(config, 1);
         chimera_server_config_set_smb_kerberos_keytab(config, keytab);
 
+        /* The positive modes run against an MIT realm with no winbind, so the
+         * only identity a principal can get is the opt-in nobody mapping; what
+         * they exercise is the GSSAPI exchange.  The refusal modes leave the
+         * knob off. */
+        if (!mode_expects_refusal(mode)) {
+            chimera_server_config_set_smb_kerberos_anonymous_fallback(config, 1);
+        }
+
         const char *realm = getenv("KRB_REALM");
         if (!realm) {
             realm = "TEST.LOCAL";
@@ -880,6 +894,12 @@ main(
          * the server must refuse the logon rather than serve it as uid 65534. */
         chimera_server_config_set_smb_winbind_enabled(config, 1);
         fprintf(stderr, "Winbind enabled with no winbindd running: Kerberos logons must be refused\n");
+    }
+
+    if (strcmp(mode, "kerberos-no-fallback") == 0) {
+        /* Neither winbind nor the fallback knob: the server has no identity
+         * source for the principal and must refuse the logon. */
+        fprintf(stderr, "No identity source configured: Kerberos logons must be refused\n");
     }
 
     const char *socket_dir = getenv("WINBINDD_SOCKET_DIR");

@@ -198,6 +198,9 @@ struct chimera_smb_rdma_element {
 struct chimera_smb_auth_config {
     int                             winbind_enabled;
     int                             kerberos_enabled;
+    /* Serve a Kerberos principal no identity source can map as uid/gid 65534
+     * instead of refusing the logon.  Only consulted when winbind is off. */
+    int                             kerberos_anonymous_fallback;
     char                            winbind_domain[256];
     char                            kerberos_keytab[256];
     char                            kerberos_realm[256];

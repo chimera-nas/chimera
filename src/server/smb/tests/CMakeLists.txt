@@ -40,6 +40,14 @@ if(CHIMERA_NETNS_TESTING)
     set_tests_properties(chimera/server/smb/smbclient_kerberos_winbind_down PROPERTIES
         SKIP_RETURN_CODE 77)
 
+    # Kerberos with winbind off and kerberos_anonymous_fallback off (the default):
+    # no identity source, so the logon must be refused rather than served as nobody.
+    add_test(NAME chimera/server/smb/smbclient_kerberos_no_fallback
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos-no-fallback)
+    set_tests_properties(chimera/server/smb/smbclient_kerberos_no_fallback PROPERTIES
+        SKIP_RETURN_CODE 77)
+
     find_program(SAMBA_TOOL samba-tool)
     if(SAMBA_TOOL)
         add_test(NAME chimera/server/smb/smbclient_winbind

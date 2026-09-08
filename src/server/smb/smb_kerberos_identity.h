@@ -34,8 +34,11 @@ struct smb_kerberos_identity {
  * cannot validate.  A deployment that configured winbind asked for real
  * identities, and an anonymous session is not a degraded form of that.
  *
- * Without winbind the principal is served as SMB_KERBEROS_NOBODY_ID with a
- * synthesized Unix SID.
+ * Without winbind there is no identity source, and the logon is refused unless
+ * anonymous_fallback is set, in which case the principal is served as
+ * SMB_KERBEROS_NOBODY_ID with a synthesized Unix SID.  The knob is ignored when
+ * winbind_enabled is set: it exists for a KDC with no domain behind it (a plain
+ * MIT realm), never as a degraded mode for a winbind failure.
  *
  * Returns 0 with *out filled, or -1 when the logon must be refused (the caller
  * answers STATUS_LOGON_FAILURE).  Logs the reason for every refusal.
@@ -43,5 +46,6 @@ struct smb_kerberos_identity {
 int
 smb_kerberos_resolve_identity(
     int                           winbind_enabled,
+    int                           anonymous_fallback,
     const char                   *principal,
     struct smb_kerberos_identity *out);

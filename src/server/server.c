@@ -45,6 +45,7 @@
 struct chimera_server_config_smb_auth {
     int  winbind_enabled;
     int  kerberos_enabled;
+    int  kerberos_anonymous_fallback;
     char winbind_domain[256];
     char kerberos_keytab[256];
     char kerberos_realm[256];
@@ -326,14 +327,15 @@ chimera_server_config_init(void)
         SMB2_SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE;
 
     // SMB auth config defaults - local NTLM only
-    config->smb_auth.winbind_enabled    = 0;
-    config->smb_auth.kerberos_enabled   = 0;
-    config->smb_auth.winbind_domain[0]  = '\0';
-    config->smb_auth.kerberos_keytab[0] = '\0';
-    config->smb_auth.kerberos_realm[0]  = '\0';
-    config->nfs_auth.kerberos_enabled   = 0;
-    config->nfs_auth.kerberos_keytab[0] = '\0';
-    config->nfs_auth.num_principal_map  = 0;
+    config->smb_auth.winbind_enabled             = 0;
+    config->smb_auth.kerberos_enabled            = 0;
+    config->smb_auth.kerberos_anonymous_fallback = 0;
+    config->smb_auth.winbind_domain[0]           = '\0';
+    config->smb_auth.kerberos_keytab[0]          = '\0';
+    config->smb_auth.kerberos_realm[0]           = '\0';
+    config->nfs_auth.kerberos_enabled            = 0;
+    config->nfs_auth.kerberos_keytab[0]          = '\0';
+    config->nfs_auth.num_principal_map           = 0;
 
     config->anonuid = 65534;
     config->anongid = 65534;
@@ -3386,6 +3388,20 @@ chimera_server_config_get_smb_kerberos_keytab(const struct chimera_server_config
 {
     return config->smb_auth.kerberos_keytab;
 } /* chimera_server_config_get_smb_kerberos_keytab */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_kerberos_anonymous_fallback(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_auth.kerberos_anonymous_fallback = enabled;
+} /* chimera_server_config_set_smb_kerberos_anonymous_fallback */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_kerberos_anonymous_fallback(const struct chimera_server_config *config)
+{
+    return config->smb_auth.kerberos_anonymous_fallback;
+} /* chimera_server_config_get_smb_kerberos_anonymous_fallback */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_kerberos_enabled(

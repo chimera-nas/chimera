@@ -61,6 +61,7 @@ The chimera side of both procedures is the `server.smb_auth` object:
 | `kerberos_enabled` | bool | `false` | Accept Kerberos through SPNEGO. |
 | `kerberos_keytab` | string | - | Keytab used to accept Kerberos contexts. If unset, the MIT default (or `KRB5_KTNAME`) applies. |
 | `kerberos_realm` | string | - | Realm the host belongs to, recorded at startup. |
+| `kerberos_anonymous_fallback` | bool | `false` | Serve an authenticated Kerberos principal as uid/gid 65534 when `winbind_enabled` is off. Off, a Kerberos logon without winbind is refused with `NT_STATUS_LOGON_FAILURE`. Ignored when `winbind_enabled` is set. |
 
 See [server.smb_auth](configuration#serversmb_auth) in the configuration
 reference for how these sit in the wider config file.
@@ -90,10 +91,18 @@ is joined it advertises fallback names and every pass-through logon fails with
 `NT_STATUS_LOGON_FAILURE`. There is no retry: restart chimera after a join or
 a rejoin.
 
-**Enable winbind even for a Kerberos-only deployment.** The Kerberos path maps
-the authenticated principal to a uid through winbind. With `winbind_enabled`
-off, or if the mapping fails, the session silently falls back to uid and gid
-65534, and every user shares one identity on disk.
+**Enable winbind for every Kerberos deployment that has a domain behind it.**
+The Kerberos path maps the authenticated principal to a uid through winbind.
+With `winbind_enabled` set, a winbindd that is down or a principal it cannot
+map refuses the logon with `NT_STATUS_LOGON_FAILURE`; an accepted service
+ticket alone never yields a session, and chimera logs the principal and the
+reason at error level. With `winbind_enabled` off, chimera has no identity
+source for the principal and refuses the logon too, unless
+`kerberos_anonymous_fallback` is set, in which case every Kerberos user is
+served as uid and gid 65534 and shares one identity on disk. That knob exists
+for a KDC with no domain (a plain MIT realm); it is never consulted when
+winbind is enabled, so a winbind outage cannot degrade a domain deployment to
+anonymous access.
 
 **`smbd` must not be running.** Chimera binds port 445 itself. If samba's file
 server is installed as a side effect of another package, disable and mask it.
@@ -407,8 +416,7 @@ the same directory without deploying Active Directory.
 
 > **Note:** this is an NTLM-only deployment. An OpenLDAP directory has no KDC,
 > so leave `kerberos_enabled` off. Chimera's Kerberos path resolves principals
-> through winbind with no fallback, so enabling it without a KDC would map
-> every session to uid 65534.
+> through winbind and refuses any principal winbind cannot map.
 
 The worked example uses these values:
 
@@ -769,7 +777,9 @@ must fail with `NT_STATUS_LOGON_FAILURE` or `NT_STATUS_WRONG_PASSWORD`.
 | Every pass-through logon fails `NT_STATUS_LOGON_FAILURE`, but `wbinfo -a` and `ntlm_auth` succeed | Chimera started before the host was joined, so it advertises fallback names in its NTLM CHALLENGE and the domain controller's target-info check rejects the response. | Restart chimera after the join. Its log line `NTLM CHALLENGE identity: ...` shows whether the names came from `winbind` or from `fallback`. |
 | `NT_STATUS_NO_SUCH_USER` after a pause of about five seconds, while `wbinfo -u`, `wbinfo -i` and `getent` all work | The nested `getpwnam()` inside the authentication request cannot be served. | Set `winbind max domain connections = 5` and reduce `nsswitch.conf` to `files winbind`. |
 | `winbind_enabled: true` appears to be ignored | Chimera was built without libwbclient. | Install `libwbclient-dev` or `libwbclient-devel`, reconfigure, and look for `libwbclient found` in the cmake output. |
-| Everything on disk is owned by uid 65534 | Winbind is disabled, or a Kerberos principal could not be mapped. | Set `winbind_enabled: true`, and check `wbinfo -n` and `wbinfo --sid-to-uid` for the user. |
+| Everything on disk is owned by uid 65534 | `kerberos_anonymous_fallback` is set with winbind off, so every Kerberos principal is served as nobody. | Set `winbind_enabled: true` and remove `kerberos_anonymous_fallback`; check `wbinfo -n` and `wbinfo --sid-to-uid` for the user. |
+| Kerberos logons fail `NT_STATUS_LOGON_FAILURE` while NTLM logons work, and chimera logs `winbind is unavailable` | winbindd is down, or chimera was built without libwbclient. Chimera refuses the logon rather than serving the principal as uid 65534. | Restart winbindd and confirm with `wbinfo --ping`; or rebuild with libwbclient. |
+| Kerberos logons fail `NT_STATUS_LOGON_FAILURE` and chimera logs `no identity source` | `winbind_enabled` and `kerberos_anonymous_fallback` are both off. | Enable winbind. For a KDC with no domain behind it, set `kerberos_anonymous_fallback: true`, knowing every user then shares uid 65534. |
 | SMB file ownership does not match the directory's `uidNumber` | An `idmap config <workgroup>` stanza is bypassing `idmap_passdb`. | Remove it for a local SAM or ldapsam domain. |
 | `adcli join` fails intermittently with `Message stream modified` | `--domain-controller` was given a name with no `ldap/` service principal, often a round-robin alias. | Use `--domain` and let adcli discover a controller. |
 | The join reports it cannot store the machine password, and `wbinfo --ping-dc` then fails | On samba 4.16 and newer, `net changesecretpw` can only upgrade an existing record. | Seed the two `secrets.tdb` records with `tdbtool` before joining. |

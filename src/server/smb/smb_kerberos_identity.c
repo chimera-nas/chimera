@@ -11,6 +11,7 @@
 SYMBOL_EXPORT int
 smb_kerberos_resolve_identity(
     int                           winbind_enabled,
+    int                           anonymous_fallback,
     const char                   *principal,
     struct smb_kerberos_identity *out)
 {
@@ -43,11 +44,17 @@ smb_kerberos_resolve_identity(
         return 0;
     }
 
-    /* No identity source: serve the principal as nobody.  Error level on
-     * purpose -- a production log must show why every Kerberos user shares one
-     * uid, and this used to be a debug line nobody saw. */
-    chimera_smb_error("Kerberos principal %s served as uid/gid %u: winbind_enabled is off",
-                      principal, SMB_KERBEROS_NOBODY_ID);
+    if (!anonymous_fallback) {
+        chimera_smb_error("Kerberos logon refused for %s: no identity source (winbind_enabled "
+                          "and kerberos_anonymous_fallback are both off)",
+                          principal);
+        return -1;
+    }
+
+    /* Explicitly opted in: serve the principal as nobody.  Info level here; the
+     * server logs the policy itself at startup. */
+    chimera_smb_info("Kerberos principal %s served as uid/gid %u (kerberos_anonymous_fallback)",
+                     principal, SMB_KERBEROS_NOBODY_ID);
 
     out->uid   = SMB_KERBEROS_NOBODY_ID;
     out->gid   = SMB_KERBEROS_NOBODY_ID;
