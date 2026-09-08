@@ -830,13 +830,15 @@ diskfs_push_trim(struct diskfs_intent_log *il)
          * advances it). */
         if (il->push_head) {
             __atomic_store_n(&il->log_tail, il->push_head->offset, __ATOMIC_RELEASE);
+            __atomic_store_n(&il->log_tail_seq, il->push_head->seq, __ATOMIC_RELEASE);
         } else {
             uint32_t hh = il->handoff_head;
             uint32_t ht = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
             if (hh != ht) {
-                __atomic_store_n(&il->log_tail,
-                                 il->handoff[hh & il->handoff_ring_mask]->offset,
-                                 __ATOMIC_RELEASE);
+                struct diskfs_il_record *oldest =
+                    il->handoff[hh & il->handoff_ring_mask];
+                __atomic_store_n(&il->log_tail, oldest->offset, __ATOMIC_RELEASE);
+                __atomic_store_n(&il->log_tail_seq, oldest->seq, __ATOMIC_RELEASE);
             }
         }
 
@@ -1223,7 +1225,7 @@ diskfs_il_write_redo(
     hdr->seq        = il->log_seq++;
     rec->seq        = hdr->seq;
     ctx->seq        = hdr->seq;     /* Stage B: apply thread advances applied_seq from this */
-    hdr->tail       = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
+    hdr->tail_seq   = __atomic_load_n(&il->log_tail_seq, __ATOMIC_ACQUIRE);
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;
     hdr->num_deltas = num_deltas;
@@ -1466,6 +1468,10 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
                 break;
             }
             __atomic_store_n(&il->log_tail, il->log_head, __ATOMIC_RELEASE);
+            /* Ring is fully trimmed (every prior record durably home): the next
+             * record written is the oldest live one, so the live-window lower
+             * bound is its own seq (== the current log_seq). */
+            __atomic_store_n(&il->log_tail_seq, il->log_seq, __ATOMIC_RELEASE);
             if (!diskfs_il_fits(il, reclen)) {
                 break;
             }
@@ -2034,6 +2040,7 @@ diskfs_intent_log_thread_init(
     il->handoff_ring_mask = il->handoff_ring_size - 1;
     il->log_head          = SM_INTENT_LOG_OFFSET;
     il->log_tail          = SM_INTENT_LOG_OFFSET;
+    il->log_tail_seq      = il->recovered_log_seq;
     il->live_records      = 0;
     /* Resume past the highest seq crash recovery replayed (0 on a clean mount /
      * mkfs), so post-recovery records never reuse a still-in-log record's seq. */

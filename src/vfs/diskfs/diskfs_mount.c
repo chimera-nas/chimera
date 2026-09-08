@@ -722,7 +722,8 @@ diskfs_recover_log(
     char                      *log;
     uint64_t                   o;
     struct diskfs_recover_rec *recs;
-    uint32_t                   nrec = 0, cap = 4096, i;
+    uint32_t                   nrec = 0, cap = 4096, i, replayed = 0;
+    uint64_t                   min_live_seq;
 
     uint64_t                   intent_log_size = shared->intent_log_size;
 
@@ -802,13 +803,40 @@ diskfs_recover_log(
      * replay.  recs is sorted ascending, so the last entry carries the max. */
     shared->intent_log.recovered_log_seq = nrec ? recs[nrec - 1].seq + 1 : 0;
 
+    /* Live-window lower bound.  The log is a ring and is NOT trimmed on a crash,
+     * so records already trimmed before the crash remain physically present with
+     * a valid magic + checksum.  Replaying them is not merely wasteful: a ring
+     * wrap can overwrite a block's newest owner while an older, superseded owner
+     * survives, so a naive latest-seq-wins replay lands the stale image over the
+     * correct one that was pushed home before the trim -- e.g. resurrecting an
+     * orphan whose home block was already freed, which then double-frees on the
+     * post-recovery re-drain.  The highest-seq record stamped log_tail_seq (the
+     * seq of the oldest un-trimmed record) at its commit; every record below that
+     * was trimmed, hence its images are durably home and its space deltas are
+     * folded into a checkpoint.  Skip them. */
+    min_live_seq = nrec ? ((struct diskfs_redo_header *)
+                           (log + recs[nrec - 1].offset))->tail_seq : 0;
+    /* tail_seq can never exceed the stamping record's own seq; a larger value is
+     * garbage (or a log from a build predating this field's seq semantics).  Fall
+     * back to replaying every survivor rather than skipping valid records. */
+    if (nrec && min_live_seq > recs[nrec - 1].seq) {
+        min_live_seq = 0;
+    }
+
     for (i = 0; i < nrec; i++) {
-        struct diskfs_redo_header *hdr  = (struct diskfs_redo_header *) (log + recs[i].offset);
-        char                      *bhp  = log + recs[i].offset + sizeof(*hdr);
-        char                      *data = log + recs[i].offset +
-            diskfs_il_hdr_len(hdr->num_blocks, hdr->num_deltas);
+        struct diskfs_redo_header *hdr = (struct diskfs_redo_header *) (log + recs[i].offset);
+        char                      *bhp;
+        char                      *data;
         char                      *dp;
         uint32_t                   b;
+
+        if (recs[i].seq < min_live_seq) {
+            continue;     /* already trimmed before the crash -- durably home */
+        }
+
+        bhp  = log + recs[i].offset + sizeof(*hdr);
+        data = log + recs[i].offset +
+            diskfs_il_hdr_len(hdr->num_blocks, hdr->num_deltas);
 
         /* New layout: all per-block headers are grouped after the redo header,
          * the space deltas follow them, and the block images follow the 4 KiB-
@@ -846,6 +874,7 @@ diskfs_recover_log(
                                         rd->length, rd->op);
             }
         }
+        replayed++;
     }
 
     for (i = 0; i < (uint32_t) shared->num_devices; i++) {
@@ -854,7 +883,9 @@ diskfs_recover_log(
 
     free(recs);
     free(log);
-    chimera_diskfs_info("crash recovery: replayed %u intact intent-log records", nrec);
+    chimera_diskfs_info("crash recovery: replayed %u of %u intact intent-log "
+                        "records (live-window seq >= %llu)", replayed, nrec,
+                        (unsigned long long) min_live_seq);
     return 0;
 } /* diskfs_recover_log */
 
