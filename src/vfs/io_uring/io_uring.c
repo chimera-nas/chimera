@@ -3265,16 +3265,30 @@ chimera_io_uring_get_xattr(
     int                             fd      = (int) request->get_xattr.handle->vfs_private;
     char                           *scratch = (char *) request->plugin_data;
     ssize_t                         rc;
+    int                             err;
 
     --thread->inflight;
 
     TERM_STR(name, request->get_xattr.name, request->get_xattr.namelen, scratch);
 
+    /* The descriptor was opened privileged (open_by_handle_at) and the
+     * kernel checks user.* xattr access against this thread's fsuid at call
+     * time, so the xattr syscalls run impersonated like every other op. */
+    err = chimera_setup_credential(request->cred, NULL);
+    if (err != 0) {
+        request->status = chimera_linux_errno_to_status(err);
+        request->complete(request);
+        return;
+    }
+
     rc = fgetxattr(fd, name, request->get_xattr.value,
                    request->get_xattr.value_maxlen);
+    err = errno;
+
+    chimera_restore_privilege(request->cred);
 
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(err);
     } else {
         request->get_xattr.r_value_len = rc;
         request->status                = CHIMERA_VFS_OK;
@@ -3293,6 +3307,7 @@ chimera_io_uring_set_xattr(
     char                           *scratch = (char *) request->plugin_data;
     int                             flags   = 0;
     int                             rc;
+    int                             err;
     struct statx                    stx;
 
     --thread->inflight;
@@ -3313,11 +3328,21 @@ chimera_io_uring_set_xattr(
 
     TERM_STR(name, request->set_xattr.name, request->set_xattr.namelen, scratch);
 
+    err = chimera_setup_credential(request->cred, NULL);
+    if (err != 0) {
+        request->status = chimera_linux_errno_to_status(err);
+        request->complete(request);
+        return;
+    }
+
     rc = fsetxattr(fd, name, request->set_xattr.value,
                    request->set_xattr.value_len, flags);
+    err = errno;
+
+    chimera_restore_privilege(request->cred);
 
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(err);
     } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
                      CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -3337,14 +3362,26 @@ chimera_io_uring_list_xattrs(
     struct chimera_io_uring_thread *thread = private_data;
     int                             fd     = (int) request->list_xattrs.handle->vfs_private;
     ssize_t                         rc;
+    int                             err;
     char                           *p, *end;
 
     --thread->inflight;
 
+    err = chimera_setup_credential(request->cred, NULL);
+    if (err != 0) {
+        request->status = chimera_linux_errno_to_status(err);
+        request->complete(request);
+        return;
+    }
+
     rc = flistxattr(fd, request->list_xattrs.buffer,
                     request->list_xattrs.max_bytes);
+    err = errno;
+
+    chimera_restore_privilege(request->cred);
+
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
@@ -3378,6 +3415,7 @@ chimera_io_uring_remove_xattr(
     int                             fd      = (int) request->remove_xattr.handle->vfs_private;
     char                           *scratch = (char *) request->plugin_data;
     int                             rc;
+    int                             err;
     struct statx                    stx;
 
     --thread->inflight;
@@ -3392,10 +3430,20 @@ chimera_io_uring_remove_xattr(
 
     TERM_STR(name, request->remove_xattr.name, request->remove_xattr.namelen, scratch);
 
-    rc = fremovexattr(fd, name);
+    err = chimera_setup_credential(request->cred, NULL);
+    if (err != 0) {
+        request->status = chimera_linux_errno_to_status(err);
+        request->complete(request);
+        return;
+    }
+
+    rc  = fremovexattr(fd, name);
+    err = errno;
+
+    chimera_restore_privilege(request->cred);
 
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(err);
     } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
                      CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);

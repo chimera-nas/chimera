@@ -99,6 +99,25 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/zerorange_cairn COMMAND vfs_zerorange_test cairn)
 endif()
 
+# xattr DAC regression, parameterized by passthrough backend: the linux and
+# io_uring modules must issue f*xattr(2) under the caller's credential, since
+# the kernel evaluates user.* xattr permission against the calling thread's
+# fsuid and their cached open_by_handle_at descriptor was opened privileged.
+# Root only (setfsuid), and the backend must be able to serve the scratch
+# directory (name_to_handle_at fails on overlayfs); the test exits 77 otherwise.
+add_executable(vfs_xattr_dac_test vfs_xattr_dac_test.c)
+target_link_libraries(vfs_xattr_dac_test chimera_vfs chimera_vfs_memkv evpl)
+if(CHIMERA_LINUX)
+    target_link_libraries(vfs_xattr_dac_test chimera_vfs_linux)
+    add_test(NAME chimera/vfs/xattr_dac_linux COMMAND vfs_xattr_dac_test linux)
+    set_tests_properties(chimera/vfs/xattr_dac_linux PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    target_link_libraries(vfs_xattr_dac_test chimera_vfs_io_uring)
+    add_test(NAME chimera/vfs/xattr_dac_io_uring COMMAND vfs_xattr_dac_test io_uring)
+    set_tests_properties(chimera/vfs/xattr_dac_io_uring PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 # Tag every test registered above with the 'vfs' label so the suite can be run
 # independently via `ctest -L vfs`.
 get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
