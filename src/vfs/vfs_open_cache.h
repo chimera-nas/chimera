@@ -316,12 +316,12 @@ chimera_vfs_open_cache_release_blocked(
             request->unblock_callback(request, request->pending_handle);
         } else {
             /* This is a request from a different thread, so we need to send it home */
+            /* Wake it under the lock; see chimera_vfs_complete_delegate for
+             * why the ring must not follow the unlock. */
             pthread_mutex_lock(&request_thread->lock);
             LL_PREPEND(request_thread->unblocked_requests, request);
-            pthread_mutex_unlock(&request_thread->lock);
-
-            /* Wake up the thread */
             evpl_ring_doorbell(&request_thread->doorbell);
+            pthread_mutex_unlock(&request_thread->lock);
         }
     }
 

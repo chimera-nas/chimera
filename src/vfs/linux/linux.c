@@ -1561,6 +1561,14 @@ chimera_linux_copy_range(
             if (errno == EINTR) {
                 continue;
             }
+            /* Named because the SMB dup-extents path lands here as the
+             * fallback after a failed clone and reports whatever this returns
+             * as NOT_SUPPORTED or INVALID_PARAMETER; without the errno the
+             * server log cannot say which call refused, or why. */
+            chimera_linux_error(
+                "linux_copy_range: copy_file_range(src_fd=%d off=%lld -> dst_fd=%d off=%lld len=%llu) failed: %s",
+                src_fd, (long long) src_off, dst_fd, (long long) dst_off,
+                (unsigned long long) remaining, strerror(errno));
             request->status = chimera_linux_errno_to_status(errno);
             request->complete(request);
             return;
@@ -1610,6 +1618,17 @@ chimera_linux_clone_range(
     rc = ioctl(dst_fd, FICLONERANGE, &args);
 
     if (rc < 0) {
+        /* EOPNOTSUPP is the everyday answer on a filesystem without reflink
+         * (ext4, overlayfs) and the caller falls back to a copy, so this is
+         * info, not error -- but it is logged: the SMB layer advertises block
+         * refcounting unconditionally, and when a test then sees
+         * NOT_SUPPORTED the only way to tell "clone refused" from "the copy
+         * fallback refused" from "a pre-check refused" is this line. */
+        chimera_linux_info(
+            "linux_clone_range: FICLONERANGE(src_fd=%d off=%llu -> dst_fd=%d off=%llu len=%llu) failed: %s",
+            src_fd, (unsigned long long) args.src_offset, dst_fd,
+            (unsigned long long) args.dest_offset,
+            (unsigned long long) args.src_length, strerror(errno));
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
