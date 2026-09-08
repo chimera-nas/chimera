@@ -13,7 +13,7 @@
 #include <pwd.h>
 #include <grp.h>
 
-int
+SYMBOL_EXPORT int
 smb_wbclient_available(void)
 {
     wbcErr wbc_err;
@@ -626,7 +626,7 @@ smb_wbclient_auth_password(
 
 // Stub implementations when libwbclient is not available
 
-int
+SYMBOL_EXPORT int
 smb_wbclient_available(void)
 {
     return 0;

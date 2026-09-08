@@ -8,11 +8,13 @@
  * This test verifies SMB authentication works with the standard Samba smbclient,
  * providing interoperability testing beyond libsmb2.
  *
- * Supports three authentication modes:
- *   --mode=ntlm      - Built-in NTLM authentication (default)
- *   --mode=kerberos  - Kerberos/GSSAPI authentication (requires KDC setup)
- *   --mode=winbind   - NTLM via winbind (requires AD environment)
- *   --mode=all       - Run all available auth tests
+ * Supports these authentication modes:
+ *   --mode=ntlm                   - Built-in NTLM authentication (default)
+ *   --mode=kerberos               - Kerberos/GSSAPI authentication (requires KDC setup)
+ *   --mode=kerberos-winbind-down  - Kerberos with winbind_enabled and no winbindd:
+ *                                   the logon must be REFUSED (requires KDC setup)
+ *   --mode=winbind                - NTLM via winbind (requires AD environment)
+ *   --mode=all                    - Run all available auth tests
  *
  * For Kerberos: Run via scripts/kerberos_test_wrapper.sh
  * For Winbind:  Run via scripts/ad_test_wrapper.sh
@@ -497,6 +499,65 @@ run_kerberos_tests(struct test_env *env)
     return failures;
 } /* run_kerberos_tests */
 
+/* A Kerberos logon the server must REFUSE.  The GSSAPI accept itself succeeds
+ * (the keytab is valid and the client holds a service ticket), but the server
+ * has no identity for the principal -- in the winbind-down mode because
+ * winbind_enabled is set and no winbindd answers -- so the SESSION_SETUP must
+ * complete with STATUS_LOGON_FAILURE.  Before the fix it was established as
+ * uid/gid 65534 and `ls` succeeded. */
+static int
+test_kerberos_logon_refused(void)
+{
+    char output[4096];
+    int  rc;
+
+    fprintf(stderr, "\n  Testing that the Kerberos logon is refused...\n");
+
+    rc = run_smbclient_with_output(kerberos_auth_args, "ls", output, sizeof(output));
+
+    if (rc == 0) {
+        fprintf(stderr, "    smbclient succeeded: the server granted a session it had no identity for\n");
+        test_fail("Kerberos logon refused");
+        return -1;
+    }
+
+    if (strstr(output, "NT_STATUS_LOGON_FAILURE") == NULL) {
+        fprintf(stderr, "    smbclient failed for another reason:\n%s\n", output);
+        test_fail("Kerberos logon refused with NT_STATUS_LOGON_FAILURE");
+        return -1;
+    }
+
+    test_pass("Kerberos logon refused with NT_STATUS_LOGON_FAILURE");
+    return 0;
+} /* test_kerberos_logon_refused */
+
+static int
+run_kerberos_refusal_tests(
+    struct test_env *env,
+    const char      *mode)
+{
+    int failures = 0;
+
+    fprintf(stderr, "\n========================================\n");
+    fprintf(stderr, "Kerberos Refusal Tests (%s)\n", mode);
+    fprintf(stderr, "========================================\n");
+
+    if (!env->kerberos_enabled) {
+        fprintf(stderr, "  Skipping - Kerberos not enabled on server\n");
+        return 0;
+    }
+
+    if (verify_kerberos_environment() < 0) {
+        return 0; /* Skip, not fail */
+    }
+
+    if (test_kerberos_logon_refused() < 0) {
+        failures++;
+    }
+
+    return failures;
+} /* run_kerberos_refusal_tests */
+
 /* ============================================================================
  * Winbind NTLM Tests
  * ============================================================================ */
@@ -654,6 +715,23 @@ run_winbind_tests(struct test_env *env)
     return failures;
 } /* run_winbind_tests */
 
+/* Modes that stand up a Kerberos-accepting server.  Each needs the KDC, keytab
+ * and ticket scripts/kerberos_test_wrapper.sh provides. */
+static int
+mode_uses_kerberos(const char *mode)
+{
+    return strcmp(mode, "kerberos") == 0 ||
+           strcmp(mode, "kerberos-winbind-down") == 0 ||
+           strcmp(mode, "all") == 0;
+} /* mode_uses_kerberos */
+
+/* Modes whose one assertion is that the Kerberos logon is REFUSED. */
+static int
+mode_expects_refusal(const char *mode)
+{
+    return strcmp(mode, "kerberos-winbind-down") == 0;
+} /* mode_expects_refusal */
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -666,6 +744,8 @@ print_usage(const char *prog)
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --mode=ntlm      Test built-in NTLM only (default)\n");
     fprintf(stderr, "  --mode=kerberos  Test Kerberos (requires KDC setup)\n");
+    fprintf(stderr,
+            "  --mode=kerberos-winbind-down  Kerberos with winbind_enabled and no winbindd; logon must be refused\n");
     fprintf(stderr, "  --mode=winbind   Test winbind NTLM (requires AD)\n");
     fprintf(stderr, "  --mode=all       Run all available tests\n");
     fprintf(stderr, "  -b <backend>     VFS backend (memfs, linux, diskfs)\n");
@@ -712,6 +792,20 @@ main(
         return 77;   /* ctest SKIP_RETURN_CODE */
     }
 
+    /* The refusal modes assert a security property: run with no KDC they would
+     * pass vacuously, so they skip outright unless the Kerberos wrapper set the
+     * environment up, and they need winbind to be genuinely absent. */
+    if (mode_expects_refusal(mode)) {
+        if (!getenv("KRB5_KTNAME")) {
+            fprintf(stderr, "\nSKIP: KRB5_KTNAME not set; run via scripts/kerberos_test_wrapper.sh\n");
+            return 77;
+        }
+        if (getenv("WINBINDD_SOCKET_DIR")) {
+            fprintf(stderr, "\nSKIP: WINBINDD_SOCKET_DIR is set; this mode needs winbind to be absent\n");
+            return 77;
+        }
+    }
+
     /* Initialize logging */
     ChimeraLogLevel = CHIMERA_LOG_INFO;
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);
@@ -740,7 +834,7 @@ main(
 
     /* Configure authentication based on environment */
     const char *keytab = getenv("KRB5_KTNAME");
-    if (keytab && (strcmp(mode, "kerberos") == 0 || strcmp(mode, "all") == 0)) {
+    if (keytab && mode_uses_kerberos(mode)) {
         chimera_server_config_set_smb_kerberos_enabled(config, 1);
         chimera_server_config_set_smb_kerberos_keytab(config, keytab);
 
@@ -778,6 +872,14 @@ main(
         }
 
         fprintf(stderr, "Kerberos enabled: realm=%s, keytab=%s\n", realm, keytab);
+    }
+
+    if (strcmp(mode, "kerberos-winbind-down") == 0) {
+        /* winbind_enabled with nothing to answer: the Kerberos wrapper stands
+         * up an MIT KDC and no winbindd, so the principal cannot be mapped and
+         * the server must refuse the logon rather than serve it as uid 65534. */
+        chimera_server_config_set_smb_winbind_enabled(config, 1);
+        fprintf(stderr, "Winbind enabled with no winbindd running: Kerberos logons must be refused\n");
     }
 
     const char *socket_dir = getenv("WINBINDD_SOCKET_DIR");
@@ -833,6 +935,10 @@ main(
 
     if (strcmp(mode, "kerberos") == 0 || strcmp(mode, "all") == 0) {
         failures += run_kerberos_tests(&env);
+    }
+
+    if (mode_expects_refusal(mode)) {
+        failures += run_kerberos_refusal_tests(&env, mode);
     }
 
     if (strcmp(mode, "winbind") == 0 || strcmp(mode, "all") == 0) {
