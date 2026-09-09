@@ -947,16 +947,15 @@ conn_for(
     }
     if (!o->conns[model_client]) {
         cb_programs[0] = &o->env->nfs_v4_cb.rpc2;
-        /* Follow the env's transport.  These per-model-client connections
-         * carry every stateful compound the trace issues -- conn_for() only
-         * falls back to env->nfs_conn for a compound with no client -- so
-         * leaving them on the stream endpoint would put most of an --rdma run
-         * back on plain RPC. */
+        /* Follow the env's transport AND its target.  These per-model-client
+         * connections carry every stateful compound the trace issues --
+         * conn_for() only falls back to env->nfs_conn for a compound with no
+         * client -- so leaving them on the stream endpoint would put most of an
+         * --rdma run back on plain RPC, and leaving them on a literal 2049
+         * would put a --pnfs-proxy run back on the metadata server. */
         ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
                                                 "127.0.0.1",
-                                                o->env->rdma
-                                                ? MBT_NFS_RDMA_PORT
-                                                : 2049);
+                                                o->env->client_nfs_port);
         o->conns[model_client] =
             evpl_rpc2_client_connect(o->env->rpc2_thread,
                                      o->env->rdma ? EVPL_DATAGRAM_INPROC
@@ -4778,6 +4777,7 @@ main(
         { "mandatory",      required_argument, 0, 'M' },
         { "backend",        required_argument, 0, 'b' },
         { "pnfs",           required_argument, 0, 'p' },
+        { "pnfs-proxy",     no_argument,       0, 'P' },
         { "delegations",    no_argument,       0, 'g' },
         { "rdma",           no_argument,       0, 'R' },
         { "sec",            required_argument, 0, 'S' },
@@ -4820,7 +4820,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnvRS:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:PgnvRS:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -4860,6 +4860,26 @@ main(
                     return 2;
                 }
                 break;
+            case 'P':
+                /* Replay through the pNFS PROXY tier: the corpus is driven at a
+                 * plain NFSv4 server whose backing store is chimera's own pNFS
+                 * client, so every WRITE/READ the corpus makes travels the
+                 * layout path (LAYOUTGET, GETDEVICEINFO, direct DS I/O,
+                 * LAYOUTCOMMIT, LAYOUTRETURN) on its way to the data servers.
+                 * The proxy needs a metadata server to front, so this implies
+                 * the pNFS cluster; --pnfs still chooses how many DS. */
+                opts.pnfs_proxy      = 1;
+                opts.client_at_proxy = 1;
+                /* chimera's pNFS client only drives NFSv3 data servers, so pin
+                 * every DS to v3: the default alternates 3 / 4.1, and a 4.1 DS
+                 * would send half the corpus's I/O back to the MDS and leave
+                 * the DS path barely exercised. */
+                opts.pnfs_ds_version = 3;
+                /* Advertise an rdma netaddr alongside the tcp one so the
+                 * client's transport-preference decode has both to choose
+                 * between; mounted over TCP it must pick tcp. */
+                opts.pnfs_ds_advertise_rdma = 1;
+                break;
             case 'R':
                 opts.rdma = 1;
                 break;
@@ -4880,7 +4900,7 @@ main(
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
-                        "[--pnfs N] [--delegations] [--rdma] "
+                        "[--pnfs N] [--pnfs-proxy] [--delegations] [--rdma] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);
@@ -4893,6 +4913,13 @@ main(
                 argv[0]);
         mbt_free_traces(traces, ntraces);
         return 2;
+    }
+
+    /* The proxy has to have a metadata server to front.  Two data servers by
+     * default, so the MDS's round-robin steering spreads the corpus's files
+     * over more than one device and the client resolves (and caches) each. */
+    if (opts.pnfs_proxy && opts.pnfs_num_ds == 0) {
+        opts.pnfs_num_ds = 2;
     }
 
     /* Open the server + client once and amortize that (dominant) cost across

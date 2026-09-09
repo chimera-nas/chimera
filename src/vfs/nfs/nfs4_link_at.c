@@ -60,18 +60,25 @@ chimera_nfs4_link_callback(
         return;
     }
 
-    /* Check LINK result (index 4) */
-    if (res->num_resarray < 5) {
+    /* The directory's pre-mutation snapshot (op 4).  Taken before the LINK
+     * status check so it is recorded even when the link itself failed. */
+    chimera_nfs4_unmarshall_dir_attr(res, 4, &request->link_at.r_dir_pre_attr);
+
+    /* Check LINK result (index 5) */
+    if (res->num_resarray < 6) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    link_res = &res->resarray[4];
+    link_res = &res->resarray[5];
     if (link_res->oplink.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(link_res->oplink.status);
         request->complete(request);
         return;
     }
+
+    /* The directory's post-mutation snapshot (op 7). */
+    chimera_nfs4_unmarshall_dir_attr(res, 7, &request->link_at.r_dir_post_attr);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -90,7 +97,8 @@ chimera_nfs4_link_at(
     struct chimera_nfs4_client_session      *session;
     struct chimera_nfs4_link_ctx            *ctx;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[5];
+    struct nfs_argop4                        argarray[8];
+    uint32_t                                 attr_request[2];
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *src_fh;
     int                                      src_fhlen;
@@ -123,12 +131,15 @@ chimera_nfs4_link_at(
     /* Map target directory FH */
     chimera_nfs4_map_fh(request->link_at.dir_fh, request->link_at.dir_fhlen, &dir_fh, &dir_fhlen);
 
-    /* Build compound: SEQUENCE + PUTFH(file) + SAVEFH + PUTFH(dir) + LINK */
+    /* Build compound: SEQUENCE + PUTFH(file) + SAVEFH + PUTFH(dir) +
+     * GETATTR(dir pre) + LINK + PUTFH(dir) + GETATTR(dir post).  The two
+     * directory GETATTRs are what the protocol server turns into
+     * change_info4; see chimera_nfs4_dir_getattr_op. */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 5;
+    args.num_argarray = 8;
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
@@ -142,14 +153,22 @@ chimera_nfs4_link_at(
     argarray[2].argop = OP_SAVEFH;
 
     /* Op 3: PUTFH - set current FH to target directory */
-    argarray[3].argop               = OP_PUTFH;
-    argarray[3].opputfh.object.data = dir_fh;
-    argarray[3].opputfh.object.len  = dir_fhlen;
+    chimera_nfs4_putfh_op(&argarray[3], dir_fh, dir_fhlen);
 
-    /* Op 4: LINK - create link from saved FH (file) in current FH (directory) */
-    argarray[4].argop               = OP_LINK;
-    argarray[4].oplink.newname.data = (uint8_t *) request->link_at.name;
-    argarray[4].oplink.newname.len  = request->link_at.namelen;
+    /* Op 4: GETATTR - the target directory's change attribute before the link */
+    chimera_nfs4_dir_getattr_op(&argarray[4], attr_request);
+
+    /* Op 5: LINK - create link from saved FH (file) in current FH (directory) */
+    argarray[5].argop               = OP_LINK;
+    argarray[5].oplink.newname.data = (uint8_t *) request->link_at.name;
+    argarray[5].oplink.newname.len  = request->link_at.namelen;
+
+    /* Op 6: PUTFH - LINK leaves the current filehandle on the target
+     * directory, but name it again rather than depend on that. */
+    chimera_nfs4_putfh_op(&argarray[6], dir_fh, dir_fhlen);
+
+    /* Op 7: GETATTR - the target directory's change attribute after the link */
+    chimera_nfs4_dir_getattr_op(&argarray[7], attr_request);
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

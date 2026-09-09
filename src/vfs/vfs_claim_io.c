@@ -251,6 +251,36 @@ chimera_vfs_io_sync_victim_locked(
  * io_try's io_sync_write branch, which RE-FIRES the trigger each retry --
  * a peer's rearm-on-demand can install a fresh grant while the writer is
  * parked, and nothing else will ever break it). */
+/*
+ * The file identity the claim layer arbitrates on.
+ *
+ * Normally that is the request's own handle.  It differs for a pNFS DS-resident
+ * file: the request is allocated against the DS BACKING file so the backend
+ * resolves the right object, but leases, delegations and oplocks are held
+ * against the MDS file the caller actually named -- that is where every other
+ * subsystem anchors, and arbitrating on the backing file would split one file's
+ * identity in two.  request->io_handle is the caller-named handle, so it is the
+ * claim identity whenever it is set (which is every I/O path that takes a
+ * claim; the fallback only covers requests that never set it).
+ */
+static inline void
+chimera_vfs_io_claim_key(
+    const struct chimera_vfs_request *request,
+    const uint8_t                   **r_fh,
+    uint32_t                         *r_fh_len,
+    uint64_t                         *r_fh_hash)
+{
+    if (request->io_handle) {
+        *r_fh      = request->io_handle->fh;
+        *r_fh_len  = request->io_handle->fh_len;
+        *r_fh_hash = request->io_handle->fh_hash;
+    } else {
+        *r_fh      = request->fh;
+        *r_fh_len  = request->fh_len;
+        *r_fh_hash = request->fh_hash;
+    }
+} /* chimera_vfs_io_claim_key */
+
 static bool
 chimera_vfs_io_sync_gate(
     struct chimera_vfs_state         *state,
@@ -260,13 +290,18 @@ chimera_vfs_io_sync_gate(
         struct chimera_vfs_request *request))
 {
     struct chimera_vfs_file_state *file;
+    const uint8_t                 *key_fh;
+    uint32_t                       key_fh_len;
+    uint64_t                       key_fh_hash;
 
-    if (!state || request->fh_len == 0) {
+    chimera_vfs_io_claim_key(request, &key_fh, &key_fh_len, &key_fh_hash);
+
+    if (!state || key_fh_len == 0) {
         return false;
     }
 
-    file = chimera_vfs_state_get(state, request->fh, request->fh_len,
-                                 request->fh_hash, false);
+    file = chimera_vfs_state_get(state, key_fh, key_fh_len,
+                                 key_fh_hash, false);
     if (!file) {
         return false;
     }
@@ -577,6 +612,11 @@ chimera_vfs_io_claim_acquire(
 {
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;
+    const uint8_t                 *key_fh;
+    uint32_t                       key_fh_len;
+    uint64_t                       key_fh_hash;
+
+    chimera_vfs_io_claim_key(request, &key_fh, &key_fh_len, &key_fh_hash);
 
     request->io_next       = next;
     request->io_lease_file = NULL;
@@ -588,8 +628,8 @@ chimera_vfs_io_claim_acquire(
      * must be visible before the write returns, not merely begun. */
     if (actor) {
         if (request->opcode == CHIMERA_VFS_OP_WRITE) {
-            chimera_vfs_claim_invalidate(state, request->fh, request->fh_len,
-                                         request->fh_hash,
+            chimera_vfs_claim_invalidate(state, key_fh, key_fh_len,
+                                         key_fh_hash,
                                          CHIMERA_TRIGGER_WRITE, actor, 0);
             if (chimera_vfs_io_sync_gate(state, request, actor, next)) {
                 return;
@@ -613,8 +653,8 @@ chimera_vfs_io_claim_acquire(
         if (!file) {
             struct chimera_vfs_file_state *expected = NULL;
 
-            file = chimera_vfs_state_get(state, request->fh, request->fh_len,
-                                         request->fh_hash, true);
+            file = chimera_vfs_state_get(state, key_fh, key_fh_len,
+                                         key_fh_hash, true);
             if (file &&
                 !__atomic_compare_exchange_n(&handle->file_state, &expected,
                                              file, false, __ATOMIC_ACQ_REL,
@@ -631,8 +671,8 @@ chimera_vfs_io_claim_acquire(
         }
     }
 
-    file = chimera_vfs_state_get(state, request->fh, request->fh_len,
-                                 request->fh_hash, true);
+    file = chimera_vfs_state_get(state, key_fh, key_fh_len,
+                                 key_fh_hash, true);
     if (!file) {
         next(request);
         return;

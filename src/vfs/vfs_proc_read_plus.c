@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
 #include "common/macros.h"
 
 static void
@@ -12,6 +14,13 @@ chimera_vfs_read_plus_complete(struct chimera_vfs_request *request)
     chimera_vfs_read_plus_callback_t callback = request->proto_callback;
 
     chimera_vfs_complete(request);
+
+    /* Drop the pNFS backing-file reference the redirect took (no-op when the
+     * op was not redirected). */
+    if (request->io_pnfs_backing) {
+        chimera_vfs_release(request->thread, request->io_pnfs_backing);
+        request->io_pnfs_backing = NULL;
+    }
 
     callback(request->status,
              request->read_plus.r_is_data,
@@ -57,5 +66,5 @@ chimera_vfs_read_plus(
     request->proto_callback      = callback;
     request->proto_private_data  = private_data;
 
-    chimera_vfs_dispatch(request);
+    chimera_vfs_pnfs_dispatch(request, 0, CHIMERA_VFS_CAP_READ_PLUS);
 } /* chimera_vfs_read_plus */

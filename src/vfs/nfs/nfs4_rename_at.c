@@ -46,32 +46,41 @@ chimera_nfs4_rename_callback(
         return;
     }
 
-    /* Check SAVEFH result (index 2) */
-    if (res->num_resarray < 3 || res->resarray[2].opsavefh.status != NFS4_OK) {
+    /* Check SAVEFH result (index 3) */
+    if (res->num_resarray < 4 || res->resarray[3].opsavefh.status != NFS4_OK) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
 
-    /* Check PUTFH result (index 3) - target directory */
-    if (res->num_resarray < 4 || res->resarray[3].opputfh.status != NFS4_OK) {
+    /* Check PUTFH result (index 4) - target directory */
+    if (res->num_resarray < 5 || res->resarray[4].opputfh.status != NFS4_OK) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
 
-    /* Check RENAME result (index 4) */
-    if (res->num_resarray < 5) {
+    /* The two pre-mutation snapshots (ops 2 and 5).  Taken before the RENAME
+     * status check so they are recorded even when the rename itself failed. */
+    chimera_nfs4_unmarshall_dir_attr(res, 2, &request->rename_at.r_fromdir_pre_attr);
+    chimera_nfs4_unmarshall_dir_attr(res, 5, &request->rename_at.r_todir_pre_attr);
+
+    /* Check RENAME result (index 6) */
+    if (res->num_resarray < 7) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    rename_res = &res->resarray[4];
+    rename_res = &res->resarray[6];
     if (rename_res->oprename.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(rename_res->oprename.status);
         request->complete(request);
         return;
     }
+
+    /* The two post-mutation snapshots (ops 8 and 10). */
+    chimera_nfs4_unmarshall_dir_attr(res, 8, &request->rename_at.r_fromdir_post_attr);
+    chimera_nfs4_unmarshall_dir_attr(res, 10, &request->rename_at.r_todir_post_attr);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -90,7 +99,8 @@ chimera_nfs4_rename_at(
     struct chimera_nfs4_client_session      *session;
     struct chimera_nfs4_rename_ctx          *ctx;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[5];
+    struct nfs_argop4                        argarray[11];
+    uint32_t                                 attr_request[2];
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *src_fh;
     int                                      src_fhlen;
@@ -123,35 +133,46 @@ chimera_nfs4_rename_at(
     /* Map target directory FH */
     chimera_nfs4_map_fh(request->rename_at.new_fh, request->rename_at.new_fhlen, &dst_fh, &dst_fhlen);
 
-    /* Build compound: SEQUENCE + PUTFH(src) + SAVEFH + PUTFH(dst) + RENAME */
+    /* Build compound: SEQUENCE + PUTFH(src) + GETATTR(src pre) + SAVEFH +
+     * PUTFH(dst) + GETATTR(dst pre) + RENAME + PUTFH(src) + GETATTR(src post) +
+     * PUTFH(dst) + GETATTR(dst post).  RENAME reports change_info4 for BOTH
+     * directories, so both need bracketing; see chimera_nfs4_dir_getattr_op. */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 5;
+    args.num_argarray = 11;
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
 
     /* Op 1: PUTFH - set current FH to source directory */
-    argarray[1].argop               = OP_PUTFH;
-    argarray[1].opputfh.object.data = src_fh;
-    argarray[1].opputfh.object.len  = src_fhlen;
+    chimera_nfs4_putfh_op(&argarray[1], src_fh, src_fhlen);
 
-    /* Op 2: SAVEFH - save source directory FH */
-    argarray[2].argop = OP_SAVEFH;
+    /* Op 2: GETATTR - source directory's change attribute before the rename */
+    chimera_nfs4_dir_getattr_op(&argarray[2], attr_request);
 
-    /* Op 3: PUTFH - set current FH to target directory */
-    argarray[3].argop               = OP_PUTFH;
-    argarray[3].opputfh.object.data = dst_fh;
-    argarray[3].opputfh.object.len  = dst_fhlen;
+    /* Op 3: SAVEFH - save source directory FH (GETATTR left it in place) */
+    argarray[3].argop = OP_SAVEFH;
 
-    /* Op 4: RENAME - rename from saved FH (source dir) to current FH (target dir) */
-    argarray[4].argop                 = OP_RENAME;
-    argarray[4].oprename.oldname.data = (uint8_t *) request->rename_at.name;
-    argarray[4].oprename.oldname.len  = request->rename_at.namelen;
-    argarray[4].oprename.newname.data = (uint8_t *) request->rename_at.new_name;
-    argarray[4].oprename.newname.len  = request->rename_at.new_namelen;
+    /* Op 4: PUTFH - set current FH to target directory */
+    chimera_nfs4_putfh_op(&argarray[4], dst_fh, dst_fhlen);
+
+    /* Op 5: GETATTR - target directory's change attribute before the rename */
+    chimera_nfs4_dir_getattr_op(&argarray[5], attr_request);
+
+    /* Op 6: RENAME - rename from saved FH (source dir) to current FH (target dir) */
+    argarray[6].argop                 = OP_RENAME;
+    argarray[6].oprename.oldname.data = (uint8_t *) request->rename_at.name;
+    argarray[6].oprename.oldname.len  = request->rename_at.namelen;
+    argarray[6].oprename.newname.data = (uint8_t *) request->rename_at.new_name;
+    argarray[6].oprename.newname.len  = request->rename_at.new_namelen;
+
+    /* Ops 7-10: re-name each directory and snapshot it again. */
+    chimera_nfs4_putfh_op(&argarray[7], src_fh, src_fhlen);
+    chimera_nfs4_dir_getattr_op(&argarray[8], attr_request);
+    chimera_nfs4_putfh_op(&argarray[9], dst_fh, dst_fhlen);
+    chimera_nfs4_dir_getattr_op(&argarray[10], attr_request);
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

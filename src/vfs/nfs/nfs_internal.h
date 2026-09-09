@@ -761,8 +761,15 @@ chimera_nfs4_attr_request_stat(uint32_t *attr_request)
      * reply can satisfy a stat() (and, being MASK_STAT-complete, is eligible
      * for the engine's attribute cache).  FSID in particular is what gives
      * st_dev a defined value -- without it the field is uninitialized. */
-    attr_request[0] = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) |
-        (1 << FATTR4_FSID) | (1 << FATTR4_FILEID);
+    /* CHANGE is in the set because a proxy that does not carry the upstream
+     * change attribute has to synthesize one from ctime, and a ctime-derived
+     * change cannot separate two mutations inside one clock tick -- which a
+     * client (or a model) reads as "the directory did not change" after a
+     * CREATE/REMOVE/RENAME that plainly did.  Forwarding the server's own
+     * counter keeps the proxy's change attribute exactly as strong as the
+     * server's. */
+    attr_request[0] = (1 << FATTR4_TYPE) | (1 << FATTR4_CHANGE) |
+        (1 << FATTR4_SIZE) | (1 << FATTR4_FSID) | (1 << FATTR4_FILEID);
     attr_request[1] = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
         (1 << (FATTR4_OWNER - 32)) | (1 << (FATTR4_OWNER_GROUP - 32)) |
         (1 << (FATTR4_RAWDEV - 32)) | (1 << (FATTR4_SPACE_USED - 32)) |
@@ -817,6 +824,18 @@ chimera_nfs4_unmarshall_fattr(
                 attr->va_mode = S_IFREG;
                 break;
         } // switch
+    }
+
+    /* FATTR4_CHANGE is attribute 3, so it is decoded between TYPE (1) and
+     * SIZE (4): fattr4 values are packed in ascending attribute order and the
+     * cursor has to move in that same order. */
+    if (fattr->attrmask[0] & (1 << FATTR4_CHANGE)) {
+        if (data + sizeof(uint64_t) > dataend) {
+            return;
+        }
+        attr->va_change    = chimera_nfs_ntoh64(*(uint64_t *) data);
+        data              += sizeof(uint64_t);
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
     }
 
     if (fattr->attrmask[0] & (1 << FATTR4_SIZE)) {
@@ -969,6 +988,77 @@ chimera_nfs4_unmarshall_fattr(
 } // chimera_nfs4_unmarshall_fattr
 
 /*
+ * Directory change snapshots for the namespace-mutating operations.
+ *
+ * A protocol server in front of this module answers CREATE/REMOVE/RENAME/LINK/
+ * OPEN with a change_info4 built from the parent directory's change attribute
+ * before and after the mutation (chimera_nfs4_set_changeinfo).  The backend has
+ * to supply both halves; when it does not, the server can only report a
+ * non-atomic, no-change cinfo -- before == after == 0 -- which tells a client
+ * its cached directory is still good when it plainly is not.
+ *
+ * NFSv3 carries wcc_data on every such reply, so the v3 half of this module
+ * gets the two snapshots for free.  NFSv4 does not: a compound only reports the
+ * attributes it explicitly asks for.  So each v4 mutating op brackets itself
+ * with a GETATTR of the parent, taken inside the same compound as the mutation
+ * -- and, after ops that move the current filehandle (CREATE and OPEN leave it
+ * on the new object), an explicit PUTFH to put it back first.
+ *
+ * The snapshots are deliberately NOT marked CHIMERA_VFS_ATTR_ATOMIC: they are
+ * separate operations, and only the upstream server could say whether its own
+ * mutation was atomic with respect to them.  A non-atomic cinfo is the honest
+ * answer and is what RFC 8881 SS18.16.3 expects when a server cannot promise more.
+ */
+static inline void
+chimera_nfs4_dir_getattr_op(
+    struct nfs_argop4 *argop,
+    uint32_t          *attr_request)
+{
+    argop->argop = OP_GETATTR;
+    chimera_nfs4_attr_request_stat(attr_request);
+    argop->opgetattr.attr_request     = attr_request;
+    argop->opgetattr.num_attr_request = 2;
+} /* chimera_nfs4_dir_getattr_op */
+
+static inline void
+chimera_nfs4_putfh_op(
+    struct nfs_argop4 *argop,
+    uint8_t           *fh,
+    int                fhlen)
+{
+    argop->argop               = OP_PUTFH;
+    argop->opputfh.object.data = fh;
+    argop->opputfh.object.len  = fhlen;
+} /* chimera_nfs4_putfh_op */
+
+/*
+ * Decode one bracketing GETATTR result into a directory snapshot.  A missing or
+ * failed GETATTR leaves the snapshot empty, which is exactly the "backend did
+ * not supply it" case the server already handles -- the mutation itself still
+ * succeeded and must not be failed over a lost attribute.
+ */
+static inline void
+chimera_nfs4_unmarshall_dir_attr(
+    const struct COMPOUND4res *res,
+    uint32_t                   index,
+    struct chimera_vfs_attrs  *out)
+{
+    const struct nfs_resop4 *resop;
+
+    if (res->num_resarray <= index) {
+        return;
+    }
+
+    resop = &res->resarray[index];
+
+    if (resop->resop != OP_GETATTR || resop->opgetattr.status != NFS4_OK) {
+        return;
+    }
+
+    chimera_nfs4_unmarshall_fattr(&resop->opgetattr.resok4.obj_attributes, out);
+} /* chimera_nfs4_unmarshall_dir_attr */
+
+/*
  * Initialize an RPC2 credential for AUTH_SYS from a VFS credential.
  * The RPC2 cred is stack-allocated by the caller.
  *
@@ -1088,8 +1178,14 @@ typedef void (*chimera_nfs4_retry_fn)(
  * frees the slot when the reply arrives before invoking `cb`.  If no slot is
  * free the request is parked and replayed via (retry_fn, retry_ctx) when one
  * frees.  `cb`/`cb_private` are the caller's original COMPOUND callback/arg.
+ *
+ * Returns 0 if the compound was handed to the marshaller, or 1 if it was
+ * parked instead.  That distinction matters to any caller that put payload
+ * iovecs in `args`: the marshaller MOVES them (see chimera_nfs4_write), so a
+ * sent compound owns them and a parked one leaves them with the caller, whose
+ * retry_fn will build the args again from scratch.
  */
-void chimera_nfs4_compound_call(
+int chimera_nfs4_compound_call(
     struct chimera_nfs_thread               *thread,
     struct chimera_nfs_shared               *shared,
     struct chimera_nfs_client_server_thread *server_thread,

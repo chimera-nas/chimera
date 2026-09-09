@@ -430,7 +430,7 @@ struct chimera_vfs_request_handle {
  * resume struct against this; raise it if one legitimately outgrows it.  It is
  * a union member, so it costs nothing until it is the largest arm -- and the
  * request union is already an order of magnitude bigger than this. */
-#define CHIMERA_VFS_GATE_SCRATCH_SIZE   384
+#define CHIMERA_VFS_GATE_SCRATCH_SIZE   704
 
 /* One enumerated named stream, packed back-to-back in the list_streams reply
  * buffer.  `name_len` bytes of (un-terminated) stream name follow this header,
@@ -582,6 +582,29 @@ struct chimera_vfs_request {
     struct chimera_vfs_open_handle    *io_handle;
     uint8_t                            io_owns_lease_ref;
     struct chimera_vfs_pending_acquire io_lease_ticket;
+
+    /* pNFS data redirect: when this file is DS-resident its bytes live in a
+     * backing file on a data server, so the request was allocated against THAT
+     * file and the backend sees it -- while io_handle above stays the MDS file
+     * the caller named, which is the identity leases and oplocks arbitrate on
+     * (chimera_vfs_io_claim_key).  Non-NULL means the reference is owned by the
+     * request and released on completion.  NULL on every non-pNFS path, which
+     * is the overwhelmingly common case. */
+    struct chimera_vfs_open_handle    *io_pnfs_backing;
+
+    /* The backend capability this op was gated on before the redirect, so it
+     * can be re-checked against the data server's backend afterwards.  0 = the
+     * op has no capability gate. */
+    uint64_t                           pnfs_required_cap;
+
+    /* Continuation resumed after the post-op MDS size/mtime sync. */
+    void                               ( *pnfs_sync_next )(
+        struct chimera_vfs_request *request);
+
+    /* Input to the post-write MDS size/mtime sync (see vfs_proc_write.c).  The
+     * setattr is async and outlives the frame that builds it, so it is staged
+     * on the request rather than on a stack. */
+    struct chimera_vfs_attrs           io_pnfs_sync_attr;
 
     struct chimera_vfs_open_handle    *pending_handle;
 

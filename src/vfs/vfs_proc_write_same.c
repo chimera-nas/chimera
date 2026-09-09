@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
 #include "vfs_attr_cache.h"
 #include "common/macros.h"
 
@@ -133,6 +135,12 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
         k = 1;          /* a single block larger than the byte budget */
     }
 
+    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
+        fprintf(stderr, "PNFSIO: ws_step k=%llu tmpl.data=%p tmpl.len=%u remaining=%llu\n",
+                (unsigned long long) k, ctx->tmpl.data, ctx->tmpl.length,
+                (unsigned long long) ctx->remaining);
+    }
+
     for (uint64_t i = 0; i < k; i++) {
         evpl_iovec_clone(&ctx->chunk_iov[i], &ctx->tmpl);
     }
@@ -223,20 +231,51 @@ chimera_vfs_write_same_fallback(
 } /* chimera_vfs_write_same_fallback */
 
 static void
+chimera_vfs_write_same_finish(struct chimera_vfs_request *request);
+
+static void
 chimera_vfs_write_same_complete(struct chimera_vfs_request *request)
 {
+    chimera_vfs_pnfs_sync_mds(request, &request->write_same.r_post_attr,
+                              request->write_same.offset +
+                              (uint64_t) request->write_same.block_size *
+                              request->write_same.block_count,
+                              chimera_vfs_write_same_finish);
+} /* chimera_vfs_write_same_complete */
+
+static void
+chimera_vfs_write_same_finish(struct chimera_vfs_request *request)
+{
     chimera_vfs_write_same_callback_t callback = request->proto_callback;
+
+    if (request->io_pnfs_backing && request->status == CHIMERA_VFS_OK) {
+        uint64_t want = request->write_same.r_post_attr.va_req_mask;
+
+        request->write_same.r_post_attr             = request->io_pnfs_sync_attr;
+        request->write_same.r_post_attr.va_req_mask = want;
+    }
 
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_attr_cache_insert(request->thread,
                                       request->thread->vfs->vfs_attr_cache,
+                                      request->io_handle ?
+                                      request->io_handle->fh_hash :
                                       request->write_same.handle->fh_hash,
+                                      request->io_handle ?
+                                      request->io_handle->fh :
                                       request->write_same.handle->fh,
+                                      request->io_handle ?
+                                      request->io_handle->fh_len :
                                       request->write_same.handle->fh_len,
                                       &request->write_same.r_post_attr);
     }
 
     chimera_vfs_complete(request);
+
+    if (request->io_pnfs_backing) {
+        chimera_vfs_release(request->thread, request->io_pnfs_backing);
+        request->io_pnfs_backing = NULL;
+    }
 
     callback(request->status,
              request->write_same.r_count,
@@ -246,7 +285,7 @@ chimera_vfs_write_same_complete(struct chimera_vfs_request *request)
              request->proto_private_data);
 
     chimera_vfs_request_free(request->thread, request);
-} /* chimera_vfs_write_same_complete */
+} /* chimera_vfs_write_same_finish */
 
 SYMBOL_EXPORT void
 chimera_vfs_write_same(
@@ -311,5 +350,5 @@ chimera_vfs_write_same(
     request->proto_callback                     = callback;
     request->proto_private_data                 = private_data;
 
-    chimera_vfs_dispatch(request);
+    chimera_vfs_pnfs_dispatch(request, 1, CHIMERA_VFS_CAP_WRITE_SAME);
 } /* chimera_vfs_write_same */

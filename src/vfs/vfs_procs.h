@@ -325,6 +325,18 @@ typedef void (*chimera_vfs_setattr_callback_t)(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
 
+/* SETATTR that skips the pNFS size pre-step; used by the redirect's own size
+ * sync, which must not re-enter the redirect. */
+void chimera_vfs_setattr_nopnfs(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data);
+
 void
 chimera_vfs_setattr(
     struct chimera_vfs_thread      *thread,

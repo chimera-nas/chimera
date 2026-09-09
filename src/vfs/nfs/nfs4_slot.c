@@ -615,7 +615,7 @@ chimera_nfs4_compound_call_cb(
     }
 } /* chimera_nfs4_compound_call_cb */
 
-void
+int
 chimera_nfs4_compound_call(
     struct chimera_nfs_thread               *thread,
     struct chimera_nfs_shared               *shared,
@@ -679,7 +679,7 @@ chimera_nfs4_compound_call(
              * replay when one of this thread's in-flight slots frees.  The floor
              * guarantees there is always such an in-flight slot. */
             chimera_nfs4_park(st, thread, shared, request, retry_fn, retry_ctx);
-            return;
+            return 1;
         }
     }
 
@@ -713,4 +713,6 @@ chimera_nfs4_compound_call(
         ddp, max_rdma_write_chunk, write_chunk_iov, write_chunk_niov, max_rdma_reply_chunk,
         chimera_nfs4_compound_call_cb,
         ctx);
+
+    return 0;
 } /* chimera_nfs4_compound_call */
