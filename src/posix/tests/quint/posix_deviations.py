@@ -59,7 +59,48 @@ class Deviation:
     reconcilable: bool = True           # False => documentation-only
 
 
+# The backend under replay.  Most deviations are a property of the POSIX client
+# and hold whatever is behind it, but a few belong to one transport; those guard
+# on this.  Set once by the replayer before any trace runs.
+_BACKEND = ""
+
+
+def set_backend(name):
+    global _BACKEND
+    _BACKEND = name or ""
+
+
+def _is_fuse(_op, _fs):
+    return _BACKEND.startswith("fuse")
+
+
 KNOWN_DEVIATIONS = [
+    Deviation(
+        id="PD-FUSE-SUPPGID",
+        posix="chown() (System Interfaces): a non-privileged caller may set "
+              "the group to any of its supplementary groups",
+        summary="chown to a SUPPLEMENTARY group fails EPERM over FUSE: the "
+                "protocol carries one gid in the request header, so the "
+                "server sees only the caller's primary group and cannot know "
+                "the group is one the caller belongs to",
+        root_cause="the FUSE wire format (fuse_in_header carries a single "
+                   "gid); no_default_permissions does not help, because the "
+                   "server still has to make the decision itself",
+        candidate_fix="resolve the caller's full group set server-side (NSS "
+                      "or an equivalent lookup keyed on the uid) instead of "
+                      "trusting the single gid on the wire",
+        ops=("RChown", "RFchown", "RLchown"),
+        expected_status=OK,
+        actual_status=EPERM,
+        context=_is_fuse,
+        # Reconciled at the chown itself.  NOTE this one mutates model state
+        # like PD2b: the model's object now has the new group and the server's
+        # does not, so a later step that reads the gid -- a stat, or the final
+        # audit -- still hard-fails, correctly so.  Retiring the entry needs
+        # the server to learn the caller's real group set, not a wider guard
+        # here.
+        reconcilable=True,
+    ),
     Deviation(
         id="PD2",
         posix="fcntl() F_DUPFD/F_GETFL/F_SETFL (System Interfaces)",

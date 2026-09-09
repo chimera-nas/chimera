@@ -164,6 +164,12 @@ FUSE_PROFILE = dict(PROFILE, cloneRange=False, strictAtime=True,
 SMB_PROFILE = dict(PROFILE, cloneRange=False, seekHole=False, strictAtime=True,
                    stickyWriteArm=True, errStickyAcces=None)
 
+# The per-backend profiles are no longer a replay gate -- the corpus is
+# generated once, with every optional interface present, and a backend without
+# one skips the traces that reach for it.  The table stays because two things
+# still want it: --backend's choices, and --check-profile, which diffs what a
+# backend actually measures against what is pinned here and so catches a
+# backend drifting away from its recorded shape.
 PROFILES = {
     "memfs": PROFILE,
     "smb_memfs": SMB_PROFILE,
@@ -179,8 +185,52 @@ PROFILES = {
 }
 
 
+# Whether a target marks atime on every read.  Not a model capability -- it is
+# a mount option, or what a transport chooses to carry -- so the harness
+# carries it, and the profile table above is where its per-backend value has
+# always been written down.
+def strict_atime_for(backend):
+    return bool(PROFILES.get(backend, PROFILE).get("strictAtime"))
+
+
 class TraceFormatError(Exception):
     pass
+
+
+class NotApplicable(Exception):
+    """Raised when a step needs an optional interface the backend does not
+    have.  The corpus is generated once, with every interface present, so a
+    backend without one cannot replay the traces that use it and says so
+    rather than failing."""
+
+    def __init__(self, step, op, what):
+        self.step = step
+        self.op = op
+        self.what = what
+        super().__init__(f"step {step}: {op} needs {what}")
+
+
+# An absent optional interface answers differently depending on which one it
+# is: copy_file_range and the reflink ioctl report EOPNOTSUPP, while an absent
+# SEEK_DATA/SEEK_HOLE reaches the caller as EINVAL, because that is what Linux
+# reports for a filesystem without them (chimera_posix_lseek_hole_data maps
+# the backend's ENOTSUP that way).  Each is only read as "absent" when the
+# model did not expect that errno itself -- lseek legitimately answers EINVAL
+# for a negative offset, which says nothing about support.
+def capability_absent(tag, req, expected, actual):
+    if tag in ("RCopyRange", "RCloneRange"):
+        return actual == 95 and expected != 95
+    if tag == "RLseek":
+        wh = (req.get("wh") or {}).get("tag")
+        return wh in ("WData", "WHole") and actual == 22 and expected != 22
+    return False
+
+
+CAPABILITY_NAMES = {
+    "RCopyRange": "copy_file_range",
+    "RCloneRange": "clone_file_range (reflink)",
+    "RLseek": "SEEK_DATA/SEEK_HOLE",
+}
 
 
 class Divergence(Exception):
@@ -354,6 +404,10 @@ class Replayer:
         self.deviations_hit = {}
         self.audit_exempt = set()  # model paths of PD24 residue nodes
         self._cur_tag = None
+        self._cur_alt = []
+        self._alts_taken = 0
+        self._cur_step = 0
+        self._applied = None    # last state the backend actually reached
         self._cur_req = None
         self._cur_fs = None
         self._cur_ps = None
@@ -436,6 +490,18 @@ class Replayer:
         """True if the errno matches (proceed with success-path checks)."""
         if actual == expected:
             return True
+        # The errnos the model says POSIX ALSO permits for the condition this
+        # step hit, carried in the LCall label (posix_ops.qnt's Out.alt).
+        # Where the standard names two spellings for one condition -- a sticky
+        # refusal is {EPERM, EACCES}, rmdir on a non-empty directory is
+        # {ENOTEMPTY, EEXIST} -- answering either conforms, so nothing is
+        # recorded against the implementation for it.
+        if actual in self._cur_alt:
+            self._alts_taken += 1
+            return False
+        if capability_absent(self._cur_tag, self._cur_req, expected, actual):
+            raise NotApplicable(self._cur_step, self._cur_tag,
+                                CAPABILITY_NAMES[self._cur_tag])
         dev = posix_deviations.reconcile(self._cur_tag, self._cur_req,
                                          expected, actual, self._cur_fs)
         if dev is not None:
@@ -1330,6 +1396,8 @@ class Replayer:
             signal.alarm(60)
             mism = []
             self._cur_tag = tag
+            self._cur_alt = label["value"].get("alt") or []
+            self._cur_step = idx
             self._cur_req = req["value"]
             self._cur_fs = state["fs"]
             self._cur_ps = state.get("ps")
@@ -1343,6 +1411,11 @@ class Replayer:
             if mism:
                 raise Divergence(idx, (tag, req["value"], res["value"]),
                                  mism)
+            # Record the state the backend has actually reached.  A capability
+            # skip aborts from the NEXT step, and auditing it against a state
+            # whose operation never ran would report every object that
+            # operation touched as a divergence.
+            self._applied = state
         signal.alarm(0)
 
 
@@ -1548,11 +1621,15 @@ def replay_one(driver, trace_path, args):
         raise TraceFormatError(f"{trace_path}: first label is not LInit")
     caps = init["value"]["caps"]
 
-    for key, want in PROFILES[args.backend].items():
-        if want is not None and caps.get(key) != want:
-            print(f"{trace_path}: SKIP: trace profile {key}="
-                  f"{caps.get(key)} does not match live profile {want}")
-            return "skip"
+    # There is no per-backend profile to match any more: the corpus is
+    # generated once, with every optional interface present, and a backend
+    # without one skips the traces that reach for it (see NotApplicable).
+    # What is left of the old profiles is strictAtime, which was never model
+    # behaviour -- whether a target marks atime on every read is a property of
+    # the target -- so the harness carries it.
+    caps = dict(caps)
+    caps["strictAtime"] = strict_atime_for(args.backend)
+    posix_deviations.set_backend(args.backend)
 
     replayer = Replayer(driver, caps, verbose=args.verbose)
     audited = 0
@@ -1563,6 +1640,20 @@ def replay_one(driver, trace_path, args):
         report_divergence(trace_path, div, replayer, driver)
         replayer.cleanup()
         return "fail"
+    except NotApplicable as na:
+        # Audit what the backend did reach, so the part of the trace that ran
+        # is still checked, then report the trace as skipped.
+        if replayer._applied is not None:
+            try:
+                replayer.final_audit(replayer._applied, na.step - 1)
+            except Divergence as div:
+                report_divergence(trace_path, div, replayer, driver)
+                replayer.cleanup()
+                return "fail"
+        replayer.cleanup()
+        print(f"{trace_path}: SKIP: needs {na.what}, which this backend "
+              f"does not implement (step {na.step}, {na.op})")
+        return "skip"
     replayer.cleanup()
 
     dev_summary = ""

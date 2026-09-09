@@ -595,6 +595,27 @@ chimera_vfs_rename_at_gate_lookup(
         memcpy(gate->src_child_fh, attr->va_fh, attr->va_fh_len);
         gate->src_child_fh_len = attr->va_fh_len;
 
+        /* Renaming a directory into itself is EINVAL, and that answer comes
+         * BEFORE the permission gates below.  XSH rename lists EINVAL and
+         * EACCES without ordering them; Linux settles the ancestor cases in
+         * do_renameat2() (old_dentry == the lock_rename trap) before
+         * vfs_rename() ever runs may_delete/may_create, so a caller who also
+         * lacks write permission on the destination still sees EINVAL.
+         *
+         * This covers the direct case -- the destination parent IS the source
+         * -- which is the one reachable without walking the tree, and it is
+         * the shape the POSIX corpus produces.  The general ancestor case
+         * (the destination is deeper inside the source) is still detected by
+         * the backend, after these gates, so its EINVAL remains ordered
+         * behind an EACCES; hoisting that one needs an ancestry walk at this
+         * layer, which is a round trip per level. */
+        if (gate->new_fhlen == gate->src_child_fh_len &&
+            memcmp(gate->new_fh, gate->src_child_fh,
+                   gate->src_child_fh_len) == 0) {
+            chimera_vfs_rename_at_gate_fail(gate, CHIMERA_VFS_EINVAL);
+            return;
+        }
+
         chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
                                        gate->fh, gate->fhlen,
                                        gate->src_child_fh, gate->src_child_fh_len,

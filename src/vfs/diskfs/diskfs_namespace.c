@@ -828,6 +828,14 @@ diskfs_mkdir_at_alloc_cb(
 
     diskfs_apply_attrs(inode, request->mkdir_at.set_attr);
 
+    /* ...and a new SUBDIRECTORY inherits the set-group-ID bit itself, so the
+     * property propagates down a tree instead of stopping at the first
+     * level.  After apply_attrs, which sets the requested mode.  Matches
+     * memfs and Linux (inode_init_owner). */
+    if (parent->mode & S_ISGID) {
+        inode->mode |= S_ISGID;
+    }
+
     parent->nlink++;
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;

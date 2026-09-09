@@ -280,7 +280,14 @@ fsim_strip_mount(const char *path)
  * Returns 0 on a completed walk -- in which case out->nodeid is 0 if the leaf
  * simply does not exist, which is not an error for a caller about to create
  * it -- or the errno the walk produced.
+ *
+ * follow_leaf is 0 (do not follow a symlink leaf), 1 (follow it), or
+ * FSIM_LEAF_CREATE for a caller that is about to create the leaf: that one
+ * does not follow either, and is additionally exempt from the trailing-slash
+ * rule on the final component.
  */
+#define FSIM_LEAF_CREATE 2
+
 static int
 fsim_walk(
     struct fsim      *f,
@@ -447,9 +454,17 @@ fsim_walk(
         /* A trailing slash forces the final symlink to be followed (XBD
          * 4.16: the slash names the directory the link resolves to), even
          * for an otherwise nofollow caller such as lstat.  The ENOTDIR check
-         * below then applies to the object the link resolved to. */
+         * below then applies to the object the link resolved to.
+         *
+         * A caller about to create the leaf is again the exception, for the
+         * same reason it is exempt from the ENOTDIR rule: the name it means
+         * to create already exists, and what it resolves to does not change
+         * that.  Following it here reported the link's own resolution failure
+         * (ELOOP for a cycle) where mkdir owes EEXIST. */
         if (S_ISLNK(e.attr.mode) &&
-            (!is_last || follow_leaf || trailing_slash)) {
+            (!is_last ||
+             (follow_leaf && follow_leaf != FSIM_LEAF_CREATE) ||
+             (trailing_slash && follow_leaf != FSIM_LEAF_CREATE))) {
             char        target[FSIM_PATH_MAX];
             const char *tgt;
             size_t      tlen;
@@ -514,7 +529,15 @@ fsim_walk(
             out->entry  = e;
             strcpy(out->leaf, comp);
 
-            if (trailing_slash && !S_ISDIR(e.attr.mode)) {
+            /* The trailing slash makes a non-directory leaf ENOTDIR for a
+             * caller that means to resolve THROUGH it.  A caller about to
+             * CREATE the leaf is not one of those: the final component has
+             * already resolved, and mkdir/mknod report what it found -- so
+             * they pass follow_leaf FSIM_LEAF_CREATE and get the entry back
+             * to judge for themselves (EEXIST).  Matches the model, whose
+             * createGate resolves the path with the trailing slash dropped. */
+            if (trailing_slash && !S_ISDIR(e.attr.mode) &&
+                follow_leaf != FSIM_LEAF_CREATE) {
                 return ENOTDIR;
             }
             return 0;

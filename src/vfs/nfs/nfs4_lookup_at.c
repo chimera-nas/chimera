@@ -60,31 +60,38 @@ chimera_nfs4_lookup_callback(
     }
 
     /*
-     * For ".", the compound is SEQUENCE + PUTFH + GETFH + GETATTR (no
+     * Index 2 is the directory's GETATTR in every shape of the compound.
+     * For ".", the rest is SEQUENCE + PUTFH + GETATTR + GETFH + GETATTR (no
      * traversal op).  For ".." and normal names, there is a LOOKUPP or
-     * LOOKUP at index 2 whose status must be checked.
+     * LOOKUP at index 3 whose status must be checked.
      */
+    if (res->num_resarray > 2 &&
+        res->resarray[2].opgetattr.status == NFS4_OK) {
+        chimera_nfs4_unmarshall_fattr(&res->resarray[2].opgetattr.resok4.obj_attributes,
+                                      &request->lookup_at.r_dir_attr);
+    }
+
     if (ctx->op_type == LOOKUP_OP_DOT) {
-        getfh_idx   = 2;
-        getattr_idx = 3;
+        getfh_idx   = 3;
+        getattr_idx = 4;
     } else {
-        if (res->num_resarray < 3) {
+        if (res->num_resarray < 4) {
             request->status = CHIMERA_VFS_EIO;
             request->complete(request);
             return;
         }
         if (ctx->op_type == LOOKUP_OP_DOTDOT) {
-            traverse_status = res->resarray[2].oplookupp.status;
+            traverse_status = res->resarray[3].oplookupp.status;
         } else {
-            traverse_status = res->resarray[2].oplookup.status;
+            traverse_status = res->resarray[3].oplookup.status;
         }
         if (traverse_status != NFS4_OK) {
             request->status = chimera_nfs4_status_to_errno(traverse_status);
             request->complete(request);
             return;
         }
-        getfh_idx   = 3;
-        getattr_idx = 4;
+        getfh_idx   = 4;
+        getattr_idx = 5;
     }
 
     /* Get GETFH result */
@@ -134,8 +141,9 @@ chimera_nfs4_lookup_at(
     struct chimera_nfs_client_server        *server;
     struct chimera_nfs4_client_session      *session;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[5];
+    struct nfs_argop4                        argarray[6];
     uint32_t                                 attr_request[2];
+    uint32_t                                 dir_attr_request[2];
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -208,26 +216,39 @@ chimera_nfs4_lookup_at(
     argarray[1].opputfh.object.data = fh;
     argarray[1].opputfh.object.len  = fhlen;
 
-    if (op_type == LOOKUP_OP_DOT) {
-        /* No traversal op: GETFH at 2, GETATTR at 3 */
-        argarray[2].argop = OP_GETFH;
-        getattr_idx       = 3;
-        args.num_argarray = 4;
-    } else {
-        if (op_type == LOOKUP_OP_DOTDOT) {
-            /* Op 2: LOOKUPP - move current FH to parent directory */
-            argarray[2].argop = OP_LOOKUPP;
-        } else {
-            /* Op 2: LOOKUP - lookup the component name */
-            argarray[2].argop                 = OP_LOOKUP;
-            argarray[2].oplookup.objname.data = (void *) request->lookup_at.component;
-            argarray[2].oplookup.objname.len  = request->lookup_at.component_len;
-        }
+    /* Op 2: GETATTR of the DIRECTORY, taken here because the current file
+     * handle is still the parent -- after the LOOKUP below it is the child.
+     * Every other backend fills r_dir_attr (NFSv3 LOOKUP carries
+     * dir_attributes in the reply, and the engine backends read it straight
+     * out of the parent inode), and the VFS relies on it: chimera_vfs_remove()
+     * judges write permission on the parent before asserting the victim's
+     * type, so without it a caller who may not write the directory was told
+     * EISDIR instead of EACCES. */
+    argarray[2].argop = OP_GETATTR;
+    chimera_nfs4_attr_request_stat(dir_attr_request);
+    argarray[2].opgetattr.attr_request     = dir_attr_request;
+    argarray[2].opgetattr.num_attr_request = 2;
 
-        /* Op 3: GETFH - get file handle for resolved object */
+    if (op_type == LOOKUP_OP_DOT) {
+        /* No traversal op: GETFH at 3, GETATTR at 4 */
         argarray[3].argop = OP_GETFH;
         getattr_idx       = 4;
         args.num_argarray = 5;
+    } else {
+        if (op_type == LOOKUP_OP_DOTDOT) {
+            /* Op 3: LOOKUPP - move current FH to parent directory */
+            argarray[3].argop = OP_LOOKUPP;
+        } else {
+            /* Op 3: LOOKUP - lookup the component name */
+            argarray[3].argop                 = OP_LOOKUP;
+            argarray[3].oplookup.objname.data = (void *) request->lookup_at.component;
+            argarray[3].oplookup.objname.len  = request->lookup_at.component_len;
+        }
+
+        /* Op 4: GETFH - get file handle for resolved object */
+        argarray[4].argop = OP_GETFH;
+        getattr_idx       = 5;
+        args.num_argarray = 6;
     }
 
     /* GETATTR for the resolved object.  OWNER/OWNER_GROUP are required so the

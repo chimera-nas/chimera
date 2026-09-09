@@ -1305,7 +1305,15 @@ memfs_fs_create(
     fs->fsid    = fsid;
     fs->fs_size = fs_size;
 
-    fs->num_inode_list = 255;
+    /* One list per value the list id can take, not one fewer.  The id is
+     * masked with CHIMERA_MEMFS_INODE_LIST_MASK, so it ranges 0..255 -- 256
+     * values -- and sizing the array at 255 left the last one off the end.
+     * memfs_inode_alloc() and memfs_inode_free() index it from the calling
+     * thread's id with no bounds check, so a thread whose id masked to 255
+     * read and locked 24 bytes past the allocation; memfs_inode_get_fh() does
+     * check, and quietly failed every inode whose inum masked to 255, which
+     * is one in every 256 of them, with ESTALE. */
+    fs->num_inode_list = CHIMERA_MEMFS_INODE_NUM_LISTS;
     fs->inode_list     = calloc(fs->num_inode_list,
                                 sizeof(*fs->inode_list));
 
@@ -2887,9 +2895,17 @@ memfs_mkdir_at(
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
 
-    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    /* POSIX: a set-group-ID parent directory forces the new node's group,
+     * and a new SUBDIRECTORY also inherits the bit itself, so the property
+     * propagates down a tree instead of stopping at the first level.  XSH
+     * mkdir leaves the bit to the implementation, but Linux and the BSDs
+     * both propagate it (inode_init_owner: "if (S_ISDIR(mode)) mode |=
+     * S_ISGID"), and pjdfstest is written around that behaviour.  Inheriting
+     * the group without the bit was a half-measure: it gave the first level
+     * the right group and every level below it the creator's. */
     if (parent_inode->mode & S_ISGID) {
-        inode->gid = parent_inode->gid;
+        inode->gid   = parent_inode->gid;
+        inode->mode |= S_ISGID;
     }
 
     /* Inherit the parent's inheritable ACEs (or seed a Windows default DACL for

@@ -902,7 +902,7 @@ fuse_exec_op(json_t *req)
             return res_int(-1, rc);
         }
 
-        rc = fsim_walk(&g_fsim, start, jstr(req, "path"), 0, &p);
+        rc = fsim_walk(&g_fsim, start, jstr(req, "path"), FSIM_LEAF_CREATE, &p);
 
         if (rc != 0) {
             return res_int(-1, rc);
@@ -944,7 +944,8 @@ fuse_exec_op(json_t *req)
             mode |= S_IFREG;
         }
 
-        rc = fsim_walk(&g_fsim, FUSE_ROOT_ID, jstr(req, "path"), 0, &p);
+        rc = fsim_walk(&g_fsim, FUSE_ROOT_ID, jstr(req, "path"),
+                       FSIM_LEAF_CREATE, &p);
 
         if (rc != 0) {
             return res_int(-1, rc);
@@ -1286,9 +1287,14 @@ fuse_exec_op(json_t *req)
             return res_int(-1, EBADF);
         }
 
-        /* lockf(3) is defined only on a descriptor open for writing, and
-         * that is checked before the filesystem is reached. */
-        if ((o->flags & O_ACCMODE) == O_RDONLY) {
+        /* lockf(3) needs a descriptor open for writing only for the commands
+         * that TAKE a lock.  F_TEST asks a question and F_ULOCK gives
+         * something back; XSH constrains neither, and gating them too refused
+         * with EBADF calls that must succeed.  Same rule, and the same fix, as
+         * chimera_posix_lockf_takes_lock() in src/posix/posix_lockf.c. */
+        if ((o->flags & O_ACCMODE) == O_RDONLY &&
+            (!cmds || strcmp(cmds, "lock") == 0 ||
+             strcmp(cmds, "tlock") == 0)) {
             return res_int(-1, EBADF);
         }
 
