@@ -764,13 +764,18 @@ diskfs_push_checkpoint_ready(
     int                        ready = 1;
 
     /* During shutdown the reclaim workers that service checkpoint CONDENSE jobs
-     * are already gone (diskfs_reclaim_destroy runs before the push-thread
-     * drain), so kicking a checkpoint here would never complete and the drain
-     * would hang forever.  A clean unmount persists the whole space map after
-     * the drain (space_map_persist stamped with the final durable_seq) and marks
-     * the superblock CLEAN, so no record needs its per-AG snapshot frontier --
-     * the log is discarded wholesale and there is nothing to replay.  Trim every
-     * covered record unconditionally. */
+     * are torn down; diskfs_teardown publishes il->shutdown BEFORE
+     * diskfs_reclaim_destroy precisely so this gate stops kicking checkpoints the
+     * instant the reclaim pool becomes unavailable.  A kick past that point would
+     * be silently dropped (diskfs_reclaim_submit_job returns on r->shutdown) yet
+     * leave the AG marked condensing, so the frontier could never advance and the
+     * reclaim workers' own shutdown drains -- which still journal through this log
+     * -- would wedge on a trim that never comes.  A clean unmount persists the
+     * whole space map after the drain (space_map_persist stamped with the final
+     * durable_seq) and marks the superblock CLEAN, so no record needs its per-AG
+     * snapshot frontier -- the log is discarded wholesale and there is nothing to
+     * replay; a crash leaves the log intact to replay.  Trim every covered record
+     * unconditionally. */
     if (__atomic_load_n(&il->shutdown, __ATOMIC_ACQUIRE)) {
         return 1;
     }

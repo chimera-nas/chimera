@@ -1624,6 +1624,20 @@ diskfs_teardown(
     struct diskfs_fs *fs, *fs_tmp;
     int               i;
 
+    /* Signal intent-log shutdown BEFORE destroying the reclaim pool.  The push
+     * thread trims the log only up to a record whose AGs are checkpointed to its
+     * seq (diskfs_push_trim's frontier gate); when it lags it kicks a background
+     * CONDENSE on a reclaim worker.  Once the reclaim pool is torn down those
+     * kicks are silently dropped (diskfs_reclaim_submit_job returns on
+     * r->shutdown) yet leave the AG marked condensing, so the frontier can never
+     * advance -- and the reclaim workers' OWN shutdown drains still journal
+     * through the intent log, so if the ring is full they wedge waiting for a
+     * trim that will never happen.  il->shutdown makes diskfs_push_checkpoint_ready
+     * trim unconditionally (a clean unmount persists the whole space map after the
+     * drain; a crash leaves the log intact to replay), so set it first and the
+     * push thread keeps the ring draining for the reclaim shutdown. */
+    __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
+
     /* Reclaim workers first: their shutdown finishes the queued drains, which
      * need the inode cache and the intent-log threads still alive. */
     diskfs_reclaim_destroy(shared);
@@ -1640,8 +1654,7 @@ diskfs_teardown(
      * commit thread first (it drains all redo writes and hands every record to
      * the push thread), then the push thread (it flushes every record home and
      * trims the log).  Only then are the shared rings and device-metric arrays
-     * safe to free. */
-    __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
+     * safe to free.  (il->shutdown was already published above.) */
     /* Stop the push thread from ringing the commit thread's wake_doorbell:
      * destroying the commit thread closes that fd, and the push thread (torn
      * down afterwards, to drain what the commit thread handed off) would
