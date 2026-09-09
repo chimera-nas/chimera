@@ -46,18 +46,25 @@ chimera_nfs4_remove_callback(
         return;
     }
 
+    /* The parent's pre-mutation snapshot (op 2).  Taken before the REMOVE
+     * status check so it is recorded even when the remove itself failed. */
+    chimera_nfs4_unmarshall_dir_attr(res, 2, &request->remove_at.r_dir_pre_attr);
+
     /* Check REMOVE result */
-    if (res->num_resarray < 3) {
+    if (res->num_resarray < 4) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    remove_res = &res->resarray[2];
+    remove_res = &res->resarray[3];
     if (remove_res->opremove.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(remove_res->opremove.status);
         request->complete(request);
         return;
     }
+
+    /* The parent's post-mutation snapshot (op 5). */
+    chimera_nfs4_unmarshall_dir_attr(res, 5, &request->remove_at.r_dir_post_attr);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -76,7 +83,8 @@ chimera_nfs4_remove_at(
     struct chimera_nfs4_client_session      *session;
     struct chimera_nfs4_remove_ctx          *ctx;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[3];
+    struct nfs_argop4                        argarray[6];
+    uint32_t                                 attr_request[2];
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -103,25 +111,35 @@ chimera_nfs4_remove_at(
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
-    /* Build compound: SEQUENCE + PUTFH + REMOVE */
+    /* Build compound: SEQUENCE + PUTFH + GETATTR(dir pre) + REMOVE + PUTFH +
+     * GETATTR(dir post).  The two directory GETATTRs are what the protocol
+     * server turns into change_info4; see chimera_nfs4_dir_getattr_op. */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 3;
+    args.num_argarray = 6;
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
 
     /* Op 1: PUTFH - set current file handle to parent directory */
-    argarray[1].argop               = OP_PUTFH;
-    argarray[1].opputfh.object.data = fh;
-    argarray[1].opputfh.object.len  = fhlen;
+    chimera_nfs4_putfh_op(&argarray[1], fh, fhlen);
 
-    /* Op 2: REMOVE - remove the file or directory */
-    argarray[2].argop                = OP_REMOVE;
-    argarray[2].opremove.target.data = (uint8_t *) request->remove_at.name;
-    argarray[2].opremove.target.len  = request->remove_at.namelen;
+    /* Op 2: GETATTR - the parent's change attribute before the mutation */
+    chimera_nfs4_dir_getattr_op(&argarray[2], attr_request);
+
+    /* Op 3: REMOVE - remove the file or directory */
+    argarray[3].argop                = OP_REMOVE;
+    argarray[3].opremove.target.data = (uint8_t *) request->remove_at.name;
+    argarray[3].opremove.target.len  = request->remove_at.namelen;
+
+    /* Op 4: PUTFH - REMOVE leaves the current filehandle on the parent, but
+     * name it again rather than depend on that. */
+    chimera_nfs4_putfh_op(&argarray[4], fh, fhlen);
+
+    /* Op 5: GETATTR - the parent's change attribute after the mutation */
+    chimera_nfs4_dir_getattr_op(&argarray[5], attr_request);
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

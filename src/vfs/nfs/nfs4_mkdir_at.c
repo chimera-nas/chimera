@@ -52,13 +52,17 @@ chimera_nfs4_mkdir_callback(
         return;
     }
 
+    /* The parent's pre-mutation snapshot (op 2).  Taken before the CREATE
+     * status check so it is recorded even when the create itself failed. */
+    chimera_nfs4_unmarshall_dir_attr(res, 2, &request->mkdir_at.r_dir_pre_attr);
+
     /* Check CREATE result */
-    if (res->num_resarray < 3) {
+    if (res->num_resarray < 4) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    create_res = &res->resarray[2];
+    create_res = &res->resarray[3];
     if (create_res->opcreate.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(create_res->opcreate.status);
         request->complete(request);
@@ -66,12 +70,12 @@ chimera_nfs4_mkdir_callback(
     }
 
     /* Check GETFH result */
-    if (res->num_resarray < 4) {
+    if (res->num_resarray < 5) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    getfh_res = &res->resarray[3];
+    getfh_res = &res->resarray[4];
     if (getfh_res->opgetfh.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(getfh_res->opgetfh.status);
         request->complete(request);
@@ -88,13 +92,17 @@ chimera_nfs4_mkdir_callback(
     }
 
     /* Get GETATTR result */
-    if (res->num_resarray >= 5) {
-        getattr_res = &res->resarray[4];
+    if (res->num_resarray >= 6) {
+        getattr_res = &res->resarray[5];
         if (getattr_res->opgetattr.status == NFS4_OK) {
             chimera_nfs4_unmarshall_fattr(&getattr_res->opgetattr.resok4.obj_attributes,
                                           &request->mkdir_at.r_attr);
         }
     }
+
+    /* The parent's post-mutation snapshot (op 7, after the PUTFH that put the
+     * current filehandle back on the parent). */
+    chimera_nfs4_unmarshall_dir_attr(res, 7, &request->mkdir_at.r_dir_post_attr);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -113,7 +121,7 @@ chimera_nfs4_mkdir_at(
     struct chimera_nfs4_client_session      *session;
     struct chimera_nfs4_mkdir_ctx           *ctx;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[5];
+    struct nfs_argop4                        argarray[8];
     uint32_t                                 attr_request[2];
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
@@ -141,26 +149,30 @@ chimera_nfs4_mkdir_at(
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
-    /* Build compound: SEQUENCE + PUTFH + CREATE + GETFH + GETATTR */
+    /* Build compound: SEQUENCE + PUTFH + GETATTR(dir pre) + CREATE + GETFH +
+     * GETATTR(new obj) + PUTFH + GETATTR(dir post).  The two directory GETATTRs
+     * are what the protocol server turns into change_info4; see the commentary
+     * on chimera_nfs4_dir_getattr_op. */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 5;
+    args.num_argarray = 8;
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
 
     /* Op 1: PUTFH - set current file handle to parent directory */
-    argarray[1].argop               = OP_PUTFH;
-    argarray[1].opputfh.object.data = fh;
-    argarray[1].opputfh.object.len  = fhlen;
+    chimera_nfs4_putfh_op(&argarray[1], fh, fhlen);
 
-    /* Op 2: CREATE - create the directory */
-    argarray[2].argop                 = OP_CREATE;
-    argarray[2].opcreate.objtype.type = NF4DIR;
-    argarray[2].opcreate.objname.data = (uint8_t *) request->mkdir_at.name;
-    argarray[2].opcreate.objname.len  = request->mkdir_at.name_len;
+    /* Op 2: GETATTR - the parent's change attribute before the mutation */
+    chimera_nfs4_dir_getattr_op(&argarray[2], attr_request);
+
+    /* Op 3: CREATE - create the directory */
+    argarray[3].argop                 = OP_CREATE;
+    argarray[3].opcreate.objtype.type = NF4DIR;
+    argarray[3].opcreate.objname.data = (uint8_t *) request->mkdir_at.name;
+    argarray[3].opcreate.objname.len  = request->mkdir_at.name_len;
 
     {
         int attr_len     = 0;
@@ -168,20 +180,27 @@ chimera_nfs4_mkdir_at(
                                                              ctx->attr_mask,
                                                              ctx->attr_vals,
                                                              &attr_len);
-        argarray[2].opcreate.createattrs.num_attrmask   = num_attrmask;
-        argarray[2].opcreate.createattrs.attrmask       = num_attrmask ? ctx->attr_mask : NULL;
-        argarray[2].opcreate.createattrs.attr_vals.len  = attr_len;
-        argarray[2].opcreate.createattrs.attr_vals.data = attr_len ? ctx->attr_vals : NULL;
+        argarray[3].opcreate.createattrs.num_attrmask   = num_attrmask;
+        argarray[3].opcreate.createattrs.attrmask       = num_attrmask ? ctx->attr_mask : NULL;
+        argarray[3].opcreate.createattrs.attr_vals.len  = attr_len;
+        argarray[3].opcreate.createattrs.attr_vals.data = attr_len ? ctx->attr_vals : NULL;
     }
 
-    /* Op 3: GETFH - get file handle for created directory */
-    argarray[3].argop = OP_GETFH;
+    /* Op 4: GETFH - get file handle for created directory */
+    argarray[4].argop = OP_GETFH;
 
-    /* Op 4: GETATTR - get attributes for created directory */
-    argarray[4].argop = OP_GETATTR;
+    /* Op 5: GETATTR - get attributes for created directory */
+    argarray[5].argop = OP_GETATTR;
     chimera_nfs4_attr_request_stat(attr_request);
-    argarray[4].opgetattr.attr_request     = attr_request;
-    argarray[4].opgetattr.num_attr_request = 2;
+    argarray[5].opgetattr.attr_request     = attr_request;
+    argarray[5].opgetattr.num_attr_request = 2;
+
+    /* Op 6: PUTFH - CREATE left the current filehandle on the new object, so
+     * put it back on the parent before snapshotting it again. */
+    chimera_nfs4_putfh_op(&argarray[6], fh, fhlen);
+
+    /* Op 7: GETATTR - the parent's change attribute after the mutation */
+    chimera_nfs4_dir_getattr_op(&argarray[7], attr_request);
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

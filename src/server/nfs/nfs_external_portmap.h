@@ -7,6 +7,7 @@
 
 #define NFS_PORT          2049
 #define NFS_MOUNT_PORT    20048
+#define NFS_PORTMAP_PORT  111
 #define NFS_RPC_PROGRAM   100003
 #define NFS_MOUNT_PROGRAM 100005
 #define NFS_NLM_PROGRAM   100021
