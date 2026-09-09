@@ -139,6 +139,11 @@ chimera_s3_request_alloc(struct chimera_server_s3_thread *thread)
     request->refcount  = 1;
     request->abandoned = 0;
 
+    /* Pooled requests are not zeroed on reuse, so the GET reassembly queue has
+     * to be reset explicitly. */
+    request->read_queue      = NULL;
+    request->read_queue_tail = NULL;
+
     return request;
 } /* chimera_s3_request_alloc */
 
