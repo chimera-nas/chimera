@@ -502,6 +502,8 @@ struct ff_layoutget_ctx {
     struct nfs_request             *req;
     struct chimera_vfs_open_handle *mds_handle;
     struct chimera_vfs_open_handle *ds_root_handle;
+    /* Held only across the truncate of an adopted backing file (ff_lg_reset_cb). */
+    struct chimera_vfs_open_handle *backing_handle;
     struct chimera_vfs_ds          *ds;
     uint64_t                        fileid;
     struct chimera_vfs_attrs        set_attr;
@@ -684,6 +686,45 @@ ff_lg_setattr_cb(
     ff_lg_emit(ctx);
 } /* ff_lg_setattr_cb */
 
+/* Record the freshly created backing file on the MDS inode as its layout. */
+static void
+ff_lg_commit_blob(struct ff_layoutget_ctx *ctx)
+{
+    struct nfs_request *req = ctx->req;
+
+    memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
+    ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_PNFS_LAYOUT;
+    ctx->set_attr.va_pnfs_len = ctx->blob_len;
+    memcpy(ctx->set_attr.va_pnfs, ctx->blob, ctx->blob_len);
+
+    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, ctx->mds_handle,
+                        &ctx->set_attr, 0, 0, ff_lg_setattr_cb, ctx);
+} /* ff_lg_commit_blob */
+
+/* The adopted backing file has been truncated; drop the handle and record the
+ * layout.  A failure here would leave the new file holding a dead file's bytes,
+ * so it fails the LAYOUTGET rather than granting a layout over them. */
+static void
+ff_lg_reset_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct ff_layoutget_ctx *ctx = private_data;
+
+    chimera_vfs_release(ctx->req->thread->vfs_thread, ctx->backing_handle);
+    ctx->backing_handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
+        return;
+    }
+
+    ff_lg_commit_blob(ctx);
+} /* ff_lg_reset_cb */
+
 static void
 ff_lg_create_cb(
     enum chimera_vfs_error          error_code,
@@ -712,17 +753,33 @@ ff_lg_create_cb(
 
     ctx->blob_len = chimera_vfs_pnfs_blob_pack(ctx->blob, ctx->ds->deviceid,
                                                attr->va_fh, attr->va_fh_len);
+
+    /* Adopting an existing backing file means the name was reused, and the
+     * bytes behind it are a dead file's.  CHIMERA_VFS_OPEN_TRUNCATE above asks
+     * for them to be dropped, but a data server reached through the `nfs` VFS
+     * module never sees that flag -- the module does not implement it, so on the
+     * remote-DS path it is a silent no-op and the new file would start life
+     * holding the previous occupant's data.  Truncate explicitly whenever the
+     * open did not create the file, exactly as the non-pNFS write redirect does
+     * (chimera_vfs_pnfs_io_create_cb).  The handle stays open across it and is
+     * released by ff_lg_reset_cb. */
+    if (oh && !oh->r_created) {
+        ctx->backing_handle = oh;
+
+        memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
+        ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        ctx->set_attr.va_size     = 0;
+
+        chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, oh,
+                            &ctx->set_attr, 0, 0, ff_lg_reset_cb, ctx);
+        return;
+    }
+
     if (oh) {
         chimera_vfs_release(req->thread->vfs_thread, oh);
     }
 
-    memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
-    ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_PNFS_LAYOUT;
-    ctx->set_attr.va_pnfs_len = ctx->blob_len;
-    memcpy(ctx->set_attr.va_pnfs, ctx->blob, ctx->blob_len);
-
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, ctx->mds_handle,
-                        &ctx->set_attr, 0, 0, ff_lg_setattr_cb, ctx);
+    ff_lg_commit_blob(ctx);
 } /* ff_lg_create_cb */
 
 static void
