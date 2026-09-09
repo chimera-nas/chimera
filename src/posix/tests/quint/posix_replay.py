@@ -404,6 +404,8 @@ class Replayer:
         self.deviations_hit = {}
         self.audit_exempt = set()  # model paths of PD24 residue nodes
         self._cur_tag = None
+        self._cur_alt = []
+        self._alts_taken = 0
         self._cur_step = 0
         self._applied = None    # last state the backend actually reached
         self._cur_req = None
@@ -488,6 +490,15 @@ class Replayer:
         """True if the errno matches (proceed with success-path checks)."""
         if actual == expected:
             return True
+        # The errnos the model says POSIX ALSO permits for the condition this
+        # step hit, carried in the LCall label (posix_ops.qnt's Out.alt).
+        # Where the standard names two spellings for one condition -- a sticky
+        # refusal is {EPERM, EACCES}, rmdir on a non-empty directory is
+        # {ENOTEMPTY, EEXIST} -- answering either conforms, so nothing is
+        # recorded against the implementation for it.
+        if actual in self._cur_alt:
+            self._alts_taken += 1
+            return False
         if capability_absent(self._cur_tag, self._cur_req, expected, actual):
             raise NotApplicable(self._cur_step, self._cur_tag,
                                 CAPABILITY_NAMES[self._cur_tag])
@@ -1385,6 +1396,7 @@ class Replayer:
             signal.alarm(60)
             mism = []
             self._cur_tag = tag
+            self._cur_alt = label["value"].get("alt") or []
             self._cur_step = idx
             self._cur_req = req["value"]
             self._cur_fs = state["fs"]
