@@ -151,15 +151,40 @@ endif()
 
 # diskfs-only cache-eviction / cold-remount stress (not part of the
 # all-backend matrix: it shrinks the diskfs caches and remounts the devices)
+#
+# TIMEOUTS.  The diskfs workload is far slower under the ubuntu24 arm64 Debug
+# image than under any other image we test, and has been for as long as the
+# per-test timings go back.  Measured in extended run 34315998434, same commit,
+# same runner pool, all Debug/ASan:
+#
+#            test                        rocky10  ubuntu26  ubuntu24   ratio
+#            diskfs/mbt/batch              34.5s     37.7s    204.3s    5.9x
+#            diskfs_reclaim (io_uring)     71.5s     73.5s    312.6s    4.4x
+#            diskfs_evict   (io_uring)    192.5s    198.6s   (killed)
+#            smb/mbt/batch_memfs           78.4s     73.8s    132.9s    1.7x
+#
+# The last row is the control: general tests run ~1.7x slower on that image,
+# the diskfs ones 4-6x.  So evict's 192s becomes ~900s there -- exactly its old
+# cap, which is why it was killed in five consecutive extended runs while
+# passing everywhere else.  It was not hanging.  reclaim shows the identical
+# ratio and survives only because it is shorter; at 452s in run 34191238682 it
+# was inside its 600s cap by 25%, and it did time out before the SQPOLL fix
+# (libevpl#166) took ~30% off both.
+#
+# Give both caps room for that image rather than shrinking the workload -- the
+# file count was already halved once for CI timing (see EVICT_NFILES) and
+# cutting it again costs the eviction pressure the test exists to create.  Why
+# that image is 4-6x slower for diskfs specifically is a separate question and
+# is not answered here.
 add_posix_testprog(test_diskfs_evict)
 if(CHIMERA_LIMITS_TESTING)
     if(IO_URING_ENABLED)
         add_posix_test(diskfs_evict_diskfs_io_uring test_diskfs_evict diskfs_io_uring)
-        set_tests_properties(chimera/posix/diskfs_evict_diskfs_io_uring PROPERTIES TIMEOUT 900)
+        set_tests_properties(chimera/posix/diskfs_evict_diskfs_io_uring PROPERTIES TIMEOUT 1800)
     endif()
     if(HAVE_LIBAIO)
         add_posix_test(diskfs_evict_diskfs_aio test_diskfs_evict diskfs_aio)
-        set_tests_properties(chimera/posix/diskfs_evict_diskfs_aio PROPERTIES TIMEOUT 900)
+        set_tests_properties(chimera/posix/diskfs_evict_diskfs_aio PROPERTIES TIMEOUT 1800)
     endif()
 endif()
 
@@ -169,11 +194,11 @@ add_posix_testprog(test_diskfs_reclaim)
 if(CHIMERA_LIMITS_TESTING)
     if(IO_URING_ENABLED)
         add_posix_test(diskfs_reclaim_diskfs_io_uring test_diskfs_reclaim diskfs_io_uring)
-        set_tests_properties(chimera/posix/diskfs_reclaim_diskfs_io_uring PROPERTIES TIMEOUT 600)
+        set_tests_properties(chimera/posix/diskfs_reclaim_diskfs_io_uring PROPERTIES TIMEOUT 1200)
     endif()
     if(HAVE_LIBAIO)
         add_posix_test(diskfs_reclaim_diskfs_aio test_diskfs_reclaim diskfs_aio)
-        set_tests_properties(chimera/posix/diskfs_reclaim_diskfs_aio PROPERTIES TIMEOUT 600)
+        set_tests_properties(chimera/posix/diskfs_reclaim_diskfs_aio PROPERTIES TIMEOUT 1200)
     endif()
 endif()
 
