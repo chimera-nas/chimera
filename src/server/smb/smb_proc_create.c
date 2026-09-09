@@ -3192,6 +3192,20 @@ chimera_smb_create_park_deadline_cb(
 
     (void) evpl;
 
+    /* No ack arrived for the whole break deadline, so the holder is revoked and
+     * this open completes anyway (MS-SMB2 break timeout).  Info, not error: a
+     * client is entitled not to ack, and smb2.lease.v2_complex1 and
+     * smb2.oplock.batch21 reach here on every run without failing.
+     *
+     * It is still worth a line, because recovery costs the full deadline
+     * (default 30 s) and a client that gives up sooner sees the create simply
+     * never answered -- a WPTS adapter times out at 20 s, so any create that
+     * gets here has already failed the test 10 s earlier. */
+    chimera_smb_info(
+        "CREATE park deadline expired with no break ack: revoking holders and completing open; fh_hash %016lx conn %p",
+        (unsigned long) request->create.park_fh_hash,
+        (void *) request->compound->conn);
+
     chimera_vfs_claim_revoke_breaks(vfs_state, request->create.park_fh,
                                     request->create.park_fh_len,
                                     request->create.park_fh_hash,
@@ -3421,6 +3435,20 @@ chimera_smb_create_open_finish(
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
         }
         chimera_smb_async_interim_begin(request);
+
+        /* A parked CREATE sends no reply until an ack settles the break, so
+         * from outside it is indistinguishable from a lost request.  Say so at
+         * info level: this is the only record that a create waited, and which
+         * connection it waited on -- both are needed to tell "the ack never
+         * came" from "the ack came on another channel of this session and we
+         * missed it".  Parks are rare relative to I/O. */
+        chimera_smb_info(
+            "CREATE parked on a caching break: fh_hash %016lx conn %p session %p deadline %u ms",
+            (unsigned long) request->create.park_fh_hash,
+            (void *) request->compound->conn,
+            (void *) (request->session_handle ? request->session_handle->session : NULL),
+            vfs_state->default_break_deadline_ms);
+
         /* Arm a deadline: if the holder never acks the break, fire at the
          * break timeout to revoke it and complete this open anyway (MS-SMB2
          * break-timeout).  Cancelled when an ack resumes the open first. */
@@ -3588,6 +3616,15 @@ chimera_smb_create_resume_parked_conn(
          * holder vanished outright, lift the capped lease/durable decision
          * before the deferred reply is marshaled. */
         chimera_smb_create_resume_rearbitrate(req);
+
+        /* Pairs with the "CREATE parked" line: a park with no matching resume
+         * and no deadline line is a create that was still waiting when its
+         * connection went away.  conn is logged on both so a resume arriving
+         * on a different channel of the same session is visible as such. */
+        chimera_smb_info("CREATE resumed after break ack: fh_hash %016lx conn %p",
+                         (unsigned long) req->create.park_fh_hash,
+                         (void *) conn);
+
         if (req->create.r_open_file) {
             req->create.r_open_file->flags &=
                 ~CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
