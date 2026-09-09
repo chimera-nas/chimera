@@ -1629,6 +1629,7 @@ def replay_one(driver, trace_path, args):
     # the target -- so the harness carries it.
     caps = dict(caps)
     caps["strictAtime"] = strict_atime_for(args.backend)
+    posix_deviations.set_backend(args.backend)
 
     replayer = Replayer(driver, caps, verbose=args.verbose)
     audited = 0
