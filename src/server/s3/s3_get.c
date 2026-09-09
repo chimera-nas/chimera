@@ -50,6 +50,53 @@ chimera_s3_get_finish(struct chimera_s3_request *request)
 
 } /* chimera_s3_put_rename_callback */
 
+/*
+ * Append every read at the head of the queue that has completed, stopping at
+ * the first one still outstanding.
+ *
+ * The body of a GET response is an ordered byte stream: evpl_http_request_add_datav()
+ * appends, and carries no file offset.  chimera_s3_get_send() issues all of an
+ * object's reads before any of them completes, and nothing orders those
+ * completions -- io_uring in particular reaps CQEs in whatever order the kernel
+ * finishes them, which for reads that miss page cache and go async is not
+ * submission order.  Appending as each read landed therefore permuted the
+ * object's bytes, silently, with the correct total length.
+ *
+ * So the queue is drained from the head, oldest offset first, and a read that
+ * completes early waits for its predecessors.  io_pending is decremented here
+ * rather than in the callback so the request is not finished until every byte
+ * has actually been handed to the response.
+ */
+static void
+chimera_s3_get_drain(struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct evpl                     *evpl   = thread->evpl;
+    struct chimera_s3_io            *io;
+
+    while ((io = request->read_queue) != NULL && io->ready) {
+
+        request->read_queue = io->queue_next;
+
+        if (request->read_queue == NULL) {
+            request->read_queue_tail = NULL;
+        }
+
+        if (io->r_niov) {
+            chimera_s3_response_add_datav(evpl, request, io->iov, io->r_niov);
+        }
+
+        request->io_pending--;
+
+        chimera_s3_io_free(thread, io);
+    }
+
+    if (request->io_pending == 0 &&
+        request->vfs_state == CHIMERA_S3_VFS_STATE_SENT) {
+        chimera_s3_get_finish(request);
+    }
+} /* chimera_s3_get_drain */
+
 static void
 chimera_s3_get_send_callback(
     enum chimera_vfs_error    error_code,
@@ -60,32 +107,27 @@ chimera_s3_get_send_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_s3_io            *io      = private_data;
-    struct chimera_s3_request       *request = io->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
+    struct chimera_s3_io      *io      = private_data;
+    struct chimera_s3_request *request = io->request;
 
     if (error_code) {
         request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        chimera_s3_io_free(thread, io);
-        request->io_pending--;
-        return;
+        /* The core released the buffers on the error leg; there is nothing to
+         * append for this chunk, but it still has to leave the queue in order
+         * so the reads behind it are not stranded. */
+        io->r_niov = 0;
+    } else {
+        /* iov is request->read.iov, which is this io's own iov[] -- the array
+         * handed to chimera_vfs_read() above.  Only the returned count needs
+         * recording. */
+        io->r_niov = niov;
     }
 
-    if (niov) {
-        chimera_s3_response_add_datav(evpl, request, iov, niov);
-    }
+    io->ready = 1;
 
-    chimera_s3_io_free(thread, io);
-
-    request->io_pending--;
-
-    if (request->io_pending == 0 &&
-        request->vfs_state == CHIMERA_S3_VFS_STATE_SENT) {
-        chimera_s3_get_finish(request);
-    }
-} /* chimera_s3_put_recv_callback */
+    chimera_s3_get_drain(request);
+} /* chimera_s3_get_send_callback */
 
 void
 chimera_s3_get_send(
@@ -117,7 +159,20 @@ chimera_s3_get_send(
 
     io = chimera_s3_io_alloc(thread, request);
 
-    io->niov = CHIMERA_S3_IOV_MAX;
+    io->niov       = CHIMERA_S3_IOV_MAX;
+    io->r_niov     = 0;
+    io->ready      = 0;
+    io->queue_next = NULL;
+
+    /* Queue before dispatching: chimera_vfs_read() may complete inline (memfs
+     * and the other non-blocking backends do), and the callback drains from
+     * this queue. */
+    if (request->read_queue_tail) {
+        request->read_queue_tail->queue_next = io;
+    } else {
+        request->read_queue = io;
+    }
+    request->read_queue_tail = io;
 
     request->io_pending++;
 

@@ -18,6 +18,7 @@ import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -305,13 +306,27 @@ def test_get(client, bucket):
     assert len(body) == 600, f"Expected 600 bytes, got {len(body)}"
     print("  GET mykey1 (range 1000-1599) - OK")
 
-    # Large object
-    large_data = b'y' * 35000000
+    # Large object.
+    #
+    # The payload is position-dependent (a distinct counter per 4 KiB page)
+    # rather than a repeated byte, and the body is compared rather than just
+    # measured.  An object this size is served by ~270 concurrent VFS reads of
+    # io_size (128 KiB) each, whose results are appended to the response body as
+    # they complete; if those completions are not put back into file order the
+    # body comes back permuted with exactly the right length, which a length
+    # assertion cannot see.  A repeated byte is byte-identical under every
+    # permutation, so it cannot see it either.
+    large_size = 35000000
+    large_data = b''.join(struct.pack('<Q', page) * 512
+                          for page in range(large_size // 4096 + 1))[:large_size]
     client.put_object(Bucket=bucket, Key='mydir1/mydir2/mydir3/mykey4', Body=large_data)
     response = client.get_object(Bucket=bucket, Key='mydir1/mydir2/mydir3/mykey4')
     body = response['Body'].read()
-    assert len(body) == 35000000, f"Expected 35000000 bytes, got {len(body)}"
-    print("  GET mykey4 (35MB) - OK")
+    assert len(body) == large_size, f"Expected {large_size} bytes, got {len(body)}"
+    assert body == large_data, (
+        f"mykey4: content mismatch; {len(body)} bytes, first diff at offset "
+        f"{next((i for i, (a, b) in enumerate(zip(body, large_data)) if a != b), -1)}")
+    print("  GET mykey4 (35MB, position-dependent) - OK")
 
     print("GET tests passed!")
 

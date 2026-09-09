@@ -81,6 +81,17 @@ struct chimera_s3_config {
 struct chimera_s3_io {
     struct chimera_s3_request *request;
     int                        niov;
+    /*
+     * GET body reassembly.  A GET issues one read per io_size chunk and leaves
+     * them all in flight, but the response body is an ordered byte stream with
+     * no offsets, so the results must be appended in file order rather than in
+     * completion order.  Each io sits on the request's read_queue in submission
+     * order; `ready` marks that its callback has run and `r_niov` records how
+     * many of iov[] the read actually returned.  See chimera_s3_get_drain().
+     */
+    int                        ready;
+    int                        r_niov;
+    struct chimera_s3_io      *queue_next;
     struct chimera_s3_io      *next;
     struct evpl_iovec          iov[CHIMERA_S3_IOV_MAX];
 };
@@ -162,6 +173,15 @@ struct chimera_s3_request {
     int64_t                          file_length;
     int64_t                          file_real_length;
     int64_t                          file_left;
+
+    /*
+     * In-flight GET reads in submission order (head = lowest file offset still
+     * unappended).  chimera_s3_get_drain() pops the completed prefix so the
+     * response body is written in file order regardless of the order the
+     * backend completes the reads in.
+     */
+    struct chimera_s3_io            *read_queue;
+    struct chimera_s3_io            *read_queue_tail;
     uint64_t                         elapsed;
     uint64_t                         etag[2];
     const char                      *path;
