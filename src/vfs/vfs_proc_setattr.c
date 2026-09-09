@@ -2,12 +2,15 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include "vfs_procs.h"
 #include "vfs_claim.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
 #include "vfs_attr_cache.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
@@ -571,6 +574,112 @@ chimera_vfs_setattr_common(
                                  callback, private_data);
 } /* chimera_vfs_setattr_common */
 
+/*
+ * A size change on a DS-resident file is the one setattr that has to reach two
+ * places, and it is a pre-step rather than a redirect.
+ *
+ * The bytes live on the data server, so a truncate must shorten the backing
+ * file or a later read would return data past the new end of file.  But the
+ * metadata server's inode is what every protocol stats, so it has to record the
+ * new size too.  Hence: truncate the backing file first, then apply the caller's
+ * setattr to the MDS unchanged.
+ *
+ * Ordering matters on the shrink path -- dropping the bytes before publishing
+ * the smaller size means a reader can never observe a size that still has data
+ * beyond it.
+ */
+struct chimera_vfs_setattr_pnfs_ctx {
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_open_handle *handle;
+    struct chimera_vfs_attrs       *set_attr;
+    uint64_t                        pre_attr_mask;
+    uint64_t                        post_attr_mask;
+    int                             fd_rights;
+    chimera_vfs_setattr_callback_t  callback;
+    void                           *private_data;
+    struct chimera_vfs_open_handle *backing;
+    struct chimera_vfs_attrs        trunc;
+};
+
+_Static_assert(sizeof(struct chimera_vfs_setattr_pnfs_ctx) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "setattr pnfs context outgrew the request gate scratch area");
+
+static void
+chimera_vfs_setattr_pnfs_resume(struct chimera_vfs_setattr_pnfs_ctx *ctx)
+{
+    struct chimera_vfs_thread      *thread        = ctx->thread;
+    const struct chimera_vfs_cred  *cred          = ctx->cred;
+    struct chimera_vfs_open_handle *handle        = ctx->handle;
+    struct chimera_vfs_attrs       *set_attr      = ctx->set_attr;
+    uint64_t                        pre_mask      = ctx->pre_attr_mask;
+    uint64_t                        post_mask     = ctx->post_attr_mask;
+    int                             fd_rights     = ctx->fd_rights;
+    chimera_vfs_setattr_callback_t  callback      = ctx->callback;
+    void                           *private_data  = ctx->private_data;
+
+    if (ctx->backing) {
+        chimera_vfs_release(thread, ctx->backing);
+    }
+
+    chimera_vfs_gate_scratch_free(thread, ctx);
+
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               pre_mask, post_mask, fd_rights,
+                               callback, private_data);
+} /* chimera_vfs_setattr_pnfs_resume */
+
+static void
+chimera_vfs_setattr_pnfs_trunc_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_setattr_pnfs_ctx *ctx = private_data;
+
+    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
+        fprintf(stderr, "PNFSIO: trunc done err=%d\n", error_code);
+    }
+
+    /* A failed backing truncate still leaves the MDS setattr to do: reporting
+     * the caller's own metadata change as failed would be wrong, and the size
+     * divergence is the same one a layout-direct write already creates. */
+    chimera_vfs_setattr_pnfs_resume(ctx);
+} /* chimera_vfs_setattr_pnfs_trunc_cb */
+
+static void
+chimera_vfs_setattr_pnfs_resolved(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *io_handle,
+    int                             redirected,
+    void                           *private_data)
+{
+    struct chimera_vfs_setattr_pnfs_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK || !redirected) {
+        ctx->backing = NULL;
+        chimera_vfs_setattr_pnfs_resume(ctx);
+        return;
+    }
+
+    ctx->backing = io_handle;
+
+    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
+        fprintf(stderr, "PNFSIO: trunc backing to %llu\n",
+                (unsigned long long) ctx->set_attr->va_size);
+    }
+
+    memset(&ctx->trunc, 0, sizeof(ctx->trunc));
+    ctx->trunc.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+    ctx->trunc.va_size     = ctx->set_attr->va_size;
+
+    chimera_vfs_setattr_common(ctx->thread, ctx->cred, io_handle, &ctx->trunc,
+                               0, 0, 1,
+                               chimera_vfs_setattr_pnfs_trunc_cb, ctx);
+} /* chimera_vfs_setattr_pnfs_resolved */
+
 SYMBOL_EXPORT void
 chimera_vfs_setattr(
     struct chimera_vfs_thread      *thread,
@@ -582,6 +691,34 @@ chimera_vfs_setattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data)
 {
+    struct chimera_vfs_setattr_pnfs_ctx *ctx;
+
+    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        chimera_vfs_pnfs_io_possible(thread, handle)) {
+        ctx = chimera_vfs_gate_scratch_alloc(thread);
+
+        ctx->thread         = thread;
+        ctx->cred           = cred;
+        ctx->handle         = handle;
+        ctx->set_attr       = set_attr;
+        ctx->pre_attr_mask  = pre_attr_mask;
+        ctx->post_attr_mask = post_attr_mask;
+        ctx->fd_rights      = 0;
+        ctx->callback       = callback;
+        ctx->private_data   = private_data;
+        ctx->backing        = NULL;
+
+        /* An EXTENDING truncate is a byte-producing operation just as a write
+         * is, so it must be able to give a still-empty file its home on a data
+         * server; otherwise the size lands on the metadata server alone and the
+         * file is stranded there for good.  A truncate to zero has no bytes to
+         * place and must not conjure a backing file. */
+        chimera_vfs_pnfs_resolve_io(thread, cred, handle,
+                                    set_attr->va_size > 0,
+                                    chimera_vfs_setattr_pnfs_resolved, ctx);
+        return;
+    }
+
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
                                pre_attr_mask, post_attr_mask, 0,
                                callback, private_data);
@@ -602,7 +739,61 @@ chimera_vfs_fsetattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data)
 {
+    struct chimera_vfs_setattr_pnfs_ctx *ctx;
+
+    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        chimera_vfs_pnfs_io_possible(thread, handle)) {
+        ctx = chimera_vfs_gate_scratch_alloc(thread);
+
+        ctx->thread         = thread;
+        ctx->cred           = cred;
+        ctx->handle         = handle;
+        ctx->set_attr       = set_attr;
+        ctx->pre_attr_mask  = pre_attr_mask;
+        ctx->post_attr_mask = post_attr_mask;
+        ctx->fd_rights      = 1;
+        ctx->callback       = callback;
+        ctx->private_data   = private_data;
+        ctx->backing        = NULL;
+
+        /* An EXTENDING truncate is a byte-producing operation just as a write
+         * is, so it must be able to give a still-empty file its home on a data
+         * server; otherwise the size lands on the metadata server alone and the
+         * file is stranded there for good.  A truncate to zero has no bytes to
+         * place and must not conjure a backing file. */
+        chimera_vfs_pnfs_resolve_io(thread, cred, handle,
+                                    set_attr->va_size > 0,
+                                    chimera_vfs_setattr_pnfs_resolved, ctx);
+        return;
+    }
+
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
                                pre_attr_mask, post_attr_mask, 1,
                                callback, private_data);
 } /* chimera_vfs_fsetattr */
+/*
+ * SETATTR that does NOT run the pNFS size pre-step.
+ *
+ * The redirect's own post-write size sync uses this.  Going through the public
+ * entry point would make that sync re-enter the redirect: it would resolve the
+ * file, open its backing handle, and truncate the backing file to the size it
+ * had just read off that same backing file -- an extra resolve, open and
+ * setattr on every redirected write, and worse than wasteful when two writes
+ * are in flight, because the earlier write's sync would then truncate away the
+ * later one's extension.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_setattr_nopnfs(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               pre_attr_mask, post_attr_mask, 0,
+                               callback, private_data);
+} /* chimera_vfs_setattr_nopnfs */

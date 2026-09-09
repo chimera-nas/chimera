@@ -573,6 +573,28 @@ int
 chimera_server_config_get_nfs_nsm_port(
     const struct chimera_server_config *config);
 
+/* The MOUNT and portmap service numbers (default 20048 / 111).  Configurable
+ * so two NFS servers can share one address space -- the in-process pNFS proxy
+ * suite runs a metadata server and the proxy in front of it in one test
+ * process, and the second server to bind a well-known number would abort. */
+void
+chimera_server_config_set_nfs_mount_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_mount_port(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs_portmap_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_portmap_port(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_state_dir(
     struct chimera_server_config *config,

@@ -171,6 +171,8 @@ nfs_server_init(
     int                               nfs_tcp_rdma_port;
     int                               nfs_lockmgr_port;
     int                               nfs_nsm_port;
+    int                               nfs_mount_port;
+    int                               nfs_portmap_port;
     int                               nfs_port;
     int                               data_server;
     int                               external_portmap;
@@ -190,6 +192,8 @@ nfs_server_init(
     nfs_tcp_rdma_port = chimera_server_config_get_nfs_tcp_rdma_port(config);
     nfs_lockmgr_port  = chimera_server_config_get_nfs_lockmgr_port(config);
     nfs_nsm_port      = chimera_server_config_get_nfs_nsm_port(config);
+    nfs_mount_port    = chimera_server_config_get_nfs_mount_port(config);
+    nfs_portmap_port  = chimera_server_config_get_nfs_portmap_port(config);
     external_portmap  = chimera_server_config_get_external_portmap(config);
     portmap_hostname  = chimera_server_config_get_portmap_hostname(config);
     chimera_nfs_debug("NFS RDMA: %s", nfs_rdma ? "enabled" : "disabled");
@@ -475,7 +479,7 @@ nfs_server_init(
     }
 
     if (!data_server) {
-        shared->mount_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", NFS_MOUNT_PORT);
+        shared->mount_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_mount_port);
     }
 
     if (nfs_tcp_rdma_port > 0) {
@@ -493,7 +497,7 @@ nfs_server_init(
             shared->portmap_endpoint = NULL;
         } else {
             chimera_nfs_debug("Initializing internal portmap support");
-            shared->portmap_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", 111);
+            shared->portmap_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_portmap_port);
             programs[0]              = &shared->portmap_v2.rpc2;
             programs[1]              = &shared->portmap_v3.rpc2;
             programs[2]              = &shared->portmap_v4.rpc2;

@@ -48,34 +48,58 @@
 
 #include "krb5_local.h"
 
-#define MBT_MAX_ENTRIES   512   /* readdir entries copied out per reply */
-#define MBT_NAME_MAX      256
-#define MBT_MAX_DATA      (4 << 20) /* read payload copy-out bound */
+#define MBT_MAX_ENTRIES        512 /* readdir entries copied out per reply */
+#define MBT_NAME_MAX           256
+#define MBT_MAX_DATA           (4 << 20) /* read payload copy-out bound */
 
 /* Must match NFS_MOUNT_PORT in nfs_external_portmap.h: under inproc the
  * port number is only a service name ("chimera-inproc-20048"), but it
  * still has to be the name the server registered.  The auxiliary services
- * follow the same rule: 111 is hardwired in nfs.c, the other two are the
- * nfs_lockmgr_port / nfs_nsm_port defaults (server.c). */
-#define MBT_MOUNT_PORT    20048
-#define MBT_PORTMAP_PORT  111
-#define MBT_NLM_PORT      32803
-#define MBT_NSM_PORT      32765
+ * follow the same rule: these are the nfs_portmap_port / nfs_lockmgr_port /
+ * nfs_nsm_port defaults (server.c), which env->server leaves alone. */
+#define MBT_NFS_PORT           2049
+#define MBT_MOUNT_PORT         20048
+#define MBT_PORTMAP_PORT       111
+#define MBT_NLM_PORT           32803
+#define MBT_NSM_PORT           32765
 
 /* The NFS/RDMA service (mbt_env_opts.rdma), which the server puts on its own
  * endpoint alongside the stream one.  Must match the nfs_rdma_port default in
  * server.c, for the same reason MBT_MOUNT_PORT must match NFS_MOUNT_PORT.
  * Only the NFS service has an RDMA endpoint: MOUNT, NLM, NSM and portmap stay
  * on the stream protocol, exactly as they do over real hardware. */
-#define MBT_NFS_RDMA_PORT 20049
+#define MBT_NFS_RDMA_PORT      20049
 
 /* pNFS topology (see mbt_env_opts.pnfs_num_ds): the data servers are
  * additional chimera servers in THIS process, each on its own inproc
  * service name, so the whole MDS+DS cluster is one test binary with no
  * ports, namespaces or daemons.  Their port numbers only have to avoid
  * the MDS's own services above. */
-#define MBT_MAX_DS        4
-#define MBT_DS_PORT_BASE  12050
+#define MBT_MAX_DS             4
+#define MBT_DS_PORT_BASE       12050
+
+/*
+ * pNFS PROXY tier (mbt_env_opts.pnfs_proxy).  A third chimera server in the
+ * same process whose backing store is the `nfs` VFS module mounting the MDS
+ * with the `pnfs` option -- so the proxy IS chimera's own pNFS CLIENT
+ * (src/vfs/nfs/nfs4_pnfs.c), fetching layouts from the MDS and driving READ and
+ * WRITE straight to the data servers.  It is the in-process equivalent of
+ * kvm/kvm_pnfs_proxy_test_wrapper.sh's three-daemon, two-netns topology, with
+ * no ports, namespaces, daemons or VMs.
+ *
+ * The proxy has to be a FULL server (it advertises USE_NON_PNFS, so an ordinary
+ * client can mount it; a data_server advertises USE_PNFS_DS and would be
+ * refused), which means it binds the MOUNT, portmap, NLM and NSM services too.
+ * The MDS keeps every well-known number so env->server and every helper built
+ * on it are unchanged; the proxy takes the alternates below.  Configurable
+ * MOUNT/portmap numbers are what make two full servers in one process possible
+ * at all -- without them the second one's listen aborts the run.
+ */
+#define MBT_PROXY_PORT         12060
+#define MBT_PROXY_MOUNT_PORT   12061
+#define MBT_PROXY_PORTMAP_PORT 12062
+#define MBT_PROXY_NLM_PORT     12063
+#define MBT_PROXY_NSM_PORT     12064
 
 /*
  * The security flavor the client half calls under.
@@ -311,6 +335,37 @@ struct mbt_env_opts {
     int             pnfs_num_ds;  /* >0: run as a pNFS metadata server with
                                    * this many in-process data servers */
     const char     *pnfs_ds_module; /* DS backend (default "memfs") */
+    /* NFS version the MDS advertises for every data server.  0 (the default)
+     * alternates 3 / 4.1 across the DS list, which is what exercises both arms
+     * of the flex-files device encoder.  A suite that needs the client to
+     * actually reach a DS pins 3 -- chimera's pNFS client only drives NFSv3
+     * data servers and falls back to the MDS for any other version. */
+    int         pnfs_ds_version;
+    /* Advertise a second, RDMA netaddr for every data server alongside the tcp
+     * one.  The device then carries two netaddrs, which is what makes the
+     * client's transport-preference loop (and its "consume them all to stay
+     * aligned" decode) do any work.  The address is never dialed: a client that
+     * mounted the MDS over TCP must select the tcp netaddr. */
+    int         pnfs_ds_advertise_rdma;
+    /* Stand up the pNFS PROXY tier as well (requires pnfs_num_ds > 0): a third
+     * server whose backing store is the nfs module mounting env->server with
+     * pNFS enabled.  env->proxy_server is that server; every per-trace
+     * filesystem gets a matching proxy mount and export.  See the port block
+     * near MBT_PROXY_PORT for the topology. */
+    int         pnfs_proxy;
+    /* Point the harness's OWN client at the proxy instead of env->server, so a
+     * replayer drives its whole corpus through the proxy tier.  The proxy is an
+     * ordinary NFSv4 server on the wire -- everything pNFS about it is internal
+     * -- so no replay logic changes; what changes is which implementation
+     * answers, and the model is the oracle for both. */
+    int         client_at_proxy;
+    /* NFS version the proxy's control path speaks to the MDS ("vers=" in its
+     * mount options).  0 => 4, which is what pNFS requires. */
+    int         pnfs_proxy_vers;
+    /* Leave the `pnfs` mount option OFF on the proxy's mount of the MDS, so the
+     * proxy is a plain NFSv4 client.  Used to pin that the pNFS path is what
+     * makes the difference, not the proxy tier itself. */
+    int             pnfs_proxy_no_pnfs;
     /* REST API and Prometheus scrape endpoint, for the control-plane suite:
      * both follow the server's transport flavor, so under inproc these are
      * endpoint names rather than bound ports, reachable from this process by
@@ -362,6 +417,13 @@ struct mbt_env {
     const char                  *module; /* backend for mkfs/mount/rmfs */
 
     int                          rdma;   /* NFS carried over RPC-over-RDMA */
+
+    /* The NFS service the harness's client half talks to: env->server's own
+     * port, or the proxy tier's when opts.client_at_proxy redirected it.  A
+     * replayer that opens further connections of its own (the NFS4 replayer
+     * gives each model client one) must dial THIS, not a literal, or half the
+     * corpus would silently land on the wrong server. */
+    int                          client_nfs_port;
 
     struct evpl                 *evpl;
     struct evpl_rpc2_thread     *rpc2_thread;
@@ -434,6 +496,14 @@ struct mbt_env {
     int                          num_ds;
     struct chimera_server       *ds_server[MBT_MAX_DS];
     struct prometheus_metrics   *ds_metrics[MBT_MAX_DS];
+
+    /* pNFS proxy tier (opts.pnfs_proxy): a full NFS server in this process
+     * whose backing store is the nfs client module mounting env->server (the
+     * MDS) with pNFS enabled.  NULL unless the option was asked for. */
+    struct chimera_server       *proxy_server;
+    struct prometheus_metrics   *proxy_metrics;
+    int                          pnfs_proxy_vers;    /* control-path NFS version */
+    int                          pnfs_proxy_no_pnfs; /* omit the `pnfs` option   */
 
     struct mbt_result            res;
 };
@@ -798,6 +868,17 @@ mbt_pnfs_ds_start(
     chimera_server_config_set_nfs_data_server(config, 1);
     chimera_server_config_set_nfs_server_scope(config, 43 + idx);
 
+    /* The DS holds the file data, so ITS sparseness granularity -- not the
+     * MDS share's -- is what SEEK reports once the MDS redirects a data op to
+     * the backing file.  Pin memfs's block size to the model's unit exactly as
+     * the MDS share does: at the 64 KiB default, writing one model block
+     * allocates eight model blocks' worth of it, and SEEK_DATA then truthfully
+     * reports data inside what the model calls a hole. */
+    if (strcmp(module, "memfs") == 0) {
+        chimera_server_config_add_module(config, "memfs", NULL,
+                                         "{\"block_size\": 8192}");
+    }
+
     env->ds_server[idx] = chimera_server_init(config, env->ds_metrics[idx]);
     chimera_server_start(env->ds_server[idx]);
 
@@ -827,6 +908,50 @@ mbt_pnfs_ds_uaddr(
     snprintf(out, out_size, "127.0.0.1.%u.%u",
              (unsigned) ((port >> 8) & 0xff), (unsigned) (port & 0xff));
 } /* mbt_pnfs_ds_uaddr */
+
+/*
+ * Bring up the pNFS proxy server (opts.pnfs_proxy).  Started AFTER the MDS,
+ * because its per-trace mounts of the MDS's exports go over the wire and the
+ * MDS has to be serving first.  It exports nothing at startup;
+ * mbt_env_fs_setup_as adds one nfs-module mount + export per trace.
+ */
+static inline void
+mbt_pnfs_proxy_start(struct mbt_env *env)
+{
+    struct chimera_server_config *config;
+    char                          dir[300];
+
+    snprintf(dir, sizeof(dir), "%s/proxy", env->session_dir);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "pnfs proxy state dir %s: %s\n", dir, strerror(errno));
+        exit(1);
+    }
+
+    env->proxy_metrics = prometheus_metrics_create(NULL, NULL, 0);
+
+    config = chimera_server_config_init();
+    chimera_server_config_set_state_dir(config, dir);
+    chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
+    chimera_server_config_set_nfs_enabled(config, 1);
+    chimera_server_config_set_nfs_port(config, MBT_PROXY_PORT);
+    chimera_server_config_set_nfs_mount_port(config, MBT_PROXY_MOUNT_PORT);
+    chimera_server_config_set_nfs_portmap_port(config, MBT_PROXY_PORTMAP_PORT);
+    chimera_server_config_set_nfs_lockmgr_port(config, MBT_PROXY_NLM_PORT);
+    chimera_server_config_set_nfs_nsm_port(config, MBT_PROXY_NSM_PORT);
+    /* A distinct scope, for the reason a data server gets one: a client keys
+     * server identity on it, and the proxy is a different server from the MDS
+     * even though they share a process. */
+    chimera_server_config_set_nfs_server_scope(config, 51);
+
+    /* The proxy caches nothing the MDS could invalidate behind its back: its
+     * whole job here is to forward, and a stale attr would make a size the
+     * pNFS LAYOUTCOMMIT path just published read back as the pre-commit one. */
+    chimera_server_config_set_attr_cache_enabled(config, 0);
+    chimera_server_config_set_name_cache_enabled(config, 0);
+
+    env->proxy_server = chimera_server_init(config, env->proxy_metrics);
+    chimera_server_start(env->proxy_server);
+} /* mbt_pnfs_proxy_start */
 
 static inline void
 mbt_env_open_opts(
@@ -952,22 +1077,34 @@ mbt_env_open_opts(
      * should never have to wait at all.  A longer timeout would just hide a
      * leaked handle behind a slower test. */
 
-    /* Register each data server with the MDS.  version alternates 3 / 4.1 so
-     * both arms of the flex-files device encoder (ffda_versions) are exercised;
-     * it only says which NFS version a *client* would use for the direct data
-     * path, and is independent of the MDS's own control-path mount below. */
+    /* Register each data server with the MDS.  The advertised version defaults
+     * to alternating 3 / 4.1 so both arms of the flex-files device encoder
+     * (ffda_versions) are exercised; it only says which NFS version a *client*
+     * would use for the direct data path, and is independent of the MDS's own
+     * control-path mount below.  opts.pnfs_ds_version pins it instead, which is
+     * what the proxy tier needs: chimera's own pNFS client drives only NFSv3
+     * data servers, so a 4.1 DS sends its I/O straight back to the MDS. */
     if (env->num_ds > 0) {
+        int fixed_vers = (opts && opts->pnfs_ds_version)
+            ? opts->pnfs_ds_version : 0;
+        int adv_rdma = (opts && opts->pnfs_ds_advertise_rdma);
+
         chimera_server_config_set_pnfs_enabled(config, 1);
 
         for (i = 0; i < env->num_ds; i++) {
-            char uaddr[64], backing[32];
+            char uaddr[64], rdma_uaddr[64], backing[32];
+            int  vers  = fixed_vers ? fixed_vers : ((i & 1) ? 4 : 3);
+            int  minor = (vers == 4) ? 1 : 0;
 
             mbt_pnfs_ds_uaddr(uaddr, sizeof(uaddr), MBT_DS_PORT_BASE + i);
+            /* A plausible-looking RDMA address on a port nothing listens on:
+             * the client must consume it and still pick the tcp netaddr. */
+            mbt_pnfs_ds_uaddr(rdma_uaddr, sizeof(rdma_uaddr),
+                              MBT_DS_PORT_BASE + i + 1000);
             snprintf(backing, sizeof(backing), "/ds%d", i);
-            chimera_server_config_add_pnfs_ds(config, "tcp", uaddr, NULL,
-                                              backing,
-                                              (i & 1) ? 4 : 3,
-                                              (i & 1) ? 1 : 0);
+            chimera_server_config_add_pnfs_ds(config, "tcp", uaddr,
+                                              adv_rdma ? rdma_uaddr : NULL,
+                                              backing, vers, minor);
         }
     }
 
@@ -1116,6 +1253,17 @@ mbt_env_open_opts(
         exit(1);
     }
 
+    /* The proxy tier, once the MDS it mounts is serving. */
+    if (opts && opts->pnfs_proxy) {
+        if (env->num_ds <= 0) {
+            fprintf(stderr, "pnfs proxy requires at least one data server\n");
+            exit(1);
+        }
+        env->pnfs_proxy_vers    = opts->pnfs_proxy_vers ? opts->pnfs_proxy_vers : 4;
+        env->pnfs_proxy_no_pnfs = opts->pnfs_proxy_no_pnfs;
+        mbt_pnfs_proxy_start(env);
+    }
+
     /* Client half: its own evpl loop; the reply callbacks run inside
      * evpl_continue() on this (the only) test thread. */
     /* Under a Kerberos flavor the loop is pumped at points where nothing is
@@ -1158,12 +1306,30 @@ mbt_env_open_opts(
 
     /* Endpoint names must match what the server derived from its ports
      * (chimera-inproc-<port>); build them through the same helper. */
+    /* opts.client_at_proxy redirects both to the proxy tier.  The proxy has no
+     * RDMA endpoint (its NFS service is the plain stream one), so the two
+     * options are mutually exclusive. */
+    if (opts && opts->client_at_proxy) {
+        if (!env->proxy_server) {
+            fprintf(stderr, "client_at_proxy needs the proxy tier\n");
+            exit(1);
+        }
+        if (env->rdma) {
+            fprintf(stderr, "client_at_proxy and rdma are exclusive\n");
+            exit(1);
+        }
+        env->client_nfs_port = MBT_PROXY_PORT;
+        mount_ep             = chimera_tcp_flavor_endpoint_create(
+            CHIMERA_TCP_FLAVOR_INPROC, "127.0.0.1", MBT_PROXY_MOUNT_PORT);
+    } else {
+        env->client_nfs_port = env->rdma ? MBT_NFS_RDMA_PORT : MBT_NFS_PORT;
+        mount_ep             = chimera_tcp_flavor_endpoint_create(
+            CHIMERA_TCP_FLAVOR_INPROC, "127.0.0.1", MBT_MOUNT_PORT);
+    }
+
     nfs_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
                                                 "127.0.0.1",
-                                                env->rdma ? MBT_NFS_RDMA_PORT
-                                                : 2049);
-    mount_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
-                                                  "127.0.0.1", MBT_MOUNT_PORT);
+                                                env->client_nfs_port);
 
     /* DATAGRAM_INPROC is the RDMA-capable inproc protocol; rpc2 picks its
      * RDMA framing from the bind, so this one choice switches both ends. */
@@ -1337,6 +1503,32 @@ mbt_env_fs_setup_as(
         fprintf(stderr, "failed to create %s export\n", path);
         exit(1);
     }
+
+    /* Proxy tier: give the just-exported MDS filesystem a matching mount on the
+     * proxy, backed by the nfs client module with pNFS enabled, and export it
+     * under the same name.  So /<name> on the proxy and /<name> on the MDS are
+     * the same tree reached two ways -- and the proxy's half travels the layout
+     * path to get there. */
+    if (env->proxy_server) {
+        char remote[128], mopts[96];
+
+        snprintf(remote, sizeof(remote), "127.0.0.1:%s", path);
+        snprintf(mopts, sizeof(mopts), "vers=%d,port=%d%s",
+                 env->pnfs_proxy_vers, MBT_NFS_PORT,
+                 env->pnfs_proxy_no_pnfs ? "" : ",pnfs");
+
+        if (chimera_server_mount(env->proxy_server, path + 1, "nfs", remote,
+                                 mopts) != 0) {
+            fprintf(stderr, "pnfs proxy: failed to mount %s (%s)\n", remote,
+                    mopts);
+            exit(1);
+        }
+        if (chimera_server_create_export(env->proxy_server, path, path, 0,
+                                         NULL) != 0) {
+            fprintf(stderr, "pnfs proxy: failed to export %s\n", path);
+            exit(1);
+        }
+    }
 } /* mbt_env_fs_setup_as */
 
 /* The common case: mount and export the filesystem under its own name, so a
@@ -1363,6 +1555,24 @@ mbt_env_fs_teardown_as(
     char path[80];
 
     snprintf(path, sizeof(path), "/%s", mntname);
+
+    /* The proxy holds an NFS client mount of the MDS export, so it has to let
+     * go first -- otherwise the MDS unmount below is EBUSY on handles the proxy
+     * still has open.  Its unmount also drives the client's own teardown
+     * (DESTROY_SESSION/DESTROY_CLIENTID), which is a path worth walking every
+     * trace rather than only at process exit. */
+    if (env->proxy_server) {
+        int prc;
+
+        chimera_server_remove_export(env->proxy_server, path);
+        prc = chimera_server_unmount(env->proxy_server, path + 1);
+        if (prc != 0) {
+            fprintf(stderr,
+                    "warning: proxy unmount of %s returned %d -- a handle is "
+                    "still open, most likely because a diverging trace stopped "
+                    "before the model knew what to close.\n", mntname, prc);
+        }
+    }
 
     chimera_server_remove_export(env->server, path);
 
@@ -1484,6 +1694,13 @@ mbt_env_stop(struct mbt_env *env)
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->mount_conn);
     evpl_rpc2_thread_destroy(env->rpc2_thread);
     evpl_destroy(env->evpl);
+
+    /* The proxy is a client of the MDS, so it goes first: destroying the MDS
+     * out from under it would tear down connections the proxy is still using. */
+    if (env->proxy_server) {
+        chimera_server_destroy(env->proxy_server);
+        prometheus_metrics_destroy(env->proxy_metrics);
+    }
 
     chimera_server_destroy(env->server);
     /* Dump before destroying, and outside the branch: env->metrics is the

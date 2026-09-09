@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
 #include "sdk/vfs_access.h"
@@ -165,6 +167,13 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_complete(request);
 
+    /* Drop the pNFS backing-file reference the redirect took (no-op when the
+     * read was not redirected). */
+    if (request->io_pnfs_backing) {
+        chimera_vfs_release(request->thread, request->io_pnfs_backing);
+        request->io_pnfs_backing = NULL;
+    }
+
     callback(request->status,
              request->read.r_length,
              request->read.r_eof,
@@ -181,6 +190,8 @@ chimera_vfs_read_dispatch(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_open_handle   *io_handle,
+    int                               redirected,
     uint64_t                          offset,
     uint32_t                          count,
     struct evpl_iovec                *iov,
@@ -194,17 +205,28 @@ chimera_vfs_read_dispatch(
 {
     struct chimera_vfs_request *request;
 
-    request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
+    /* The request is allocated against io_handle -- the DS backing file for a
+     * DS-resident file, otherwise `handle` itself -- so that the module, the
+     * mount private and the file handle the backend resolves from all name the
+     * object that actually holds the bytes. */
+    request = chimera_vfs_request_alloc_by_handle(thread, cred, io_handle);
 
     if (CHIMERA_VFS_IS_ERR(request)) {
+        if (redirected) {
+            chimera_vfs_release(thread, io_handle);
+        }
         callback(CHIMERA_VFS_PTR_ERR(request), 0, 0, NULL, 0, NULL, private_data);
         return;
     }
 
     request->opcode      = CHIMERA_VFS_OP_READ;
     request->complete    = chimera_vfs_read_complete;
-    request->read.handle = handle;
-    /* Anchor the implicit claim on the cached handle (chimera_vfs_io_claim_acquire). */
+    request->read.handle = io_handle;
+    request->io_pnfs_backing = redirected ? io_handle : NULL;
+    /* Anchor the implicit claim on the cached handle (chimera_vfs_io_claim_acquire).
+     * Deliberately the CALLER-named handle even when the I/O was redirected: a
+     * file's leases and oplocks are held against the MDS file, not against the
+     * backing file its bytes happen to live in. */
     request->io_handle               = handle;
     request->read.offset             = offset;
     request->read.length             = count;
@@ -262,6 +284,109 @@ chimera_vfs_read_dispatch(
                                  io_owner ? &request->io_owner : NULL,
                                  chimera_vfs_dispatch);
 } /* chimera_vfs_read_dispatch */
+
+/* Carries the read arguments across the pNFS backing-handle resolve, which is
+ * async whenever the file might be DS-resident.  Same shape as the ACL gate
+ * below; kept separate so the two stages can run independently. */
+struct chimera_vfs_read_resolve_ctx {
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_open_handle *handle;
+    uint64_t                        offset;
+    uint32_t                        count;
+    struct evpl_iovec              *iov;
+    int                             niov;
+    struct evpl_iovec              *dest_iov;
+    int                             dest_niov;
+    uint64_t                        attr_mask;
+    bool                            has_io_owner;
+    struct chimera_claim_actor      io_owner;
+    chimera_vfs_read_callback_t     callback;
+    void                           *private_data;
+};
+
+_Static_assert(sizeof(struct chimera_vfs_read_resolve_ctx) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "read resolve context outgrew the request gate scratch area");
+
+static void
+chimera_vfs_read_resolve_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *io_handle,
+    int                             redirected,
+    void                           *private_data)
+{
+    struct chimera_vfs_read_resolve_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        ctx->callback(error_code, 0, 0, NULL, 0, NULL, ctx->private_data);
+        chimera_vfs_gate_scratch_free(ctx->thread, ctx);
+        return;
+    }
+
+    chimera_vfs_read_dispatch(ctx->thread, ctx->cred, ctx->handle,
+                              io_handle, redirected,
+                              ctx->offset, ctx->count, ctx->iov, ctx->niov,
+                              ctx->dest_iov, ctx->dest_niov, ctx->attr_mask,
+                              ctx->has_io_owner ? &ctx->io_owner : NULL,
+                              ctx->callback, ctx->private_data);
+    chimera_vfs_gate_scratch_free(ctx->thread, ctx);
+} /* chimera_vfs_read_resolve_complete */
+
+/*
+ * Send the read to wherever this file's bytes actually live.  For everything
+ * but a pNFS DS-resident file that is the handle the caller named, and the
+ * fast path below keeps that case free of any allocation: one predicate, then
+ * straight to dispatch.
+ */
+static void
+chimera_vfs_read_resolve(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    struct evpl_iovec                *dest_iov,
+    int                               dest_niov,
+    uint64_t                          attr_mask,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_read_callback_t       callback,
+    void                             *private_data)
+{
+    struct chimera_vfs_read_resolve_ctx *ctx;
+
+    if (!chimera_vfs_pnfs_io_possible(thread, handle)) {
+        chimera_vfs_read_dispatch(thread, cred, handle, handle, 0,
+                                  offset, count, iov, niov, dest_iov, dest_niov,
+                                  attr_mask, io_owner, callback, private_data);
+        return;
+    }
+
+    ctx = chimera_vfs_gate_scratch_alloc(thread);
+
+    ctx->thread    = thread;
+    ctx->cred      = cred;
+    ctx->handle    = handle;
+    ctx->offset    = offset;
+    ctx->count     = count;
+    ctx->iov       = iov;
+    ctx->niov      = niov;
+    ctx->dest_iov  = dest_iov;
+    ctx->dest_niov = dest_niov;
+    ctx->attr_mask = attr_mask;
+    if (io_owner) {
+        ctx->has_io_owner = true;
+        ctx->io_owner     = *io_owner;
+    } else {
+        ctx->has_io_owner = false;
+    }
+    ctx->callback     = callback;
+    ctx->private_data = private_data;
+
+    chimera_vfs_pnfs_resolve_io(thread, cred, handle, 0,
+                                chimera_vfs_read_resolve_complete, ctx);
+} /* chimera_vfs_read_resolve */
 
 /* Continuation for the first gated read on a handle: a getattr+ACL computes the
  * caller's effective access mask, which is cached on the handle for reuse. */
@@ -342,13 +467,13 @@ chimera_vfs_read_gate_complete(
         return;
     }
 
-    chimera_vfs_read_dispatch(gate->thread, gate->cred, gate->handle,
-                              gate->offset, gate->count, gate->iov, gate->niov,
-                              gate->dest_iov, gate->dest_niov,
-                              gate->attr_mask,
-                              gate->has_io_owner ? &gate->io_owner : NULL,
-                              gate->callback,
-                              gate->private_data);
+    chimera_vfs_read_resolve(gate->thread, gate->cred, gate->handle,
+                             gate->offset, gate->count, gate->iov, gate->niov,
+                             gate->dest_iov, gate->dest_niov,
+                             gate->attr_mask,
+                             gate->has_io_owner ? &gate->io_owner : NULL,
+                             gate->callback,
+                             gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_read_gate_complete */
 
@@ -425,9 +550,9 @@ chimera_vfs_read_submit(
         }
     }
 
-    chimera_vfs_read_dispatch(thread, cred, handle, offset, count, iov, niov,
-                              dest_iov, dest_niov, attr_mask, io_owner, callback,
-                              private_data);
+    chimera_vfs_read_resolve(thread, cred, handle, offset, count, iov, niov,
+                             dest_iov, dest_niov, attr_mask, io_owner, callback,
+                             private_data);
 } /* chimera_vfs_read_submit */
 
 SYMBOL_EXPORT void

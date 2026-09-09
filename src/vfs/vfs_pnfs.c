@@ -148,6 +148,110 @@ chimera_vfs_pnfs_find_device(
     return NULL;
 } /* chimera_vfs_pnfs_find_device */
 
+/*
+ * Opaque per-file pNFS layout blob: [deviceid:16][fhlen:1][backing-fh].
+ *
+ * The blob is persisted verbatim by the backend as CHIMERA_VFS_ATTR_PNFS_LAYOUT
+ * and is otherwise meaningless to it.  It lives here rather than in the NFS
+ * server because both consumers need it: the NFS server, to encode a layout for
+ * a client, and the VFS data redirect, to find the backing file that MDS-path
+ * I/O must be sent to.
+ *
+ * backing_fh is the handle AS THE MDS HOLDS IT, so it can be handed straight to
+ * chimera_vfs_open_fh: for a remote data server that is the nfs module's
+ * [mount-id][server-index][native] wrapper, and for a local one (backing_local)
+ * a raw VFS handle in the backing mount.  Deriving the client-facing form from
+ * it is the NFS server's job (see chimera_nfs4_encode_ff_layout's callers) --
+ * the two differ, and only the stored form is openable here.
+ */
+SYMBOL_EXPORT uint32_t
+chimera_vfs_pnfs_blob_pack(
+    uint8_t       *blob,
+    const uint8_t *deviceid,
+    const uint8_t *backing_fh,
+    uint32_t       backing_fh_len)
+{
+    memcpy(blob, deviceid, CHIMERA_VFS_DEVICEID_SIZE);
+    blob[CHIMERA_VFS_DEVICEID_SIZE] = (uint8_t) backing_fh_len;
+    memcpy(blob + CHIMERA_VFS_DEVICEID_SIZE + 1, backing_fh, backing_fh_len);
+    return CHIMERA_VFS_DEVICEID_SIZE + 1 + backing_fh_len;
+} /* chimera_vfs_pnfs_blob_pack */
+
+SYMBOL_EXPORT int
+chimera_vfs_pnfs_blob_unpack(
+    const uint8_t  *blob,
+    uint32_t        blob_len,
+    const uint8_t **r_deviceid,
+    const uint8_t **r_backing_fh,
+    uint32_t       *r_backing_fh_len)
+{
+    uint32_t fh_len;
+
+    if (blob_len < CHIMERA_VFS_DEVICEID_SIZE + 1) {
+        return -1;
+    }
+
+    fh_len = blob[CHIMERA_VFS_DEVICEID_SIZE];
+
+    if (fh_len == 0 ||
+        blob_len < CHIMERA_VFS_DEVICEID_SIZE + 1 + fh_len) {
+        return -1;
+    }
+
+    if (r_deviceid) {
+        *r_deviceid = blob;
+    }
+    if (r_backing_fh) {
+        *r_backing_fh = blob + CHIMERA_VFS_DEVICEID_SIZE + 1;
+    }
+    if (r_backing_fh_len) {
+        *r_backing_fh_len = fh_len;
+    }
+
+    return 0;
+} /* chimera_vfs_pnfs_blob_unpack */
+
+/*
+ * True when `fh` names an object inside a pNFS data-server backing mount.
+ *
+ * A DS backing file is an ordinary file in an ordinary chimera mount, so
+ * without this test the MDS-side data redirect would apply to backing files
+ * too: one that somehow carried a layout blob would redirect to itself, and
+ * every forwarded I/O would re-enter the redirect.  Residency is switched off
+ * for the whole backing mount rather than guarded per file, because no file
+ * under it is ever DS-resident by construction -- it IS the data server.
+ *
+ * A handle's first CHIMERA_VFS_MOUNTID_SIZE bytes are its mount id, and every
+ * resolved DS root handle carries its backing mount's, so the test is a
+ * comparison against at most CHIMERA_PNFS_MAX_DS ids.  Data servers whose
+ * backing root has not been resolved yet have root_fh_len 0 and match nothing;
+ * they cannot be steered to either (see chimera_vfs_pnfs_steer).
+ */
+SYMBOL_EXPORT int
+chimera_vfs_pnfs_fh_is_ds_backing(
+    const struct chimera_vfs *vfs,
+    const void               *fh,
+    int                       fhlen)
+{
+    const struct chimera_vfs_pnfs *pnfs = vfs->pnfs;
+    int                            i;
+
+    if (!pnfs || fhlen < CHIMERA_VFS_MOUNTID_SIZE) {
+        return 0;
+    }
+
+    for (i = 0; i < pnfs->num_ds; i++) {
+        const struct chimera_vfs_ds *ds = &pnfs->ds[i];
+
+        if (ds->root_fh_len >= CHIMERA_VFS_MOUNTID_SIZE &&
+            memcmp(ds->root_fh, fh, CHIMERA_VFS_MOUNTID_SIZE) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+} /* chimera_vfs_pnfs_fh_is_ds_backing */
+
 SYMBOL_EXPORT struct chimera_vfs_ds *
 chimera_vfs_pnfs_steer(struct chimera_vfs *vfs)
 {

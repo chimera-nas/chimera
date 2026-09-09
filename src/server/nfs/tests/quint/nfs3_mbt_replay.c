@@ -1834,6 +1834,8 @@ main(
           'R'                                                                           },
         { "sec",                required_argument,                0,
           'S'                                                                           },
+        { "pnfs-proxy",         no_argument,                      0,
+          'P'                                                                           },
         { 0,                    0,                                0,                               0 },
     };
     char               **traces;
@@ -1845,6 +1847,7 @@ main(
     int                  sec                = MBT_SEC_SYS;
     const char          *backend            = "memfs";
     int                  rdma               = 0;
+    int                  pnfs_proxy         = 0;
     int                  failures           = 0;
     int                  c;
     int                  i;
@@ -1870,7 +1873,7 @@ main(
      * error, and skips them here (the 't'/'D'/'X' cases). */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:RS:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:RPS:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1904,13 +1907,24 @@ main(
                     return 2;
                 }
                 break;
+            case 'P':
+                /* Replay through the in-process pNFS PROXY tier (see the
+                 * MBT_PROXY_PORT block in nfs3_mbt_common.h).  NOTE: an NFSv3
+                 * front end gives the proxy no per-file open state, and
+                 * chimera's pNFS client engages only for I/O that carries one,
+                 * so this route reaches the MDS rather than the data servers --
+                 * it is here to exercise the proxy backend itself, not the
+                 * layout path.  Use nfs4_mbt_replay --pnfs-proxy for that. */
+                pnfs_proxy = 1;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
                         "[--sec sys|krb5|krb5i|krb5p] "
-                        "[--rdma] [--dry-run] [--verbose]\n", argv[0]);
+                        "[--rdma] [--pnfs-proxy] [--dry-run] [--verbose]\n",
+                        argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
         } /* switch */
@@ -1935,6 +1949,14 @@ main(
         opts.num_principal_uids = mbt_collect_cred_uids(traces, ntraces, uids,
                                                         MBT_MAX_MAPPED_UIDS);
         opts.principal_uids = uids;
+
+        if (pnfs_proxy) {
+            opts.pnfs_proxy             = 1;
+            opts.client_at_proxy        = 1;
+            opts.pnfs_num_ds            = 2;
+            opts.pnfs_ds_version        = 3;
+            opts.pnfs_ds_advertise_rdma = 1;
+        }
         mbt_env_open_opts(&env, &opts);
     }
 

@@ -198,6 +198,37 @@ chimera_nfs4_copy_read_complete(
         return;
     }
 
+    /* Take the iovecs the read actually returned, which are NOT necessarily the
+     * scratch slots we handed down: a backend advertising
+     * CAP_READ_PROVIDES_BUFFERS may either fill our array in place (memfs) or
+     * hand back one of its own (the nfs proxy returns the RPC reply's buffers,
+     * replacing request->read.iov outright).  Reusing rw_iov unconditionally
+     * would write from never-initialised slots.  We own whatever comes back --
+     * neither the caller nor the reply path releases it -- so copy the refs into
+     * rw_iov and let copy_write_complete release them as before.
+     *
+     * The refs must be CLONED rather than copied: the returned array may live
+     * in the backend's RPC reply, which does not outlive this callback, and an
+     * iovec is not relocatable by assignment (in iovec-trace builds its canary
+     * records the address of the struct that owns it).  Cloning takes our own
+     * reference at our own address; the originals are ours to drop, since for a
+     * backend-provided read neither the VFS core nor a reply path releases
+     * them. */
+    if (niov > CHIMERA_NFS4_COPY_IOV_MAX) {
+        evpl_iovecs_release(req->thread->evpl, iov, niov);
+        chimera_nfs4_copy_finish(req, refs, CHIMERA_VFS_EIO);
+        return;
+    }
+
+    if (iov != refs->rw_iov) {
+        int i;
+
+        for (i = 0; i < niov; i++) {
+            evpl_iovec_clone(&refs->rw_iov[i], &iov[i]);
+        }
+        evpl_iovecs_release(req->thread->evpl, iov, niov);
+    }
+
     dst_handle     = chimera_nfs4_copy_state_handle(refs->dst_state, refs->dst_type);
     refs->rw_count = count;
     refs->rw_eof   = eof;

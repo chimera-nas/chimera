@@ -63,8 +63,10 @@ chimera_nfs3_write(
     struct chimera_nfs3_write_ctx           *ctx;
     struct WRITE3args                        args;
     struct evpl_rpc2_cred                    rpc2_cred;
+    struct evpl_iovec                       *ds_iov;
     uint8_t                                 *fh;
     int                                      fhlen;
+    int                                      i;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -84,9 +86,22 @@ chimera_nfs3_write(
     args.offset         = request->write.offset;
     args.count          = request->write.length;
     args.stable         = request->write.sync;     /* 3-level UNSTABLE/DATA_SYNC/FILE_SYNC */
-    args.data.iov       = request->write.iov;
-    args.data.niov      = request->write.niov;
-    args.data.length    = request->write.length;
+
+    /* The WRITE3 marshaller MOVES (consumes + frees) the payload iovecs into
+     * the outgoing RPC message, but our payload is BORROWED from whoever
+     * dispatched this VFS write -- when that is chimera's own NFS server layer
+     * (this module is the backing store of a proxy), that layer releases the
+     * very same iovecs once we complete, and it would be releasing freed ones.
+     * Hand the marshaller CLONES and leave the borrowed originals intact; each
+     * clone's reference is dropped when the RPC message is released.  Same
+     * contract, same reason, as the pNFS DS write path in nfs4_pnfs.c. */
+    ds_iov = malloc((size_t) request->write.niov * sizeof(*ds_iov));
+    for (i = 0; i < request->write.niov; i++) {
+        evpl_iovec_clone(&ds_iov[i], &request->write.iov[i]);
+    }
+    args.data.iov    = ds_iov;
+    args.data.niov   = request->write.niov;
+    args.data.length = request->write.length;
 
     {
         /* I/O goes out with the opening credential when there is one: POSIX
@@ -106,4 +121,7 @@ chimera_nfs3_write(
 
     shared->nfs_v3.send_call_NFSPROC3_WRITE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                             &args, 1, 0, NULL, 0, 0, chimera_nfs3_write_callback, request);
+
+    /* The marshaller moved (and invalidated) the clones; free only the array. */
+    free(ds_iov);
 } /* chimera_nfs3_write */

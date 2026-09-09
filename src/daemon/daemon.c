@@ -726,6 +726,18 @@ main(
         chimera_server_config_set_nfs_lockmgr_port(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "mount_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_nfs_mount_port(server_config, int_value);
+    }
+
+    json_value = json_object_get(server_params, "portmap_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_nfs_portmap_port(server_config, int_value);
+    }
+
     json_value = json_object_get(server_params, "nfs_port");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);

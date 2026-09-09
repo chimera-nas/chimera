@@ -482,26 +482,14 @@ nfs_pnfs_devcache_find(
 } /* nfs_pnfs_devcache_find */
 
 /*
- * Opaque pNFS-layout blob format (stored on the MDS file via the
- * CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute): [deviceid:16][fhlen:1][backing-fh].
- * The backing-fh is the nfs-module chimera handle of the file's data on the DS;
- * its native (NFSv3) handle for the layout is recovered by skipping the
+ * The layout blob itself ([deviceid][fhlen][backing-fh]) is packed and unpacked
+ * by the VFS (chimera_vfs_pnfs_blob_{pack,unpack}), because the VFS data
+ * redirect reads it too.  What stays here is the wire derivation: the stored
+ * backing handle is the nfs-module chimera handle of the file's data on the DS,
+ * and the native (NFSv3) handle a CLIENT must use is recovered by skipping the
  * 16-byte mount_id + 1-byte server-index prefix the nfs module prepends.
  */
 #define FF_BLOB_FH_SKIP (CHIMERA_VFS_MOUNTID_SIZE + 1)
-
-static uint32_t
-ff_blob_pack(
-    uint8_t       *blob,
-    const uint8_t *deviceid,
-    const uint8_t *backing_fh,
-    uint32_t       backing_fh_len)
-{
-    memcpy(blob, deviceid, CHIMERA_VFS_DEVICEID_SIZE);
-    blob[CHIMERA_VFS_DEVICEID_SIZE] = (uint8_t) backing_fh_len;
-    memcpy(blob + CHIMERA_VFS_DEVICEID_SIZE + 1, backing_fh, backing_fh_len);
-    return CHIMERA_VFS_DEVICEID_SIZE + 1 + backing_fh_len;
-} /* ff_blob_pack */
 
 /*
  * LAYOUTGET is an async state machine.  The per-file pNFS layout state lives in
@@ -519,7 +507,7 @@ struct ff_layoutget_ctx {
     struct chimera_vfs_attrs        set_attr;
     uint8_t                         blob[CHIMERA_VFS_PNFS_LAYOUT_MAX];
     uint32_t                        blob_len;
-    char                            backing_name[24];
+    char                            backing_name[CHIMERA_VFS_PNFS_BACKING_NAME_MAX];
 };
 
 static void
@@ -579,10 +567,12 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         return;
     }
 
-    /* Unpack [deviceid][backing-fh-len][backing-fh]. */
-    deviceid       = ctx->blob;
-    backing_fh_len = ctx->blob[CHIMERA_VFS_DEVICEID_SIZE];
-    backing_fh     = ctx->blob + CHIMERA_VFS_DEVICEID_SIZE + 1;
+    if (chimera_vfs_pnfs_blob_unpack(ctx->blob, ctx->blob_len,
+                                     &deviceid, &backing_fh,
+                                     &backing_fh_len) != 0) {
+        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
+        return;
+    }
 
     /* Recover the handle the client will use against the data server.  A remote
      * DS is reached through the nfs proxy module, so the backing handle is the
@@ -720,8 +710,8 @@ ff_lg_create_cb(
         return;
     }
 
-    ctx->blob_len = ff_blob_pack(ctx->blob, ctx->ds->deviceid,
-                                 attr->va_fh, attr->va_fh_len);
+    ctx->blob_len = chimera_vfs_pnfs_blob_pack(ctx->blob, ctx->ds->deviceid,
+                                               attr->va_fh, attr->va_fh_len);
     if (oh) {
         chimera_vfs_release(req->thread->vfs_thread, oh);
     }
@@ -751,10 +741,16 @@ ff_lg_dsroot_cb(
 
     ctx->ds_root_handle = handle;
 
-    /* One backing file per MDS file, named by its fileid (flat on the DS). */
-    snprintf(ctx->backing_name, sizeof(ctx->backing_name), "%016" PRIx64, ctx->fileid);
+    /* One backing file per MDS file, flat on the DS.  Shared with the non-pNFS
+     * write redirect (vfs_pnfs_io.c), which must resolve the very same file. */
+    chimera_vfs_pnfs_backing_name(ctx->backing_name, ctx->mds_handle->fh,
+                                  ctx->fileid);
 
-    /* Backing files are internal data containers; real access control is the
+    /* TRUNCATE: the backing name ends in the MDS fileid, which is reused once
+     * the original inode is gone, so without it a new file can inherit a dead
+     * file's bytes.
+     *
+     * Backing files are internal data containers; real access control is the
      * client's OPEN against the MDS metadata file.  flex-files steers DS I/O
      * with synthetic, per-iomode principals (ffds_user "0" for RW, "1" for
      * READ), so the backing object must be reachable by both.  A dedicated DS
@@ -769,7 +765,8 @@ ff_lg_dsroot_cb(
 
     chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, ctx->ds_root_handle,
                         ctx->backing_name, strlen(ctx->backing_name),
-                        CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED,
+                        CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_TRUNCATE |
+                        CHIMERA_VFS_OPEN_INFERRED,
                         &ctx->set_attr, CHIMERA_VFS_ATTR_FH, 0, 0,
                         ff_lg_create_cb, ctx);
 } /* ff_lg_dsroot_cb */
@@ -792,6 +789,22 @@ ff_lg_getattr_cb(
         ctx->blob_len = attr->va_pnfs_len;
         memcpy(ctx->blob, attr->va_pnfs, attr->va_pnfs_len);
         ff_lg_emit(ctx);
+        return;
+    }
+
+    /* No layout yet.  Granting one now is only safe while the file is still
+     * empty: the backing file we would create starts empty, so any bytes
+     * already on the metadata server would be stranded behind it and no reader
+     * could see both halves.  A file that already holds data is therefore
+     * permanently MDS-resident, and saying so plainly is the correct answer --
+     * RFC 8881 18.43.3 lists NFS4ERR_LAYOUTUNAVAILABLE for exactly this, and
+     * clients respond by doing their I/O through the metadata server.
+     *
+     * The VFS applies the same rule on the write path (chimera_vfs_pnfs_io
+     * materializes only for an empty file), so the two agree on which files are
+     * DS-resident and a file is never split between the two stores. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && attr->va_size != 0) {
+        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
         return;
     }
 
@@ -1024,7 +1037,8 @@ ff_lg_open_cb(
             return;
         }
         chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, handle,
-                            CHIMERA_VFS_ATTR_PNFS_LAYOUT | CHIMERA_VFS_ATTR_INUM,
+                            CHIMERA_VFS_ATTR_PNFS_LAYOUT | CHIMERA_VFS_ATTR_INUM |
+                            CHIMERA_VFS_ATTR_SIZE,
                             ff_lg_getattr_cb, ctx);
         return;
     }
