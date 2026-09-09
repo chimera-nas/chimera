@@ -1772,6 +1772,20 @@ check_statres(
              * to the set-id bits. */
             if (g_smb && (diff & ~06000u) == 0) {
                 record_dev("SD-SETID");
+            } else if (g_nfs_version == 3 && (diff & ~06000u) == 0 &&
+                       ((unsigned) wmode & 06000u) != 0 &&
+                       ((st->st_mode & 07777) & 06000u) == 0 &&
+                       strcmp(ftag, "FReg") == 0) {
+                /* ND11: fallocate over NFSv3 clears the set-id bits, because
+                 * NFSv3 has no ALLOCATE and the client emulates it with a
+                 * SETATTR that sets the size (nfs3_allocate.c).  The server
+                 * cannot tell that from an ftruncate, and a truncate by an
+                 * unprivileged writer kills privileges -- so the bits the
+                 * model (and every direct backend) keep across a fallocate are
+                 * gone.  Confined to a regular file losing only set-id bits;
+                 * the model never expects a fallocate to touch them, so the
+                 * reverse direction is still a divergence. */
+                record_dev("ND11");
             } else {
                 mism("mode: expected %#llo, got %#o", (long long) wmode,
                      st->st_mode & 07777);
