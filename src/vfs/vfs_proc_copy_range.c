@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
@@ -334,7 +335,20 @@ chimera_vfs_copy_range(
      * cannot drive it safely.  A proxy doing server-side copy by round-tripping
      * every byte to its upstream would also defeat the point, so the proxy keeps
      * surfacing ENOTSUP (its prior behaviour) and lets the client copy. */
-    if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
+        /* Server-side range copy is declined outright while pNFS is configured.
+     * Either handle may be DS-resident, so a correct implementation would have
+     * to resolve both and drive the copy between two backing files; until it
+     * does, ENOTSUP sends the caller down the read+write fallback, which is
+     * redirected and therefore correct.  This costs an optimization, never
+     * correctness -- every protocol that offers a server-side copy is required
+     * to cope with the server refusing it. */
+    if (chimera_vfs_pnfs_io_possible(thread, dst_handle) ||
+        chimera_vfs_pnfs_io_possible(thread, src_handle)) {
+        callback(CHIMERA_VFS_ENOTSUP, 0, NULL, NULL, private_data);
+        return;
+    }
+
+if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
         if (dst_handle->vfs_module->fh_magic == CHIMERA_VFS_FH_MAGIC_NFS ||
             src_handle->vfs_module->fh_magic == CHIMERA_VFS_FH_MAGIC_NFS) {
             callback(CHIMERA_VFS_ENOTSUP, 0, NULL, NULL, private_data);
