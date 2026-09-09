@@ -49,6 +49,22 @@
 #define SD_HEADER_SIZE             20
 
 /*
+ * True when the `need` bytes at wire offset `off` lie inside a `len`-byte
+ * buffer.  Written as a subtraction against the remaining length: `off` is a
+ * client-supplied 32-bit value, and `off + need <= len` wraps for an offset
+ * near UINT32_MAX, passing the check and pointing the parse far outside the
+ * request buffer.
+ */
+static inline int
+sd_region_ok(
+    uint32_t off,
+    uint32_t need,
+    uint32_t len)
+{
+    return off <= len && len - off >= need;
+} /* sd_region_ok */
+
+/*
  * Check whether a SID at the given buffer position is S-1-5-88-<kind>-<value>
  * and extract <value>.  Returns 0 on match, -1 otherwise.
  */
@@ -352,7 +368,7 @@ chimera_smb_sd_to_acl(
     offset_dacl  = sd_buf[16] | (sd_buf[17] << 8) | (sd_buf[18] << 16) | ((uint32_t) sd_buf[19] << 24);
 
     /* Owner SID -> uid (modefromsid first, then general idmap). */
-    if (offset_owner && offset_owner + 8 <= sd_len) {
+    if (offset_owner && sd_region_ok(offset_owner, 8, sd_len)) {
         struct chimera_principal p;
 
         if (parse_unix_sid(sd_buf + offset_owner, sd_len - offset_owner, 1, &value) == 0) {
@@ -377,7 +393,7 @@ chimera_smb_sd_to_acl(
     }
 
     /* Group SID -> gid (modefromsid first, then general idmap). */
-    if (offset_group && offset_group + 8 <= sd_len) {
+    if (offset_group && sd_region_ok(offset_group, 8, sd_len)) {
         struct chimera_principal p;
 
         if (parse_unix_sid(sd_buf + offset_group, sd_len - offset_group, 2, &value) == 0) {
@@ -402,14 +418,14 @@ chimera_smb_sd_to_acl(
     }
 
     /* DACL -> canonical ACL. */
-    if (acl && offset_dacl && offset_dacl + 8 <= sd_len) {
+    if (acl && offset_dacl && sd_region_ok(offset_dacl, 8, sd_len)) {
         const uint8_t *acl_buf   = sd_buf + offset_dacl;
         uint16_t       acl_size  = acl_buf[2] | (acl_buf[3] << 8);
         uint16_t       ace_count = acl_buf[4] | (acl_buf[5] << 8);
         uint32_t       pos       = 8;
         unsigned       n         = 0;
 
-        if (offset_dacl + acl_size > sd_len) {
+        if (acl_size > sd_len - offset_dacl) {
             acl_size = sd_len - offset_dacl;
         }
 
@@ -804,40 +820,44 @@ chimera_smb_parse_sd_to_attrs(
     }
 
     /* Parse security descriptor header (self-relative format) */
-    uint32_t offset_owner = sd_buf[4]  | (sd_buf[5] << 8) | (sd_buf[6] << 16) | (sd_buf[7] << 24);
-    uint32_t offset_group = sd_buf[8]  | (sd_buf[9] << 8) | (sd_buf[10] << 16) | (sd_buf[11] << 24);
-    uint32_t offset_dacl  = sd_buf[16] | (sd_buf[17] << 8) | (sd_buf[18] << 16) | (sd_buf[19] << 24);
+    uint32_t offset_owner = sd_buf[4]  | (sd_buf[5] << 8) | (sd_buf[6] << 16) | ((uint32_t) sd_buf[7] << 24);
+    uint32_t offset_group = sd_buf[8]  | (sd_buf[9] << 8) | (sd_buf[10] << 16) | ((uint32_t) sd_buf[11] << 24);
+    uint32_t offset_dacl  = sd_buf[16] | (sd_buf[17] << 8) | (sd_buf[18] << 16) | ((uint32_t) sd_buf[19] << 24);
 
-    /* Owner SID → uid */
-    if (offset_owner && offset_owner + SID_UNIX_SIZE <= sd_len) {
+    /* Owner SID -> uid */
+    if (offset_owner && sd_region_ok(offset_owner, SID_UNIX_SIZE, sd_len)) {
         if (parse_unix_sid(sd_buf + offset_owner, sd_len - offset_owner, 1, &value) == 0) {
             attrs->va_uid       = value;
             attrs->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         }
     }
 
-    /* Group SID → gid */
-    if (offset_group && offset_group + SID_UNIX_SIZE <= sd_len) {
+    /* Group SID -> gid */
+    if (offset_group && sd_region_ok(offset_group, SID_UNIX_SIZE, sd_len)) {
         if (parse_unix_sid(sd_buf + offset_group, sd_len - offset_group, 2, &value) == 0) {
             attrs->va_gid       = value;
             attrs->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         }
     }
 
-    /* DACL → scan ACEs for mode SID */
-    if (offset_dacl && offset_dacl + 8 <= sd_len) {
+    /* DACL -> scan ACEs for mode SID.  Past the region check, sd_len -
+     * offset_dacl is the ACL's true extent, so the in-ACL positions (bounded
+     * by the 16-bit AclSize) are compared against it without any addition
+     * that a hostile offset could wrap. */
+    if (offset_dacl && sd_region_ok(offset_dacl, 8, sd_len)) {
         const uint8_t *acl_buf   = sd_buf + offset_dacl;
         uint16_t       acl_size  = acl_buf[2] | (acl_buf[3] << 8);
         uint16_t       ace_count = acl_buf[4] | (acl_buf[5] << 8);
+        uint32_t       acl_avail = sd_len - offset_dacl;
         uint32_t       pos       = 8; /* skip ACL header */
 
         for (uint16_t i = 0; i < ace_count && pos + 8 <= acl_size &&
-             offset_dacl + pos + 8 <= sd_len; i++) {
+             pos + 8 <= acl_avail; i++) {
             uint16_t ace_size = acl_buf[pos + 2] | (acl_buf[pos + 3] << 8);
             /* ACE header is 4 bytes, then 4 bytes access mask, then SID */
             uint32_t sid_offset = pos + 8;
 
-            if (offset_dacl + sid_offset + SID_UNIX_SIZE <= sd_len) {
+            if (sid_offset + SID_UNIX_SIZE <= acl_avail) {
                 if (parse_unix_sid(acl_buf + sid_offset,
                                    sd_len - offset_dacl - sid_offset, 3, &value) == 0) {
                     attrs->va_mode      = value;
