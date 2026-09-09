@@ -1305,7 +1305,15 @@ memfs_fs_create(
     fs->fsid    = fsid;
     fs->fs_size = fs_size;
 
-    fs->num_inode_list = 255;
+    /* One list per value the list id can take, not one fewer.  The id is
+     * masked with CHIMERA_MEMFS_INODE_LIST_MASK, so it ranges 0..255 -- 256
+     * values -- and sizing the array at 255 left the last one off the end.
+     * memfs_inode_alloc() and memfs_inode_free() index it from the calling
+     * thread's id with no bounds check, so a thread whose id masked to 255
+     * read and locked 24 bytes past the allocation; memfs_inode_get_fh() does
+     * check, and quietly failed every inode whose inum masked to 255, which
+     * is one in every 256 of them, with ESTALE. */
+    fs->num_inode_list = CHIMERA_MEMFS_INODE_NUM_LISTS;
     fs->inode_list     = calloc(fs->num_inode_list,
                                 sizeof(*fs->inode_list));
 
