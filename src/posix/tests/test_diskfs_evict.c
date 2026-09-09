@@ -241,6 +241,15 @@ main(
 
     evict_sweep(&env, 3);
 
+    /*
+     * Every phase from here on announces itself, and the unlink loop reports
+     * progress the way the pre-remount one does.  posix_test_success() prints
+     * nothing, so without this a clean run and a run wedged anywhere after the
+     * last sweep emit byte-identical output ending at "unlinking the rest...".
+     * A ctest timeout was therefore indistinguishable from a slow pass, and
+     * this test's timeouts were read as a hang in the unlink loop for weeks on
+     * the strength of where the output happened to stop.
+     */
     fprintf(stderr, "unlinking the rest...\n");
     for (i = 0; i < EVICT_NFILES; i++) {
         if ((i % 3) == 0) {
@@ -252,8 +261,12 @@ main(
             fprintf(stderr, "unlink %s failed: %s\n", path, strerror(errno));
             posix_test_fail(&env);
         }
+        if ((i % 6000) == 0) {
+            fprintf(stderr, "unlinked through %d\n", i);
+        }
     }
 
+    fprintf(stderr, "removing directories...\n");
     for (i = 0; i < EVICT_NDIRS; i++) {
         snprintf(path, sizeof(path), "/test/d%d", i);
         rc = chimera_posix_rmdir(path);
@@ -263,13 +276,16 @@ main(
         }
     }
 
+    fprintf(stderr, "unmounting...\n");
     rc = posix_test_umount();
     if (rc != 0) {
         fprintf(stderr, "Failed to unmount /test: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
 
+    fprintf(stderr, "shutting down...\n");
     posix_test_success(&env);
+    fprintf(stderr, "done\n");
 
     return 0;
 } /* main */
