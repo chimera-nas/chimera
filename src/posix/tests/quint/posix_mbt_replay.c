@@ -1597,6 +1597,33 @@ check_status(
     return 0;
 } /* check_status */
 
+/* True when the model still holds an open description on `ino`.  A silly
+ * rename lives exactly as long as one does: the NFS client renames the name
+ * out of the way at unlink and removes it at last close, so while the model
+ * has the file open chimera carries one link the model has already dropped. */
+static int
+model_ino_open(
+    json_t *ps,
+    int64_t ino)
+{
+    json_t *pairs = ps ? json_object_get(ps, "ofds") : NULL;
+    size_t  i;
+
+    pairs = json_is_object(pairs) ? json_object_get(pairs, "#map") : NULL;
+    if (!json_is_array(pairs)) {
+        return 0;
+    }
+    for (i = 0; i < json_array_size(pairs); i++) {
+        json_t *pair = json_array_get(pairs, i);
+        json_t *v    = json_array_get(pair, 1);
+
+        if (json_is_object(v) && tf_field(v, "ino") == ino) {
+            return 1;
+        }
+    }
+    return 0;
+} /* model_ino_open */
+
 static const char *
 ftype_of(const char *tag)
 {
@@ -1801,10 +1828,18 @@ check_statres(
              st->st_gid);
     }
     if ((int64_t) st->st_nlink != tf_field(rv, "nlink")) {
-        if (g_nfs_version && tf_field(rv, "nlink") == 0 &&
-            st->st_nlink == 1) {
+        if (g_nfs_version && strcmp(ftag, "FLnk") != 0 &&
+            (int64_t) st->st_nlink == tf_field(rv, "nlink") + 1 &&
+            (tf_field(rv, "nlink") == 0 ||
+             model_ino_open(g_cur_ps, tf_field(rv, "ino")))) {
             /* Unlinked-while-open: the silly-renamed name keeps one link
-             * alive until the last close (ND2). */
+             * alive until the last close (ND2).  The model may still have
+             * OTHER links to the same file -- unlinking one of two leaves the
+             * model at 1 and chimera at 2 -- so this is one more link than the
+             * model has, not necessarily exactly one.  Guarded on the model
+             * still holding the file open, which is precisely as long as the
+             * silly name lives; the nlink == 0 arm needs no such check because
+             * a file with no names left is open by construction. */
             record_dev("ND2");
         } else if (g_nfs_version && g_nexempt > 0 &&
                    strcmp(ftag, "FDir") == 0 &&
@@ -3833,6 +3868,14 @@ final_audit(json_t *fs)
                     strcmp(ftag, "FDir") == 0 &&
                     (int64_t) st.st_nlink > tf_field(cnode, "nlink")) {
                     record_dev("ND5");   /* residue subdir (see check_statres) */
+                } else if (g_nfs_version && strcmp(ftag, "FDir") != 0 &&
+                           (int64_t) st.st_nlink ==
+                           tf_field(cnode, "nlink") + 1 &&
+                           model_ino_open(g_cur_ps, cino)) {
+                    /* A silly rename outstanding at the end of the trace: the
+                     * model closed no descriptor, so the extra name is still
+                     * there.  Same rule as check_statres's ND2. */
+                    record_dev("ND2");
                 } else {
                     mism("audit: %s: nlink %llu != %lld", cpath,
                          (unsigned long long) st.st_nlink,
