@@ -14,6 +14,13 @@
  * an object with no explicit DACL must not manufacture an empty ACL (the
  * mode-derived DACL has to survive).
  *
+ * The chown gate treats a SID as the companion of its numeric identity, so
+ * a non-root leg checks who may attach, restate, replace or clear one.  A
+ * SETATTR that shrinks a file and chowns it in one call must drop the stale
+ * owner SID like any other chown.  And on the persistent backends everything
+ * stored must come back byte for byte after a cold restart -- the in-memory
+ * record mirrors are gone, so that is what proves the on-disk replay.
+ *
  *     vfs_acl_sid_test <backend>
  *
  * where <backend> is memfs (default), cairn, diskfs_io_uring, or diskfs_aio.
@@ -63,6 +70,7 @@ struct test_ctx {
     uint64_t                        got_uid;
     uint64_t                        got_gid;
     uint64_t                        got_mode;
+    uint64_t                        got_size;
     struct chimera_sid              got_owner_sid;
     struct chimera_sid              got_group_sid;
     uint8_t                         got_acl_storage[sizeof(struct chimera_acl) +
@@ -169,6 +177,7 @@ getattr_cb(
         ctx->got_uid  = attr->va_uid;
         ctx->got_gid  = attr->va_gid;
         ctx->got_mode = attr->va_mode;
+        ctx->got_size = attr->va_size;
         if ((attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) && attr->va_owner_sid) {
             ctx->got_owner_sid = *attr->va_owner_sid;
         }
@@ -209,6 +218,42 @@ do_setattr(
     assert(ctx->status == CHIMERA_VFS_OK);
 } /* do_setattr */
 
+/* Like do_setattr, but hands the status back so a gate refusal can be
+ * asserted rather than aborting the test. */
+static enum chimera_vfs_error
+setattr_status(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_attrs      *sattr)
+{
+    chimera_vfs_setattr(ctx->vfs_thread, cred, ctx->handle, sattr, 0, 0,
+                        setattr_cb, ctx);
+    wait_done(ctx);
+    return ctx->status;
+} /* setattr_status */
+
+/* Look `name` up under `dir_fh` and open it; leaves the handle in ctx->handle. */
+static void
+open_child(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *dir_fh,
+    uint32_t                       dir_fh_len,
+    const char                    *name)
+{
+    chimera_vfs_lookup(ctx->vfs_thread, cred, dir_fh, dir_fh_len, name,
+                       strlen(name),
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                       lookup_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, ctx->fh, ctx->fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+} /* open_child */
+
 /* Create `name` (0644, uid/gid 1000) under `dir`; leaves the file open in
  * ctx->handle. */
 static void
@@ -241,17 +286,23 @@ struct backend_spec {
     const char *mount_module;
     char        mount_path[300];
     int         needs_mkfs;
+    int         persistent; /* survives a cold restart of the VFS */
 };
 
+/* With `reuse` set the store created earlier in this run is opened as it is:
+ * no device is (re)created and the module is not told to initialize it, so a
+ * second chimera_vfs_init sees what the first one wrote. */
 static void
 backend_configure(
     const char                    *backend,
     const char                    *session_dir,
     struct chimera_vfs_module_cfg *cfgs,
-    struct backend_spec           *spec)
+    struct backend_spec           *spec,
+    int                            reuse)
 {
-    char dev_path[300];
-    char cfg[512];
+    const char *init = reuse ? "" : "\"initialize\":true,";
+    char        dev_path[300];
+    char        cfg[512];
 
     memset(spec, 0, sizeof(*spec));
 
@@ -262,34 +313,38 @@ backend_configure(
         snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else if (strcmp(backend, "cairn") == 0) {
         strncpy(cfgs[0].module_name, "cairn", sizeof(cfgs[0].module_name) - 1);
-        snprintf(cfg, sizeof(cfg),
-                 "{\"initialize\":true,\"path\":\"%s\"}", session_dir);
+        snprintf(cfg, sizeof(cfg), "{%s\"path\":\"%s\"}", init, session_dir);
         strncpy(cfgs[0].config_data, cfg, sizeof(cfgs[0].config_data) - 1);
         spec->mount_module = "cairn";
         spec->needs_mkfs   = 1;
+        spec->persistent   = 1;
         snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
                strcmp(backend, "diskfs_aio") == 0) {
         const char *iotype = (strcmp(backend, "diskfs_aio") == 0) ? "libaio"
                                                                   : "io_uring";
-        int         fd, rc;
 
         snprintf(dev_path, sizeof(dev_path), "%s/device-0.img", session_dir);
-        fd = open(dev_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
-        assert(fd >= 0);
-        rc = ftruncate(fd, (off_t) DEV_SIZE_BYTES);
-        assert(rc == 0);
-        close(fd);
+        if (!reuse) {
+            int fd = open(dev_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+            int rc;
+
+            assert(fd >= 0);
+            rc = ftruncate(fd, (off_t) DEV_SIZE_BYTES);
+            assert(rc == 0);
+            close(fd);
+        }
 
         snprintf(cfg, sizeof(cfg),
-                 "{\"initialize\":true,\"unsafe_async\":true,"
+                 "{%s\"unsafe_async\":true,"
                  "\"intent_log_size\":67108864,"
                  "\"devices\":[{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}]}",
-                 iotype, dev_path);
+                 init, iotype, dev_path);
         strncpy(cfgs[0].module_name, "diskfs", sizeof(cfgs[0].module_name) - 1);
         strncpy(cfgs[0].config_data, cfg, sizeof(cfgs[0].config_data) - 1);
         spec->mount_module = "diskfs";
         spec->needs_mkfs   = 1;
+        spec->persistent   = 1;
         snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else {
         fprintf(stderr, "unknown backend: %s\n", backend);
@@ -299,6 +354,67 @@ backend_configure(
     strncpy(cfgs[1].module_name, "memkv", sizeof(cfgs[1].module_name) - 1);
     spec->ncfg = 2;
 } /* backend_configure */
+
+/* Mount fs0 at /test and open its root.  Fills root_fh / root_fh_len and
+ * returns the root handle; used at start-up and again after the restart. */
+static struct chimera_vfs_open_handle *
+mount_root(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const struct backend_spec     *spec,
+    uint8_t                       *root_fh,
+    uint32_t                      *root_fh_len)
+{
+    chimera_vfs_mount(ctx->vfs_thread, NULL, "/test", spec->mount_module,
+                      spec->mount_path, NULL, mount_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_get_root_fh(root_fh, root_fh_len);
+    chimera_vfs_lookup(ctx->vfs_thread, cred, root_fh, *root_fh_len, "test", 4,
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                       lookup_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    memcpy(root_fh, ctx->fh, ctx->fh_len);
+    *root_fh_len = ctx->fh_len;
+
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, root_fh, *root_fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    return ctx->handle;
+} /* mount_root */
+
+/* Tear the VFS down and bring it back on the same store without initialising
+ * it.  The inode caches and the in-memory record mirrors die with the old
+ * instance, so whatever getattr reports afterwards was read back from the
+ * device -- an in-process umount/mount would not prove that (diskfs keeps
+ * its inode cache across umount). */
+static void
+cold_restart(
+    struct test_ctx               *ctx,
+    const char                    *backend,
+    const char                    *session_dir,
+    struct chimera_vfs_module_cfg *module_cfgs,
+    struct backend_spec           *spec,
+    struct prometheus_metrics    **metrics)
+{
+    chimera_vfs_thread_destroy(ctx->vfs_thread);
+    chimera_vfs_destroy(ctx->vfs);
+    prometheus_metrics_destroy(*metrics);
+
+    memset(module_cfgs, 0, 2 * sizeof(*module_cfgs));
+    backend_configure(backend, session_dir, module_cfgs, spec, 1 /* reuse */);
+
+    *metrics = prometheus_metrics_create(NULL, NULL, 0);
+    assert(*metrics != NULL);
+    ctx->vfs = chimera_vfs_init(0, 0, module_cfgs, spec->ncfg, "memkv", 60, 1,
+                                1, 0, *metrics);
+    assert(ctx->vfs != NULL);
+    ctx->vfs_thread = chimera_vfs_thread_init(ctx->evpl, ctx->vfs);
+    assert(ctx->vfs_thread != NULL);
+} /* cold_restart */
 
 int
 main(
@@ -314,8 +430,12 @@ main(
     struct chimera_vfs_open_handle *root_handle;
     struct chimera_vfs_open_handle *f_handle;
     struct chimera_vfs_open_handle *g_handle;
+    struct chimera_vfs_open_handle *h_handle;
+    struct chimera_vfs_open_handle *t_handle;
+    struct chimera_vfs_cred         owner_cred, other_cred;
     const char                     *backend = argc > 1 ? argv[1] : "memfs";
     char                            tmpl[]  = "/tmp/vfs_aclsid_XXXXXX";
+    char                            rmcmd[400];
     char                           *session_dir;
     uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        root_fh_len;
@@ -327,6 +447,8 @@ main(
 
     chimera_log_init();
     chimera_vfs_cred_init_unix(&cred, 0, 0, 0, NULL);
+    chimera_vfs_cred_init_unix(&owner_cred, 1000, 1000, 0, NULL);
+    chimera_vfs_cred_init_unix(&other_cred, 2000, 2000, 0, NULL);
 
     assert(chimera_sid_from_str(&owner_sid, SID_OWNER) == 0);
     assert(chimera_sid_from_str(&group_sid, SID_GROUP) == 0);
@@ -336,7 +458,7 @@ main(
     assert(session_dir != NULL);
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
-    backend_configure(backend, session_dir, module_cfgs, &spec);
+    backend_configure(backend, session_dir, module_cfgs, &spec, 0);
 
     metrics = prometheus_metrics_create(NULL, NULL, 0);
     assert(metrics != NULL);
@@ -358,25 +480,7 @@ main(
         assert(ctx.status == CHIMERA_VFS_OK);
     }
 
-    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", spec.mount_module,
-                      spec.mount_path, NULL, mount_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-    memcpy(root_fh, ctx.fh, ctx.fh_len);
-    root_fh_len = ctx.fh_len;
-
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, root_fh, root_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-    root_handle = ctx.handle;
+    root_handle = mount_root(&ctx, &cred, &spec, root_fh, &root_fh_len);
 
     create_file(&ctx, &cred, root_handle, "f");
     f_handle = ctx.handle;
@@ -484,6 +588,230 @@ main(
     TEST_PASS("owner SID without an explicit DACL keeps the mode-derived ACL");
 
     chimera_vfs_release(ctx.vfs_thread, g_handle);
+
+    /* --- 5. the chown gate treats a SID as the companion of its numeric
+     *        identity: the owner may attach, restate or clear one but not
+     *        replace it, and a non-owner may name one only with WRITE_OWNER
+     *        and only alongside a uid it is taking to itself --- */
+    create_file(&ctx, &cred, root_handle, "h");
+    h_handle = ctx.handle;
+
+    memset(acl_storage, 0, sizeof(acl_storage));
+    acl->num_aces            = 1;
+    acl->ctrl_flags          = CHIMERA_ACL_CTRL_PROTECTED;
+    acl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+    acl->aces[0].flags       = 0;
+    acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA;
+    acl->aces[0].who.type    = CHIMERA_PRINCIPAL_USER;
+    acl->aces[0].who.id      = 1000;
+
+    /* attach: the object has no SID yet, and the owner saves a DACL that
+     * names its own SID alongside (the SMB AD flow) */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_acl       = acl;
+    sattr.va_owner_sid = &owner_sid;
+    assert(setattr_status(&ctx, &owner_cred, &sattr) == CHIMERA_VFS_OK);
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_uid == 1000);
+    assert(ctx.got_mask & CHIMERA_VFS_ATTR_OWNER_SID);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+
+    /* restate: not a chown.  (sattr is rebuilt before every call: a backend
+     * rewrites the caller's va_set_mask to what it applied.) */
+    acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA;
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_acl       = acl;
+    sattr.va_owner_sid = &owner_sid;
+    assert(setattr_status(&ctx, &owner_cred, &sattr) == CHIMERA_VFS_OK);
+
+    /* replace: a different owner SID is an ownership change the owner may
+     * not make; nothing of the refused set is applied */
+    acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA |
+        CHIMERA_ACE_EXECUTE;
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_acl       = acl;
+    sattr.va_owner_sid = &opaque_sid;
+    assert(setattr_status(&ctx, &owner_cred, &sattr) == CHIMERA_VFS_EPERM);
+    do_getattr(&ctx, &cred);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+    assert(got_acl->num_aces == 1);
+    assert(got_acl->aces[0].access_mask == CHIMERA_ACE_READ_DATA);
+
+    /* a non-owner without WRITE_OWNER may not name a SID at all -- this
+     * used to be dispatched to the backend unchecked */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_owner_sid = &opaque_sid;
+    assert(setattr_status(&ctx, &other_cred, &sattr) == CHIMERA_VFS_EPERM);
+    do_getattr(&ctx, &cred);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+
+    /* clear: permitted to the owner */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_owner_sid = NULL;
+    assert(setattr_status(&ctx, &owner_cred, &sattr) == CHIMERA_VFS_OK);
+    do_getattr(&ctx, &cred);
+    assert(!(ctx.got_mask & CHIMERA_VFS_ATTR_OWNER_SID));
+
+    /* with WRITE_OWNER granted, the other user may take the object -- the
+     * SID alongside its own uid, never on its own */
+    memset(acl_storage, 0, sizeof(acl_storage));
+    acl->num_aces            = 2;
+    acl->ctrl_flags          = CHIMERA_ACL_CTRL_PROTECTED;
+    acl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+    acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA;
+    acl->aces[0].who.type    = CHIMERA_PRINCIPAL_USER;
+    acl->aces[0].who.id      = 1000;
+    acl->aces[1].type        = CHIMERA_ACE_ALLOWED;
+    acl->aces[1].access_mask = CHIMERA_ACE_WRITE_OWNER | CHIMERA_ACE_READ_ACL;
+    acl->aces[1].who.type    = CHIMERA_PRINCIPAL_USER;
+    acl->aces[1].who.id      = 2000;
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+    sattr.va_acl      = acl;
+    do_setattr(&ctx, &cred, &sattr);
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_owner_sid = &opaque_sid;
+    assert(setattr_status(&ctx, &other_cred, &sattr) == CHIMERA_VFS_EPERM);
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_uid       = 2000;
+    sattr.va_owner_sid = &opaque_sid;
+    assert(setattr_status(&ctx, &other_cred, &sattr) == CHIMERA_VFS_OK);
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_uid == 2000);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &opaque_sid));
+    TEST_PASS("the chown gate governs the SID as the companion of its identity");
+
+    /* --- 6. a shrinking truncate that also chowns drops the stale owner SID
+     *        like any other chown, and one that also sets an ACL and a SID
+     *        stores both (diskfs finished its truncate on a separate chain
+     *        that skipped the record steps) --- */
+    create_file(&ctx, &cred, root_handle, "t");
+    t_handle = ctx.handle;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+    sattr.va_size     = 65536; /* grow first: a shrink needs a size to shrink */
+    do_setattr(&ctx, &cred, &sattr);
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_uid       = 1000;
+    sattr.va_owner_sid = &owner_sid;
+    do_setattr(&ctx, &cred, &sattr);
+    do_getattr(&ctx, &cred);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_UID;
+    sattr.va_size     = 4096;
+    sattr.va_uid      = 1001;
+    do_setattr(&ctx, &cred, &sattr);
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_size == 4096);
+    assert(ctx.got_uid == 1001);
+    assert(!(ctx.got_mask & CHIMERA_VFS_ATTR_OWNER_SID));
+    assert(!chimera_sid_present(&ctx.got_owner_sid));
+
+    memset(acl_storage, 0, sizeof(acl_storage));
+    acl->num_aces            = 2;
+    acl->ctrl_flags          = CHIMERA_ACL_CTRL_PROTECTED;
+    acl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+    acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA;
+    acl->aces[0].who.type    = CHIMERA_PRINCIPAL_SID;
+    acl->aces[0].who.sid     = opaque_sid;
+    acl->aces[1].type        = CHIMERA_ACE_ALLOWED;
+    acl->aces[1].access_mask = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA;
+    acl->aces[1].who.type    = CHIMERA_PRINCIPAL_USER;
+    acl->aces[1].who.id      = 1000;
+    acl->aces[1].who.sid     = owner_sid;
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ACL |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_size      = 1024;
+    sattr.va_acl       = acl;
+    sattr.va_uid       = 1000;
+    sattr.va_owner_sid = &owner_sid;
+    do_setattr(&ctx, &cred, &sattr);
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_size == 1024);
+    assert(ctx.got_uid == 1000);
+    assert(ctx.got_mask & CHIMERA_VFS_ATTR_ACL);
+    assert(got_acl->num_aces == 2);
+    assert(memcmp(got_acl->aces, acl->aces, 2 * sizeof(struct chimera_ace)) == 0);
+    assert((ctx.got_mode & 0777) == (chimera_acl_to_mode(acl) & 0777));
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+    TEST_PASS("a shrinking truncate keeps SID and ACL coherence");
+
+    /* --- 7. everything stored comes back after a cold restart (memfs: after
+     *        a plain umount/mount) --- */
+    chimera_vfs_release(ctx.vfs_thread, h_handle);
+    chimera_vfs_release(ctx.vfs_thread, t_handle);
+    chimera_vfs_release(ctx.vfs_thread, root_handle);
+
+    chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    if (spec.persistent) {
+        cold_restart(&ctx, backend, session_dir, module_cfgs, &spec, &metrics);
+    }
+    root_handle = mount_root(&ctx, &cred, &spec, root_fh, &root_fh_len);
+
+    /* f: two SID-bearing ACEs, chowned to 1001 (owner SID dropped), group
+     * SID cleared explicitly */
+    open_child(&ctx, &cred, root_fh, root_fh_len, "f");
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_uid == 1001 && ctx.got_gid == 1000);
+    assert(!(ctx.got_mask & CHIMERA_VFS_ATTR_OWNER_SID));
+    assert(!(ctx.got_mask & CHIMERA_VFS_ATTR_GROUP_SID));
+    assert(got_acl->num_aces == 2);
+    assert(got_acl->ctrl_flags == CHIMERA_ACL_CTRL_PROTECTED);
+    assert(got_acl->aces[0].who.type == CHIMERA_PRINCIPAL_SID);
+    assert(chimera_sid_equal(&got_acl->aces[0].who.sid, &opaque_sid));
+    assert(got_acl->aces[1].who.id == 1000);
+    assert(chimera_sid_equal(&got_acl->aces[1].who.sid, &owner_sid));
+    chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+    /* g: an owner SID with no ACL record -- the mode-derived DACL must still
+     * be what comes back, so the SID record really is separate */
+    open_child(&ctx, &cred, root_fh, root_fh_len, "g");
+    do_getattr(&ctx, &cred);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+    assert(!(ctx.got_mask & CHIMERA_VFS_ATTR_GROUP_SID));
+    assert((ctx.got_mode & 0777) == 0600);
+    assert(got_acl->num_aces >= 3);
+    assert(chimera_acl_to_mode(got_acl) == 0600);
+    chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+    /* h: taken over by uid 2000 with the opaque SID as its companion */
+    open_child(&ctx, &cred, root_fh, root_fh_len, "h");
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_uid == 2000);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &opaque_sid));
+    assert(got_acl->num_aces == 2);
+    chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+    /* t: the truncate-and-set state */
+    open_child(&ctx, &cred, root_fh, root_fh_len, "t");
+    do_getattr(&ctx, &cred);
+    assert(ctx.got_size == 1024);
+    assert(ctx.got_uid == 1000);
+    assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
+    assert(got_acl->num_aces == 2);
+    assert(memcmp(got_acl->aces, acl->aces, 2 * sizeof(struct chimera_ace)) == 0);
+    chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+    TEST_PASS(spec.persistent ? "SIDs and ACLs survive a cold restart"
+                              : "SIDs and ACLs survive umount and mount");
+
     chimera_vfs_release(ctx.vfs_thread, root_handle);
 
     chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, &ctx);
@@ -507,6 +835,11 @@ main(
     chimera_vfs_destroy(ctx.vfs);
     evpl_destroy(ctx.evpl);
     prometheus_metrics_destroy(metrics);
+
+    snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", session_dir);
+    if (system(rmcmd) != 0) {
+        fprintf(stderr, "warning: could not remove %s\n", session_dir);
+    }
 
     fprintf(stderr, "All native-SID round-trip tests passed on %s\n", backend);
     return 0;
