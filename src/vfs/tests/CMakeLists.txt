@@ -119,6 +119,15 @@ add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)
 # zero_range reproducer / regression: VFS zero_range (DEALLOCATE+ALLOCATE) data
 # integrity, parameterized by backend.  memfs/linux confirm the invariant holds
 # (and that the model checker is sound); the diskfs cases reproduce the bug.
+# The VFS compound executor: sequence chaining, one callback, and the
+# stop-at-first-failure rule.  memfs only -- what is under test is the
+# executor, not any backend.
+add_executable(vfs_compound_test vfs_compound_test.c)
+target_link_libraries(vfs_compound_test chimera_vfs chimera_vfs_memfs
+    chimera_vfs_memkv evpl)
+add_test(NAME chimera/vfs/compound COMMAND vfs_compound_test)
+set_tests_properties(chimera/vfs/compound PROPERTIES LABELS "vfs" TIMEOUT 60)
+
 add_executable(vfs_zerorange_test vfs_zerorange_test.c)
 target_link_libraries(vfs_zerorange_test chimera_vfs chimera_vfs_memfs
     chimera_vfs_diskfs chimera_vfs_memkv evpl)
