@@ -3192,6 +3192,8 @@ chimera_smb_create_park_deadline_cb(
 
     (void) evpl;
 
+    chimera_smb_create_break_waiter_retire(request);
+
     /* No ack arrived for the whole break deadline, so the holder is revoked and
      * this open completes anyway (MS-SMB2 break timeout).  Info, not error: a
      * client is entitled not to ack, and smb2.lease.v2_complex1 and
@@ -3277,9 +3279,10 @@ chimera_smb_create_open_finish(
         thread->vfs_thread->vfs->vfs_state;
     bool                              will_park = false;
 
-    request->create.r_open_file       = open_file;
-    request->create.dir_break_pending = 0;
-    request->create.park_on_notify    = 0;
+    request->create.r_open_file          = open_file;
+    request->create.dir_break_pending    = 0;
+    request->create.park_on_notify       = 0;
+    request->create.break_waiter_counted = 0;
 
     open_file->granted_access = request->create.r_granted_access;
     open_file->maximal_access = request->create.r_maximal_access;
@@ -3435,6 +3438,11 @@ chimera_smb_create_open_finish(
             open_file->flags |= CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
         }
         chimera_smb_async_interim_begin(request);
+
+        /* Count this park on the file's claim state: it is what tells the claim
+         * layer that an opener is blocked on this break, which is the signal a
+         * mid-break channel loss has to be resolved against. */
+        chimera_smb_create_break_waiter_register(request);
 
         /* A parked CREATE sends no reply until an ack settles the break, so
          * from outside it is indistinguishable from a lost request.  Say so at
@@ -3599,6 +3607,7 @@ chimera_smb_create_resume_parked_conn(
             *pp                  = req->async.park_next;
             req->async.park_next = resume;
             req->async.armed     = 0; /* already unlinked; skip re-cancel */
+            chimera_smb_create_break_waiter_retire(req);
             /* Cancel the break-deadline timer so it cannot fire after the open
              * has been completed here. */
             evpl_remove_timer(thread->evpl, &req->async.timer);
@@ -5100,10 +5109,11 @@ chimera_smb_create(struct chimera_smb_request *request)
     enum chimera_smb_pipe_magic   pipe_magic;
     chimera_smb_pipe_transceive_t transceive;
 
-    request->create.has_stream          = 0;
-    request->create.explicit_data_fork  = 0;
-    request->create.explicit_index_fork = 0;
-    request->create.base_oh             = NULL;
+    request->create.has_stream           = 0;
+    request->create.break_waiter_counted = 0;
+    request->create.explicit_data_fork   = 0;
+    request->create.explicit_index_fork  = 0;
+    request->create.base_oh              = NULL;
     /* Only the regular-file open path (open_at_callback) registers a finish
      * callback and may park on a batch-oplock break; clear it so the mkdir /
      * stream / pipe paths never inherit a stale callback and park. */
