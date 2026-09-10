@@ -8,6 +8,24 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
+/*
+ * Fill a SETXATTR4 result's change_info from the object's ctime either side of
+ * the change.  Shared by the per-op path below and by the VFS-compound path,
+ * which carries the same pair of ctimes back from the sequence.
+ */
+void
+chimera_nfs4_setxattr_fill(
+    struct SETXATTR4res   *res,
+    const struct timespec *pre_ctime,
+    const struct timespec *post_ctime)
+{
+    res->sxr_info.atomic = 1;
+    res->sxr_info.before = pre_ctime->tv_sec * 1000000000ULL +
+        pre_ctime->tv_nsec;
+    res->sxr_info.after = post_ctime->tv_sec * 1000000000ULL +
+        post_ctime->tv_nsec;
+} /* chimera_nfs4_setxattr_fill */
+
 static void
 chimera_nfs4_setxattr_complete(
     enum chimera_vfs_error          error_code,
@@ -19,12 +37,9 @@ chimera_nfs4_setxattr_complete(
     struct SETXATTR4res *res = &req->res_compound.resarray[req->index].opsetxattr;
 
     if (error_code == CHIMERA_VFS_OK) {
-        res->sxr_status      = NFS4_OK;
-        res->sxr_info.atomic = 1;
-        res->sxr_info.before = pre_attr->va_ctime.tv_sec * 1000000000ULL +
-            pre_attr->va_ctime.tv_nsec;
-        res->sxr_info.after = post_attr->va_ctime.tv_sec * 1000000000ULL +
-            post_attr->va_ctime.tv_nsec;
+        res->sxr_status = NFS4_OK;
+        chimera_nfs4_setxattr_fill(res, &pre_attr->va_ctime,
+                                   &post_attr->va_ctime);
     } else {
         res->sxr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
@@ -42,7 +57,6 @@ chimera_nfs4_setxattr_open_callback(
     struct nfs_request   *req  = private_data;
     struct SETXATTR4args *args = &req->args_compound->argarray[req->index].opsetxattr;
     struct SETXATTR4res  *res  = &req->res_compound.resarray[req->index].opsetxattr;
-    uint32_t              namecap;
     char                 *name;
     int                   namelen;
 
@@ -54,34 +68,15 @@ chimera_nfs4_setxattr_open_callback(
 
     req->handle = handle;
 
-    /* RFC 8276 carries the key without a namespace prefix; the VFS expects a
-     * fully-qualified "user." name.  Stage the prefixed name in the response
-     * dbuf, which outlives the async VFS op. */
-    if (args->sxa_key.len == 0) {
-        res->sxr_status = NFS4ERR_INVAL;
+    res->sxr_status = chimera_nfs4_xattr_stage_name(req, args->sxa_key.data,
+                                                    args->sxa_key.len,
+                                                    &name, &namelen);
+    if (res->sxr_status != NFS4_OK) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
         chimera_nfs4_compound_complete(req, res->sxr_status);
         return;
     }
 
-    namecap = CHIMERA_VFS_XATTR_USER_PREFIX_LEN + args->sxa_key.len;
-    name    = xdr_dbuf_alloc_space(namecap, req->encoding->dbuf);
-    if (!name) {
-        res->sxr_status = NFS4ERR_RESOURCE;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        chimera_nfs4_compound_complete(req, res->sxr_status);
-        return;
-    }
-
-    namelen = chimera_vfs_xattr_build_user(name, namecap,
-                                           args->sxa_key.data,
-                                           args->sxa_key.len);
-    if (namelen < 0) {
-        res->sxr_status = NFS4ERR_NAMETOOLONG;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        chimera_nfs4_compound_complete(req, res->sxr_status);
-        return;
-    }
     chimera_vfs_set_xattr(req->thread->vfs_thread, &req->cred,
                           handle,
                           args->sxa_option,

@@ -38,6 +38,14 @@
  * ones resolved.  Ops that ran carry their own status and results; ops after
  * the failure did not run and are left CHIMERA_VFS_UNSET.
  *
+ * MUTATION.  Most ops here are read-only, but SETXATTR and REMOVEXATTR are not.
+ * Stopping at a failure therefore leaves the mutations of the ops that already
+ * ran applied: a sequence is not a transaction and is not rolled back.  That is
+ * exactly what the op-at-a-time path does with the same sequence of calls -- the
+ * ops are the same ops -- and it is the only behaviour available while nothing
+ * retries, which nothing does yet.  A caller that needs all-or-nothing wants the
+ * VFS transaction API, not this.
+ *
  * PARKING.  An op that must wait -- for a lease break, for a peer's ack --
  * parks exactly as it would outside a sequence.  The sequence simply does not
  * advance until it completes.  Nothing is held that would not otherwise be
@@ -62,10 +70,64 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_GETFH,
     /* The current object's symlink target. */
     CHIMERA_VFS_COMPOUND_OP_READLINK,
+    /* Copy the current object into the SAVED slot, and put the SAVED slot back
+     * as the current object.  Neither touches a backend.  The saved slot holds
+     * a file handle only, never an open handle -- see the note in
+     * vfs_compound.c on why the handle cache is not shared between slots. */
+    CHIMERA_VFS_COMPOUND_OP_SAVEFH,
+    CHIMERA_VFS_COMPOUND_OP_RESTOREFH,
+    /* The parent of the current object; the parent becomes current.  Expressed
+     * as a lookup of ".." through the current object opened as a directory,
+     * which is what resolves a parent on every backend -- the native ones
+     * understand ".." directly, the passthroughs reach it through the open
+     * directory.  (chimera_vfs_getparent is a different thing: it needs
+     * CHIMERA_VFS_CAP_RPL and answers with a parent *and the name*, which is a
+     * reverse-path-lookup service, not this.) */
+    CHIMERA_VFS_COMPOUND_OP_LOOKUPP,
+    /* Flush a byte range of the current object to stable storage. */
+    CHIMERA_VFS_COMPOUND_OP_COMMIT,
+    /* One page of the current object's directory entries. */
+    CHIMERA_VFS_COMPOUND_OP_READDIR,
+    /* Extended attributes of the current object.  SETXATTR and REMOVEXATTR
+     * MUTATE -- see the MUTATION note above. */
+    CHIMERA_VFS_COMPOUND_OP_GETXATTR,
+    CHIMERA_VFS_COMPOUND_OP_SETXATTR,
+    CHIMERA_VFS_COMPOUND_OP_LISTXATTRS,
+    CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR,
 };
 
 #define CHIMERA_VFS_COMPOUND_MAX_OPS  32
 #define CHIMERA_VFS_COMPOUND_NAME_MAX 255
+
+/*
+ * A READDIR's result is a page, not the whole directory: the caller says how
+ * many entries it can use, the executor keeps that many and stops the
+ * enumeration there -- reporting eof=0 and the cookie of the first entry it
+ * refused, exactly as it would for any caller that stopped early.  A caller
+ * wanting more issues another READDIR from that cookie.
+ *
+ * The budget is a count rather than a byte size because the entries are fixed
+ * size (an inline name plus a copied attribute set, ~730 bytes each): a caller
+ * whose own limit is in bytes divides by the least an entry can cost it, which
+ * is the only bound it can compute before it has marshalled anything.
+ *
+ * CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES is the ceiling on that budget, and
+ * so on what one page can cost: ~370KB at the ceiling, but allocated only for a
+ * READDIR and only for as many entries as that READDIR asked for -- a caller
+ * whose reply holds 32 entries pays for 32.
+ */
+#define CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES 512
+
+struct chimera_vfs_compound_dirent {
+    uint64_t                 inum;
+    uint64_t                 cookie;
+    uint32_t                 name_len;
+    char                     name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    /* As for every other attribute result here, va_acl is NULL and the ACL bit
+     * is clear: the backend owns the ACL only for the duration of the entry
+     * callback. */
+    struct chimera_vfs_attrs attr;
+};
 
 struct chimera_vfs_compound_op {
     uint8_t                type;
@@ -79,6 +141,17 @@ struct chimera_vfs_compound_op {
     uint32_t               name_len;
     uint64_t               attr_mask;
     uint32_t               requested;
+    uint64_t               offset;      /* COMMIT                             */
+    uint64_t               count;       /* COMMIT                             */
+    uint64_t               cookie;      /* READDIR, LISTXATTRS                */
+    uint64_t               verifier;    /* READDIR                            */
+    uint32_t               dircount;    /* READDIR (advisory; see the adder)  */
+    uint32_t               maxcount;    /* READDIR (advisory; see the adder)  */
+    uint32_t               max_entries; /* READDIR                            */
+    uint32_t               xattr_option; /* SETXATTR                          */
+    const void            *xattr_value; /* SETXATTR (borrowed from caller)    */
+    uint32_t               xattr_value_len;
+    uint32_t               buffer_max;  /* GETXATTR, LISTXATTRS               */
 
     /* ---- results ---- */
     /* LOOKUP, GETATTR, ACCESS.  va_acl is always NULL here and the ACL bit is
@@ -98,6 +171,28 @@ struct chimera_vfs_compound_op {
     uint32_t                 granted;   /* ACCESS                            */
     char                    *target;    /* READLINK (owned by the compound)  */
     uint32_t                 target_len;
+
+    /* SETXATTR, REMOVEXATTR.  Only the ctime is kept: it is the whole of what
+     * a change_info reply needs, and keeping two more attribute sets per op
+     * would double the size of a sequence for one field. */
+    struct timespec          pre_ctime;
+    struct timespec          post_ctime;
+
+    /* READDIR.  `entries` is allocated on demand and owned by the compound. */
+    struct chimera_vfs_compound_dirent *entries;
+    uint32_t                            num_entries;
+    /* READDIR and LISTXATTRS: whether the enumeration reached the end, and the
+     * cookie to resume it from, as the backend reported them when it stopped.
+     * r_verifier is the directory's verifier (READDIR only). */
+    uint32_t                            eof;
+    uint64_t                            r_cookie;
+    uint64_t                            r_verifier;
+
+    /* GETXATTR (value), LISTXATTRS (back-to-back NUL-terminated names).  Owned
+     * by the compound, buffer_max bytes, valid until it is freed. */
+    void                               *buffer;
+    uint32_t                            buffer_len;
+    uint32_t                            buffer_count;  /* LISTXATTRS: names   */
 };
 
 typedef void (*chimera_vfs_compound_callback_t)(
@@ -144,6 +239,80 @@ chimera_vfs_compound_add_getfh(
 int
 chimera_vfs_compound_add_readlink(
     struct chimera_vfs_compound *compound);
+
+int
+chimera_vfs_compound_add_savefh(
+    struct chimera_vfs_compound *compound);
+
+/* Fails with CHIMERA_VFS_EINVAL at execution time when nothing was saved.  A
+ * caller whose protocol distinguishes that case (NFS4ERR_RESTOREFH) should
+ * check for itself that the sequence saves before it restores. */
+int
+chimera_vfs_compound_add_restorefh(
+    struct chimera_vfs_compound *compound);
+
+int
+chimera_vfs_compound_add_lookupp(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     attr_mask);
+
+/* `pre_attr_mask` is fetched against the object before the flush, so a caller
+ * that must classify what it just committed does not need a separate getattr. */
+int
+chimera_vfs_compound_add_commit(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     offset,
+    uint64_t                     count,
+    uint64_t                     pre_attr_mask);
+
+/* One page of entries from `cookie`, at most `max_entries` of them (0 to
+ * CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES; larger is refused).  `dircount` and
+ * `maxcount` are the caller's own byte budgets: the executor records them for
+ * the caller's benefit but does not enforce them -- it cannot know what an
+ * entry will cost once the caller has marshalled it -- so the caller applies
+ * them to the entry list it gets back and, if it stops earlier than the
+ * executor did, reports that entry's cookie rather than `r_cookie`. */
+int
+chimera_vfs_compound_add_readdir(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     cookie,
+    uint64_t                     verifier,
+    uint32_t                     dircount,
+    uint32_t                     maxcount,
+    uint32_t                     max_entries,
+    uint64_t                     attr_mask);
+
+/* `name` is the fully-qualified xattr name ("user.foo"), as the VFS xattr calls
+ * take it.  `value` must outlive the submission; the compound copies neither it
+ * nor, for GETXATTR/LISTXATTRS, the answer's destination -- it allocates and
+ * owns that (op->buffer). */
+int
+chimera_vfs_compound_add_getxattr(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen,
+    uint32_t                     value_max);
+
+int
+chimera_vfs_compound_add_setxattr(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     option,
+    const char                  *name,
+    int                          namelen,
+    const void                  *value,
+    uint32_t                     value_len);
+
+int
+chimera_vfs_compound_add_listxattrs(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     cookie,
+    uint32_t                     max_bytes);
+
+int
+chimera_vfs_compound_add_removexattr(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen);
 
 /* Execute the sequence.  The callback fires exactly once, on the submitting
  * thread, when execution has stopped -- because every op ran or because one

@@ -8,7 +8,14 @@
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_mount_table.h"
 
-static bool
+/*
+ * True iff `fh` is the root of a mounted share.  Such a handle is an export
+ * root in the NFSv4 namespace, so LOOKUPP from it must answer with the
+ * namespace root rather than the backend's physical parent -- which is why the
+ * VFS-compound path (nfs4_compound_vfs.c) asks this before encoding a LOOKUPP
+ * and refuses when it is true.
+ */
+bool
 chimera_nfs4_fh_is_vfs_mount_root(
     struct chimera_vfs *vfs,
     const uint8_t      *fh,

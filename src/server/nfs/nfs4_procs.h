@@ -256,6 +256,85 @@ chimera_nfs4_putfh_check_stale(
     const uint8_t                  *fh,
     int                             fhlen);
 
+bool
+chimera_nfs4_fh_is_vfs_mount_root(
+    struct chimera_vfs *vfs,
+    const uint8_t      *fh,
+    uint32_t            fhlen);
+
+void
+chimera_nfs4_savefh_apply(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    int                 fhlen);
+
+void
+chimera_nfs4_restorefh_apply(
+    struct nfs_request *req);
+
+nfsstat4
+chimera_nfs4_commit_fill(
+    struct nfs_request             *req,
+    struct COMMIT4res              *res,
+    const struct chimera_vfs_attrs *pre_attr);
+
+int
+chimera_nfs4_readdir_entry_fill(
+    struct nfs_request             *req,
+    struct READDIR4args            *args,
+    struct nfs_nfs4_readdir_cursor *cursor,
+    const uint8_t                  *dir_fh,
+    int                             dir_fhlen,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs);
+
+/* The most a GETXATTR value may occupy in the reply (RFC 8276 leaves the bound
+ * to the server). */
+#define CHIMERA_NFS4_GETXATTR_MAX 65536
+
+nfsstat4
+chimera_nfs4_xattr_stage_name(
+    struct nfs_request *req,
+    const void         *wire_name,
+    uint32_t            wire_len,
+    char              **name,
+    int                *namelen);
+
+uint32_t
+chimera_nfs4_xattr_stage_max(
+    struct nfs_request *req,
+    uint32_t            cap);
+
+nfsstat4
+chimera_nfs4_getxattr_fill(
+    struct nfs_request  *req,
+    struct GETXATTR4res *res,
+    const void          *value,
+    uint32_t             value_len);
+
+void
+chimera_nfs4_setxattr_fill(
+    struct SETXATTR4res   *res,
+    const struct timespec *pre_ctime,
+    const struct timespec *post_ctime);
+
+void
+chimera_nfs4_removexattr_fill(
+    struct REMOVEXATTR4res *res,
+    const struct timespec  *pre_ctime,
+    const struct timespec  *post_ctime);
+
+nfsstat4
+chimera_nfs4_listxattrs_fill(
+    struct nfs_request    *req,
+    struct LISTXATTRS4res *res,
+    const char            *names,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie);
+
 /*
  * Per-export read-only policy for one operation, as the compound dispatcher
  * applies it.  Only call after nfs4_op_check_minor has accepted the op.
