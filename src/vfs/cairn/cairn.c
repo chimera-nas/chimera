@@ -985,12 +985,10 @@ cairn_load_acl(
  */
 /*
  * Native owner / group SID record (CAIRN_KEY_SID): the SID companions to the
- * inode's uid / gid.  Value layout: u8 owner_len, owner bytes, u8 group_len,
- * group bytes; a zero length means none is known.  The record is absent when
- * neither SID is known.
+ * inode's uid / gid, in the pair record format shared with diskfs
+ * (chimera_sid_pair_encode / chimera_sid_pair_decode, vfs_sid.h).  The record
+ * is absent when neither SID is known.
  */
-#define CAIRN_SID_REC_MAX (2 + 2 * CHIMERA_SID_MAX_LEN)
-
 static inline void
 cairn_remove_sids(
     struct cairn_thread *thread,
@@ -1017,23 +1015,14 @@ cairn_put_sids(
     rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
     char                  *err = NULL;
     struct cairn_sid_key   key;
-    uint8_t                buf[CAIRN_SID_REC_MAX];
-    int                    len = 0;
+    uint8_t                buf[CHIMERA_SID_PAIR_MAX];
+    int                    len = chimera_sid_pair_encode(owner, group, buf,
+                                                         sizeof(buf));
 
-    if (!chimera_sid_present(owner) && !chimera_sid_present(group)) {
+    if (len <= 0) {
+        /* Neither SID present: no record should exist. */
         cairn_remove_sids(thread, inum);
         return;
-    }
-
-    buf[len++] = chimera_sid_present(owner) ? owner->len : 0;
-    if (chimera_sid_present(owner)) {
-        memcpy(buf + len, owner->data, owner->len);
-        len += owner->len;
-    }
-    buf[len++] = chimera_sid_present(group) ? group->len : 0;
-    if (chimera_sid_present(group)) {
-        memcpy(buf + len, group->data, group->len);
-        len += group->len;
     }
 
     key.keytype = CAIRN_KEY_SID;
@@ -1062,8 +1051,9 @@ cairn_load_sids(
     size_t                   len;
     int                      found = 0;
 
-    owner->len = 0;
-    group->len = 0;
+    /* Both outputs are fully defined whether or not a record exists. */
+    memset(owner, 0, sizeof(*owner));
+    memset(group, 0, sizeof(*group));
 
     key.keytype = CAIRN_KEY_SID;
     key.inum    = inum;
@@ -1073,26 +1063,14 @@ cairn_load_sids(
 
     if (slice) {
         blob = (const uint8_t *) rocksdb_pinnableslice_value(slice, &len);
-        if (len >= 1) {
-            uint8_t olen = blob[0];
-
-            if (olen && 1 + olen <= len &&
-                chimera_sid_from_bin(owner, blob + 1, olen) == (int) olen &&
-                1 + olen < len) {
-                uint8_t glen = blob[1 + olen];
-
-                if (glen && 2 + olen + glen <= len) {
-                    chimera_sid_from_bin(group, blob + 2 + olen, glen);
-                }
-            } else if (!olen && len >= 2) {
-                uint8_t glen = blob[1];
-
-                if (glen && 2 + glen <= len) {
-                    chimera_sid_from_bin(group, blob + 2, glen);
-                }
-            }
-            found = 1;
+        /* A record longer than the codec's maximum is corrupt past the point
+         * the decoder reads; clamp so the length fits an int and let the
+         * decoder ignore the tail. */
+        if (len > CHIMERA_SID_PAIR_MAX) {
+            len = CHIMERA_SID_PAIR_MAX;
         }
+        chimera_sid_pair_decode(blob, (int) len, owner, group);
+        found = 1;
         rocksdb_pinnableslice_destroy(slice);
     }
 

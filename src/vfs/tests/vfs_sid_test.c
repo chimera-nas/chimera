@@ -170,6 +170,94 @@ test_absent_and_equal(void)
     TEST_PASS("len 0 is the absent state; equality compares bytes");
 } /* test_absent_and_equal */
 
+/* The owner/group pair record the native backends persist (cairn and diskfs
+ * share this codec): every case leaves both outputs fully defined. */
+static void
+test_pair_codec(void)
+{
+    struct chimera_sid owner, group, o2, g2, none;
+    uint8_t            rec[CHIMERA_SID_PAIR_MAX];
+    uint8_t            big[CHIMERA_SID_PAIR_MAX + 16];
+    int                len;
+
+    memset(&none, 0, sizeof(none));
+    assert(chimera_sid_from_str(&owner, "S-1-5-21-1-2-3-1001") == 0);
+    assert(chimera_sid_from_str(&group, "S-1-5-21-1-2-3-513") == 0);
+
+    /* Both present: round trip byte for byte. */
+    len = chimera_sid_pair_encode(&owner, &group, rec, sizeof(rec));
+    assert(len == 2 + (int) owner.len + (int) group.len);
+    memset(&o2, 0xa5, sizeof(o2));
+    memset(&g2, 0xa5, sizeof(g2));
+    assert(chimera_sid_pair_decode(rec, len, &o2, &g2) == 0);
+    assert(memcmp(&o2, &owner, sizeof(owner)) == 0);
+    assert(memcmp(&g2, &group, sizeof(group)) == 0);
+
+    /* Owner only: the record ends with a zero group length. */
+    len = chimera_sid_pair_encode(&owner, NULL, rec, sizeof(rec));
+    assert(len == 2 + (int) owner.len);
+    assert(rec[len - 1] == 0);
+    assert(chimera_sid_pair_decode(rec, len, &o2, &g2) == 0);
+    assert(memcmp(&o2, &owner, sizeof(owner)) == 0);
+    assert(memcmp(&g2, &none, sizeof(none)) == 0);
+
+    /* Owner only, record cut right after the owner (no group length byte). */
+    assert(chimera_sid_pair_decode(rec, len - 1, &o2, &g2) == 0);
+    assert(memcmp(&o2, &owner, sizeof(owner)) == 0);
+    assert(memcmp(&g2, &none, sizeof(none)) == 0);
+
+    /* Group only: a zero owner length, then the group. */
+    len = chimera_sid_pair_encode(&none, &group, rec, sizeof(rec));
+    assert(len == 2 + (int) group.len);
+    assert(rec[0] == 0);
+    assert(chimera_sid_pair_decode(rec, len, &o2, &g2) == 0);
+    assert(memcmp(&o2, &none, sizeof(none)) == 0);
+    assert(memcmp(&g2, &group, sizeof(group)) == 0);
+
+    /* Neither present: nothing to store.  Too small a buffer: refused. */
+    assert(chimera_sid_pair_encode(NULL, NULL, rec, sizeof(rec)) == 0);
+    assert(chimera_sid_pair_encode(&none, &none, rec, sizeof(rec)) == 0);
+    assert(chimera_sid_pair_encode(&owner, &group, rec, 1) == -1);
+    assert(chimera_sid_pair_encode(&owner, &group, rec,
+                                   1 + owner.len + group.len) == -1);
+
+    /* Absent record: both outputs absent, not an error. */
+    memset(&o2, 0xa5, sizeof(o2));
+    memset(&g2, 0xa5, sizeof(g2));
+    assert(chimera_sid_pair_decode(NULL, 0, &o2, &g2) == 0);
+    assert(memcmp(&o2, &none, sizeof(none)) == 0);
+    assert(memcmp(&g2, &none, sizeof(none)) == 0);
+    rec[0] = 0;
+    assert(chimera_sid_pair_decode(rec, 1, &o2, &g2) == 0);
+    assert(memcmp(&o2, &none, sizeof(none)) == 0);
+
+    /* Corrupt owner, valid group: the group is still reachable and comes
+    * back; the owner is absent, and the record is reported malformed. */
+    len    = chimera_sid_pair_encode(&owner, &group, rec, sizeof(rec));
+    rec[2] = CHIMERA_SID_MAX_SUB_AUTHS + 1; /* owner's sub-authority count */
+    memset(&o2, 0xa5, sizeof(o2));
+    assert(chimera_sid_pair_decode(rec, len, &o2, &g2) == -1);
+    assert(memcmp(&o2, &none, sizeof(none)) == 0);
+    assert(memcmp(&g2, &group, sizeof(group)) == 0);
+
+    /* Owner length past the end of the record: nothing is reachable. */
+    len    = chimera_sid_pair_encode(&owner, &group, rec, sizeof(rec));
+    rec[0] = (uint8_t) (len + 5);
+    memset(&g2, 0xa5, sizeof(g2));
+    assert(chimera_sid_pair_decode(rec, len, &o2, &g2) == -1);
+    assert(memcmp(&o2, &none, sizeof(none)) == 0);
+    assert(memcmp(&g2, &none, sizeof(none)) == 0);
+
+    /* Trailing bytes after the group are ignored. */
+    len = chimera_sid_pair_encode(&owner, &group, big, sizeof(big));
+    memset(big + len, 0xee, sizeof(big) - len);
+    assert(chimera_sid_pair_decode(big, (int) sizeof(big), &o2, &g2) == 0);
+    assert(memcmp(&o2, &owner, sizeof(owner)) == 0);
+    assert(memcmp(&g2, &group, sizeof(group)) == 0);
+
+    TEST_PASS("owner/group pair record round-trips and stays defined");
+} /* test_pair_codec */
+
 int
 main(
     int    argc,
@@ -180,6 +268,7 @@ main(
     test_max_sub_auths();
     test_bad_input();
     test_absent_and_equal();
+    test_pair_codec();
 
     fprintf(stderr, "All SID codec tests passed\n");
     return 0;

@@ -226,3 +226,88 @@ chimera_sid_from_str(
     sid->len = (uint8_t) len;
     return 0;
 } /* chimera_sid_from_str */
+
+SYMBOL_EXPORT int
+chimera_sid_pair_encode(
+    const struct chimera_sid *owner,
+    const struct chimera_sid *group,
+    uint8_t                  *out,
+    int                       outcap)
+{
+    int have_owner = chimera_sid_present(owner);
+    int have_group = chimera_sid_present(group);
+    int need       = 2 + (have_owner ? owner->len : 0) +
+        (have_group ? group->len : 0);
+    int pos = 0;
+
+    if (!have_owner && !have_group) {
+        return 0;
+    }
+    if (outcap < need) {
+        return -1;
+    }
+
+    out[pos++] = have_owner ? owner->len : 0;
+    if (have_owner) {
+        memcpy(out + pos, owner->data, owner->len);
+        pos += owner->len;
+    }
+    out[pos++] = have_group ? group->len : 0;
+    if (have_group) {
+        memcpy(out + pos, group->data, group->len);
+        pos += group->len;
+    }
+    return pos;
+} /* chimera_sid_pair_encode */
+
+SYMBOL_EXPORT int
+chimera_sid_pair_decode(
+    const uint8_t      *buf,
+    int                 len,
+    struct chimera_sid *owner,
+    struct chimera_sid *group)
+{
+    int     pos = 0;
+    int     rc  = 0;
+    uint8_t olen, glen;
+
+    memset(owner, 0, sizeof(*owner));
+    memset(group, 0, sizeof(*group));
+
+    if (!buf || len < 2) {
+        return 0;
+    }
+
+    olen = buf[pos++];
+    if (olen) {
+        if (pos + olen > len) {
+            /* The owner length runs past the record: the group SID cannot
+             * be located either. */
+            return -1;
+        }
+        /* from_bin returns the SID's own length; a stored length that does
+         * not agree with it is a malformed record, not a shorter SID. */
+        if (chimera_sid_from_bin(owner, buf + pos, olen) != (int) olen) {
+            memset(owner, 0, sizeof(*owner));
+            rc = -1;
+        }
+        pos += olen;
+    }
+
+    if (pos >= len) {
+        /* Owner only (or the record ends right after the owner). */
+        return rc;
+    }
+
+    glen = buf[pos++];
+    if (glen) {
+        if (pos + glen > len) {
+            return -1;
+        }
+        if (chimera_sid_from_bin(group, buf + pos, glen) != (int) glen) {
+            memset(group, 0, sizeof(*group));
+            rc = -1;
+        }
+    }
+    return rc;
+} /* chimera_sid_pair_decode */

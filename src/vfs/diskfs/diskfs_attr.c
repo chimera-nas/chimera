@@ -373,69 +373,8 @@ diskfs_acl_serial_install(
 } /* diskfs_acl_serial_install */
 
 
-/*
- * Native owner / group SID record codec (DISKFS_REC_SID): u8 owner_len,
- * owner bytes, u8 group_len, group bytes; a zero length means unknown.
- * Encode returns the record length, or -1 when neither SID is present (then
- * no record should exist).  Decode clears whichever SID is not recorded.
- */
-int
-diskfs_sid_rec_encode(
-    const struct chimera_sid *owner,
-    const struct chimera_sid *group,
-    uint8_t                  *buf)
-{
-    int len = 0;
-
-    if (!chimera_sid_present(owner) && !chimera_sid_present(group)) {
-        return -1;
-    }
-    buf[len++] = chimera_sid_present(owner) ? owner->len : 0;
-    if (chimera_sid_present(owner)) {
-        memcpy(buf + len, owner->data, owner->len);
-        len += owner->len;
-    }
-    buf[len++] = chimera_sid_present(group) ? group->len : 0;
-    if (chimera_sid_present(group)) {
-        memcpy(buf + len, group->data, group->len);
-        len += group->len;
-    }
-    return len;
-} /* diskfs_sid_rec_encode */
-
-void
-diskfs_sid_rec_decode(
-    const uint8_t      *serial,
-    uint32_t            len,
-    struct chimera_sid *owner,
-    struct chimera_sid *group)
-{
-    uint32_t pos = 0;
-    uint8_t  olen, glen;
-
-    owner->len = 0;
-    group->len = 0;
-
-    if (!serial || len < 2) {
-        return;
-    }
-    olen = serial[pos++];
-    if (olen) {
-        if (pos + olen > len ||
-            chimera_sid_from_bin(owner, serial + pos, olen) != (int) olen) {
-            owner->len = 0;
-            return;
-        }
-        pos += olen;
-    }
-    if (pos >= len) {
-        return;
-    }
-    glen = serial[pos++];
-    if (glen && pos + glen <= len) {
-        chimera_sid_from_bin(group, serial + pos, glen);
-    }
-} /* diskfs_sid_rec_decode */
+/* The DISKFS_REC_SID record is the owner / group SID pair record shared with
+ * cairn: chimera_sid_pair_encode / chimera_sid_pair_decode (vfs_sid.h). */
 
 /* Replace inode->sid_serial (mirror of the DISKFS_REC_SID record) with a
  * copy of serial[0..len), or clear it when len < 0.  Caller holds the inode
@@ -467,7 +406,7 @@ diskfs_sid_decode_into(
     static __thread struct chimera_sid owner;
     static __thread struct chimera_sid group;
 
-    diskfs_sid_rec_decode(serial, len, &owner, &group);
+    chimera_sid_pair_decode(serial, (int) len, &owner, &group);
 
     if ((attr->va_req_mask & CHIMERA_VFS_ATTR_OWNER_SID) && owner.len) {
         attr->va_owner_sid = &owner;
@@ -1205,8 +1144,8 @@ diskfs_setattr_records(struct chimera_vfs_request *request)
         int                had     = inode->sid_serial != NULL;
         int                changed = 0;
 
-        diskfs_sid_rec_decode(inode->sid_serial, inode->sid_serial_len,
-                              &owner, &group);
+        chimera_sid_pair_decode(inode->sid_serial, (int) inode->sid_serial_len,
+                                &owner, &group);
 
         if (mask & CHIMERA_VFS_ATTR_OWNER_SID) {
             if (chimera_sid_present(sa->va_owner_sid)) {
@@ -1235,15 +1174,21 @@ diskfs_setattr_records(struct chimera_vfs_request *request)
         }
 
         if (changed) {
-            uint8_t rec[DISKFS_SID_REC_MAX];
-            int     len = diskfs_sid_rec_encode(&owner, &group, rec);
+            uint8_t rec[CHIMERA_SID_PAIR_MAX];
+            int     len = chimera_sid_pair_encode(&owner, &group, rec,
+                                                  sizeof(rec));
 
-            diskfs_sid_serial_install(inode, rec, len);
-            if (len >= 0) {
+            /* 0 means neither SID is present: no record should exist, so the
+             * mirror is cleared rather than set to an empty record. */
+            if (len > 0) {
+                diskfs_sid_serial_install(inode, rec, len);
                 p->sid_action = had ? DISKFS_SID_ACTION_REPLACE
                                     : DISKFS_SID_ACTION_INSERT;
-            } else if (had) {
-                p->sid_action = DISKFS_SID_ACTION_REMOVE;
+            } else {
+                diskfs_sid_serial_install(inode, NULL, -1);
+                if (had) {
+                    p->sid_action = DISKFS_SID_ACTION_REMOVE;
+                }
             }
         }
     }
