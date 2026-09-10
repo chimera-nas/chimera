@@ -26,5 +26,19 @@ set_tests_properties(chimera/vfs/diskfs/smoke_test PROPERTIES
     LABELS "quint;diskfs_mbt"
     TIMEOUT 300)
 
+# ENOSPC-boundary test: mounts the bounded pool the kvm nfstest_alloc wrapper
+# uses and runs that suite's alloc06 case in-process, so the allocator's
+# out-of-space failure path is covered by the quick tier.
+add_executable(diskfs_enospc_test diskfs_enospc_test.c)
+target_include_directories(diskfs_enospc_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(diskfs_enospc_test
+    chimera_vfs chimera_vfs_diskfs chimera_vfs_memkv evpl)
+add_test(NAME chimera/vfs/diskfs/enospc_test COMMAND diskfs_enospc_test)
+set_tests_properties(chimera/vfs/diskfs/enospc_test PROPERTIES
+    LABELS "quint;diskfs_mbt"
+    TIMEOUT 300)
+
 # The quint diskfs stress model + replay harness (generated corpus).
 add_subdirectory(quint)

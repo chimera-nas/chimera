@@ -390,11 +390,11 @@ sm_ag_free_locked(
     rb_tree_query_ceil(&ag->free_by_offset, offset + length, offset, next_ext);
 
     sm_abort_if(prev_ext && prev_ext->offset + prev_ext->length > offset,
-                "double-free or overlap at offset=%lu (prev=%lu+%lu)",
-                offset, prev_ext->offset, prev_ext->length);
+                "double-free or overlap at offset=%lu length=%lu (prev=%lu+%lu)",
+                offset, length, prev_ext->offset, prev_ext->length);
     sm_abort_if(next_ext && next_ext->offset < offset + length,
-                "double-free or overlap at offset=%lu (next=%lu+%lu)",
-                offset, next_ext->offset, next_ext->length);
+                "double-free or overlap at offset=%lu length=%lu (next=%lu+%lu)",
+                offset, length, next_ext->offset, next_ext->length);
 
     /* prev (floor of offset) and next (ceil of offset+length) are necessarily
      * distinct nodes: the overlap aborts above pin prev to end <= offset and
