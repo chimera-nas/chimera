@@ -11,44 +11,57 @@
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_access.h"
 
-static void
-chimera_nfs4_access_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+/*
+ * The ACCESS4_* bits this server will actually evaluate for `attr`/`fh`.
+ *
+ * The server reports in `supported` exactly the requested bits it evaluated,
+ * never undefined bits or bits not meaningful for the object type (RFC 7530
+ * sec 16.1.4 / RFC 8276 sec 8.4).  The xattr access bits exist only in
+ * NFSv4.2, so they are meaningful only when the client negotiated
+ * minorversion >= 2 AND the backend implements xattrs -- on 4.0/4.1 bit 0x40
+ * is undefined and must be ignored.
+ *
+ * Split out from the fill because the caller needs it to build the ACE mask it
+ * evaluates; the VFS-compound path passes `fh` for the object that op ran
+ * against rather than req->fh.
+ */
+uint32_t
+chimera_nfs4_access_requested(
+    struct nfs_request             *req,
+    const struct ACCESS4args       *args,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen)
 {
-    struct nfs_request *req  = private_data;
-    struct ACCESS4args *args = &req->args_compound->argarray[req->index].opaccess;
-    struct ACCESS4res  *res  = &req->res_compound.resarray[req->index].opaccess;
-    uint32_t            meaningful, requested, granted;
+    uint32_t meaningful;
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    /* The server reports in `supported` exactly the requested bits it
-     * evaluated, never undefined bits or bits not meaningful for the object
-     * type (RFC 7530 sec 16.1.4 / RFC 8276 sec 8.4).  The xattr access bits
-     * exist only in NFSv4.2, so they are meaningful only when the client
-     * negotiated minorversion >= 2 AND the backend implements xattrs -- on 4.0/
-     * 4.1 bit 0x40 is undefined and must be ignored. */
     meaningful = chimera_nfs4_access_meaningful(
         S_ISDIR(attr->va_mode),
         req->minorversion >= 2 &&
-        chimera_nfs4_xattr_supported(req->thread->vfs_thread,
-                                     req->fh, req->fhlen));
+        chimera_nfs4_xattr_supported(req->thread->vfs_thread, fh, fhlen));
 
-    requested = args->access & meaningful;
+    return args->access & meaningful;
+} /* chimera_nfs4_access_requested */
 
-    /* Evaluate the canonical ACL (or mode fallback) once via the shared gate,
-     * then map the granted ACE bits back to the ACCESS4_* result bits. */
-    granted = chimera_vfs_access_check(attr, &req->cred,
-                                       chimera_nfs4_access4_to_mask(requested));
-
+/*
+ * Fill an ACCESS4 result from the evaluated request bits and the ACE bits the
+ * central gate granted.  `granted` may cover more than `requested` asked for
+ * (the VFS compound evaluates the client's whole request); the mapping back is
+ * limited to `requested` either way.
+ *
+ * `attr` is the object's, and is needed for the execute rule below -- which
+ * lives HERE rather than in either caller because both paths have to give the
+ * same answer, and a rule applied on one of them would be the one thing this
+ * conversion is not allowed to change.
+ */
+void
+chimera_nfs4_access_fill(
+    struct nfs_request             *req,
+    struct ACCESS4res              *res,
+    const struct chimera_vfs_attrs *attr,
+    uint32_t                        requested,
+    uint32_t                        granted)
+{
     /* RFC 8881 18.1.4: the server SHOULD NOT set ACCESS4_EXECUTE unless an
      * execute bit is set.  A privileged caller's DAC override grants
      * ACE_EXECUTE on a file with no execute bit anywhere in its mode, which is
@@ -75,6 +88,36 @@ chimera_nfs4_access_complete(
         res->resok4.access &= ~(ACCESS4_MODIFY | ACCESS4_EXTEND |
                                 ACCESS4_DELETE | ACCESS4_XAWRITE);
     }
+} /* chimera_nfs4_access_fill */
+
+static void
+chimera_nfs4_access_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct ACCESS4args *args = &req->args_compound->argarray[req->index].opaccess;
+    struct ACCESS4res  *res  = &req->res_compound.resarray[req->index].opaccess;
+    uint32_t            requested, granted;
+
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    requested = chimera_nfs4_access_requested(req, args, attr,
+                                              req->fh, req->fhlen);
+
+    /* Evaluate the canonical ACL (or mode fallback) once via the shared gate,
+     * then map the granted ACE bits back to the ACCESS4_* result bits. */
+    granted = chimera_vfs_access_check(attr, &req->cred,
+                                       chimera_nfs4_access4_to_mask(requested));
+
+    chimera_nfs4_access_fill(req, res, attr, requested, granted);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_access_complete */

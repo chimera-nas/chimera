@@ -26,9 +26,7 @@ chimera_nfs4_putfh_attrdir_complete(
     struct PUTFH4res   *res = &req->res_compound.resarray[req->index].opputfh;
 
     if (error_code != CHIMERA_VFS_OK) {
-        res->status = (error_code == CHIMERA_VFS_ENOENT ||
-                       error_code == CHIMERA_VFS_ESTALE) ?
-            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        res->status = chimera_nfs4_putfh_errno(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
@@ -41,6 +39,34 @@ chimera_nfs4_putfh_attrdir_complete(
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_putfh_attrdir_complete */
 
+/*
+ * The zero-link staleness rule PUTFH applies to the handle it has just opened
+ * and stat'd.  `fh` is the decoded (inner VFS) handle, which is also the key
+ * under which open state is tracked.  A zero-link inode is only still valid if
+ * some open pins it; that open may belong to any client (the REMOVE and this
+ * PUTFH can arrive on a different connection than the OPEN), so the check is
+ * server-wide, not per-connection.
+ *
+ * Shared with the VFS-compound path, which runs the same open+stat as part of
+ * the sequence it submits.
+ */
+nfsstat4
+chimera_nfs4_putfh_check_stale(
+    struct nfs_request             *req,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen)
+{
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK) &&
+        attr->va_nlink == 0 &&
+        !nfs4_clients_have_open_state(&req->thread->shared->nfs4_shared_clients,
+                                      fh, fhlen)) {
+        return NFS4ERR_STALE;
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_putfh_check_stale */
+
 static void
 chimera_nfs4_putfh_getattr_complete(
     enum chimera_vfs_error    error_code,
@@ -48,16 +74,13 @@ chimera_nfs4_putfh_getattr_complete(
     void                     *private_data)
 {
     struct nfs_request             *req    = private_data;
-    struct PUTFH4args              *args   = &req->args_compound->argarray[req->index].opputfh;
     struct PUTFH4res               *res    = &req->res_compound.resarray[req->index].opputfh;
     struct chimera_vfs_open_handle *handle = req->handle;
 
     req->handle = NULL;
 
     if (error_code != CHIMERA_VFS_OK) {
-        res->status = (error_code == CHIMERA_VFS_ENOENT ||
-                       error_code == CHIMERA_VFS_ESTALE) ?
-            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        res->status = chimera_nfs4_putfh_errno(error_code);
         chimera_vfs_release(req->thread->vfs_thread, handle);
         chimera_nfs4_compound_complete(req, res->status);
         return;
@@ -65,23 +88,10 @@ chimera_nfs4_putfh_getattr_complete(
 
     chimera_vfs_release(req->thread->vfs_thread, handle);
 
-    /* req->fh already holds the decoded (inner VFS) handle, which is also the
-     * key under which open state is tracked.  A zero-link inode is only still
-     * valid if some open pins it; that open may belong to any client (the
-     * REMOVE and this PUTFH can arrive on a different connection than the
-     * OPEN), so the check is server-wide, not per-connection. */
-    (void) args;
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK) &&
-        attr->va_nlink == 0 &&
-        !nfs4_clients_have_open_state(&req->thread->shared->nfs4_shared_clients,
-                                      req->fh, req->fhlen)) {
-        res->status = NFS4ERR_STALE;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
+    res->status = chimera_nfs4_putfh_check_stale(req, attr,
+                                                 req->fh, req->fhlen);
 
-    res->status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_putfh_getattr_complete */
 
 static void
@@ -94,9 +104,7 @@ chimera_nfs4_putfh_validate_complete(
     struct PUTFH4res   *res = &req->res_compound.resarray[req->index].opputfh;
 
     if (error_code != CHIMERA_VFS_OK) {
-        res->status = (error_code == CHIMERA_VFS_ENOENT ||
-                       error_code == CHIMERA_VFS_ESTALE) ?
-            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        res->status = chimera_nfs4_putfh_errno(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }

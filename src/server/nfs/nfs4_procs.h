@@ -203,6 +203,84 @@ nfs4_root_readdir(
     struct nfs_request               *req);
 
 
+/*
+ * Result marshalling shared between the per-operation handlers and the
+ * VFS-compound path (nfs4_compound_vfs.c), which runs the tail of a COMPOUND as
+ * one VFS sequence and fills every result at the end.  Each takes the object's
+ * file handle explicitly: in a sequence, successive ops address different
+ * objects, so req->fh is not the answer for any particular one.
+ */
+nfsstat4
+chimera_nfs4_getattr_fill(
+    struct nfs_request             *req,
+    struct GETATTR4args            *args,
+    struct GETATTR4res             *res,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen);
+
+uint32_t
+chimera_nfs4_access_requested(
+    struct nfs_request             *req,
+    const struct ACCESS4args       *args,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen);
+
+void
+chimera_nfs4_access_fill(
+    struct nfs_request             *req,
+    struct ACCESS4res              *res,
+    const struct chimera_vfs_attrs *attr,
+    uint32_t                        requested,
+    uint32_t                        granted);
+
+nfsstat4
+chimera_nfs4_getfh_fill(
+    struct nfs_request *req,
+    struct GETFH4res   *res,
+    const uint8_t      *fh,
+    int                 fhlen);
+
+nfsstat4
+chimera_nfs4_readlink_check_type(
+    const struct chimera_vfs_attrs *attr);
+
+nfsstat4
+chimera_nfs4_readlink_fill(
+    struct nfs_request  *req,
+    struct READLINK4res *res,
+    const char          *target,
+    uint32_t             target_len);
+
+nfsstat4
+chimera_nfs4_putfh_check_stale(
+    struct nfs_request             *req,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen);
+
+/*
+ * Per-export read-only policy for one operation, as the compound dispatcher
+ * applies it.  Only call after nfs4_op_check_minor has accepted the op.
+ */
+nfsstat4
+nfs4_rofs_gate(
+    struct nfs_request      *req,
+    const struct nfs_argop4 *argop);
+
+/*
+ * Try to run the whole remainder of this COMPOUND (ops [req->index,
+ * num_resarray)) as one VFS compound.  Returns non-zero if the sequence was
+ * submitted -- in which case the request is now owned by that submission and
+ * the caller must not touch it -- and zero if any part of the remainder is not
+ * expressible, leaving the request exactly as it was for op-by-op dispatch.
+ */
+int
+chimera_nfs4_compound_try_vfs(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req);
+
 void
 chimera_nfs4_access(
     struct chimera_server_nfs_thread *thread,
