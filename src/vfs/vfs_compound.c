@@ -63,6 +63,11 @@ struct chimera_vfs_compound {
     uint8_t                         saved_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        saved_fh_len;
 
+    /* An OPEN that must resolve its name before opening runs in two steps, and
+     * this says which one is next.  Cleared whenever the sequence advances, so
+     * it can never be read as belonging to a different op. */
+    uint8_t                         open_resolved;
+
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
 };
@@ -95,6 +100,13 @@ chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
     }
 
     for (i = 0; i < compound->num_ops; i++) {
+        /* An open handle the caller did not take: see OPEN HANDLE OWNERSHIP.
+         * Releasing here is what makes "take it if you want it" safe, rather
+         * than making every one of the caller's error paths responsible. */
+        if (compound->ops[i].out_handle) {
+            chimera_vfs_release(compound->thread, compound->ops[i].out_handle);
+            compound->ops[i].out_handle = NULL;
+        }
         free(compound->ops[i].target);
         free(compound->ops[i].entries);
         free(compound->ops[i].buffer);
@@ -102,6 +114,23 @@ chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
 
     free(compound);
 } /* chimera_vfs_compound_free */
+
+SYMBOL_EXPORT struct chimera_vfs_open_handle *
+chimera_vfs_compound_take_handle(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index)
+{
+    struct chimera_vfs_open_handle *handle;
+
+    if (index >= compound->num_ops) {
+        return NULL;
+    }
+
+    handle                          = compound->ops[index].out_handle;
+    compound->ops[index].out_handle = NULL;
+
+    return handle;
+} /* chimera_vfs_compound_take_handle */
 
 /* Claim the next op slot, or -1 when the sequence is full. */
 static struct chimera_vfs_compound_op *
@@ -460,6 +489,48 @@ chimera_vfs_compound_add_removexattr(
     return index;
 } /* chimera_vfs_compound_add_removexattr */
 
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_open(
+    struct chimera_vfs_compound    *compound,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    flags,
+    uint32_t                        opts,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_OPEN,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    if (name && namelen > 0) {
+        memcpy(op->name, name, namelen);
+        op->name[namelen] = '\0';
+        op->name_len      = (uint32_t) namelen;
+    }
+
+    op->open_flags = flags;
+    op->open_opts  = opts;
+    op->attr_mask  = attr_mask;
+
+    if (set_attr) {
+        op->set_attr = *set_attr;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_open */
+
 /* ---------------------------------------------------------------------- */
 /* Execution                                                              */
 /* ---------------------------------------------------------------------- */
@@ -499,6 +570,7 @@ chimera_vfs_compound_op_done(
     }
 
     compound->index++;
+    compound->open_resolved = 0;
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_op_done */
 
@@ -799,6 +871,142 @@ chimera_vfs_compound_xattr_change_callback(
 } /* chimera_vfs_compound_xattr_change_callback */
 
 /*
+ * An OPEN with REGULAR_ONLY refused the object it found.  The caller decides
+ * what to say about it -- op->existing_mode is there precisely because no
+ * errno carries "not a regular file, and here is what it was" -- but a status
+ * still has to be something, so report the closest POSIX answer for the type.
+ */
+static enum chimera_vfs_error
+chimera_vfs_compound_nonreg_error(uint32_t mode)
+{
+    if (S_ISDIR(mode)) {
+        return CHIMERA_VFS_EISDIR;
+    }
+
+    if (S_ISLNK(mode)) {
+        return CHIMERA_VFS_ELOOP;
+    }
+
+    return CHIMERA_VFS_EINVAL;
+} /* chimera_vfs_compound_nonreg_error */
+
+/*
+ * Step one of a two-step OPEN: the name has been resolved (or found absent).
+ * Apply what the resolve was for, then re-enter step() to do the open itself.
+ */
+static void
+chimera_vfs_compound_open_resolve_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) dir_attr;
+
+    compound->open_resolved = 1;
+
+    if (error_code == CHIMERA_VFS_ENOENT) {
+        /* Nothing there.  A create proceeds and makes it; a plain open fails
+         * exactly as the open itself would have. */
+        if (!(op->open_flags & CHIMERA_VFS_OPEN_CREATE)) {
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOENT);
+            return;
+        }
+        chimera_vfs_compound_step(compound);
+        return;
+    }
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    op->existed = 1;
+
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        op->existing_mode = attr->va_mode;
+
+        if ((op->open_opts & CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY) &&
+            !S_ISREG(attr->va_mode)) {
+            chimera_vfs_compound_op_done(
+                compound,
+                chimera_vfs_compound_nonreg_error(attr->va_mode));
+            return;
+        }
+    }
+
+    if (op->open_opts & CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY) {
+        /* The object exists, so the create attributes do not describe it. */
+        op->set_attr.va_set_mask = 0;
+        op->set_attr.va_req_mask = 0;
+    }
+
+    chimera_vfs_compound_step(compound);
+} /* chimera_vfs_compound_open_resolve_callback */
+
+static void
+chimera_vfs_compound_open_at_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) set_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    chimera_vfs_compound_store_attr(op, attr);
+    op->dir_pre_attr  = *dir_pre_attr;
+    op->dir_post_attr = *dir_post_attr;
+    op->created       = handle->r_created;
+
+    /* The opened object becomes current.  set_current releases the handle we
+     * were holding on the PARENT, which is what we want; the handle this op
+     * produced is a data open of a different object out of a different cache,
+     * so it is not offered as the current object's handle (the two are not
+     * interchangeable -- see chimera_vfs_compound_handle_serves).  An op that
+     * follows on the new current object opens it for itself. */
+    chimera_vfs_compound_set_current(compound, handle->fh, handle->fh_len);
+
+    op->out_handle = handle;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_open_at_callback */
+
+static void
+chimera_vfs_compound_open_fh_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    /* Re-opening the current object does not move it, and open_fh reports no
+     * attributes: a caller wanting them asks for a GETATTR after this. */
+    op->out_handle = handle;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_open_fh_callback */
+
+/*
  * The flags this op needs the current object opened with, or 0 if it addresses
  * the current object without a handle at all.
  *
@@ -809,11 +1017,20 @@ chimera_vfs_compound_xattr_change_callback(
  *
  * COMMIT and the xattr ops ask for a *data* open (no CHIMERA_VFS_OPEN_PATH),
  * again matching what those operations do outside a sequence.
+ *
+ * OPEN is the one op whose answer depends on its arguments rather than its
+ * type: a named open resolves through the current object as a directory, while
+ * an unnamed one re-opens the current object itself and so needs no handle on
+ * it at all.
  */
 static unsigned int
-chimera_vfs_compound_op_open_flags(uint8_t type)
+chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
 {
-    switch (type) {
+    switch (op->type) {
+        case CHIMERA_VFS_COMPOUND_OP_OPEN:
+            return op->name_len ? (CHIMERA_VFS_OPEN_INFERRED |
+                                   CHIMERA_VFS_OPEN_PATH |
+                                   CHIMERA_VFS_OPEN_DIRECTORY) : 0;
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
         case CHIMERA_VFS_COMPOUND_OP_LOOKUPP:
         case CHIMERA_VFS_COMPOUND_OP_READDIR:
@@ -869,7 +1086,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
     }
 
     op         = &compound->ops[compound->index];
-    open_flags = chimera_vfs_compound_op_open_flags(op->type);
+    open_flags = chimera_vfs_compound_op_open_flags(op);
 
     if (open_flags) {
         if (compound->fh_len == 0) {
@@ -939,6 +1156,47 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             chimera_vfs_compound_set_current(compound, compound->saved_fh,
                                              compound->saved_fh_len);
             chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_OPEN:
+            if (op->name_len == 0) {
+                /* Re-open the current object by handle. */
+                if (compound->fh_len == 0) {
+                    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                    break;
+                }
+                chimera_vfs_open_fh(compound->thread, compound->cred,
+                                    compound->fh, (int) compound->fh_len,
+                                    op->open_flags,
+                                    chimera_vfs_compound_open_fh_callback,
+                                    compound);
+                break;
+            }
+
+            if (!compound->open_resolved &&
+                (op->open_opts & (CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY |
+                                  CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY))) {
+                /* Resolve the name before opening it -- step one of two. */
+                chimera_vfs_lookup_at(compound->thread, compound->cred,
+                                      compound->handle,
+                                      op->name, op->name_len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_vfs_compound_open_resolve_callback,
+                                      compound);
+                break;
+            }
+
+            chimera_vfs_open_at(compound->thread, compound->cred,
+                                compound->handle,
+                                op->name, op->name_len,
+                                op->open_flags,
+                                &op->set_attr,
+                                op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                chimera_vfs_compound_open_at_callback,
+                                compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:

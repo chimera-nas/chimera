@@ -636,6 +636,194 @@ main(
     }
     TEST_PASS("the xattr ops address the current object; mutations are not undone");
 
+    /* ---- OPEN creates, becomes current, and hands out its handle ----
+     * The sequence resolves the parent, creates through it, and the created
+     * object is what the ops after the OPEN address -- so a caller that wants
+     * the new object's attributes and file handle asks for them here rather
+     * than making a second round trip for what it just created. */
+    {
+        struct chimera_vfs_attrs sattr;
+        int                      i_open, i_ga2, i_fh2;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0644;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "o1", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr,
+                                               CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga2  = chimera_vfs_compound_add_getattr(cp,
+                                                  CHIMERA_VFS_ATTR_MASK_STAT);
+        i_fh2  = chimera_vfs_compound_add_getfh(cp);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->created);
+        assert(!op->existed);
+        assert(op->out_handle != NULL);
+        assert(S_ISREG(op->attr.va_mode));
+        /* The directory's change attribute either side of the create, which is
+         * the whole of what a change_info reply needs. */
+        assert(op->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+
+        /* The ops after it addressed the object the OPEN produced. */
+        assert(chimera_vfs_compound_op(cp, i_ga2)->status == CHIMERA_VFS_OK);
+        assert(S_ISREG(chimera_vfs_compound_op(cp, i_ga2)->attr.va_mode));
+        assert(chimera_vfs_compound_op(cp, i_fh2)->fh_len == op->fh_len);
+        assert(memcmp(chimera_vfs_compound_op(cp, i_fh2)->fh, op->fh,
+                      op->fh_len) == 0);
+
+        /* Taking the handle is what makes it the caller's; the compound no
+         * longer has it, and releasing it is now the caller's job. */
+        {
+            struct chimera_vfs_open_handle *taken;
+
+            taken = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+            assert(taken != NULL);
+            assert(chimera_vfs_compound_op(cp, i_open)->out_handle == NULL);
+            assert(chimera_vfs_compound_take_handle(cp,
+                                                    (uint32_t) i_open) == NULL);
+            chimera_vfs_release(ctx.vfs_thread, taken);
+        }
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("OPEN creates, becomes current, and hands out its handle");
+
+    /* ---- REGULAR_ONLY refuses a non-regular object and says what it was ----
+     * Without this the sequence would open the directory and leave the caller
+     * to discover the type afterwards -- or, on a backend whose open of a FIFO
+     * blocks, not leave it anything at all.  The status alone cannot carry the
+     * answer a protocol wants (NFS4 distinguishes a symlink from a device from
+     * a directory), so the mode comes back with it. */
+    {
+        int i_open;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "a", 1,
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY,
+                                               NULL,
+                                               CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_EISDIR);
+        assert(op->existed);
+        assert(S_ISDIR(op->existing_mode));
+        assert(op->out_handle == NULL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EISDIR);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("OPEN with REGULAR_ONLY refuses a directory and reports its mode");
+
+    /* ---- ATTRS_ON_CREATE_ONLY leaves an existing object alone ----
+     * A create's attributes describe a creation.  Opening a name that is
+     * already there must not restyle it, which is what NFS4 UNCHECKED4 and
+     * NFS3 UNCHECKED both mean -- and what the caller previously had to
+     * arrange by looking the name up itself and blanking the attributes
+     * before it opened. */
+    {
+        struct chimera_vfs_attrs sattr;
+        int                      i_open, i_ga3;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "o2", 2,
+                                               CHIMERA_VFS_OPEN_CREATE,
+                                               0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_open)->created);
+        chimera_vfs_compound_free(cp);
+
+        /* Re-open the same name asking for 0777. */
+        sattr.va_mode = S_IFREG | 0777;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(
+            cp, "o2", 2,
+            CHIMERA_VFS_OPEN_CREATE,
+            CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga3  = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(!op->created);
+        assert(op->existed);
+        /* The mode the object was created with, not the one this open asked
+         * for. */
+        assert((chimera_vfs_compound_op(cp, i_ga3)->attr.va_mode & 0777) ==
+               0600);
+
+        /* Deliberately NOT taken: free must release it.  An untaken handle is
+         * the normal outcome of every path where the caller decided not to
+         * keep the open, so it cannot be a leak. */
+        assert(op->out_handle != NULL);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("OPEN with ATTRS_ON_CREATE_ONLY does not restyle an existing object");
+
+    /* ---- an OPEN with no name re-opens the current object ---- */
+    {
+        int i_open;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "o1", 2, 0);
+        i_open = chimera_vfs_compound_add_open(cp, NULL, 0,
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, NULL, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->out_handle != NULL);
+        assert(!op->created);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("an OPEN with no name re-opens the current object");
+
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
     ctx.callbacks = 0;
