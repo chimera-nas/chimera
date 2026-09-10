@@ -106,7 +106,80 @@ struct chimera_smb_fs_attrs {
     uint64_t smb_actual_available_allocation_units;
     uint32_t smb_sectors_per_allocation_unit;
     uint32_t smb_bytes_per_sector;
+    uint32_t smb_fs_attributes;   /* FileFsAttributeInformation.FileSystemAttributes */
 };
+
+/*
+ * Does this share serve named streams?  Both halves are required: the
+ * smb_named_streams knob (the operator's choice) and the serving module's
+ * CHIMERA_VFS_CAP_NAMED_STREAMS (the backend's ability).  FileStreamInformation
+ * and FileFsAttributeInformation test the conjunction here; the stream CREATE
+ * path tests the two halves separately, on purpose -- the knob before the base
+ * file is opened (no module yet) and the capability once it is, so its debug
+ * log can say which half refused a stream name.
+ */
+static inline int
+chimera_smb_named_streams_enabled(
+    uint64_t capabilities,
+    int      named_streams)
+{
+    return named_streams && (capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS);
+} /* chimera_smb_named_streams_enabled */
+
+/*
+ * FileFsAttributeInformation.FileSystemAttributes (MS-FSCC 2.5.1) for a share
+ * served by a module with the given capabilities.  Clients consult this word
+ * BEFORE attempting a feature -- macOS falls back to AppleDouble sidecars
+ * without FILE_NAMED_STREAMS, Explorer hides the Security tab without
+ * FILE_PERSISTENT_ACLS -- so it must describe what the backend actually does,
+ * not what the server implements in general.
+ *
+ * Unconditional: names are case-sensitive and case-preserving Unicode, and
+ * reparse points (symlinks and device nodes under the NFS reparse tag) ride
+ * on symlink_at / mknod_at, which every FS module implements.
+ *
+ * FILE_NAMED_STREAMS follows chimera_smb_named_streams_enabled, the gate
+ * FileStreamInformation applies, so the client is never told about streams
+ * the server would then refuse.
+ *
+ * FILE_PERSISTENT_ACLS gates on CHIMERA_VFS_CAP_ACL_NATIVE, which means
+ * lossless ACL storage, so a mode-only backend such as the linux passthrough
+ * does not get the bit even though it round-trips a DACL through mode bits.
+ * That is deliberate: the collapse to owner/group/other loses the per-user
+ * ACEs a Security-tab edit exists to set, and hiding the tab is a better
+ * answer than silently discarding half the policy.  See
+ * CHIMERA_VFS_CAP_ACL_NATIVE in vfs/sdk/vfs_module.h.  Note that SET_INFO
+ * SECURITY is NOT gated on the capability (smb_proc_security.c) -- a client
+ * that sets an ACL anyway still gets the best-effort mode mapping.
+ */
+static inline uint32_t
+chimera_smb_fs_attributes(
+    uint64_t capabilities,
+    int      named_streams)
+{
+    uint32_t attrs = SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
+        SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
+        SMB2_FS_ATTR_UNICODE_ON_DISK |
+        SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS;
+
+    if (capabilities & CHIMERA_VFS_CAP_SPARSE) {
+        attrs |= SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES;
+    }
+
+    if (capabilities & CHIMERA_VFS_CAP_CLONE_RANGE) {
+        attrs |= SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING;
+    }
+
+    if (capabilities & CHIMERA_VFS_CAP_ACL_NATIVE) {
+        attrs |= SMB2_FS_ATTR_PERSISTENT_ACLS;
+    }
+
+    if (chimera_smb_named_streams_enabled(capabilities, named_streams)) {
+        attrs |= SMB2_FS_ATTR_NAMED_STREAMS;
+    }
+
+    return attrs;
+} /* chimera_smb_fs_attributes */
 
 /* Helper functions for common attribute marshaling operations */
 static inline void
