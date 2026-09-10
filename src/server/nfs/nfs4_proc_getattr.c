@@ -24,27 +24,33 @@ struct nfs4_getattr_park {
     struct chimera_vfs_attrs attr;
 };
 
-static void
-chimera_nfs4_getattr_finish(
-    struct nfs_request       *req,
-    struct chimera_vfs_attrs *attr)
+/*
+ * Marshal a GETATTR4 result from attributes already fetched for `fh`.
+ *
+ * Shared by the per-op path below and by the VFS-compound path, which runs the
+ * tail of a COMPOUND as one VFS sequence and comes back holding one attribute
+ * set per op -- each possibly for a different object, which is why the object's
+ * file handle is passed explicitly instead of read from req->fh.
+ *
+ * Returns NFS4_OK, or NFS4ERR_RESOURCE when the reply buffer cannot hold the
+ * attributes.  Touches neither the request's open handle nor the compound.
+ */
+nfsstat4
+chimera_nfs4_getattr_fill(
+    struct nfs_request             *req,
+    struct GETATTR4args            *args,
+    struct GETATTR4res             *res,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen)
 {
-    struct GETATTR4args     *args = &req->args_compound->argarray[req->index].opgetattr;
-    struct GETATTR4res      *res  = &req->res_compound.resarray[req->index].opgetattr;
     struct chimera_vfs_attrs marshall_attr;
     int                      rc;
-
-    res->status = NFS4_OK;
 
     rc = xdr_dbuf_alloc_array(&res->resok4.obj_attributes, attrmask, 3, req->encoding->dbuf);
 
     if (rc) {
-        res->status = NFS4ERR_RESOURCE;
-        if (req->handle) {
-            chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        }
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return NFS4ERR_RESOURCE;
     }
 
     /* Size the attribute buffer to hold a variable-length ACL, but only when
@@ -70,20 +76,15 @@ chimera_nfs4_getattr_finish(
                                req->encoding->dbuf);
 
     if (rc) {
-        res->status = NFS4ERR_RESOURCE;
-        if (req->handle) {
-            chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        }
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return NFS4ERR_RESOURCE;
     }
 
     marshall_attr = *attr;
     chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
                                        args->num_attr_request,
                                        args->attr_request,
-                                       req->fh,
-                                       req->fhlen);
+                                       fh,
+                                       fhlen);
 
     /* The synthetic named-attribute directory reports NF4ATTRDIR (invisible in
      * the underlying mode bits).  The named-attribute *files* themselves are
@@ -91,7 +92,7 @@ chimera_nfs4_getattr_finish(
      * (and SMB ADS) treat them -- NF4NAMEDATTR is avoided as some clients
      * mishandle it. */
     uint32_t type_override = 0;
-    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+    if (chimera_nfs4_fh_is_attrdir(fh, fhlen)) {
         type_override = NF4ATTRDIR;
     }
 
@@ -107,9 +108,9 @@ chimera_nfs4_getattr_finish(
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen),
+                                                              fh, fhlen),
                                 chimera_nfs4_xattr_supported(req->thread->vfs_thread,
-                                                             req->fh, req->fhlen),
+                                                             fh, fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
@@ -118,11 +119,25 @@ chimera_nfs4_getattr_finish(
                                 req->thread->shared->fh_sign,
                                 type_override);
 
+    return NFS4_OK;
+} /* chimera_nfs4_getattr_fill */
+
+static void
+chimera_nfs4_getattr_finish(
+    struct nfs_request       *req,
+    struct chimera_vfs_attrs *attr)
+{
+    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
+
+    res->status = chimera_nfs4_getattr_fill(req, args, res, attr,
+                                            req->fh, req->fhlen);
+
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
     }
 
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_getattr_finish */
 
 /* Encode an NFSv4 fattr4_change value back into park->attr in whichever

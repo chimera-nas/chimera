@@ -76,6 +76,21 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
 } /* chimera_nfs4_errno_to_nfsstat4 */
 
 /*
+ * Status for a failure while PUTFH validates the handle it was given.
+ *
+ * A well-formed handle whose object is gone is NFS4ERR_STALE (RFC 7530
+ * §16.20.5); anything else maps normally.  Shared by the PUTFH handler and by
+ * the VFS-compound path, which performs the same validation as part of the
+ * sequence it submits.
+ */
+static inline nfsstat4
+chimera_nfs4_putfh_errno(enum chimera_vfs_error err)
+{
+    return (err == CHIMERA_VFS_ENOENT || err == CHIMERA_VFS_ESTALE) ?
+           NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(err);
+} /* chimera_nfs4_putfh_errno */
+
+/*
  * Status for a data-path op -- READ, WRITE, COMMIT, LOCKT, SETATTR(size) and
  * the RFC 7862 sparse ops -- whose current filehandle is not a regular file.
  *

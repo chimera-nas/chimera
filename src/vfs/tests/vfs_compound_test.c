@@ -115,6 +115,27 @@ compound_cb(
 } /* compound_cb */
 
 static void
+open_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    if (error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
+        ctx->fh_len = attr->va_fh_len;
+    }
+    if (oh) {
+        chimera_vfs_release_handle(ctx->vfs_thread, oh);
+    }
+    ctx->done = 1;
+} /* open_cb */
+
+static void
 mkdir_under(
     struct test_ctx               *ctx,
     const struct chimera_vfs_cred *cred,
@@ -289,9 +310,63 @@ main(
     assert(op->status == CHIMERA_VFS_OK);
     /* root against a 0755 directory it owns */
     assert(op->granted & CHIMERA_ACE_READ_DATA);
+    /* The decision was reached with the object's ACL in hand, not from its
+     * mode bits alone -- an ACL-bearing object would otherwise be answered
+     * from a mode that says nothing about who its ACL admits. */
+    assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
 
     chimera_vfs_compound_free(cp);
     TEST_PASS("ACCESS is evaluated against the object the sequence resolved");
+
+    /* ---- a LOOKUP through a non-directory ----
+     * Resolving a name through a regular file is ENOTDIR.  The current object
+     * is opened as a directory for the LOOKUP, which is what makes that answer
+     * uniform on a backend whose open enforces it rather than left to however
+     * that backend's lookup reports a non-directory parent.  The GETATTR before
+     * it must still succeed: it needs no directory open, so the sequence's
+     * shared handle is re-opened for the LOOKUP instead of the LOOKUP's
+     * requirement being imposed on everything that came before. */
+    {
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  f_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 f_fh_len;
+        int                      i_ga, i_lk;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0644;
+
+        chimera_vfs_open(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
+                         "f", 1,
+                         CHIMERA_VFS_OPEN_CREATE |
+                         CHIMERA_VFS_OPEN_CREATE_REGULAR,
+                         &sattr,
+                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                         open_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        memcpy(f_fh, ctx.fh, ctx.fh_len);
+        f_fh_len = ctx.fh_len;
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, f_fh, (int) f_fh_len);
+        i_ga = chimera_vfs_compound_add_getattr(cp,
+                                                CHIMERA_VFS_ATTR_MASK_STAT);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "x", 1, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        assert(S_ISREG(chimera_vfs_compound_op(cp, i_ga)->attr.va_mode));
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOTDIR);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("a LOOKUP opens the current object as a directory");
 
     /* ---- a sequence that addresses an object before naming one ---- */
     cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
