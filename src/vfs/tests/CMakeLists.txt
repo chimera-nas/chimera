@@ -125,8 +125,13 @@ add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)
 add_executable(vfs_compound_test vfs_compound_test.c)
 target_link_libraries(vfs_compound_test chimera_vfs chimera_vfs_memfs
     chimera_vfs_memkv evpl)
+# Quick tier: this is the executor's only direct coverage, and everything that
+# drives it (the NFS4 encoder) is quick-tier too.  Registered in the extended
+# tier it would sit unrun while the code under it changed.
+set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/vfs/compound COMMAND vfs_compound_test)
 set_tests_properties(chimera/vfs/compound PROPERTIES LABELS "vfs" TIMEOUT 60)
+set(CHIMERA_TEST_TIER extended)
 
 add_executable(vfs_zerorange_test vfs_zerorange_test.c)
 target_link_libraries(vfs_zerorange_test chimera_vfs chimera_vfs_memfs

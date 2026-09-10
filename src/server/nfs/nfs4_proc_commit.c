@@ -11,6 +11,32 @@
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+/*
+ * Marshal a COMMIT4 result from the attributes the flush reported for the
+ * object it flushed.  Shared by the per-op path below and by the VFS-compound
+ * path, which comes back holding the same pre-flush attributes.
+ */
+nfsstat4
+chimera_nfs4_commit_fill(
+    struct nfs_request             *req,
+    struct COMMIT4res              *res,
+    const struct chimera_vfs_attrs *pre_attr)
+{
+    if ((pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(pre_attr->va_mode)) {
+        /* RFC 7530 §16.4: COMMIT only applies to regular files. A directory
+         * yields NFS4ERR_ISDIR; any other non-regular object NFS4ERR_INVAL. */
+        return S_ISDIR(pre_attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
+    }
+
+    memcpy(res->resok4.writeverf,
+           &req->thread->shared->nfs_verifier,
+           sizeof(res->resok4.writeverf));
+
+    return NFS4_OK;
+} /* chimera_nfs4_commit_fill */
+
 static void
 chimera_nfs4_commit_complete(
     enum chimera_vfs_error    error_code,
@@ -23,17 +49,8 @@ chimera_nfs4_commit_complete(
 
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    } else if ((pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-               !S_ISREG(pre_attr->va_mode)) {
-        /* RFC 7530 §16.4: COMMIT only applies to regular files. A directory
-         * yields NFS4ERR_ISDIR; any other non-regular object NFS4ERR_INVAL. */
-        res->status = S_ISDIR(pre_attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
     } else {
-        res->status = NFS4_OK;
-
-        memcpy(res->resok4.writeverf,
-               &req->thread->shared->nfs_verifier,
-               sizeof(res->resok4.writeverf));
+        res->status = chimera_nfs4_commit_fill(req, res, pre_attr);
     }
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);

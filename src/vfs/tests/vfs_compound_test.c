@@ -312,8 +312,12 @@ main(
     assert(op->granted & CHIMERA_ACE_READ_DATA);
     /* The decision was reached with the object's ACL in hand, not from its
      * mode bits alone -- an ACL-bearing object would otherwise be answered
-     * from a mode that says nothing about who its ACL admits. */
-    assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+     * from a mode that says nothing about who its ACL admits.  What survives to
+     * here is the request, not the ACL itself: the result copy drops it
+     * deliberately (see chimera_vfs_compound_store_attr), so the answer's own
+     * masks cannot be what says the ACL was consulted. */
+    assert(op->attr_mask & CHIMERA_VFS_ATTR_ACL);
+    assert(!(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL));
 
     chimera_vfs_compound_free(cp);
     TEST_PASS("ACCESS is evaluated against the object the sequence resolved");
@@ -380,6 +384,257 @@ main(
     assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
     chimera_vfs_compound_free(cp);
     TEST_PASS("an op with no current object fails rather than guessing");
+
+    /* ---- SAVEFH/RESTOREFH round-trip across a LOOKUP ----
+     * Save the directory, walk away from it, put it back.  What this really
+     * pins down is the handle lifetime: the sequence holds an open handle for
+     * the current object, and the walk away and the walk back each change what
+     * that is.  Under ASAN a handle released twice or leaked shows up here. */
+    {
+        int i_save, i_lk, i_restore, i_fh_after;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        /* A getattr on each side of the save, so the sequence is actually
+         * holding an open handle when the slot is written and when it is
+         * restored -- not just a file handle. */
+        chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_save = chimera_vfs_compound_add_savefh(cp);
+        i_lk   = chimera_vfs_compound_add_lookup(cp, "a", 1,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_restore  = chimera_vfs_compound_add_restorefh(cp);
+        i_fh_after = chimera_vfs_compound_add_getfh(cp);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        /* The SAVEFH addressed the directory; the LOOKUP moved off it. */
+        op = chimera_vfs_compound_op(cp, i_save);
+        assert(op->fh_len == root_fh_len);
+        assert(memcmp(op->fh, root_fh, root_fh_len) == 0);
+
+        op = chimera_vfs_compound_op(cp, i_lk);
+        assert(op->fh_len == a_fh_len);
+        assert(memcmp(op->fh, a_fh, a_fh_len) == 0);
+
+        /* ...and the RESTOREFH put it back, for itself and for what follows. */
+        op = chimera_vfs_compound_op(cp, i_restore);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == root_fh_len);
+        assert(memcmp(op->fh, root_fh, root_fh_len) == 0);
+
+        op = chimera_vfs_compound_op(cp, i_fh_after);
+        assert(op->fh_len == root_fh_len);
+        assert(memcmp(op->fh, root_fh, root_fh_len) == 0);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("SAVEFH/RESTOREFH round-trips the current object across a LOOKUP");
+
+    /* ---- RESTOREFH with nothing saved ---- */
+    cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+    chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+    chimera_vfs_compound_add_restorefh(cp);
+    i_getfh = chimera_vfs_compound_add_getfh(cp);
+
+    ctx.callbacks = 0;
+    chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+    wait_done(&ctx);
+
+    assert(ctx.callbacks == 1);
+    assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+    assert(chimera_vfs_compound_num_completed(cp) == 2);
+    assert(chimera_vfs_compound_op(cp, i_getfh)->status == CHIMERA_VFS_UNSET);
+    chimera_vfs_compound_free(cp);
+    TEST_PASS("RESTOREFH with an empty saved slot fails and stops the sequence");
+
+    /* ---- LOOKUPP walks back up ---- */
+    {
+        int i_lka, i_lkb, i_up;
+
+        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lka = chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
+        i_lkb = chimera_vfs_compound_add_lookup(cp, "b", 1, 0);
+        i_up  = chimera_vfs_compound_add_lookupp(cp,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        /* The parent of /mem/a/b is /mem/a, which is what the first LOOKUP
+         * resolved. */
+        op = chimera_vfs_compound_op(cp, i_up);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == chimera_vfs_compound_op(cp, i_lka)->fh_len);
+        assert(memcmp(op->fh, chimera_vfs_compound_op(cp, i_lka)->fh,
+                      op->fh_len) == 0);
+        assert(chimera_vfs_compound_op(cp, i_lkb)->status == CHIMERA_VFS_OK);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("LOOKUPP makes the current object's parent current");
+
+    /* ---- COMMIT of a regular file ----
+     * The COMMIT needs a data open where the GETATTR before it needs a path
+     * open.  Those are two different handles from two different caches, so the
+     * sequence must re-open rather than hand the data op the path handle it is
+     * already holding. */
+    {
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  c_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 c_fh_len;
+        int                      i_ga, i_commit;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0644;
+
+        chimera_vfs_open(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
+                         "c", 1,
+                         CHIMERA_VFS_OPEN_CREATE |
+                         CHIMERA_VFS_OPEN_CREATE_REGULAR,
+                         &sattr,
+                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                         open_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        memcpy(c_fh, ctx.fh, ctx.fh_len);
+        c_fh_len = ctx.fh_len;
+
+        cp       = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, c_fh, (int) c_fh_len);
+        i_ga     = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+        i_commit = chimera_vfs_compound_add_commit(cp, 0, 0,
+                                                   CHIMERA_VFS_ATTR_MODE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_commit);
+        assert(op->status == CHIMERA_VFS_OK);
+        /* The pre-flush attributes the caller asked for came back with it. */
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE);
+        assert(S_ISREG(op->attr.va_mode));
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("COMMIT re-opens the current object for data and reports its attrs");
+
+    /* ---- READDIR of the current object ---- */
+    {
+        int      i_rd;
+        uint32_t e;
+        int      saw_b = 0;
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
+        i_rd = chimera_vfs_compound_add_readdir(cp, 0, 0, 8192, 8192, 32,
+                                                CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        /* The READDIR enumerated /mem/a, the object the LOOKUP resolved. */
+        op = chimera_vfs_compound_op(cp, i_rd);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->eof);
+        assert(op->num_entries >= 1);
+        assert(op->num_entries <= CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES);
+
+        for (e = 0; e < op->num_entries; e++) {
+            if (op->entries[e].name_len == 1 &&
+                op->entries[e].name[0] == 'b') {
+                saw_b = 1;
+                assert(S_ISDIR(op->entries[e].attr.va_mode));
+                /* Per-entry attributes survive to the callback, and carry no
+                 * ACL for the same reason no other attribute result does. */
+                assert(!(op->entries[e].attr.va_set_mask &
+                         CHIMERA_VFS_ATTR_ACL));
+            }
+        }
+        assert(saw_b);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("READDIR pages the current object's entries with their attrs");
+
+    /* ---- the xattr ops, against the object the sequence resolved ---- */
+    {
+        int i_set, i_list, i_get, i_remove, i_get2;
+
+        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
+        i_set = chimera_vfs_compound_add_setxattr(cp, 0, "user.k", 6,
+                                                  "value", 5);
+        i_list  = chimera_vfs_compound_add_listxattrs(cp, 0, 4096);
+        i_get   = chimera_vfs_compound_add_getxattr(cp, "user.k", 6, 4096);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_set);
+        assert(op->status == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_list);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->buffer_count >= 1);
+        assert(strcmp((const char *) op->buffer, "user.k") == 0);
+
+        op = chimera_vfs_compound_op(cp, i_get);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->buffer_len == 5);
+        assert(memcmp(op->buffer, "value", 5) == 0);
+
+        chimera_vfs_compound_free(cp);
+
+        /* Removing it makes the next read of it fail, in the same sequence. */
+        cp       = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
+        i_remove = chimera_vfs_compound_add_removexattr(cp, "user.k", 6);
+        i_get2   = chimera_vfs_compound_add_getxattr(cp, "user.k", 6, 4096);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_op(cp, i_remove)->status ==
+               CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_get2)->status !=
+               CHIMERA_VFS_OK);
+        /* The removal stands even though the sequence stopped at a failure:
+         * nothing is rolled back (see the MUTATION note in vfs_compound.h). */
+        assert(chimera_vfs_compound_status(cp) != CHIMERA_VFS_OK);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("the xattr ops address the current object; mutations are not undone");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
