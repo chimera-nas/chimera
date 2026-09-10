@@ -202,6 +202,29 @@ if(CHIMERA_LIMITS_TESTING)
     endif()
 endif()
 
+# diskfs-only ENOSPC-boundary test: the in-process analogue of nfstest_alloc's
+# alloc06, which is what the kvm nfstest shards run over NFSv4.2.  Reaching
+# ENOSPC needs a bounded pool, so it shrinks the device geometry to the 2 x
+# 128 MiB the kvm wrapper uses; the default 10 x 1 GiB pool never gets near it.
+add_posix_testprog(test_diskfs_enospc)
+if(CHIMERA_LIMITS_TESTING)
+    if(IO_URING_ENABLED)
+        add_posix_test(diskfs_enospc_diskfs_io_uring test_diskfs_enospc diskfs_io_uring)
+        set_tests_properties(chimera/posix/diskfs_enospc_diskfs_io_uring PROPERTIES TIMEOUT 300)
+    endif()
+    if(HAVE_LIBAIO)
+        add_posix_test(diskfs_enospc_diskfs_aio test_diskfs_enospc diskfs_aio)
+        set_tests_properties(chimera/posix/diskfs_enospc_diskfs_aio PROPERTIES TIMEOUT 300)
+    endif()
+    if(NOT IO_URING_ENABLED AND NOT HAVE_LIBAIO)
+        # Neither async block backend exists here (macOS, or a Linux host
+        # without libaio): diskfs still runs on libevpl's portable pread
+        # backend, and the defect this covers is backend-independent.
+        add_posix_test(diskfs_enospc_diskfs test_diskfs_enospc diskfs)
+        set_tests_properties(chimera/posix/diskfs_enospc_diskfs PROPERTIES TIMEOUT 300)
+    endif()
+endif()
+
 # Cross-mount EXDEV test: link/rename across two VFS mounts must fail EXDEV.  It
 # mounts a second memfs instance alongside the primary backend, so the primary
 # must be a different module from memfs (two memfs mounts share one fsid, i.e.
