@@ -3,13 +3,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include <stdlib.h>
-unsigned long g_nfs4_ops_vfs, g_nfs4_ops_perop;
-unsigned long g_nfs4_perop_hist[1024];
-static void g_nfs4_report(void) { fprintf(stderr, "NFS4-OP-PATHS vfs=%lu perop=%lu\n", g_nfs4_ops_vfs, g_nfs4_ops_perop);
-    for (int i = 0; i < 1024; i++) { if (g_nfs4_perop_hist[i]) fprintf(stderr, "NFS4-PEROP %d %lu\n", i, g_nfs4_perop_hist[i]); } }
-__attribute__((constructor)) static void g_nfs4_arm(void) { atexit(g_nfs4_report); }
-
 #include "nfs4_session.h"
 #include "nfs4_recovery.h"
 #include "evpl/evpl.h"
@@ -263,21 +256,15 @@ chimera_nfs4_compound_process(
         if (gate != NFS4_OK) {
             nfs4_fail_undispatched_op(thread, argop, resop, gate);
             chimera_nfs4_compound_complete(req, gate);
-        } else if (({ extern unsigned long g_nfs4_ops_vfs, g_nfs4_ops_perop;
-                      unsigned long before = req->index;
-                      int r = chimera_nfs4_compound_try_vfs(thread, req);
-                      if (r) { g_nfs4_ops_vfs += req->res_compound.num_resarray - before; }
-                      r; })) {
-            /* Everything left in this COMPOUND was expressible as a single VFS
-             * compound and has been submitted as one; its completion fills the
-             * remaining results and re-enters the reply path.  The attempt is
-             * made here rather than at compound entry so that a leading
-             * SEQUENCE dispatches normally and the rest of a 4.1+ COMPOUND is
-             * still reachable. */
+        } else if (chimera_nfs4_compound_try_vfs(thread, req)) {
+            /* A run of the ops left in this COMPOUND was expressible as a
+             * single VFS compound and has been submitted as one; its completion
+             * fills those results and re-enters the reply path -- at the end of
+             * the COMPOUND, or, when the run stopped short, back here for the
+             * op that ended it.  The attempt is made here rather than at
+             * compound entry so that a leading SEQUENCE dispatches normally and
+             * the rest of a 4.1+ COMPOUND is still reachable. */
         } else {
-            { extern unsigned long g_nfs4_ops_perop; extern unsigned long g_nfs4_perop_hist[1024];
-              g_nfs4_ops_perop++;
-              if (argop->argop < 1024) { g_nfs4_perop_hist[argop->argop]++; } }
             /* NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2):
              * ops that change the current filehandle clear the current
              * stateid, while SAVEFH/RESTOREFH carry it alongside the

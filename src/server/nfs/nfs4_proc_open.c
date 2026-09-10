@@ -180,7 +180,7 @@ chimera_nfs4_open_deleg_none(
  * for the normal path (granted or not), where the caller continues with
  * chimera_nfs4_open_complete.
  */
-static bool
+SYMBOL_EXPORT bool
 chimera_nfs4_open_grant_delegation(
     struct nfs_request             *req,
     struct OPEN4res                *res,
@@ -407,7 +407,7 @@ chimera_nfs4_open_grant_delegation(
  * or chimera_vfs_open_fh.  On create, ownership transfers to the new
  * open_state; on coalesce, the function calls chimera_vfs_release on it.
  */
-static nfsstat4
+SYMBOL_EXPORT nfsstat4
 chimera_nfs4_open_install_state(
     struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle,
@@ -620,7 +620,7 @@ chimera_nfs4_open_install_state(
  * file, while 4.1+ reports NFS4ERR_SYMLINK only for an actual symlink and
  * NFS4ERR_WRONG_TYPE for fifos, sockets, and devices.
  */
-static nfsstat4
+SYMBOL_EXPORT nfsstat4
 chimera_nfs4_open_nonreg_status(
     uint8_t minorversion,
     mode_t  mode)
@@ -750,7 +750,7 @@ chimera_nfs4_open_trunc_complete(
  * was granted rather than re-checked against the file's mode -- the ftruncate
  * rule, and the same grant the client would use for a WRITE.
  */
-static void
+SYMBOL_EXPORT void
 chimera_nfs4_open_complete(
     struct nfs_request *req,
     nfsstat4            status)
