@@ -10,24 +10,34 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
-static int
-chimera_nfs4_readdir_callback(
-    uint64_t                        inum,
+/*
+ * Marshal one directory entry into the reply and append it to `cursor`,
+ * enforcing the READDIR's maxcount and the reply buffer's floor.  Returns 0 if
+ * the entry was taken and -1 if it did not fit -- the signal that stops the
+ * enumeration (and, for the VFS-compound path, the point at which the page
+ * truncates).
+ *
+ * `dir_fh` is the directory being read: its backend decides the layout type and
+ * xattr support reported for every entry.  The per-op path passes req->fh; the
+ * VFS-compound path passes the handle the sequence had current when the READDIR
+ * ran, which req->fh no longer holds by the time results are filled.
+ */
+int
+chimera_nfs4_readdir_entry_fill(
+    struct nfs_request             *req,
+    struct READDIR4args            *args,
+    struct nfs_nfs4_readdir_cursor *cursor,
+    const uint8_t                  *dir_fh,
+    int                             dir_fhlen,
     uint64_t                        cookie,
     const char                     *name,
     int                             namelen,
-    const struct chimera_vfs_attrs *attrs,
-    void                           *arg)
+    const struct chimera_vfs_attrs *attrs)
 {
-    struct nfs_request             *req = arg;
-    uint32_t                        dbuf_cur;
-    uint32_t                        dbuf_before = req->encoding->dbuf->used;
-    struct entry4                  *entry;
-    struct READDIR4args            *args = &req->args_compound->argarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor *cursor;
-    int                             rc;
-
-    cursor = &req->readdir4_cursor;
+    uint32_t       dbuf_cur;
+    uint32_t       dbuf_before = req->encoding->dbuf->used;
+    struct entry4 *entry;
+    int            rc;
 
     entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
     if (!entry) {
@@ -76,9 +86,9 @@ chimera_nfs4_readdir_callback(
                                 /* entries share the directory's backend/fs */
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen),
+                                                              dir_fh, dir_fhlen),
                                 chimera_nfs4_xattr_supported(req->thread->vfs_thread,
-                                                             req->fh, req->fhlen),
+                                                             dir_fh, dir_fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
@@ -109,6 +119,25 @@ chimera_nfs4_readdir_callback(
     }
 
     return 0;
+} /* chimera_nfs4_readdir_entry_fill */
+
+static int
+chimera_nfs4_readdir_callback(
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *arg)
+{
+    struct nfs_request  *req  = arg;
+    struct READDIR4args *args = &req->args_compound->argarray[req->index].opreaddir;
+
+    (void) inum;
+
+    return chimera_nfs4_readdir_entry_fill(req, args, &req->readdir4_cursor,
+                                           req->fh, req->fhlen,
+                                           cookie, name, namelen, attrs);
 } /* chimera_nfs4_readdir_callback */
 
 static void
