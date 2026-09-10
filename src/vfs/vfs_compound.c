@@ -40,10 +40,13 @@ struct chimera_vfs_compound {
     enum chimera_vfs_error          status;
 
     /* The current object: its file handle, and an open handle for it once
-     * something has needed one. */
+     * something has needed one.  handle_flags records what that handle was
+     * opened with, so an op needing more than it carries (a LOOKUP wanting a
+     * directory open) can re-open rather than settle for less. */
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        fh_len;
     struct chimera_vfs_open_handle *handle;
+    unsigned int                    handle_flags;
 
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
@@ -196,7 +199,11 @@ chimera_vfs_compound_add_access(
     }
 
     op->requested = requested;
-    op->attr_mask = CHIMERA_VFS_ATTR_MASK_STAT;
+    /* The ACL as well as the mode: chimera_vfs_access_check evaluates a native
+     * ACL when the object has one and only falls back to the mode bits when it
+     * does not, so fetching stat alone would silently answer every ACL-bearing
+     * object from its mode. */
+    op->attr_mask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL;
 
     return index;
 } /* chimera_vfs_compound_add_access */
@@ -242,8 +249,17 @@ chimera_vfs_compound_op_done(
     struct chimera_vfs_compound *compound,
     enum chimera_vfs_error       status)
 {
-    compound->ops[compound->index].status = status;
-    compound->completed                   = compound->index + 1;
+    struct chimera_vfs_compound_op *done = &compound->ops[compound->index];
+
+    done->status        = status;
+    compound->completed = compound->index + 1;
+
+    /* Record what the op ended up addressing, so a caller describing the
+     * object in its reply does not have to re-derive it. */
+    if (compound->fh_len) {
+        memcpy(done->fh, compound->fh, compound->fh_len);
+        done->fh_len = compound->fh_len;
+    }
 
     if (status != CHIMERA_VFS_OK) {
         /* Stop at the first failure: every later op addresses what an earlier
@@ -269,6 +285,8 @@ chimera_vfs_compound_set_current(
         compound->handle = NULL;
     }
 
+    compound->handle_flags = 0;
+
     memcpy(compound->fh, fh, fh_len);
     compound->fh_len = fh_len;
 } /* chimera_vfs_compound_set_current */
@@ -292,6 +310,31 @@ chimera_vfs_compound_open_callback(
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_open_callback */
 
+/* Copy a backend's attrs into an op result.
+ *
+ * va_acl is dropped rather than copied.  A backend reports the ACL by pointing
+ * va_acl at its own live inode state (memfs: attr.va_acl = inode->acl), valid
+ * only for the duration of its completion -- so a struct copy that survives
+ * the callback carries a pointer to memory the caller must not read.  Storing
+ * it would leave every consumer one dereference away from a use-after-free
+ * that no test would reliably catch.
+ *
+ * So the sequence does not offer ACLs: the bit is cleared with the pointer, a
+ * caller that asks for one sees it absent rather than dangling, and a caller
+ * that needs one issues the getattr itself.  Anything computed FROM the ACL
+ * while it was live -- ACCESS's granted mask -- is unaffected. */
+static void
+chimera_vfs_compound_store_attr(
+    struct chimera_vfs_compound_op *op,
+    const struct chimera_vfs_attrs *attr)
+{
+    op->attr = *attr;
+
+    op->attr.va_acl       = NULL;
+    op->attr.va_req_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    op->attr.va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+} /* chimera_vfs_compound_store_attr */
+
 static void
 chimera_vfs_compound_lookup_callback(
     enum chimera_vfs_error    error_code,
@@ -306,7 +349,7 @@ chimera_vfs_compound_lookup_callback(
 
     if (error_code == CHIMERA_VFS_OK) {
         if (attr) {
-            op->attr = *attr;
+            chimera_vfs_compound_store_attr(op, attr);
         }
 
         if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
@@ -333,7 +376,7 @@ chimera_vfs_compound_getattr_callback(
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
     if (error_code == CHIMERA_VFS_OK && attr) {
-        op->attr = *attr;
+        chimera_vfs_compound_store_attr(op, attr);
 
         if (op->type == CHIMERA_VFS_COMPOUND_OP_ACCESS) {
             op->granted = chimera_vfs_access_check(attr, compound->cred,
@@ -368,34 +411,46 @@ chimera_vfs_compound_readlink_callback(
     chimera_vfs_compound_op_done(compound, error_code);
 } /* chimera_vfs_compound_readlink_callback */
 
-/* Does this op address the current object through a handle? */
-static int
-chimera_vfs_compound_op_needs_handle(uint8_t type)
+/*
+ * The flags this op needs the current object opened with, or 0 if it addresses
+ * the current object without a handle at all.
+ *
+ * LOOKUP asks for a directory open, which is what every protocol's own lookup
+ * does today: resolving a name through a non-directory then fails on the open,
+ * uniformly, instead of on however a particular backend's lookup_at chooses to
+ * report a non-directory parent.
+ */
+static unsigned int
+chimera_vfs_compound_op_open_flags(uint8_t type)
 {
     switch (type) {
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
+            return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                   CHIMERA_VFS_OPEN_DIRECTORY;
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
         case CHIMERA_VFS_COMPOUND_OP_ACCESS:
         case CHIMERA_VFS_COMPOUND_OP_READLINK:
-            return 1;
+            return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
         default:
             return 0;
     } /* switch */
-} /* chimera_vfs_compound_op_needs_handle */
+} /* chimera_vfs_compound_op_open_flags */
 
 static void
 chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
 {
     struct chimera_vfs_compound_op *op;
+    unsigned int                    open_flags;
 
     if (compound->index >= compound->num_ops) {
         chimera_vfs_compound_finish(compound, CHIMERA_VFS_OK);
         return;
     }
 
-    op = &compound->ops[compound->index];
+    op         = &compound->ops[compound->index];
+    open_flags = chimera_vfs_compound_op_open_flags(op->type);
 
-    if (chimera_vfs_compound_op_needs_handle(op->type)) {
+    if (open_flags) {
         if (compound->fh_len == 0) {
             /* No current object: the sequence addressed one before naming
              * one.  A caller builds these itself, so this is its bug. */
@@ -403,13 +458,20 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             return;
         }
 
-        if (!compound->handle) {
+        if (!compound->handle || (open_flags & ~compound->handle_flags)) {
             /* Open the current object once; every op that follows on the same
-             * object reuses this handle. */
+             * object reuses this handle -- unless it needs flags the handle
+             * was not opened with, in which case it is re-opened. */
+            if (compound->handle) {
+                chimera_vfs_release(compound->thread, compound->handle);
+                compound->handle = NULL;
+            }
+
+            compound->handle_flags = open_flags;
+
             chimera_vfs_open_fh(compound->thread, compound->cred,
                                 compound->fh, (int) compound->fh_len,
-                                CHIMERA_VFS_OPEN_INFERRED |
-                                CHIMERA_VFS_OPEN_PATH,
+                                open_flags,
                                 chimera_vfs_compound_open_callback, compound);
             return;
         }
@@ -427,8 +489,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                 break;
             }
-            memcpy(op->fh, compound->fh, compound->fh_len);
-            op->fh_len = compound->fh_len;
+            /* The fh is recorded for every op below; GETFH exists so the
+             * caller has an index to read it from. */
             chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
             break;
 

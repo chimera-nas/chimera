@@ -50,7 +50,9 @@ enum chimera_vfs_compound_op_type {
     /* Make `fh` the current object.  Any sequence that addresses an object
      * starts with one of these. */
     CHIMERA_VFS_COMPOUND_OP_PUTFH,
-    /* Resolve `name` in the current object; the result becomes current. */
+    /* Resolve `name` in the current object; the result becomes current.  The
+     * current object is opened as a directory, so a LOOKUP through anything
+     * else fails on the open (ENOTDIR) rather than in the backend. */
     CHIMERA_VFS_COMPOUND_OP_LOOKUP,
     /* Attributes of the current object. */
     CHIMERA_VFS_COMPOUND_OP_GETATTR,
@@ -79,9 +81,20 @@ struct chimera_vfs_compound_op {
     uint32_t               requested;
 
     /* ---- results ---- */
-    struct chimera_vfs_attrs attr;      /* LOOKUP, GETATTR                   */
+    /* LOOKUP, GETATTR, ACCESS.  va_acl is always NULL here and the ACL bit is
+     * always clear in the masks: a backend reports an ACL by pointing at its
+     * own live inode state, which does not outlive its completion, so a copy
+     * that survives the callback cannot carry one.  Rather than leave a
+     * pointer that looks valid and is not, the sequence drops it -- a caller
+     * that needs an ACL issues that getattr itself.  ACCESS's `granted` is
+     * computed while the ACL is still live, so it is unaffected. */
+    struct chimera_vfs_attrs attr;
+    /* The current object AFTER this op ran: what a LOOKUP resolved, what a
+     * PUTFH selected, and for everything else the object the op addressed.
+     * A caller that must describe the object an op acted on -- which is most
+     * of what a protocol reply is -- would otherwise have to re-derive it. */
     uint8_t                  fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                 fh_len;    /* GETFH                             */
+    uint32_t                 fh_len;
     uint32_t                 granted;   /* ACCESS                            */
     char                    *target;    /* READLINK (owned by the compound)  */
     uint32_t                 target_len;

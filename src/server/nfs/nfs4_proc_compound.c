@@ -77,7 +77,7 @@ nfs4_release_write_args(
  * Only call this after nfs4_op_check_minor has accepted the op (argop is then a
  * valid matrix index).
  */
-static nfsstat4
+nfsstat4
 nfs4_rofs_gate(
     struct nfs_request      *req,
     const struct nfs_argop4 *argop)
@@ -256,6 +256,13 @@ chimera_nfs4_compound_process(
         if (gate != NFS4_OK) {
             nfs4_fail_undispatched_op(thread, argop, resop, gate);
             chimera_nfs4_compound_complete(req, gate);
+        } else if (chimera_nfs4_compound_try_vfs(thread, req)) {
+            /* Everything left in this COMPOUND was expressible as a single VFS
+             * compound and has been submitted as one; its completion fills the
+             * remaining results and re-enters the reply path.  The attempt is
+             * made here rather than at compound entry so that a leading
+             * SEQUENCE dispatches normally and the rest of a 4.1+ COMPOUND is
+             * still reachable. */
         } else {
             /* NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2):
              * ops that change the current filehandle clear the current
