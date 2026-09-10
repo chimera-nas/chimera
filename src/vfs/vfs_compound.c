@@ -68,6 +68,11 @@ struct chimera_vfs_compound {
      * it can never be read as belonging to a different op. */
     uint8_t                         open_resolved;
 
+    /* An exclusive create collided and is being re-opened -- see
+     * CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY.  Set so the retry cannot
+     * itself retry.  Cleared whenever the sequence advances. */
+    uint8_t                         open_retried;
+
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
 };
@@ -571,6 +576,7 @@ chimera_vfs_compound_op_done(
 
     compound->index++;
     compound->open_resolved = 0;
+    compound->open_retried  = 0;
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_op_done */
 
@@ -961,6 +967,31 @@ chimera_vfs_compound_open_at_callback(
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
     (void) set_attr;
+
+    if (error_code == CHIMERA_VFS_EEXIST &&
+        (op->open_opts & CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY) &&
+        !compound->open_retried) {
+        /* The name was taken.  Open what is there so the caller can decide what
+         * the collision means; it applies no attributes, and asks for no
+         * access, because this open exists to be looked at. */
+        compound->open_retried = 1;
+        op->existed            = 1;
+
+        op->set_attr.va_set_mask = 0;
+        op->set_attr.va_req_mask = 0;
+
+        chimera_vfs_open_at(compound->thread, compound->cred,
+                            compound->handle,
+                            op->name, op->name_len,
+                            CHIMERA_VFS_OPEN_INFERRED,
+                            &op->set_attr,
+                            op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                            CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                            CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                            chimera_vfs_compound_open_at_callback,
+                            compound);
+        return;
+    }
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_compound_op_done(compound, error_code);

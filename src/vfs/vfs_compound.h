@@ -164,6 +164,14 @@ enum chimera_vfs_compound_op_type {
  * finds an existing one leaves it alone.  (NFS4 UNCHECKED4 and NFS3 UNCHECKED
  * both mean this: the create attributes describe a creation, not an open.) */
 #define CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY (1U << 1)
+/* An exclusive create that collides opens what is already there instead of
+ * failing, reporting `existed`.  The caller decides what the collision means --
+ * NFS4's EXCLUSIVE4 compares a verifier stamped in the object's timestamps to
+ * tell its own earlier create from somebody else's file, which it can only do
+ * with the object open and its attributes in hand.  The re-open applies no
+ * attributes and takes no data-access intent; it exists to look, and the
+ * caller closes or keeps it. */
+#define CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY      (1U << 2)
 
 struct chimera_vfs_compound_dirent {
     uint64_t                 inum;
