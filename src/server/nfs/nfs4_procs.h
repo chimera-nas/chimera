@@ -242,6 +242,42 @@ chimera_nfs4_getfh_fill(
     const uint8_t      *fh,
     int                 fhlen);
 
+/*
+ * The OPEN completion, shared with the VFS-compound path.  Both paths reach the
+ * same point -- an object is open and its attributes are in hand -- by
+ * different routes, and everything from there (installing the open state,
+ * taking the share reservation, offering a delegation, the deferred truncate,
+ * the 4.0 seqid advance) is identical, so it lives in one place.
+ */
+nfsstat4
+chimera_nfs4_open_install_state(
+    struct nfs_request             *req,
+    struct chimera_vfs_open_handle *handle,
+    const struct chimera_vfs_attrs *attr,
+    bool                            file_created,
+    const uint8_t                  *base_fh,
+    int                             base_fh_len,
+    struct stateid4                *out_stateid,
+    uint32_t                       *out_rflags);
+
+nfsstat4
+chimera_nfs4_open_nonreg_status(
+    uint8_t minorversion,
+    mode_t  mode);
+
+/* Returns true if the OPEN parked on a CB_NULL probe and will complete itself;
+ * the caller must then not complete it. */
+bool
+chimera_nfs4_open_grant_delegation(
+    struct nfs_request             *req,
+    struct OPEN4res                *res,
+    const struct chimera_vfs_attrs *file_attr);
+
+void
+chimera_nfs4_open_complete(
+    struct nfs_request *req,
+    nfsstat4            status);
+
 nfsstat4
 chimera_nfs4_readlink_check_type(
     const struct chimera_vfs_attrs *attr);
