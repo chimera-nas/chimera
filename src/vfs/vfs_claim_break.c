@@ -390,6 +390,89 @@ chimera_vfs_claim_mark_break_notified(
     chimera_vfs_state_put(state, file);
 } /* chimera_vfs_claim_mark_break_notified */
 
+/* -------------------------------------------------------------------- */
+/* Break waiters (protocol replies held on a break)                     */
+/* -------------------------------------------------------------------- */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_break_waiter_add(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash)
+{
+    struct chimera_vfs_file_state *file;
+
+    if (!state || fh_len == 0) {
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    file->break_waiters++;
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_claim_break_waiter_add */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_break_waiter_remove(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash)
+{
+    struct chimera_vfs_file_state *file;
+
+    if (!state || fh_len == 0) {
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    if (file->break_waiters) {
+        file->break_waiters--;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_claim_break_waiter_remove */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_has_break_waiter(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash)
+{
+    struct chimera_vfs_file_state *file;
+    bool                           waiting;
+
+    if (!state || fh_len == 0) {
+        return false;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    waiting = file->break_waiters != 0;
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+    return waiting;
+} /* chimera_vfs_claim_has_break_waiter */
+
 SYMBOL_EXPORT void
 chimera_vfs_claim_revoke_breaks(
     struct chimera_vfs_state             *state,
