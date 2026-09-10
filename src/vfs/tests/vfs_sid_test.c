@@ -170,6 +170,39 @@ test_absent_and_equal(void)
     TEST_PASS("len 0 is the absent state; equality compares bytes");
 } /* test_absent_and_equal */
 
+/* A length that cannot describe a SID is not a SID: the presence predicate,
+ * and everything built on it, treats it as absent.  That is what bounds every
+ * consumer that copies `len` bytes -- the serializer, the SMB emitter, the
+ * backends -- whoever built the struct and however badly. */
+static void
+test_len_invariant(void)
+{
+    struct chimera_sid   s, t;
+    char                 buf[CHIMERA_SID_STR_MAX];
+    static const uint8_t bad[] = { 1, 2, 3, 4, 5, 6, 7, 69, 100, 200, 255 };
+
+    assert(chimera_sid_from_str(&s, "S-1-5-21-1-2-3-1001") == 0);
+
+    for (unsigned i = 0; i < sizeof(bad); i++) {
+        t     = s;
+        t.len = bad[i];
+        assert(!chimera_sid_present(&t));
+        assert(!chimera_sid_equal(&t, &t));
+        assert(!chimera_sid_equal(&t, &s));
+        assert(chimera_sid_to_str(&t, buf, sizeof(buf)) == -1);
+    }
+
+    /* The bounds themselves are present: the 8-byte header alone (a SID with
+     * no sub-authorities) and the 15-sub-authority maximum. */
+    t     = s;
+    t.len = CHIMERA_SID_MIN_LEN;
+    assert(chimera_sid_present(&t));
+    t.len = CHIMERA_SID_MAX_LEN;
+    assert(chimera_sid_present(&t));
+
+    TEST_PASS("out-of-range lengths are absent; the bounds are present");
+} /* test_len_invariant */
+
 /* The owner/group pair record the native backends persist (cairn and diskfs
  * share this codec): every case leaves both outputs fully defined. */
 static void
@@ -268,6 +301,7 @@ main(
     test_max_sub_auths();
     test_bad_input();
     test_absent_and_equal();
+    test_len_invariant();
     test_pair_codec();
 
     fprintf(stderr, "All SID codec tests passed\n");
