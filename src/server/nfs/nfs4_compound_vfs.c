@@ -376,6 +376,41 @@ nfs4_vfs_readdir_fill(
 } /* nfs4_vfs_readdir_fill */
 
 /*
+ * Does the object an exclusive create collided with carry this OPEN's own
+ * verifier?  If so the create is a retry of one that already succeeded and the
+ * OPEN succeeds against the existing object; if not, somebody else's file is in
+ * the way (RFC 7530 §16.16.4).
+ */
+static int
+nfs4_vfs_open_verifier_matches(
+    const struct OPEN4args         *args,
+    const struct chimera_vfs_attrs *attr)
+{
+    const uint8_t *verf;
+    uint32_t       verf_atime, verf_mtime;
+
+    verf = (args->openhow.how.mode == EXCLUSIVE4) ?
+           args->openhow.how.createverf :
+           args->openhow.how.ch_createboth.cva_verf;
+
+    memcpy(&verf_atime, verf, sizeof(verf_atime));
+    memcpy(&verf_mtime, verf + sizeof(verf_atime), sizeof(verf_mtime));
+
+    return (attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) &&
+           (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+           attr->va_atime.tv_sec == verf_atime &&
+           attr->va_mtime.tv_sec == verf_mtime;
+} /* nfs4_vfs_open_verifier_matches */
+
+static int
+nfs4_vfs_open_is_exclusive(const struct OPEN4args *args)
+{
+    return args->openhow.opentype == OPEN4_CREATE &&
+           (args->openhow.how.mode == EXCLUSIVE4 ||
+            args->openhow.how.mode == EXCLUSIVE4_1);
+} /* nfs4_vfs_open_is_exclusive */
+
+/*
  * Map a failed VFS op onto the status its NFSv4 operation reports.  Two
  * operations do not use the generic mapping: PUTFH turns a missing object into
  * NFS4ERR_STALE, and LISTXATTRS turns a too-small buffer into NFS4ERR_TOOSMALL
@@ -383,11 +418,12 @@ nfs4_vfs_readdir_fill(
  */
 static nfsstat4
 nfs4_vfs_op_errno(
-    uint32_t                              argop,
+    const struct nfs_argop4              *ap,
     const struct chimera_vfs_compound_op *vop,
     struct nfs_request                   *req)
 {
-    enum chimera_vfs_error err = vop->status;
+    enum chimera_vfs_error err   = vop->status;
+    uint32_t               argop = ap->argop;
 
     if (argop == OP_PUTFH) {
         return chimera_nfs4_putfh_errno(err);
@@ -395,6 +431,15 @@ nfs4_vfs_op_errno(
 
     if (argop == OP_LISTXATTRS && err == CHIMERA_VFS_ERANGE) {
         return NFS4ERR_TOOSMALL;
+    }
+
+    /* An exclusive create whose re-open of the colliding object failed.  No
+     * object that is not a regular file can be carrying the verifier an
+     * exclusive create stamped, so whatever is in the way and however the
+     * backend reported it, the answer the protocol wants is simply "something
+     * else is already there" (RFC 7530 §16.16.4). */
+    if (argop == OP_OPEN && vop->existed && nfs4_vfs_open_is_exclusive(&ap->opopen)) {
+        return NFS4ERR_EXIST;
     }
 
     /* An OPEN refused by the type gate: the VFS reports the nearest POSIX
@@ -437,13 +482,27 @@ nfs4_vfs_op_fill(
             uint32_t                        install_rflags = 0;
             int                             rc;
 
-            /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular
-             * file.  The type gate above catches this before the open for the
-             * modes that ask for it; a GUARDED4 create does not, so the object
-             * it opened is classified here, exactly as the per-op path does on
-             * its own open completion. */
-            if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-                !S_ISREG(vop->attr.va_mode)) {
+            if (vop->existed && nfs4_vfs_open_is_exclusive(oargs)) {
+                /* An exclusive create that collided.  The object was opened so
+                 * that this one question could be asked of it, and the answer
+                 * settles the OPEN by itself: carrying this verifier is what
+                 * makes the object ours, and nothing else about it matters.
+                 *
+                 * In particular its TYPE does not: no object that is not a
+                 * regular file can be carrying a verifier an exclusive create
+                 * stamped, so a directory or a symlink here is not a type
+                 * error, it is just somebody else's name (RFC 7530 §16.16.4).
+                 */
+                if (!nfs4_vfs_open_verifier_matches(oargs, &vop->attr)) {
+                    return NFS4ERR_EXIST;
+                }
+            } else if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+                       !S_ISREG(vop->attr.va_mode)) {
+                /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular
+                 * file.  The type gate before the open catches this for the
+                 * modes that ask for it; a GUARDED4 create does not, so the
+                 * object it opened is classified here, exactly as the per-op
+                 * path does on its own open completion. */
                 return chimera_nfs4_open_nonreg_status(req->minorversion,
                                                        vop->attr.va_mode);
             }
@@ -494,23 +553,36 @@ nfs4_vfs_op_fill(
                 OPEN4_RESULT_LOCKTYPE_POSIX;
             ores->resok4.num_attrset = 0;
 
-            if (oargs->openhow.opentype == OPEN4_CREATE) {
-                /* Which of the requested attributes the create actually
-                 * applied.  set_attr is the executor's copy, which it blanks
-                 * when the name resolved to something that already existed --
-                 * so an open that created nothing reports nothing set, which is
-                 * what the per-op path reports for the same reason. */
+            /* Which of the requested attributes the create actually applied.
+             * set_attr is the executor's copy, which it blanks when the name
+             * resolved to something that already existed -- so an open that
+             * created nothing reports nothing set, which is what the per-op
+             * path reports for the same reason.
+             *
+             * The requested set lives in a different arm of openhow.how for
+             * each create mode, and EXCLUSIVE4 has none at all: its verifier
+             * occupies that slot, so reading it as an attribute request would
+             * be reading the verifier's bytes as an attribute mask. */
+            if (oargs->openhow.opentype == OPEN4_CREATE &&
+                oargs->openhow.how.mode != EXCLUSIVE4) {
                 struct chimera_vfs_attrs applied = vop->set_attr;
+                uint32_t                 n_mask;
+                uint32_t                *mask;
+
+                if (oargs->openhow.how.mode == EXCLUSIVE4_1) {
+                    n_mask = oargs->openhow.how.ch_createboth.cva_attrs.num_attrmask;
+                    mask   = oargs->openhow.how.ch_createboth.cva_attrs.attrmask;
+                } else {
+                    n_mask = oargs->openhow.how.createattrs.num_attrmask;
+                    mask   = oargs->openhow.how.createattrs.attrmask;
+                }
 
                 rc = xdr_dbuf_alloc_array(&ores->resok4, attrset, 4,
                                           req->encoding->dbuf);
                 chimera_nfs_abort_if(rc, "Failed to allocate array");
 
                 ores->resok4.num_attrset = chimera_nfs4_mask2attr(
-                    &applied,
-                    oargs->openhow.how.createattrs.num_attrmask,
-                    oargs->openhow.how.createattrs.attrmask,
-                    ores->resok4.attrset);
+                    &applied, n_mask, mask, ores->resok4.attrset);
             }
 
             if (map->open_by_name) {
@@ -731,8 +803,7 @@ nfs4_vfs_compound_complete(
                                  "NFSv4 compound: VFS op %d never ran", j);
 
             if (vop->status != CHIMERA_VFS_OK) {
-                status                  = nfs4_vfs_op_errno(argop->argop, vop,
-                                                            req);
+                status                  = nfs4_vfs_op_errno(argop, vop, req);
                 resop->opillegal.status = status;
                 fail_res                = map->res_index;
                 failed                  = 1;
@@ -889,6 +960,55 @@ nfs4_vfs_add_xattr_op(
 } /* nfs4_vfs_add_xattr_op */
 
 /*
+ * The create attributes an exclusive OPEN carries.
+ *
+ * EXCLUSIVE4 carries none at all -- the verifier occupies the attribute slot --
+ * so the object's mode is undefined until the client's follow-up SETATTR (RFC
+ * 7530 §16.16.5) and it is created owner-only, the same safe default the per-op
+ * path, Linux nfsd and NFS-Ganesha all use.  EXCLUSIVE4_1 does carry
+ * attributes, and takes the same default when they leave the mode out.
+ *
+ * Either way the verifier is stamped into atime and mtime, overwriting anything
+ * the client asked for there -- which is why an EXCLUSIVE4_1 that sets
+ * time_access_set or time_modify_set is refused rather than silently clobbered.
+ */
+static void
+nfs4_vfs_open_exclusive_attrs(
+    const struct OPEN4args   *args,
+    struct chimera_vfs_attrs *attr)
+{
+    const uint8_t *verf;
+    uint32_t       part;
+
+    if (args->openhow.how.mode == EXCLUSIVE4_1) {
+        chimera_nfs4_unmarshall_attrs(
+            attr,
+            args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+            args->openhow.how.ch_createboth.cva_attrs.attrmask,
+            args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
+            args->openhow.how.ch_createboth.cva_attrs.attr_vals.len,
+            NULL, 0);
+        verf = args->openhow.how.ch_createboth.cva_verf;
+    } else {
+        verf = args->openhow.how.createverf;
+    }
+
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+
+    memcpy(&part, verf, 4);
+    attr->va_atime.tv_sec  = part;
+    attr->va_atime.tv_nsec = 0;
+    memcpy(&part, verf + 4, 4);
+    attr->va_mtime.tv_sec  = part;
+    attr->va_mtime.tv_nsec = 0;
+
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+        attr->va_mode      = 0600;
+    }
+} /* nfs4_vfs_open_exclusive_attrs */
+
+/*
  * Append an OPEN, marshalling its arguments the way the per-op path does before
  * it makes any VFS call.
  *
@@ -911,8 +1031,9 @@ nfs4_vfs_add_open_op(
     struct chimera_vfs_attrs attr;
     unsigned int             flags = 0;
     uint32_t                 opts  = 0;
-    const char              *name  = NULL;
+    const char              *name    = NULL;
     int                      namelen = 0;
+    uint64_t                 attr_mask;
 
     memset(&attr, 0, sizeof(attr));
 
@@ -923,18 +1044,38 @@ nfs4_vfs_add_open_op(
     }
 
     if (args->openhow.opentype == OPEN4_CREATE) {
-        flags |= CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_CREATE_REGULAR;
+        flags |= CHIMERA_VFS_OPEN_CREATE;
 
-        if (args->openhow.how.mode == GUARDED4) {
+        if (args->openhow.how.mode != UNCHECKED4) {
             flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
         }
 
-        chimera_nfs4_unmarshall_attrs(&attr,
-                                      args->openhow.how.createattrs.num_attrmask,
-                                      args->openhow.how.createattrs.attrmask,
-                                      args->openhow.how.createattrs.attr_vals.data,
-                                      args->openhow.how.createattrs.attr_vals.len,
-                                      NULL, 0);
+        if (args->openhow.how.mode == UNCHECKED4 ||
+            args->openhow.how.mode == GUARDED4) {
+            /* Resolve an existing name's type rather than opening it, so a
+             * socket or a directory is answered for by type.  An exclusive
+             * create does NOT ask for this: it wants the plain collision, so
+             * that whatever is in the way it can go and look at it.  (The
+             * per-op path draws the line in the same place.) */
+            flags |= CHIMERA_VFS_OPEN_CREATE_REGULAR;
+
+            chimera_nfs4_unmarshall_attrs(&attr,
+                                          args->openhow.how.createattrs.num_attrmask,
+                                          args->openhow.how.createattrs.attrmask,
+                                          args->openhow.how.createattrs.attr_vals.data,
+                                          args->openhow.how.createattrs.attr_vals.len,
+                                          NULL, 0);
+        } else {
+            /* EXCLUSIVE4 and EXCLUSIVE4_1 stamp the client's verifier into the
+             * object's atime and mtime, which is how a repeat of the same
+             * create recognises its own earlier one.  (Linux nfsd does the
+             * same; a server-private xattr would be better and is a TODO on the
+             * per-op path.)  A collision therefore has to be looked at rather
+             * than refused, which is what EXCLUSIVE_RETRY is for. */
+            opts |= CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY;
+
+            nfs4_vfs_open_exclusive_attrs(args, &attr);
+        }
 
         if (args->openhow.how.mode == UNCHECKED4) {
             /* An UNCHECKED4 create of a name that is already there opens it
@@ -966,13 +1107,17 @@ nfs4_vfs_add_open_op(
     (void) req;
 
     /* The same attributes the per-op path's open asks for -- no more, so an
-     * object is not stat'd more thoroughly on one path than the other. */
+     * object is not stat'd more thoroughly on one path than the other.  An
+     * exclusive create adds the two the verifier lives in. */
+    attr_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME;
+
+    if (opts & CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY) {
+        attr_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+    }
+
     return chimera_vfs_compound_add_open(compound, name, namelen, flags, opts,
-                                         &attr,
-                                         CHIMERA_VFS_ATTR_FH |
-                                         CHIMERA_VFS_ATTR_MODE |
-                                         CHIMERA_VFS_ATTR_CHANGE |
-                                         CHIMERA_VFS_ATTR_CTIME);
+                                         &attr, attr_mask);
 } /* nfs4_vfs_add_open_op */
 
 int
@@ -1309,17 +1454,27 @@ chimera_nfs4_compound_try_vfs(
                 }
                 }
 
-                /* An EXCLUSIVE create that collides re-opens the existing name
-                 * and compares its verifier, which is a second, conditional VFS
-                 * op the sequence cannot express. */
+                /* RFC 8881 §18.16.3: an EXCLUSIVE4_1 attribute outside
+                 * suppattr_exclcreat is NFS4ERR_INVAL, and the per-op path is
+                 * what says so.  Without this the verifier would silently
+                 * clobber a time_access_set or time_modify_set the client
+                 * asked for. */
                 if (oa->openhow.opentype == OPEN4_CREATE &&
-                    oa->openhow.how.mode != UNCHECKED4 &&
-                    oa->openhow.how.mode != GUARDED4) {
-                    {
+                    oa->openhow.how.mode == EXCLUSIVE4_1 &&
+                    (chimera_nfs4_validate_createattrs(
+                         oa->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                         oa->openhow.how.ch_createboth.cva_attrs.attrmask) !=
+                     NFS4_OK ||
+                     chimera_nfs4_validate_exclcreat_attrs(
+                         oa->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                         oa->openhow.how.ch_createboth.cva_attrs.attrmask) !=
+                     NFS4_OK ||
+                     (oa->openhow.how.ch_createboth.cva_attrs.num_attrmask >= 1 &&
+                      (oa->openhow.how.ch_createboth.cva_attrs.attrmask[0] &
+                       (1U << FATTR4_ACL))))) {
                     nenc = i;
                     stop = 1;
                     break;
-                }
                 }
 
                 /* Statuses the per-op path decides before it opens anything. */
@@ -1341,7 +1496,9 @@ chimera_nfs4_compound_try_vfs(
                 }
                 }
 
-                if (oa->openhow.opentype == OPEN4_CREATE) {
+                if (oa->openhow.opentype == OPEN4_CREATE &&
+                    (oa->openhow.how.mode == UNCHECKED4 ||
+                     oa->openhow.how.mode == GUARDED4)) {
                     if (chimera_nfs4_validate_createattrs(
                             oa->openhow.how.createattrs.num_attrmask,
                             oa->openhow.how.createattrs.attrmask) != NFS4_OK) {

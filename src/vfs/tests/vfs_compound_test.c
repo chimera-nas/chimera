@@ -797,6 +797,80 @@ main(
     }
     TEST_PASS("OPEN with ATTRS_ON_CREATE_ONLY does not restyle an existing object");
 
+    /* ---- an exclusive create that collides opens what is there ----
+     * The collision is the answer the caller wants, not an error: NFS4's
+     * EXCLUSIVE4 has to look at the object to tell its own earlier create from
+     * somebody else's file.  The re-open applies none of the create's
+     * attributes, so the object it finds is left exactly as it was. */
+    {
+        struct chimera_vfs_attrs sattr;
+        int                      i_open, i_ga4;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0640;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "x1", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_EXCLUSIVE,
+                                               0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_open)->created);
+        chimera_vfs_compound_free(cp);
+
+        /* Without the option, a second exclusive create is refused. */
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "x1", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_EXCLUSIVE,
+                                               0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_open)->status ==
+               CHIMERA_VFS_EEXIST);
+        assert(chimera_vfs_compound_op(cp, i_open)->out_handle == NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* With it, the same create opens the object instead, says it was
+         * already there, and does not restyle it to the 0777 this open asked
+         * for. */
+        sattr.va_mode = S_IFREG | 0777;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(
+            cp, "x1", 2,
+            CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_EXCLUSIVE,
+            CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga4  = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->existed);
+        assert(!op->created);
+        assert(op->out_handle != NULL);
+        assert((chimera_vfs_compound_op(cp, i_ga4)->attr.va_mode & 0777) ==
+               0640);
+
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("an exclusive create that collides opens what is already there");
+
     /* ---- an OPEN with no name re-opens the current object ---- */
     {
         int i_open;
