@@ -155,6 +155,97 @@ probe_query_sweep(
     }
 } /* probe_query_sweep */
 
+/* ---- FileFsAttributeInformation flags ------------------------------------
+ *
+ * MS-FSCC 2.5.1 FileSystemAttributes is what a client consults BEFORE trying a
+ * feature: macOS writes AppleDouble sidecars instead of streams unless
+ * FILE_NAMED_STREAMS is set, Windows Explorer hides the Security tab without
+ * FILE_PERSISTENT_ACLS, and robocopy picks its stream strategy from the word.
+ * smbtorture never reads it (it opens streams directly), so a wrong word is
+ * invisible to the whole conformance suite -- only a real client notices.
+ * The word must follow the serving module's capabilities and the
+ * smb_named_streams knob, so the probe pins it under both knob settings.
+ *
+ * MS-FSCC names, spelled with an FSA_ prefix so they cannot collide with the
+ * harness's own FILE_* constants. */
+#define FSA_CASE_SENSITIVE_SEARCH      0x00000001
+#define FSA_CASE_PRESERVED_NAMES       0x00000002
+#define FSA_UNICODE_ON_DISK            0x00000004
+#define FSA_PERSISTENT_ACLS            0x00000008
+#define FSA_SUPPORTS_SPARSE_FILES      0x00000040
+#define FSA_SUPPORTS_REPARSE_POINTS    0x00000080
+#define FSA_NAMED_STREAMS              0x00040000
+#define FSA_SUPPORTS_BLOCK_REFCOUNTING 0x08000000
+
+/* memfs stores rich ACLs, punches holes, reflinks and keeps named streams, so
+ * with the knob on it advertises everything chimera can derive. */
+#define FSA_MEMFS_STREAMS_ON           (FSA_CASE_SENSITIVE_SEARCH |      \
+                                        FSA_CASE_PRESERVED_NAMES |       \
+                                        FSA_UNICODE_ON_DISK |            \
+                                        FSA_PERSISTENT_ACLS |            \
+                                        FSA_SUPPORTS_SPARSE_FILES |      \
+                                        FSA_SUPPORTS_REPARSE_POINTS |    \
+                                        FSA_NAMED_STREAMS |              \
+                                        FSA_SUPPORTS_BLOCK_REFCOUNTING)
+
+static void
+probe_fs_attributes(
+    struct smb2_conn *c,
+    const uint8_t     file_id[16],
+    uint32_t          want,
+    const char       *what)
+{
+    uint8_t  buf[64];
+    uint32_t st, len = 0, got;
+
+    printf("# --- FileFsAttributeInformation (%s) ---\n", what);
+
+    memset(buf, 0, sizeof(buf));
+    st = smb2_query_info(c, SMB2_INFO_FILESYSTEM_T, SMB2_FS_ATTRIBUTE_INFO_T,
+                         file_id, 0, buf, sizeof(buf), &len);
+    CHECK(st == ST_SUCCESS && len >= 12,
+          "%s: FileFsAttributeInformation -> 0x%08x (%u bytes)", what, st, len);
+    if (st != ST_SUCCESS || len < 12) {
+        return;
+    }
+
+    got = g32(buf, 0);
+    CHECK(got == want,
+          "%s: FileSystemAttributes 0x%08x (want 0x%08x; missing 0x%08x, extra 0x%08x)",
+          what, got, want, want & ~got, got & ~want);
+    CHECK(g32(buf, 4) == 255,
+          "%s: MaximumComponentNameLength %u (want 255)", what, g32(buf, 4));
+} /* probe_fs_attributes */
+
+/* The knob half of the gate: with smb_named_streams off the same memfs share
+ * must drop FILE_NAMED_STREAMS and nothing else.  Needs its own server. */
+static void
+probe_fs_attributes_streams_off(void)
+{
+    struct smb2_env        env;
+    struct smb2_env_opts   opts = { .named_streams = 0 };
+    struct smb2_conn      *c;
+    struct smb2_create_out file;
+    uint32_t               st;
+
+    smb2_env_start_opts(&env, &opts);
+    c = smb2_conn_open(&env);
+    smb2_handshake(c);
+
+    st = smb2_create(c, "fsattr.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &file);
+    if (st == ST_SUCCESS) {
+        probe_fs_attributes(c, file.file_id,
+                            FSA_MEMFS_STREAMS_ON & ~FSA_NAMED_STREAMS,
+                            "memfs, smb_named_streams off");
+        smb2_close(c, file.file_id);
+    } else {
+        CHECK(0, "setup: CREATE fsattr.bin -> 0x%08x", st);
+    }
+
+    smb2_env_stop(&env);
+} /* probe_fs_attributes_streams_off */
+
 /* ---- extended attributes ------------------------------------------------
  *
  * FILE_FULL_EA_INFORMATION (MS-FSCC 2.4.15) is a chain of
@@ -1198,6 +1289,8 @@ main(
                      FILE_SHARE_RWD, NULL, &file);
     if (st == ST_SUCCESS) {
         probe_query_sweep(c, file.file_id, "a file");
+        probe_fs_attributes(c, file.file_id, FSA_MEMFS_STREAMS_ON,
+                            "memfs, smb_named_streams on");
         smb2_close(c, file.file_id);
     } else {
         CHECK(0, "setup: CREATE sweep.bin -> 0x%08x", st);
@@ -1222,6 +1315,8 @@ main(
     probe_refusals(c);
 
     smb2_env_stop(&env);
+
+    probe_fs_attributes_streams_off();
 
     if (failures) {
         fprintf(stderr, "%d info-class check(s) FAILED\n", failures);

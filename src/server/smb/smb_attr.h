@@ -106,7 +106,53 @@ struct chimera_smb_fs_attrs {
     uint64_t smb_actual_available_allocation_units;
     uint32_t smb_sectors_per_allocation_unit;
     uint32_t smb_bytes_per_sector;
+    uint32_t smb_fs_attributes;   /* FileFsAttributeInformation.FileSystemAttributes */
 };
+
+/*
+ * FileFsAttributeInformation.FileSystemAttributes (MS-FSCC 2.5.1) for a share
+ * served by a module with the given capabilities.  Clients consult this word
+ * BEFORE attempting a feature -- macOS falls back to AppleDouble sidecars
+ * without FILE_NAMED_STREAMS, Explorer hides the Security tab without
+ * FILE_PERSISTENT_ACLS -- so it must describe what the backend actually does,
+ * not what the server implements in general.
+ *
+ * Unconditional: names are case-sensitive and case-preserving Unicode, and
+ * reparse points (symlinks and device nodes under the NFS reparse tag) ride
+ * on symlink_at / mknod_at, which every FS module implements.
+ *
+ * FILE_NAMED_STREAMS needs the capability AND the smb_named_streams knob: the
+ * same gate FileStreamInformation and the stream CREATE path apply, so the
+ * client is never told about streams the server would then refuse.
+ */
+static inline uint32_t
+chimera_smb_fs_attributes(
+    uint64_t capabilities,
+    int      named_streams)
+{
+    uint32_t attrs = SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
+        SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
+        SMB2_FS_ATTR_UNICODE_ON_DISK |
+        SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS;
+
+    if (capabilities & CHIMERA_VFS_CAP_SPARSE) {
+        attrs |= SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES;
+    }
+
+    if (capabilities & CHIMERA_VFS_CAP_CLONE_RANGE) {
+        attrs |= SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING;
+    }
+
+    if (capabilities & CHIMERA_VFS_CAP_ACL_NATIVE) {
+        attrs |= SMB2_FS_ATTR_PERSISTENT_ACLS;
+    }
+
+    if (named_streams && (capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
+        attrs |= SMB2_FS_ATTR_NAMED_STREAMS;
+    }
+
+    return attrs;
+} /* chimera_smb_fs_attributes */
 
 /* Helper functions for common attribute marshaling operations */
 static inline void
