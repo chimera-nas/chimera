@@ -239,8 +239,8 @@ struct chimera_vfs_attrs {
      * Same lifetime contract as va_acl: on getattr the backend points these
      * at storage valid only for the duration of the completion callback; on
      * setattr the caller owns the buffers. */
-    const struct chimera_sid *va_owner_sid;
-    const struct chimera_sid *va_group_sid;
+    struct chimera_sid *va_owner_sid;
+    struct chimera_sid *va_group_sid;
 
     /* Opaque pNFS layout state, owned by the NFS server (see
      * CHIMERA_VFS_ATTR_PNFS_LAYOUT). */

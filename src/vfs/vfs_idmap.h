@@ -84,10 +84,14 @@ int chimera_idmap_who_to_principal(
 
 /*
  * Encode `p` as a Windows SID string ("S-1-...") into `buf`.  Special-whos map
- * to well-known SIDs (EVERYONE@ -> S-1-1-0, OWNER@ -> S-1-3-0, GROUP@ ->
- * S-1-3-1); numeric ids map algorithmically (uid -> S-1-22-1-<uid>, gid ->
- * S-1-22-2-<gid>).  Returns the string length, or -1 if the buffer is too
- * small / the principal is not representable.
+ * to their well-known SIDs (EVERYONE@ -> S-1-1-0, CREATOR OWNER -> S-1-3-0,
+ * CREATOR GROUP -> S-1-3-1, ...); OWNER@ and GROUP@ have no standalone SID
+ * (the SD emitter substitutes the object's owner / group) and, like an opaque
+ * CHIMERA_PRINCIPAL_SID whose identity is its stored bytes, are not
+ * representable.  Numeric ids map algorithmically to the modefromsid forms
+ * (uid -> S-1-5-88-1-<uid>, gid -> S-1-5-88-2-<gid>); sid_to_principal still
+ * parses the Samba S-1-22 forms as well.  Returns the string length, or -1 if
+ * the buffer is too small / the principal is not representable.
  */
 int chimera_idmap_principal_to_sid(
     const struct chimera_principal *p,
