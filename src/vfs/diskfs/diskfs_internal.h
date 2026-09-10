@@ -1136,9 +1136,6 @@ struct diskfs_xattr_rec {
 #define DISKFS_ACL_REC_MAX_ACES \
         (((DISKFS_ACL_REC_MAX) -CHIMERA_ACL_SERIAL_HDR) / CHIMERA_ACL_SERIAL_ACE)
 
-/* Native owner/group SID record: two length-prefixed SIDs. */
-#define DISKFS_SID_REC_MAX (2 + 2 * CHIMERA_SID_MAX_LEN)
-
 /* True when the ACL carried by a setattr or create (if any) serializes into
  * one b+tree record.  Checked before anything is mutated: the txn abort does
  * not roll the in-memory inode back, so an ACL that cannot be stored has to
@@ -2235,7 +2232,7 @@ struct diskfs_inode_load_ctx {
     int                         sid_len;
     int                         pnfs_len;
     uint8_t                     acl_rec[DISKFS_ACL_REC_MAX];
-    uint8_t                     sid_rec[DISKFS_SID_REC_MAX];
+    uint8_t                     sid_rec[CHIMERA_SID_PAIR_MAX];
     uint8_t                     pnfs_rec[CHIMERA_VFS_PNFS_LAYOUT_MAX];
 };
 
@@ -3154,19 +3151,6 @@ diskfs_acl_serial_install(
     struct diskfs_inode *inode,
     const uint8_t       *serial,
     int                  len);
-
-int
-diskfs_sid_rec_encode(
-    const struct chimera_sid *owner,
-    const struct chimera_sid *group,
-    uint8_t                  *buf);
-
-void
-diskfs_sid_rec_decode(
-    const uint8_t      *serial,
-    uint32_t            len,
-    struct chimera_sid *owner,
-    struct chimera_sid *group);
 
 void
 diskfs_sid_serial_install(

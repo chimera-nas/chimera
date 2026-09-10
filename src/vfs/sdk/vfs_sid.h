@@ -99,6 +99,45 @@ int chimera_sid_from_str(
     const char         *str);
 
 /*
+ * Owner / group SID pair record: the companions to uid / gid that the native
+ * backends persist beside (not inside) the ACL, so "no ACL record" still
+ * means "mode-derived DACL" and a chown never touches the DACL record.
+ *
+ *     u8 owner_len, owner bytes, u8 group_len, group bytes
+ *
+ * A zero length means that SID is not recorded.  Shared by cairn
+ * (CAIRN_KEY_SID) and diskfs (DISKFS_REC_SID).
+ */
+#define CHIMERA_SID_PAIR_MAX (2 + 2 * CHIMERA_SID_MAX_LEN)
+
+/*
+ * Encode `owner` / `group` (either may be NULL or absent) into `out`
+ * (capacity `outcap`).  Returns the record length (at least 2), 0 when
+ * neither SID is present -- nothing to store, and no record should exist --
+ * or -1 when `outcap` is too small.
+ */
+int chimera_sid_pair_encode(
+    const struct chimera_sid *owner,
+    const struct chimera_sid *group,
+    uint8_t                  *out,
+    int                       outcap);
+
+/*
+ * Decode a pair record.  Both outputs are fully defined on every return: the
+ * recorded SID, or zeroed (absent) when it is not recorded, unreachable or
+ * malformed.  Returns 0 when every recorded SID decoded -- an absent record
+ * (NULL, or fewer than 2 bytes) is 0 with both outputs absent -- and -1 when
+ * a length byte runs past the record or a SID fails validation.  A SID that
+ * is still positionally reachable after a malformed one is decoded anyway,
+ * and bytes after the group SID are ignored.
+ */
+int chimera_sid_pair_decode(
+    const uint8_t      *buf,
+    int                 len,
+    struct chimera_sid *owner,
+    struct chimera_sid *group);
+
+/*
  * A SID is present only when `len` can describe one: at least the 8-byte
  * header, at most the 15-sub-authority maximum.  Any other value -- storage
  * that was never initialised, or a module handing back a bogus owner SID --
