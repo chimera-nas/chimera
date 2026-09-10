@@ -219,9 +219,20 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS (1U << 20)
 
 /* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
- * losslessly.  If unset, the module is mode-only: the VFS translates ACLs to
- * and from UNIX mode bits on its behalf.  There is no POSIX.1e capability by
- * design -- Chimera carries a single ACL model (see vfs_acl.h). */
+ * losslessly.  If unset, the module is mode-only, and a mode-only module that
+ * wants ACLs at all translates them itself: linux maps a set-ACL down to chmod
+ * and synthesizes one back from the mode on query, io_uring does neither.  The
+ * VFS core does not translate on a module's behalf -- it only reads va_acl to
+ * gate access.  There is no POSIX.1e capability by design -- Chimera carries a
+ * single ACL model (see vfs_acl.h).
+ *
+ * This is a statement about fidelity, and the SMB server's
+ * FILE_PERSISTENT_ACLS advertisement gates on it deliberately: a mode-bit
+ * round trip is not preservation.  Explorer showing the Security tab on a
+ * mode-only backend would invite a user to set per-user ACEs that then
+ * collapse to owner/group/other, losing the policy they came to set, so the
+ * hidden tab is the honest answer.  Do not widen this to cover mode-mapped
+ * backends, and do not add a second capability for them. */
 #define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 23)
 
 /* If set, the module delegates discretionary access control to a real
@@ -337,6 +348,30 @@ struct chimera_vfs_handle_state {
  * kernel applies the rule, and a proxy whose server applies it all leave this
  * unset. */
 #define CHIMERA_VFS_CAP_CREATE_GID_ENGINE     (1U << 30)
+
+/* If set, the module keeps files sparse: chimera_vfs_allocate can punch a hole
+ * (deallocate a byte range so it reads as zeros without consuming storage) and
+ * chimera_vfs_seek can classify a range as DATA or HOLE.  The SMB server
+ * advertises FILE_SUPPORTS_SPARSE_FILES only for such modules, so a client
+ * never issues FSCTL_SET_ZERO_DATA / QUERY_ALLOCATED_RANGES the backend would
+ * refuse.
+ *
+ * Both halves are required.  The smb proxy forwards FSCTL_SET_ZERO_DATA but
+ * has no SEEK, so it leaves this unset.  The nfs proxy does implement both
+ * over NFSv4.2 (OP_DEALLOCATE and OP_SEEK) but only zero-write emulation of
+ * the first over NFSv3, and the version is chosen per mount, so one
+ * per-module bit cannot express it.  It declares the bit anyway: the SMB
+ * server advertised sparse support on every backend before this capability
+ * existed, so declaring it keeps v4.2 shares punching holes and leaves v3
+ * shares exactly as over-advertised as they were (see vfs_nfs in nfs.c).
+ *
+ * Advisory only.  Unlike every other capability here, the VFS core does not
+ * gate on this bit: chimera_vfs_seek and chimera_vfs_allocate dispatch to the
+ * module unconditionally and backend ENOTSUP stays the enforcement, because
+ * sparseness is a runtime property of the underlying filesystem for the
+ * passthroughs and of the negotiated version for the proxies.  The bit exists
+ * to answer FileFsAttributeInformation.  Do not turn it into a core gate. */
+#define CHIMERA_VFS_CAP_SPARSE                (1U << 31)
 
 struct chimera_vfs_module {
     /* Required
