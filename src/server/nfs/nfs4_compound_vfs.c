@@ -993,6 +993,9 @@ chimera_nfs4_compound_try_vfs(
     /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
      * always the last op of its run. */
     int                           open_at = -1;
+    /* Set when the scan meets an op the sequence cannot carry: the run ends in
+     * front of it, and the dispatcher picks up from there. */
+    int                           stop = 0;
     /* The seed PUTFH the sequence always opens with. */
     uint32_t                      vfs_ops = 1;
     uint64_t                      reply_bound = 0, avail;
@@ -1006,9 +1009,13 @@ chimera_nfs4_compound_try_vfs(
      * in, and what is left is dispatched op by op afterwards. */
     nenc  = num;
 
-    if (first >= num || num - first > NFS4_VFS_COMPOUND_MAX_OPS) {
+    if (first >= num) {
         return 0;
     }
+
+    /* A remainder longer than the sequence can hold is not refused: the scan's
+     * own vfs_ops budget ends the run when it fills up, and the rest is
+     * dispatched op by op. */
 
     /* The dispatcher fails an op with NFS4ERR_RESOURCE rather than running it
      * when the reply buffer is nearly full; leave that to it. */
@@ -1022,7 +1029,8 @@ chimera_nfs4_compound_try_vfs(
         argop = &req->args_compound->argarray[i];
 
         if (!nfs4_vfs_op_encodable(argop->argop)) {
-            return 0;
+            nenc = i;
+            break;
         }
 
         /* The per-op gates decide statuses this path has no vocabulary for, so
@@ -1030,11 +1038,13 @@ chimera_nfs4_compound_try_vfs(
          * rejected there. */
         if (nfs4_op_check_minor(argop->argop, req->minorversion, i,
                                 req->seen_sequence) != NFS4_OK) {
-            return 0;
+            nenc = i;
+            break;
         }
 
         if (nfs4_rofs_gate(req, argop) != NFS4_OK) {
-            return 0;
+            nenc = i;
+            break;
         }
 
         reply_bound  += nfs4_vfs_op_reply_bound(argop);
@@ -1049,7 +1059,8 @@ chimera_nfs4_compound_try_vfs(
                     argop->argop == OP_COMMIT) ? 2 : 1;
 
         if (vfs_ops > NFS4_VFS_COMPOUND_MAX_OPS) {
-            return 0;
+            nenc = i;
+            break;
         }
 
         /* Ops that can still fail once the whole sequence has run: the three
@@ -1074,14 +1085,22 @@ chimera_nfs4_compound_try_vfs(
                  * and with it the squash policy and the credential the whole
                  * sequence runs under, which is fixed at submission. */
                 if (i != first) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 break;
 
             case OP_LOOKUP:
                 if (chimera_nfs4_validate_name(&argop->oplookup.objname) !=
                     NFS4_OK) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 have_lookup = 1;
                 cur_moved   = 1;
@@ -1096,7 +1115,11 @@ chimera_nfs4_compound_try_vfs(
                  * what a later LOOKUPP would climb from is not known until the
                  * sequence has already run past it. */
                 if (cur_moved) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 have_lookupp = 1;
                 cur_moved    = 1;
@@ -1113,7 +1136,11 @@ chimera_nfs4_compound_try_vfs(
                  * the sequence would have to run under, which was fixed when it
                  * was submitted. */
                 if (!have_saved) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 cur_moved = 1;
                 break;
@@ -1125,13 +1152,21 @@ chimera_nfs4_compound_try_vfs(
                 if (argop->opreaddir.maxcount < 16 ||
                     argop->opreaddir.cookie == 1 ||
                     argop->opreaddir.cookie == 2) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 if (chimera_nfs4_validate_getattr_request(
                         argop->opreaddir.num_attr_request,
                         argop->opreaddir.attr_request) != NFS4_OK) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* Per-entry ACLs are dropped for the same reason a GETATTR's
@@ -1139,7 +1174,11 @@ chimera_nfs4_compound_try_vfs(
                  * runs. */
                 if (argop->opreaddir.num_attr_request >= 1 &&
                     (argop->opreaddir.attr_request[0] & (1U << FATTR4_ACL))) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* A page the sequence could fill and the reply could not is
@@ -1148,20 +1187,32 @@ chimera_nfs4_compound_try_vfs(
                 if (nfs4_vfs_readdir_max_entries(argop->opreaddir.maxcount,
                                                  avail) >
                     CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 break;
 
             case OP_GETXATTR:
                 if (!nfs4_vfs_xattr_name_ok(argop->opgetxattr.gxa_name.len)) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 break;
 
             case OP_SETXATTR:
                 if (may_fail_late ||
                     !nfs4_vfs_xattr_name_ok(argop->opsetxattr.sxa_key.len)) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* RFC 8276 §8.3: only the three defined option values are
@@ -1169,14 +1220,22 @@ chimera_nfs4_compound_try_vfs(
                 if (argop->opsetxattr.sxa_option != SETXATTR4_EITHER &&
                     argop->opsetxattr.sxa_option != SETXATTR4_CREATE &&
                     argop->opsetxattr.sxa_option != SETXATTR4_REPLACE) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 break;
 
             case OP_REMOVEXATTR:
                 if (may_fail_late ||
                     !nfs4_vfs_xattr_name_ok(argop->opremovexattr.rxa_name.len)) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 break;
 
@@ -1184,7 +1243,11 @@ chimera_nfs4_compound_try_vfs(
                 if (chimera_nfs4_validate_getattr_request(
                         argop->opgetattr.num_attr_request,
                         argop->opgetattr.attr_request) != NFS4_OK) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* A backend owns the ACL it reports only for the duration of
@@ -1194,7 +1257,11 @@ chimera_nfs4_compound_try_vfs(
                  * it while it is still live. */
                 if (argop->opgetattr.num_attr_request >= 1 &&
                     (argop->opgetattr.attr_request[0] & (1U << FATTR4_ACL))) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
                 have_getattr = 1;
                 break;
@@ -1207,7 +1274,11 @@ chimera_nfs4_compound_try_vfs(
                  * it does to SETXATTR: nothing whose NFSv4-side check fails
                  * after the sequence has run may precede it. */
                 if (may_fail_late) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* 4.0 classifies the open_owner's seqid before any VFS work,
@@ -1218,7 +1289,11 @@ chimera_nfs4_compound_try_vfs(
                  * needs no such rule, because both paths leave through the same
                  * chimera_nfs4_open_finish. */
                 if (req->minorversion == 0 && i != first) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* Only the two claims that are an ordinary open of a name or of
@@ -1227,7 +1302,11 @@ chimera_nfs4_compound_try_vfs(
                  * and CLAIM_DELEGATE_PREV is refused outright. */
                 if (oa->claim.claim != CLAIM_NULL &&
                     oa->claim.claim != CLAIM_FH) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* An EXCLUSIVE create that collides re-opens the existing name
@@ -1236,25 +1315,41 @@ chimera_nfs4_compound_try_vfs(
                 if (oa->openhow.opentype == OPEN4_CREATE &&
                     oa->openhow.how.mode != UNCHECKED4 &&
                     oa->openhow.how.mode != GUARDED4) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* Statuses the per-op path decides before it opens anything. */
                 if ((oa->share_access & (OPEN4_SHARE_ACCESS_READ |
                                          OPEN4_SHARE_ACCESS_WRITE)) == 0) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 if (oa->claim.claim == CLAIM_NULL &&
                     chimera_nfs4_validate_name(&oa->claim.file) != NFS4_OK) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 if (oa->openhow.opentype == OPEN4_CREATE) {
                     if (chimera_nfs4_validate_createattrs(
                             oa->openhow.how.createattrs.num_attrmask,
                             oa->openhow.how.createattrs.attrmask) != NFS4_OK) {
-                        return 0;
+                        {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                     }
 
                     /* An ACL in the create attributes would have to survive
@@ -1263,7 +1358,11 @@ chimera_nfs4_compound_try_vfs(
                     if (oa->openhow.how.createattrs.num_attrmask >= 1 &&
                         (oa->openhow.how.createattrs.attrmask[0] &
                          (1U << FATTR4_ACL))) {
-                        return 0;
+                        {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                     }
                 }
 
@@ -1274,14 +1373,22 @@ chimera_nfs4_compound_try_vfs(
                                             req->session ?
                                             req->session->client_unified : NULL,
                                             false) != NFS4_OK) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 if (req->minorversion > 0 && req->session &&
                     !nfs4_client_reclaim_complete(
                         &thread->shared->nfs4_shared_clients,
                         req->session->nfs4_session_clientid)) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* A delegation grant can park on an in-flight CB_NULL probe,
@@ -1293,7 +1400,11 @@ chimera_nfs4_compound_try_vfs(
                  * delegation to the per-op path. */
                 if (chimera_server_config_get_nfs4_delegations(
                         thread->shared->config)) {
-                    return 0;
+                    {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 }
 
                 /* Everything after an OPEN is dispatched op by op. */
@@ -1306,9 +1417,14 @@ chimera_nfs4_compound_try_vfs(
                 break;
         } /* switch */
 
-        if (nfs4_vfs_op_ends_run(argop->argop)) {
+        if (stop || nfs4_vfs_op_ends_run(argop->argop)) {
             break;
         }
+    }
+
+    /* Nothing at all was expressible, so there is no sequence to build. */
+    if (nenc <= first) {
+        return 0;
     }
 
     /*
@@ -1598,8 +1714,13 @@ chimera_nfs4_compound_try_vfs(
      * dispatcher applies this before dispatching each op; replaying the whole
      * sequence's worth here, in order, is the same thing -- the value never
      * leaves the request, so applying it up front rather than as each op runs
-     * is not observable. */
-    for (i = first; i < num; i++) {
+     * is not observable.
+     *
+     * Only the ops the sequence CARRIES.  Anything past nenc is dispatched op
+     * by op afterwards and the dispatcher applies this to it then; doing it
+     * here as well would apply it twice, and out of order with the ops in
+     * between. */
+    for (i = first; i < nenc; i++) {
         switch (req->args_compound->argarray[i].argop) {
             case OP_PUTFH:
             case OP_LOOKUP:
