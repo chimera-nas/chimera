@@ -260,6 +260,17 @@ chimera_nfs4_open_install_state(
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags);
 
+/* RFC 7530 §9.1.7 entry-time seqid classification for a 4.0 OPEN.  True when
+ * the OPEN is answered outright (replay, bad seqid, stale clientid) with
+ * *status carrying the answer; false to proceed, having pinned the owner on
+ * req->open_4_0_owner.  A no-op returning false on 4.1+. */
+bool
+chimera_nfs4_open_4_0_entry(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    uint32_t                          res_index,
+    nfsstat4                         *status);
+
 nfsstat4
 chimera_nfs4_open_nonreg_status(
     uint8_t minorversion,

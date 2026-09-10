@@ -1719,29 +1719,36 @@ chimera_nfs4_open_attrdir_base_open_callback(
                             req);
 } /* chimera_nfs4_open_attrdir_base_open_callback */
 
-void
-chimera_nfs4_open(
+/*
+ * RFC 7530 §9.1.7 entry-time seqid classification for the 4.0 path.
+ *
+ * Runs BEFORE any VFS work, so a replay is answered from the owner's cached
+ * reply without re-executing the open.  That ordering is why it is a separate
+ * function: the VFS-compound path has to reach the same decision before it
+ * submits a sequence, and both paths then advance the seqid through the same
+ * chimera_nfs4_open_finish on the way out.
+ *
+ * Returns true when the OPEN is answered outright -- replay, bad seqid, stale
+ * clientid, all of them in the no-advance set -- with *status carrying the
+ * answer for the caller to complete the COMPOUND with.  Returns false when the
+ * OPEN should proceed, having pinned the resolved owner on req->open_4_0_owner
+ * (chimera_nfs4_open_finish drops it).  A no-op returning false on 4.1+.
+ */
+SYMBOL_EXPORT bool
+chimera_nfs4_open_4_0_entry(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop)
+    uint32_t                          res_index,
+    nfsstat4                         *status)
 {
-    struct OPEN4args *args = &argop->opopen;
-    struct OPEN4res  *res  = &resop->opopen;
+    struct OPEN4args *args = &req->args_compound->argarray[res_index].opopen;
+    struct OPEN4res  *res  = &req->res_compound.resarray[res_index].opopen;
 
-    req->open_trunc_pending = false;
-
-    if (req->fhlen == 0) {
-        res->status = NFS4ERR_NOFILEHANDLE;
-        chimera_nfs4_open_complete(req, res->status);
-        return;
+    if (req->minorversion != 0) {
+        return false;
     }
 
-    /* RFC 7530 §9.1.7 entry-time seqid classification for the 4.0 path.
-     * Done BEFORE any VFS work so a replay short-circuits without
-     * re-executing the open.  On NEW, the resolved owner is stashed on
-     * req for chimera_nfs4_open_complete to advance + cache the reply. */
-    if (req->minorversion == 0) {
+    {
         struct nfs_client *client = NULL;
 
         /* Resolve the client strictly by the OPEN owner's clientid.  The
@@ -1769,8 +1776,8 @@ chimera_nfs4_open(
             /* NFS4ERR_STALE_CLIENTID is in the no-advance set; we don't
              * touch any owner state. */
             res->status = NFS4ERR_STALE_CLIENTID;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            *status     = NFS4ERR_STALE_CLIENTID;
+            return true;
         }
         if (client->expired) {
             client->expired = 0;
@@ -1813,8 +1820,8 @@ chimera_nfs4_open(
             /* Early return before the borrow ref transfers to the request;
              * release it here. */
             nfs_open_owner_put(owner);
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            *status = res->status;
+            return true;
         }
 
         if (cls != NFS4_SEQID_NEW) {
@@ -1823,14 +1830,47 @@ chimera_nfs4_open(
             evpl_mutex_unlock(&owner->lock);
             nfs_open_owner_put(owner);
             res->status = NFS4ERR_BAD_SEQID;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            *status     = NFS4ERR_BAD_SEQID;
+            return true;
         }
 
         evpl_mutex_unlock(&owner->lock);
         /* Transfer the find_or_create ref onto the request; dropped in
          * chimera_nfs4_open_complete. */
         req->open_4_0_owner = owner;
+    }
+    return false;
+} /* chimera_nfs4_open_4_0_entry */
+
+void
+chimera_nfs4_open(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
+{
+    struct OPEN4args *args = &argop->opopen;
+    struct OPEN4res  *res  = &resop->opopen;
+
+    req->open_trunc_pending = false;
+
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* RFC 7530 §9.1.7 entry-time seqid classification for the 4.0 path; see
+     * chimera_nfs4_open_4_0_entry.  A replay or a rejected seqid is answered
+     * here, before any VFS work. */
+    {
+        nfsstat4 entry_status;
+
+        if (chimera_nfs4_open_4_0_entry(thread, req, (uint32_t) req->index,
+                                        &entry_status)) {
+            chimera_nfs4_compound_complete(req, entry_status);
+            return;
+        }
     }
 
     /* Gate OPEN during recovery.  Two distinct rules apply:
