@@ -50,6 +50,21 @@
  * parks exactly as it would outside a sequence.  The sequence simply does not
  * advance until it completes.  Nothing is held that would not otherwise be
  * held, because the ops are the same ops.
+ *
+ * OPEN HANDLE OWNERSHIP.  Every other op leaves nothing behind: the executor
+ * opens what it needs, and releases it when the current object moves on or the
+ * sequence ends.  An OPEN is different -- an open handle is the whole point of
+ * it, and the caller needs it to outlive the sequence.
+ *
+ * The rule is that the compound owns it until the caller takes it.  On the
+ * completion callback the handle is readable as op->out_handle;
+ * chimera_vfs_compound_take_handle() transfers it, after which the caller
+ * releases it.  Anything the caller does NOT take is released by
+ * chimera_vfs_compound_free(), so the failure paths -- a later op failed, the
+ * caller decided not to install the state, the caller simply forgot -- leak
+ * nothing.  Defaulting to "the compound still owns it" is deliberate: a caller
+ * that must remember to release a handle on every error path is a caller that
+ * eventually does not.
  */
 
 struct chimera_vfs_compound;
@@ -88,6 +103,14 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_COMMIT,
     /* One page of the current object's directory entries. */
     CHIMERA_VFS_COMPOUND_OP_READDIR,
+    /* Open (and optionally create) an object, which becomes current.  With a
+     * `name`, the name is resolved in the current object, which is opened as a
+     * directory; without one, the current object itself is opened.  MUTATES
+     * when the flags say create -- see the MUTATION note above.
+     *
+     * Unlike every other op here, an OPEN produces a resource the caller keeps:
+     * the open handle.  See OPEN HANDLE OWNERSHIP below. */
+    CHIMERA_VFS_COMPOUND_OP_OPEN,
     /* Extended attributes of the current object.  SETXATTR and REMOVEXATTR
      * MUTATE -- see the MUTATION note above. */
     CHIMERA_VFS_COMPOUND_OP_GETXATTR,
@@ -117,6 +140,30 @@ enum chimera_vfs_compound_op_type {
  * whose reply holds 32 entries pays for 32.
  */
 #define CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES 512
+
+/*
+ * OPEN options.  These express the two things a protocol open wants that a
+ * bare open_at does not do, and that a caller would otherwise have to get by
+ * looking the name up itself first -- which is exactly what NFS4's OPEN did
+ * before this op existed, at the cost of being back in the middle of its own
+ * sequence between the lookup and the open.
+ *
+ * The executor implements both by resolving the name once before the open,
+ * which is the same two steps the caller used to take; the point is that they
+ * are now on this side of the submission.  Pushing the type gate down into the
+ * backends' open paths would save that resolve and close the window between it
+ * and the open -- CHIMERA_VFS_OPEN_CREATE_REGULAR is the same idea for the
+ * create path -- but it is a change to every backend, and separable from this.
+ */
+/* Refuse a non-regular object rather than opening it: a native open of a FIFO,
+ * socket or device can block or report a backend-specific errno where a
+ * protocol wants to answer for the type.  The op fails, and `existing_mode`
+ * carries the mode so the caller can say what it wants about it. */
+#define CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY   (1U << 0)
+/* Apply `set_attr` only if the open actually creates the object.  An open that
+ * finds an existing one leaves it alone.  (NFS4 UNCHECKED4 and NFS3 UNCHECKED
+ * both mean this: the create attributes describe a creation, not an open.) */
+#define CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY (1U << 1)
 
 struct chimera_vfs_compound_dirent {
     uint64_t                 inum;
@@ -148,6 +195,12 @@ struct chimera_vfs_compound_op {
     uint32_t               dircount;    /* READDIR (advisory; see the adder)  */
     uint32_t               maxcount;    /* READDIR (advisory; see the adder)  */
     uint32_t               max_entries; /* READDIR                            */
+    unsigned int           open_flags;  /* OPEN: CHIMERA_VFS_OPEN_*           */
+    uint32_t               open_opts;   /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
+    /* OPEN: attributes to apply to a created object.  Read by the executor at
+     * execution time, so ATTRS_ON_CREATE_ONLY can clear it once the name has
+     * been resolved. */
+    struct chimera_vfs_attrs set_attr;
     uint32_t               xattr_option; /* SETXATTR                          */
     const void            *xattr_value; /* SETXATTR (borrowed from caller)    */
     uint32_t               xattr_value_len;
@@ -177,6 +230,24 @@ struct chimera_vfs_compound_op {
      * would double the size of a sequence for one field. */
     struct timespec          pre_ctime;
     struct timespec          post_ctime;
+
+    /* ---- OPEN results ---- */
+    /* The open handle, owned by the CALLER once the sequence has finished --
+     * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed. */
+    struct chimera_vfs_open_handle *out_handle;
+    /* Whether the open created the object. */
+    uint8_t                         created;
+    /* Set when the executor resolved the name before opening (which it does
+     * for REGULAR_ONLY or ATTRS_ON_CREATE_ONLY) and found an existing object.
+     * `existing_mode` is that object's mode -- the whole point of the
+     * REGULAR_ONLY failure, whose status says only that the open was refused
+     * and not what was in the way. */
+    uint8_t                         existed;
+    uint32_t                        existing_mode;
+    /* The parent directory before and after, for a change_info reply.  Only
+     * meaningful for an OPEN that named a child. */
+    struct chimera_vfs_attrs        dir_pre_attr;
+    struct chimera_vfs_attrs        dir_post_attr;
 
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
     struct chimera_vfs_compound_dirent *entries;
@@ -314,6 +385,27 @@ chimera_vfs_compound_add_removexattr(
     const char                  *name,
     int                          namelen);
 
+/* Open, and with CHIMERA_VFS_OPEN_CREATE create, `name` in the current object;
+ * the opened object becomes current.  A NULL (or empty) `name` opens the
+ * current object itself, which is how a protocol re-opens by file handle.
+ *
+ * `flags` is an ordinary CHIMERA_VFS_OPEN_* word and means exactly what it
+ * means to chimera_vfs_open_at.  `opts` selects the two resolve-first
+ * behaviours documented on CHIMERA_VFS_COMPOUND_OPEN_* above.  `set_attr` may
+ * be NULL; it is copied, so the caller need not keep it alive.
+ *
+ * The handle this produces belongs to the compound until taken -- see OPEN
+ * HANDLE OWNERSHIP at the top of this file. */
+int
+chimera_vfs_compound_add_open(
+    struct chimera_vfs_compound    *compound,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    flags,
+    uint32_t                        opts,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
 /* Execute the sequence.  The callback fires exactly once, on the submitting
  * thread, when execution has stopped -- because every op ran or because one
  * failed.  The compound stays valid until the caller frees it. */
@@ -347,3 +439,11 @@ const struct chimera_vfs_compound_op *
 chimera_vfs_compound_op(
     const struct chimera_vfs_compound *compound,
     uint32_t                           index);
+
+/* Take ownership of an OPEN's handle: returns it and clears out_handle, so the
+ * compound will not release it and the caller must.  NULL if that op is not an
+ * OPEN, did not run, failed, or has already been taken. */
+struct chimera_vfs_open_handle *
+chimera_vfs_compound_take_handle(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
