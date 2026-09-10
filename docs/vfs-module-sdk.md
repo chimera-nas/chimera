@@ -51,8 +51,9 @@ xxhash comes from the system (`libxxhash-dev` / `xxhash`).
 | `vfs_log.h` | `chimera_vfs_debug/info/error/fatal/abort` macros, self-contained |
 | `vfs_fh.h` | **The file-handle routing contract** (see below) and the encoders that satisfy it |
 | `vfs_varint.h` | Varint primitives the inum-style file-handle encoders are built on |
-| `vfs_acl.h` | `struct chimera_acl` / `struct chimera_ace` — the canonical ACL carried by `chimera_vfs_attrs.va_acl` |
-| `vfs_acl_serialize.h` | Stable, versioned encoding of a `chimera_acl` for a backend's own persistence |
+| `vfs_sid.h` | `struct chimera_sid`, the native Windows SID value type (MS-DTYP binary form) carried on ACL principals and on the owner/group attrs, plus its binary/string codec and the owner/group SID pair record codec the native backends persist |
+| `vfs_acl.h` | `struct chimera_acl` / `struct chimera_ace` — the canonical ACL carried by `chimera_vfs_attrs.va_acl`; each principal pairs a numeric uid/gid with an optional native SID |
+| `vfs_acl_serialize.h` | Stable, versioned encoding of a `chimera_acl` for a backend's own persistence (v2 adds the per-ACE native SID; v1 blobs still decode) |
 | `vfs_access.h` | Access-mask evaluation, so `ACCESS` answers agree across backends |
 | `vfs_xattr_name.h` | The protocol-exported `user.` xattr keyspace NFS and SMB both normalize into |
 | `vfs_tcp_flavor.h` | `enum chimera_tcp_flavor`, the value `chimera_vfs_request_tcp_flavor` returns |
@@ -126,6 +127,12 @@ The SDK contract is versioned by `CHIMERA_VFS_SDK_VERSION`
 binary fails loudly at load time instead of misinterpreting the request
 structures.  Any incompatible change to an SDK header — struct layout,
 enum values, capability semantics — must bump the version.
+
+Version history: 1 was the initial SDK; 2 widened
+`struct chimera_principal` with an inline native SID, added
+`CHIMERA_PRINCIPAL_SID`, and added the `va_owner_sid` / `va_group_sid`
+attrs and their `CHIMERA_VFS_ATTR_OWNER_SID` / `GROUP_SID` bits.  A module
+built against version 1 must be rebuilt.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /

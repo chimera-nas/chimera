@@ -328,14 +328,14 @@ test_serialize_roundtrip(void)
      * the SID absent on every ACE. */
     {
         static const uint8_t v1[] = {
-            1,                      /* version                              */
-            0x01, 0x00,             /* ctrl_flags = PROTECTED               */
-            0x01, 0x00,             /* num_aces = 1                         */
-            0x00, 0x00,             /* type = ALLOWED                       */
-            0x00, 0x00,             /* flags                                */
+            1,    /* version                              */
+            0x01, 0x00, /* ctrl_flags = PROTECTED               */
+            0x01, 0x00, /* num_aces = 1                         */
+            0x00, 0x00, /* type = ALLOWED                       */
+            0x00, 0x00, /* flags                                */
             0x01, 0x00, 0x00, 0x00, /* access_mask = READ_DATA              */
-            0x00,                   /* principal type = USER                */
-            0x00,                   /* special                              */
+            0x00, /* principal type = USER                */
+            0x00, /* special                              */
             0xe8, 0x03, 0x00, 0x00, /* id = 1000                            */
         };
 

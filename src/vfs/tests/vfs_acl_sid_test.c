@@ -44,9 +44,9 @@
 #define DEV_SIZE_BYTES (1024ULL * 1024ULL * 1024ULL) /* 1 GiB, sparse */
 #define TEST_MAX_ACES  8
 
-#define SID_OWNER  "S-1-5-21-7-8-9-500"
-#define SID_GROUP  "S-1-5-21-7-8-9-513"
-#define SID_OPAQUE "S-1-5-21-7-8-9-1001"
+#define SID_OWNER      "S-1-5-21-7-8-9-500"
+#define SID_GROUP      "S-1-5-21-7-8-9-513"
+#define SID_OPAQUE     "S-1-5-21-7-8-9-1001"
 
 struct test_ctx {
     int                             done;
