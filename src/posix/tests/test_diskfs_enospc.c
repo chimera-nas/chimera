@@ -22,11 +22,21 @@
 
 #include "posix_test_common.h"
 
-#define ENOSPC_DEV_COUNT 2
-#define ENOSPC_DEV_BYTES (128ULL << 20)
+#define ENOSPC_DEV_COUNT      2
+#define ENOSPC_DEV_BYTES      (128ULL << 20)
 
 /* alloc06 leaves this much headroom when it asks for "the rest". */
-#define ENOSPC_HEADROOM  (256ULL * 1024)
+#define ENOSPC_HEADROOM       (256ULL * 1024)
+
+/* Convergence slack for the post-delete check below.  Deleting the two files
+ * does not have to return the pool to the byte it started at: a b+tree node the
+ * directory grew to hold their names stays allocated (nodes are not merged back
+ * on remove), and the AG logs churn.  Observed drift is a single 4 KiB block.
+ * The regression this check exists for is ~159 MB of extents for space the
+ * allocator still counts as free, so a slack four orders of magnitude below
+ * that costs it nothing -- test_diskfs_reclaim takes 8 MiB for the same reason
+ * over a far heavier workload. */
+#define ENOSPC_CONVERGE_SLACK (1ULL << 20)
 
 static uint64_t
 free_bytes(struct posix_test_env *env)
@@ -118,7 +128,7 @@ main(
     reclaimed = 0;
     for (i = 0; i < 100; i++) {
         reclaimed = free_bytes(&env);
-        if (reclaimed >= baseline) {
+        if (reclaimed + ENOSPC_CONVERGE_SLACK >= baseline) {
             break;
         }
         usleep(100000);
@@ -134,9 +144,10 @@ main(
      * sm_ag_free_locked ("double-free or overlap"); a run that gets here at all
      * has cleared that.  Converging back to the baseline is the positive half:
      * nothing the failed allocation touched leaked or double-counted. */
-    if (reclaimed < baseline) {
+    if (reclaimed + ENOSPC_CONVERGE_SLACK < baseline) {
         fprintf(stderr, "space did not return after delete: %" PRIu64
-                " < baseline %" PRIu64 "\n", reclaimed, baseline);
+                " < baseline %" PRIu64 " less %" PRIu64 " slack\n",
+                reclaimed, baseline, (uint64_t) ENOSPC_CONVERGE_SLACK);
         posix_test_fail(&env);
     }
 
