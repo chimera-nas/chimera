@@ -1873,9 +1873,24 @@ diskfs_txn_unpin_blocks(struct diskfs_txn *txn)
     txn->blocks = NULL;
     while (tb) {
         n = tb->next;
-        /* Abort: no record was logged, so no tail-push will ever release this
-         * txn's claim pin -- drop it here.  The block is home (nothing of ours
-         * went un-home), so unpin marks it CLEAN once fully unpinned. */
+        /*
+         * Roll the block back to what it held before this txn touched it.  The
+         * block cache is shared, live state: unpinning alone would leave the
+         * aborted txn's half-finished edits in the cache, published as CLEAN --
+         * indistinguishable from committed content.  For a b+tree that means
+         * the file keeps extent records pointing at blocks whose ALLOC deltas
+         * were just discarded, so the allocator still counts them free: it can
+         * hand the same blocks to another file, and deleting this one frees
+         * ranges that are already free (which aborts in sm_ag_free_locked).
+         *
+         * The list is LIFO, so a block attached more than once is restored
+         * newest-first and its oldest -- i.e. true pre-txn -- image lands last.
+         */
+        memcpy(tb->block->iov.data, tb->undo, DISKFS_BLOCK_SIZE);
+
+        /* No record was logged, so no tail-push will ever release this txn's
+         * claim pin -- drop it here.  The block is home (nothing of ours went
+         * un-home), so unpin marks it CLEAN once fully unpinned. */
         diskfs_block_unpin(thread, tb->block, DISKFS_BLOCK_CLEAN);
         free(tb);
         tb = n;

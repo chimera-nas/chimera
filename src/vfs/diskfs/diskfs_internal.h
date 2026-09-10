@@ -1167,6 +1167,14 @@ struct diskfs_txn_block {
     uint64_t                 snap_csum_lo;
     uint64_t                 snap_csum_hi;
     struct diskfs_txn_block *next;
+    /* Undo image: the block's content as it was when this txn first attached it,
+     * captured before the txn mutated anything in it.  An aborting txn copies it
+     * back (diskfs_txn_unpin_blocks), which is what makes abort a true rollback:
+     * the cache keeps the block, so without this a txn's half-finished b+tree
+     * edits survive its own abort while the space they reference stays free in
+     * the allocator.  Live only while the txn is open -- a committing txn never
+     * reads it -- and last in the struct to keep the hot fields packed. */
+    uint8_t                  undo[DISKFS_BLOCK_SIZE];
 };
 
 
@@ -4410,6 +4418,10 @@ diskfs_txn_add_block(
     tb->next         = txn->blocks;
     txn->blocks      = tb;
 
+    /* Take the undo image before the caller writes into the block: every attach
+     * site claims (or CoW-forks) the block and only then mutates it. */
+    memcpy(tb->undo, block->iov.data, DISKFS_BLOCK_SIZE);
+
     /* Diag: a normal op dirties a handful of blocks.  If one txn balloons,
      * dump the call path + journal/direct split at growth thresholds so we can
      * see whether the same site repeats (re-execution loop) or varies, and
@@ -5047,10 +5059,12 @@ static inline void
 diskfs_txn_abort(struct diskfs_txn *txn)
 {
     /* Discard pending frees (their journaled FREE deltas never commit, so the
-     * ranges stay allocated).  Drop any blocks the aborted txn pinned (their
-     * contents are discarded) and release the inode locks.  NOTE: the in-memory
-     * allocator alloc deltas applied during the txn are still not rolled back
-     * here -- a pre-existing transaction-atomicity gap, separate from frees. */
+     * ranges stay allocated), roll every block this txn dirtied back to its
+     * pre-txn content, and release the inode locks.  NOTE: the txn's in-memory
+     * *inode* scalars (size, timestamps, change counter) are still not rolled
+     * back here; the failure paths that exist today all bail out before
+     * stamping them, but a future one that does not would need the same
+     * treatment. */
     diskfs_txn_discard_frees(txn);
     /* Reservation allocator: alloc deltas were never applied to the free tree
      * (only retire does that), so there is nothing to roll back there -- but each

@@ -261,7 +261,12 @@ posix_test_diskfs_device_type(const char *backend)
     if (strcmp(backend, "diskfs_aio") == 0) {
         return "libaio";
     }
-    return "io_uring";
+    if (strcmp(backend, "diskfs_io_uring") == 0) {
+        return "io_uring";
+    }
+    /* Plain "diskfs": whatever libevpl block backend this build settled on
+     * (io_uring / libaio on Linux, the portable pread backend elsewhere). */
+    return CHIMERA_DISKFS_DEVICE_TYPE;
 } // posix_test_diskfs_device_type
 
 // Helper to check if a backend name is a diskfs variant
@@ -404,6 +409,11 @@ posix_test_emit_ext_module_config(
  * / posix_test_configure_diskfs. */
 static const char *posix_test_diskfs_extra_cfg = NULL;
 static int         posix_test_diskfs_reuse_devices __attribute__ ((unused)) = 0;
+/* Device geometry.  The default 10 x 1 GiB pool is effectively unbounded; a
+ * test that needs ENOSPC to be reachable shrinks it (the kvm nfstest_alloc
+ * wrapper does the same thing for the same reason). */
+static int         posix_test_diskfs_device_count = 10;
+static uint64_t    posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
  * mounts the SAME NFS backend a second time, read-only, under a subdirectory
@@ -505,7 +515,7 @@ posix_test_configure_diskfs(
     cfg     = json_object();
     devices = json_array();
 
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < posix_test_diskfs_device_count; ++i) {
         device = json_object();
         snprintf(device_path, sizeof(device_path), "%s/device-%d.img", session_dir, i);
         json_object_set_new(device, "type", json_string(device_type));
@@ -523,7 +533,7 @@ posix_test_configure_diskfs(
             exit(EXIT_FAILURE);
         }
 
-        rc = ftruncate(fd, 1024 * 1024 * 1024UL);
+        rc = ftruncate(fd, (off_t) posix_test_diskfs_device_bytes);
 
         if (rc < 0) {
             fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
