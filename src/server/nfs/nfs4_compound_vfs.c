@@ -131,13 +131,18 @@ struct nfs4_vfs_compound_ctx {
     uint32_t            num_ops;
     struct nfs4_vfs_op  ops[NFS4_VFS_COMPOUND_MAX_OPS];
 
+    /* The OPEN this sequence carries, if any -- recorded when the sequence is
+     * built, because every way out of it has to go through the OPEN's own
+     * completion, including the ways where the OPEN never ran. */
+    int                      open_present;
+    uint32_t                 open_res_index;
+
     /* An OPEN that filled successfully still owes the part of itself that can
      * suspend -- the delegation grant, the deferred truncate -- and that part
      * runs after the sequence has been freed, so what it needs is copied out
      * here rather than left pointing into the compound. */
-    int                      open_pending;
+    int                      open_filled;
     int                      open_has_attr;
-    uint32_t                 open_res_index;
     struct chimera_vfs_attrs open_attr;
 };
 
@@ -450,6 +455,14 @@ nfs4_vfs_op_fill(
                 return NFS4ERR_SERVERFAULT;
             }
 
+            /* install_state and everything after it -- the delegation offer,
+             * the completion, the 4.0 seqid advance -- read the OPEN's
+             * arguments and result through req->index.  The fill loop has not
+             * moved it yet, so move it here.  Safe because an OPEN is always
+             * the last op of its sequence: nothing after this reads it as
+             * anything else. */
+            req->index = (int) map->res_index;
+
             /* Capture the file handle before install_state, which may release
              * the handle when it coalesces onto an existing open state. */
             memcpy(req->fh, handle->fh, handle->fh_len);
@@ -522,10 +535,9 @@ nfs4_vfs_op_fill(
             /* The rest of the OPEN -- the delegation offer and that truncate --
              * can suspend, so it runs once the sequence has been freed.  Copy
              * out what it needs; vop does not outlive the compound. */
-            ctx->open_pending   = 1;
-            ctx->open_res_index = map->res_index;
-            ctx->open_has_attr  = map->open_by_name;
-            ctx->open_attr      = vop->attr;
+            ctx->open_filled   = 1;
+            ctx->open_has_attr = map->open_by_name;
+            ctx->open_attr     = vop->attr;
 
             return NFS4_OK;
         }
@@ -762,7 +774,33 @@ nfs4_vfs_compound_complete(
     req->index = failed ? (int) fail_res :
         (int) ctx->ops[ctx->num_ops - 1].res_index;
 
-    if (!failed && ctx->open_pending) {
+    /*
+     * Every way out of an OPEN goes through its own completion, not the generic
+     * one.  chimera_nfs4_open_finish is what advances a 4.0 open_owner's seqid
+     * and drops the reference the encoder pinned on it -- and it has to run for
+     * the outcomes that FAIL too, because most OPEN errors are in the advance
+     * set (RFC 7530 §9.1.7).  Skipping it on the failure path leaves the owner
+     * one seqid behind, and the client's next OPEN is answered NFS4ERR_BAD_SEQID
+     * for a request that was perfectly good.
+     */
+    if (failed && ctx->open_present && fail_res == ctx->open_res_index) {
+        req->index = (int) fail_res;
+
+        chimera_vfs_compound_free(compound);
+        free(ctx);
+
+        chimera_nfs4_open_complete(req, status);
+        return;
+    }
+
+    if (ctx->open_present && !ctx->open_filled && req->open_4_0_owner) {
+        /* The sequence stopped before the OPEN ran at all, so there is no
+         * seqid to advance -- but the encoder's pin is still outstanding. */
+        nfs_open_owner_put(req->open_4_0_owner);
+        req->open_4_0_owner = NULL;
+    }
+
+    if (!failed && ctx->open_filled) {
         /* The OPEN's own tail.  It can park on a CB_NULL probe and it can issue
          * a truncate, so it owns the completion from here; nothing of the
          * sequence may still be needed, which is why the attributes it takes
@@ -952,10 +990,14 @@ chimera_nfs4_compound_try_vfs(
     int                           have_lookupp = 0, have_saved = 0;
     int                           cur_moved = 0, stages_early = 0;
     int                           may_fail_late = 0;
+    /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
+     * always the last op of its run. */
+    int                           open_at = -1;
     /* The seed PUTFH the sequence always opens with. */
     uint32_t                      vfs_ops = 1;
     uint64_t                      reply_bound = 0, avail;
     int                           idx, next;
+    int                           open_4_0_pinned = 0;
 
     first = (uint32_t) req->index;
     num   = req->res_compound.num_resarray;
@@ -1168,12 +1210,14 @@ chimera_nfs4_compound_try_vfs(
                     return 0;
                 }
 
-                /* 4.0 classifies the open_owner's seqid at OPEN entry -- before
-                 * any VFS work, so a replay answers from the owner's cached
-                 * reply without re-opening anything -- and advances it on the
-                 * way out.  Both belong to the per-op path's entry and exit,
-                 * neither of which this path has. */
-                if (req->minorversion == 0) {
+                /* 4.0 classifies the open_owner's seqid before any VFS work,
+                 * and that classification can answer the OPEN outright -- a
+                 * replay is served from the owner's cached reply.  Answering
+                 * outright means running none of the sequence, so nothing may
+                 * precede the OPEN in it; the seqid advance on the way out
+                 * needs no such rule, because both paths leave through the same
+                 * chimera_nfs4_open_finish. */
+                if (req->minorversion == 0 && i != first) {
                     return 0;
                 }
 
@@ -1233,7 +1277,7 @@ chimera_nfs4_compound_try_vfs(
                     return 0;
                 }
 
-                if (req->session &&
+                if (req->minorversion > 0 && req->session &&
                     !nfs4_client_reclaim_complete(
                         &thread->shared->nfs4_shared_clients,
                         req->session->nfs4_session_clientid)) {
@@ -1253,7 +1297,8 @@ chimera_nfs4_compound_try_vfs(
                 }
 
                 /* Everything after an OPEN is dispatched op by op. */
-                nenc = i + 1;
+                open_at = (int) i;
+                nenc    = i + 1;
                 break;
             }
 
@@ -1356,6 +1401,26 @@ chimera_nfs4_compound_try_vfs(
 
     /* ---- ops [first, nenc) are expressible: build the sequence ---- */
 
+    /* The 4.0 OPEN's entry-time seqid classification.  Deliberately the last
+     * thing before the sequence is built: it pins the open_owner on the request
+     * for chimera_nfs4_open_finish to advance, so it must not run ahead of a
+     * decision that could still send this COMPOUND back to the per-op path --
+     * which would resolve the same owner a second time and pin it twice. */
+    if (open_at >= 0 && req->minorversion == 0) {
+        nfsstat4 entry_status;
+
+        if (chimera_nfs4_open_4_0_entry(thread, req, (uint32_t) open_at,
+                                        &entry_status)) {
+            /* Answered without any VFS work.  The OPEN is the first op of the
+             * run, so there is nothing before it that still had to happen. */
+            req->index = open_at;
+            chimera_nfs4_compound_complete(req, entry_status);
+            return 1;
+        }
+
+        open_4_0_pinned = 1;
+    }
+
     compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
 
     ctx = calloc(1, sizeof(*ctx));
@@ -1439,8 +1504,11 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_OPEN:
-                idx          = nfs4_vfs_add_open_op(req, compound, argop, map);
-                map->vfs_res = idx;
+                ctx->open_present   = 1;
+                ctx->open_res_index = i;
+                idx                 = nfs4_vfs_add_open_op(req, compound,
+                                                           argop, map);
+                map->vfs_res        = idx;
                 break;
 
             case OP_SAVEFH:
@@ -1556,6 +1624,14 @@ chimera_nfs4_compound_try_vfs(
     return 1;
 
  refuse:
+
+    /* The build gave up after the 4.0 entry pinned the owner.  The per-op path
+     * is about to resolve it again, so drop this reference rather than leave
+     * two outstanding against one chimera_nfs4_open_finish. */
+    if (open_4_0_pinned && req->open_4_0_owner) {
+        nfs_open_owner_put(req->open_4_0_owner);
+        req->open_4_0_owner = NULL;
+    }
 
     chimera_vfs_compound_free(compound);
     free(ctx);
