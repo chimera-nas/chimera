@@ -69,6 +69,15 @@ struct chimera_vfs_file_state {
     struct chimera_vfs_pending_acquire *pending_head;
     struct chimera_vfs_pending_acquire *pending_tail;
 
+    /* Protocol requests that were granted a (capped) claim and are holding
+     * their reply until a break on THIS file settles -- SMB's MS-SMB2 3.3.5.9
+     * pending open, which parks on conn->parked_requests rather than on
+     * pending_head above.  The claim layer cannot see that park, but it has to
+     * know it exists: it is the difference between a mid-break holder whose
+     * disappearance nobody is waiting on and one that is blocking an opener.
+     * Guarded by file->lock. */
+    uint32_t                            break_waiters;
+
     /* FIFO of parked I/O / namespace requests. */
     struct chimera_vfs_pending_acquire *io_wait_head;
     struct chimera_vfs_pending_acquire *io_wait_tail;
@@ -630,6 +639,31 @@ chimera_vfs_claim_mark_break_notified(
     uint8_t                   fh_len,
     uint64_t                  fh_hash,
     const uint8_t            *lease_key);
+
+/* Register/retire a protocol request that is holding its reply until a break on
+ * this file settles (see chimera_vfs_file_state::break_waiters).  Add on park,
+ * remove on resume or park-deadline -- exactly once each. */
+void
+chimera_vfs_claim_break_waiter_add(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash);
+
+void
+chimera_vfs_claim_break_waiter_remove(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash);
+
+/* Is anyone holding a reply on a break on this file? */
+bool
+chimera_vfs_claim_has_break_waiter(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash);
 
 /* Revoke every mid-break cache claim except `except` (parked-open deadline
  * expiry). */

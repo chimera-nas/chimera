@@ -155,6 +155,8 @@ chimera_smb_async_interim_cancel(struct chimera_smb_request *request)
 
     chimera_smb_async_interim_unlink(conn, request);
 
+    chimera_smb_create_break_waiter_retire(request);
+
     request->async.armed = 0;
 
     /* Deliberately do NOT clear request->async_id: an interim is on the wire, so
@@ -173,6 +175,7 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
         request->async.park_next = NULL;
         request->async.armed     = 0;
         evpl_remove_timer(thread->evpl, &request->async.timer);
+        chimera_smb_create_break_waiter_retire(request);
 
         /* A CREATE parked on a share-acquire ticket (rather than on a break ack)
          * is resumed by the VFS pump, which would dereference this request after
