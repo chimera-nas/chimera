@@ -90,6 +90,17 @@ target_include_directories(smb_ea_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/ea_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_ea_test)
 
+# FileFsAttributeInformation flag derivation (smb_attr.h): the FileSystemAttributes
+# word must follow the serving module's capabilities and the named-streams knob.
+# The memfs probe sees only the everything-on shape; this covers the shapes
+# (proxy, mode-only, knob off) no quick-tier backend has.
+add_executable(smb_fs_attr_test smb_fs_attr_test.c)
+target_link_libraries(smb_fs_attr_test chimera_server chimera_smb)
+target_include_directories(smb_fs_attr_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/fs_attr_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_fs_attr_test)
+
 # The SMB3 transport-compression codec unit test that used to live here is now
 # quint/smb2_compress_probe.c: the same codec checks and reference vectors, plus
 # the COMPRESSION_TRANSFORM path over a real connection, in the quick tier where

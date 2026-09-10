@@ -3575,7 +3575,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_io_uring = {
     .capabilities = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP | CHIMERA_VFS_CAP_CLAIM_RANGE |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE |
-        CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR,
+        CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR |
+        CHIMERA_VFS_CAP_SPARSE,
     .init           = chimera_io_uring_init,
     .destroy        = chimera_io_uring_destroy,
     .thread_init    = chimera_io_uring_thread_init,
