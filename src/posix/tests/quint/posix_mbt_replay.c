@@ -13,11 +13,15 @@
  * in-memory request object.  This file adds what posix_replay.py used to do:
  * ITF decoding, the identity/time/shadow oracle, and the final audit.
  *
- * Scope: the deviation-free stepping flavors (the model's LInit profile is
- * pinned to memfs).  Traces that would exercise a known chimera deviation are
- * out of scope here -- posix_replay.py (with posix_deviations.py) remains the
- * reference for those; this replayer treats any errno/state divergence as a
- * hard mismatch.
+ * Conformance is the MODEL's to state, not this file's.  Where chimera still
+ * diverges from POSIX.1-2024 the model takes chimera's branch, gated on the
+ * cell's config (posix.qnt's DEVS, declared with their citations in
+ * ext/specs/quint/posix/corpus.schema.json), so the trace's expectation already
+ * IS chimera's behaviour and replay is an exact match.  Where the standard
+ * permits several answers per call the model emits a sibling <field>Accept set
+ * and this file membership-tests it (see accepts()).  There is no registry of
+ * forgivable differences here any more -- what remains is the residue named in
+ * check_status(): allowances a model branch cannot state.
  */
 
 #define POSIX_DRIVER_ENGINE_ONLY
@@ -974,369 +978,139 @@ host_to_linux(int e)
  * immediately after the chimera call, before anything else clobbers errno. */
 #define ERRV(rc) ((rc) < 0 ? host_to_linux(errno) : 0)
 
-/* ---- known-deviation registry (mirror of posix_deviations.py) ------------ */
-
-#define DEV_ANY (-1)
-enum devctx { CTX_ALWAYS, CTX_DFD, CTX_SLASH, CTX_NLONG, CTX_ACCW, CTX_SMB,
-              CTX_SMB_DFD };
-
-struct deviation {
-    const char *id;
-    const char *ops[12];     /* NULL-terminated; empty first slot = any op    */
-    int         expected;    /* DEV_ANY = wildcard                            */
-    int         actual;
-    enum devctx ctx;
-};
-
-/* Reconcilable entries only, in posix_deviations.py order (reconcile returns
- * the first match, so order is significant). */
-/* *INDENT-OFF* */
-static const struct deviation KNOWN_DEVIATIONS[] = {
-    { "PD1",
-        {
-            "RFcntlLock",
-            "RLockf",
-            0
-        },
-        DEV_ANY,
-        95,
-        CTX_ALWAYS                                     },
-    { "PD2",
-        {
-            "RFcntlDupfd",
-            "RFcntlGetfl",
-            0
-        },
-        DEV_ANY,
-        22,
-        CTX_ALWAYS                                     },
-    { "PD2b",
-        {
-            "RFcntlSetfl",
-            0
-        },
-        DEV_ANY,
-        22,
-        CTX_ALWAYS    },
-    { "PD3",
-        {
-            "RStat",
-            0
-        },
-        DEV_ANY,
-        38,
-        CTX_DFD },
-    { "PD7r",
-        {
-            "RRead",
-            "RPread",
-            0
-        },
-        9,
-        0,
-        CTX_ALWAYS                                             },
-    { "PD11a",
-        {
-            "RRead",
-            "RPread",
-            0
-        },
-        0,
-        13,      CTX_ALWAYS                                                    },
-    { "PD11b",
-        {
-            "RRead",
-            "RPread",
-            0
-        },
-        9,      13,        CTX_ALWAYS                                                          },
-    { "PD8",
-        {
-            "RRead",
-            "RPread",
-            0
-        },
-        21, 0,  CTX_ALWAYS                                                                                     },
-    { "PD8w",
-        {
-            "RWrite",
-            "RPwrite",
-            0
-        },
-        9,  21, CTX_ALWAYS                                                                                     },
-    { "PD13",
-        {
-            "ROpen",
-            0
-        },
-        6,
-        0,
-        CTX_ALWAYS },
-    { "PD14",
-        {
-            "ROpen",
-            0
-        },
-        21
-        ,
-        0,
-        CTX_ALWAYS },
-    { "PD15",
-        {
-            "RStat",
-            "RMkdir",
-            "ROpen",
-            "RUnlink",
-            "RRmdir",
-            "RTruncate",
-            "RChmod",
-            "RChown",
-            "RUtimens",
-            "RAccess",
-            "RReadlink",
-            0
-        },
-        20
-        ,
-        DEV_ANY,
-        CTX_SLASH }
-    ,
-    { "PD15b",
-        {
-            "RMkdir",
-            0
-        },
-        40
-        ,
-        17,
-        CTX_SLASH },
-    { "PD15c",
-        {
-            "RMkdir",     0
-        },
-        0,
-        17,
-        CTX_SLASH },
-    { "PD17h",
-        {
-            "RRmdir",     0
-        },
-        20
-        ,
-        13,
-        CTX_ALWAYS },
-    { "PD17i",
-        {
-            "RRmdir",      0
-        },
-        39
-        ,
-        13,
-        CTX_ALWAYS },
-    { "PD17a",
-        {
-            "RUnlink",     0
-        },
-        21
-        ,
-        13,
-        CTX_ALWAYS },
-    { "PD17b",
-        {
-            "RMkdir",
-            "RSymlink",
-            "RMknod",
-            "RLink",
-            0
-        },
-        17,     13,     CTX_ALWAYS },
-    { "PD17c",
-        {
-            "RLink",       0
-        },
-        1,
-        13,
-        CTX_ALWAYS },
-    { "PD18",
-        { "RAccess", 0                                                                               },
-        13
-        ,
-        0,
-        CTX_ALWAYS },
-    { "PD17d",
-        { "ROpen",
-        "RMkdir",
-        "RMknod",
-        "RSymlink",
-        0    },
-        13
-        ,        17,       CTX_ALWAYS },
-    { "PD17e",  { "RLink",       0                                                               },
-        1,
-        17,
-        CTX_ALWAYS },
-    { "PD17f",  { "RLink",       0                                                               },
-        2,
-        17,
-        CTX_ALWAYS },
-    { "PD24",   { "ROpen",       "RDup",
-                  "RFcntlDupfd",
-                  "ROpendir", 0 }, 24, 0
-        ,
-        CTX_ALWAYS }
-    ,
-    { "PD20",   { "ROpen",       0                                                               },
-        13
-        ,
-        0,
-        CTX_ALWAYS },
-    { "PD22",   { "RLseek",      0                                                               },
-        6,
-        22,
-        CTX_ALWAYS },
-    { "PD19",   { "RCloneRange", 0                                                               },
-        22
-        ,
-        0,
-        CTX_ALWAYS },
-    { "PD25",   { "RMkdir",
-                  "RMknod",
-                  "RSymlink",
-                  "RChmod", "RChown",
-                  "RUnlink", "RRmdir",
-                  "RTruncate",
-                  "RStat",
-                  0 }
-        ,
-        13, 36, CTX_NLONG },
-    { "PD26",   { "ROpen",       0                                                               },
-        13
-        ,
-        21,
-        CTX_ACCW },
-    /* SD-SEEK: SEEK_DATA/SEEK_HOLE.  The smb_memfs profile advertises no sparse
-     * seek (seekHole off), so the model returns EINVAL; the SMB backend has no
-     * seek op and the VFS generic fallback treats the whole file as data,
-     * answering ENXIO past EOF.  Both are conformant "no real hole map"
-     * behaviours -- a real CIFS mount also lacks a sparse map here. */
-    { "SD-SEEK", { "RLseek", 0 }, 22 /* EINVAL */, 6 /* ENXIO */, CTX_SMB },
-    /* SD-SPECIAL: opening a FIFO/device special file.  The model answers ENXIO
-     * (no reader / no backing device); the SMB backend opens the NFS-reparse
-     * specfile node and reports EINVAL for the unsupported data open.  Neither
-     * is what a Windows client would do (SMB has no POSIX device semantics);
-     * the divergence is a property of the specfile-over-reparse mapping. */
-    { "SD-SPECIAL", { "ROpen", 0 }, 6 /* ENXIO */, 22 /* EINVAL */, CTX_SMB },
-    /* SD-DFD-REUSE: a path-only mount (SMB, like cifs.ko) resolves a dirfd-
-     * relative op through the dirfd's interned PATH, not its inode.  When the
-     * dirfd names a directory that was removed while it stayed open and whose
-     * name was then reused for a non-directory, the path resolves to that
-     * non-directory and the op fails ENOTDIR -- where the model, resolving
-     * against the still-open (removed) directory inode, sees no such child and
-     * fails ENOENT.  A real CIFS mount cannot create relative to a server-side-
-     * deleted directory either; it is inherent to resolving by path.  Gated on a
-     * dirfd being present so a plain-path op (whose ENOTDIR is genuine and the
-     * model shares) is never masked. */
-    { "SD-DFD-REUSE",
-        { "RMkdir", "RRmdir", "RUnlink", "RSymlink", "RMknod", "ROpen",
-          "RStat", "RChmod", "RChown", "RTruncate", 0 },
-        2 /* ENOENT */, 20 /* ENOTDIR */, CTX_SMB_DFD },
-};
-/* *INDENT-ON* */
-
-static int
-dev_ctx_ok(
-    enum devctx ctx,
-    json_t     *rv)
-{
-    json_t *pth;
-    size_t  i;
-
-    switch (ctx) {
-        case CTX_ALWAYS:
-            return 1;
-        case CTX_DFD:
-            return tf_field(rv, "dfd") != -1;
-        case CTX_SLASH:
-            return tf_bool(json_object_get(rv, "pth"), "slash");
-        case CTX_NLONG:
-            pth = json_object_get(json_object_get(rv, "pth"), "comps");
-            for (i = 0; pth && i < json_array_size(pth); i++) {
-                const char *c = json_string_value(json_array_get(pth, i));
-                if (c && strcmp(c, "@nlong") == 0) {
-                    return 1;
-                }
-            }
-            return 0;
-        case CTX_ACCW: {
-            const char *a = tf_tag(json_object_get(
-                                       json_object_get(rv, "fl"), "acc"));
-            return a && (strcmp(a, "AccW") == 0 || strcmp(a, "AccRW") == 0);
-        }
-        case CTX_SMB:
-            return g_smb;
-        case CTX_SMB_DFD:
-            return g_smb && tf_field(rv, "dfd") != -1;
-    } /* switch */
-    return 0;
-} /* dev_ctx_ok */
-
-/* Return the id of the first reconcilable deviation matching this divergence,
- * or NULL.  Called only when actual != expected. */
-static const char *
-reconcile(
-    const char *tag,
-    json_t     *rv,
-    int         expected,
-    int         actual)
-{
-    size_t i, j;
-
-    for (i = 0; i < sizeof(KNOWN_DEVIATIONS) / sizeof(KNOWN_DEVIATIONS[0]);
-         i++) {
-        const struct deviation *d     = &KNOWN_DEVIATIONS[i];
-        int                     op_ok = (d->ops[0] == NULL);
-
-        for (j = 0; d->ops[j]; j++) {
-            if (strcmp(tag, d->ops[j]) == 0) {
-                op_ok = 1;
-                break;
-            }
-        }
-        if (!op_ok) {
-            continue;
-        }
-        if (d->expected != DEV_ANY && d->expected != expected) {
-            continue;
-        }
-        if (d->actual != DEV_ANY && d->actual != actual) {
-            continue;
-        }
-        if (dev_ctx_ok(d->ctx, rv)) {
-            return d->id;
-        }
-    }
-    return NULL;
-} /* reconcile */
-
 /* ---- oracle -------------------------------------------------------------- */
 
-/* True if the errno matches (proceed with success-path checks).  A mismatch
- * that reconciles to a known deviation is recorded and treated as non-fatal. */
+/* TOLERANCES: one rule, every field.  Where the standard permits several
+ * answers per call -- and the model therefore cannot pin one, because a cell's
+ * corpus is replayed by backends that legitimately differ -- the model emits a
+ * sibling <field>Accept set beside the field, its own answer always among the
+ * members.  If that set is present the comparison is membership; if it is
+ * absent it is equality.  Nothing else, and nothing the harness decides: the
+ * model states what is acceptable, gated on the cell's config, and this only
+ * reads it.
+ *
+ * `eAccept` is the errno instance (see Caps.stickyRemovalEperm in posix.qnt). */
+static int
+accepts(
+    json_t     *res_v,
+    const char *field,
+    int64_t     actual)
+{
+    char    key[32];
+    json_t *set, *v;
+    size_t  i;
+
+    snprintf(key, sizeof(key), "%sAccept", field);
+    set = json_object_get(res_v, key);
+    if (!set) {
+        return 0;               /* absent: the caller compares for equality */
+    }
+    /* ITF renders a set as {"#set": [...]}. */
+    if (json_is_object(set)) {
+        json_t *inner = json_object_get(set, "#set");
+        if (inner) {
+            set = inner;
+        }
+    }
+    json_array_foreach(set, i, v)
+    {
+        if (tf_i64(v) == actual) {
+            return 1;
+        }
+    }
+    return 0;
+} /* accepts */
+
+/* The model result of the step under replay, for the <field>Accept rule. */
+static json_t *g_cur_res;
+
+/* True if the errno matches (proceed with success-path checks). */
 static int
 check_status(
     int64_t expected,
     int     actual)
 {
-    const char *dev;
-
     g_last_recon = NULL;
     if (actual == expected) {
         return 1;
     }
-    dev = reconcile(g_cur_tag, g_cur_rv, (int) expected, actual);
-    if (dev) {
-        record_dev(dev);
-        g_last_recon = dev;
+    if (g_cur_res && accepts(g_cur_res, "e", actual)) {
+        /* Within the tolerance the model declared.  Not a success path: the
+         * answers differ, so the caller must not go on to compare a payload
+         * the implementation never produced. */
+        return 0;
+    }
+    /* ---- residue: what has no model branch to move into --------------------
+     *
+     * Every divergence that IS a chimera deviation from POSIX now lives in the
+     * model, gated on the cell's config (posix.qnt's DEVS; the ids and their
+     * citations are in ext/specs/quint/posix/corpus.schema.json).  What is left
+     * here is what a model branch cannot state:
+     *
+     *   PD24  is not a chimera defect at all -- the model's per-process
+     *         descriptor table holds MAX_FDS = 16 and predicts EMFILE when it
+     *         fills, while chimera's holds 1024.  Making the model predict
+     *         chimera's answer means enlarging the model's universe, not
+     *         describing a divergence, so it stays a harness-side allowance
+     *         (with the stray-descriptor and O_CREAT-residue bookkeeping that
+     *         goes with it).
+     *   PD19  clone_file_range with a source range past EOF: diskfs does not
+     *         validate it and grows the destination.  memfs has since gained
+     *         the check -- and memfs and diskfs replay the SAME cell -- so no
+     *         config can enable it without breaking the other backend.  It
+     *         retires when diskfs validates offSrc+len <= source size in
+     *         clone_range, as memfs does.
+     *   SD-DFD-REUSE  a path-only mount (SMB, like cifs.ko) resolves a
+     *         dirfd-relative op through the dirfd's interned PATH, not its
+     *         inode, so a dirfd whose directory was removed and whose name was
+     *         reused for a non-directory answers ENOTDIR where resolving
+     *         against the still-open inode gives ENOENT.  The model has no
+     *         notion of an interned path id to state that with.
+     */
+    /* PD17b / PD17d: EEXIST vs EACCES priority on a create whose target
+     * already exists AND whose path the caller may not fully traverse or
+     * whose parent it may not write.  POSIX orders neither, and neither could
+     * be moved into the model: measured against this corpus chimera answers
+     * EEXIST where the parent is unwritable but searchable, and EACCES where
+     * the holding directory is unsearchable -- which is exactly what the model
+     * already predicts, so no reordering of its checks reproduces the cases
+     * these two entries were recorded against.  Until an instance is captured
+     * with the state that produced it, the shape stays here rather than as a
+     * model branch that would be wrong far more often than right.
+     *   PD17b  the model states EEXIST, chimera answers EACCES.
+     *   PD17d  the model states EACCES, chimera answers EEXIST.
+     */
+    if (((expected == 17 && actual == 13) ||
+         (expected == 13 && actual == 17)) &&
+        (strcmp(g_cur_tag, "ROpen") == 0 ||
+         strcmp(g_cur_tag, "RMkdir") == 0 ||
+         strcmp(g_cur_tag, "RMknod") == 0 ||
+         strcmp(g_cur_tag, "RSymlink") == 0 ||
+         strcmp(g_cur_tag, "RLink") == 0)) {
+        const char *id = (expected == 17) ? "PD17b" : "PD17d";
+        record_dev(id);
+        g_last_recon = id;
+        return 0;
+    }
+    if (actual == 0 && expected == 24 &&
+        (strcmp(g_cur_tag, "ROpen") == 0 || strcmp(g_cur_tag, "RDup") == 0 ||
+         strcmp(g_cur_tag, "RFcntlDupfd") == 0 ||
+         strcmp(g_cur_tag, "ROpendir") == 0)) {
+        record_dev("PD24");
+        g_last_recon = "PD24";
+        return 0;
+    }
+    if (actual == 0 && expected == 22 &&
+        strcmp(g_cur_tag, "RCloneRange") == 0) {
+        record_dev("PD19");
+        g_last_recon = "PD19";
+        return 0;
+    }
+    if (g_smb && actual == 20 && expected == 2 &&
+        tf_field(g_cur_rv, "dfd") != -1 &&
+        json_object_get(g_cur_rv, "pth")) {
+        record_dev("SD-DFD-REUSE");
+        g_last_recon = "SD-DFD-REUSE";
         return 0;
     }
     if (g_strict_dac) {
@@ -1439,20 +1213,6 @@ check_status(
             json_object_get(g_cur_rv, "fd")) {
             record_dev("ND10");
             g_last_recon = "ND10";
-            return 0;
-        }
-    }
-    if (posix_module_is_passthrough(g_module)) {
-        /* PT1: denial of a removal (or replacing rename) in a sticky
-         * directory.  POSIX permits either errno; the model, like the
-         * engine backends, answers EACCES while the Linux kernel answers
-         * EPERM. */
-        if (actual == 1 && expected == 13 &&
-            (strcmp(g_cur_tag, "RUnlink") == 0 ||
-             strcmp(g_cur_tag, "RRmdir") == 0 ||
-             strcmp(g_cur_tag, "RRename") == 0)) {
-            record_dev("PT1");
-            g_last_recon = "PT1";
             return 0;
         }
     }
@@ -1969,12 +1729,7 @@ op_lseek(
                              (off_t) tf_field(rv, "off"), whence);
     e = ERRV(rc);
     if (e != exp_e) {
-        const char *dev = reconcile("RLseek", rv, (int) exp_e, e);
-        if (dev) {              /* e.g. PD22 (ENXIO vs EINVAL) */
-            record_dev(dev);
-            return;
-        }
-        fail = 1;               /* unreconciled errno divergence */
+        fail = 1;               /* errno divergence */
     } else if (exp_e == 0 && (int64_t) rc != tf_field(res_v, "off")) {
         fail = 1;               /* offset divergence on success */
     }
@@ -2026,11 +1781,14 @@ op_lseek(
                 return;
             }
         }
-        /* PD25: a directory's st_size is unspecified; the model abstracts it
-         * as 0 while memfs reports a block, so size-relative seeks (and the
-         * ENXIO boundary at that size) legitimately disagree on dir fds. */
+        /* PD-DIRSIZE: a directory's st_size is unspecified; the model
+         * abstracts it as 0 while memfs reports a block, so size-relative
+         * seeks (and the ENXIO boundary at that size) legitimately disagree on
+         * dir fds.  Named apart from the model's PD* ids: this is a property
+         * of the abstraction, not a chimera defect, so there is no deviation
+         * branch for it to move into. */
         if (is_size_seek && fd_is_model_dir(pid, tf_field(rv, "fd"))) {
-            record_dev("PD25");
+            record_dev("PD-DIRSIZE");
         } else if (e != exp_e) {
             mism("errno: expected %lld, got %d", (long long) exp_e, e);
         } else {
@@ -3781,6 +3539,7 @@ replay_trace(const char *path)
         g_cur_ps   = state_get(st, "ps");
         g_cur_tag  = tag;
         g_cur_rv   = tf_val(req);
+        g_cur_res  = tf_val(res);
         g_cur_pid  = pid;
         g_cur_step = (int) i;
         last_fs    = g_cur_fs;
@@ -3815,7 +3574,7 @@ replay_trace(const char *path)
             strncat(devs, one, sizeof(devs) - strlen(devs) - 1);
         }
         printf("%s: %zu steps replayed, %d objects audited%s%s\n", path,
-               ns - 1, audited, g_ndevhits ? "; known deviations: " : "",
+               ns - 1, audited, g_ndevhits ? "; harness allowances: " : "",
                devs);
     }
     json_decref(root);

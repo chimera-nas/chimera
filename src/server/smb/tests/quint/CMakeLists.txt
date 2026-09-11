@@ -13,9 +13,12 @@ set(CHIMERA_TEST_TIER quick)
 # in-process C replay harness that drives that corpus against the live chimera
 # SMB server, plus the ground-truth probes that need no corpus at all.
 #
-# The trace corpus is resolved once, at the top level, by cmake/SpecsBundle.cmake
-# into SPECS_BUNDLE_DIR; the batched replay points --trace-dir at
-# ${SPECS_BUNDLE_DIR}/smb2.
+# The trace corpus is CONFIG-DRIVEN.  configs/*.json each fix every constant
+# the smb2 model declares (which caching features the server under test has,
+# which of several legal behaviours it chose) and carry that corpus's batch
+# list, so one config fully determines one corpus.  specs_corpus() registers
+# each as a cell with its own trace directory, and the replay ctests point
+# --trace-dir at those directories -- no filename-prefix carving.
 
 # ---------------------------------------------------------------------------
 # The in-process SMB2 wire harness + smoke probe (ROADMAP-SMB.md Increment 0).
@@ -185,16 +188,79 @@ add_executable(smb2_mbt_replay smb2_mbt_replay.c)
 target_include_directories(smb2_mbt_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(smb2_mbt_replay chimera_server chimera_metrics jansson)
 
-if(NOT SPECS_BUNDLE_AVAILABLE)
+if(NOT CHIMERA_MBT_AVAILABLE)
     message(STATUS "smb MBT replay ctest skipped (no specs trace corpus)")
     return()
 endif()
 
+# One cell per distinct corpus.  These are exactly the five generation
+# instances the corpus had before configs existed -- smb2Base, smb2Leases,
+# smb2ForceL2, smb2Durable, smb2Replay -- with the same flavors, depths, trace
+# counts and seeds, and the same trace basenames (each config's traceStem is
+# the old instance name, which is also what ext/specs/quint/smb2/coverage.py
+# parses its (instance, flavor) coverage groups out of).
+#
+# Each config also names the KNOWN DEVIATIONS chimera still carries, and the
+# model predicts them: there is no reply-level deviation registry in the
+# harness any more.  A deviation is a branch in
+# ext/specs/quint/smb2/smb2_ops.qnt gated on the DEVS set, declared with its
+# MS-SMB2 / MS-FSA citation in that family's corpus.schema.json.  That is what
+# makes a STATE-MUTATING divergence expressible at all: CD-3 (a truncating
+# CREATE refused after it had already emptied the file) had an identical reply
+# on both sides and differed only in state, so the old registry entry could only
+# abandon the trace -- while the model branch let the rest of the trace keep
+# testing, which is how the bug stayed measurable until it was fixed.  No cell
+# declares one today: CD-5 (a lease grant keyed without a client term, so a
+# second client's RqLs open landed on the first client's lease) went the same
+# way.
+# smb2/base additionally registers a STRICT TWIN: the identical batch list
+# regenerated with DEVS = Set(), i.e. every expectation the MS-FSA-correct one.
+# With every cell's deviation list now empty the twin passes, and it keeps
+# running so the day a deviation is added the debt it stands for is re-measured
+# on every run.  The other four cells get the liveness gate but no twin: three
+# of them (durable, leases, replay) are declined wholesale by the trace-limit
+# table below and would never be replayed, and force_l2 would re-measure the
+# same debt at a second cost.
+specs_corpus(NAME           smb2/base
+             FAMILY         smb2
+             CONFIG         ${CMAKE_CURRENT_SOURCE_DIR}/configs/base.json
+             OUT_DIR        smb2_base_traces
+             STRICT_OUT_DIR smb2_base_strict)
+specs_corpus(NAME    smb2/durable
+             FAMILY  smb2
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/durable.json
+             OUT_DIR smb2_durable_traces)
+specs_corpus(NAME    smb2/force_l2
+             FAMILY  smb2
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/force_l2.json
+             OUT_DIR smb2_force_l2_traces)
+specs_corpus(NAME    smb2/leases
+             FAMILY  smb2
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/leases.json
+             OUT_DIR smb2_leases_traces)
+specs_corpus(NAME    smb2/replay
+             FAMILY  smb2
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/replay.json
+             OUT_DIR smb2_replay_traces)
+
+# Every cell, in the order the single flat corpus used to sort into.  A trace's
+# capability profile configures the SERVER, and smb2_mbt_replay restarts it
+# whenever the profile changes between adjacent traces, so keeping the cells
+# grouped (and in the old alphabetical order) keeps this at one server start
+# per cell, exactly as before.  mbt_collect_traces() honours a repeated
+# --trace-dir, appending each directory's sorted contents in argv order.
+set(SMB2_MBT_TRACE_DIRS
+    --trace-dir ${smb2_base_traces}
+    --trace-dir ${smb2_durable_traces}
+    --trace-dir ${smb2_force_l2_traces}
+    --trace-dir ${smb2_leases_traces}
+    --trace-dir ${smb2_replay_traces})
+
 add_test(NAME chimera/server/smb/mbt/batch_memfs
-    COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2)
+    COMMAND $<TARGET_FILE:smb2_mbt_replay> ${SMB2_MBT_TRACE_DIRS})
 # The whole generated corpus in one ctest, not a single case.  ext/specs
-# generates every instance and flavor unconditionally -- nothing is withheld on
-# account of what chimera does with it -- so this runs ~70 traces at depth
+# generates every cell and flavor unconditionally -- nothing is withheld on
+# account of what chimera does with it -- so this runs 86 traces at depth
 # 300-500, each standing up and tearing down its own filesystem, against an
 # ASAN build on a loaded container.
 #
@@ -217,10 +283,52 @@ set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
 # break notifications that no single-request probe reaches.  A divergence here
 # that does not reproduce in batch_memfs is a protection-layer bug.
 add_test(NAME chimera/server/smb/mbt/batch_memfs_signed
-    COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2
+    COMMAND $<TARGET_FILE:smb2_mbt_replay> ${SMB2_MBT_TRACE_DIRS}
             --wire signed311)
 set_tests_properties(chimera/server/smb/mbt/batch_memfs_signed PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs_signed"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 1800
     SKIP_RETURN_CODE 77)
+
+# ---- the deviation machinery ----------------------------------------------
+
+set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
+
+# The strict twin of smb2/base: the same batches regenerated with
+# DEVS = Set(), so every expectation is the MS-FSA-correct one.  With base
+# carrying no deviations it now PASSES -- it failed for as long as chimera
+# carried CD-3, which was the point.  Its output is the conformance debt,
+# re-measured on every run, which is what a deviation registry could never do:
+# a registry entry keeps forgiving after the bug is fixed, and forgives the same
+# divergence somewhere it was never meant to.  Reporting, not gating, so it goes
+# in the extended tier.
+set(CHIMERA_TEST_TIER extended)
+
+add_test(NAME chimera/server/smb/mbt/strict_memfs
+    COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${smb2_base_strict})
+set_tests_properties(chimera/server/smb/mbt/strict_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_strict_memfs"
+    LABELS "quint;smb_mbt;memfs;strict"
+    TIMEOUT 1800
+    SKIP_RETURN_CODE 77)
+
+set(CHIMERA_TEST_TIER quick)
+
+# The liveness gate: a cell may not enable a deviation its own corpus never
+# exercises.  Either the deviation is dead (retire it from the config and
+# delete its branch in the model) or the generator quietly lost the coverage
+# that used to reach it.  Both need a human, so both fail here -- in the quick
+# tier, because a stale claim is a blindfold from the moment it goes stale.
+if(Python3_FOUND)
+    foreach(cell base durable force_l2 leases replay)
+        add_test(NAME chimera/server/smb/mbt/devliveness_${cell}
+            COMMAND ${Python3_EXECUTABLE} ${SPECS_DEVLIVENESS}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/configs/${cell}.json
+                    ${SPECS_CORPUS_ROOT}/smb2/${cell})
+        set_tests_properties(chimera/server/smb/mbt/devliveness_${cell}
+            PROPERTIES LABELS "quint;smb_mbt;devliveness" TIMEOUT 120)
+    endforeach()
+else()
+    message(STATUS "smb MBT deviation-liveness gate skipped (no python3)")
+endif()

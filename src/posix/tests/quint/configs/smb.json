@@ -1,0 +1,55 @@
+// The SMB-loopback profile (posix client -> smb proxy -> in-process SMB2 server
+// -> backend), analogous to the nfs3/nfs4 loopbacks but for the SMB wire.  It is
+// the memfs profile modified by three SMB transport properties:
+//
+//   * server-side copy IS available.  SMB2 has FSCTL_SRV_COPYCHUNK; the proxy
+//     issues it, so copy_file_range succeeds -- unlike NFS3/NFS4, which have no
+//     COPY and force the VFS fallback that the proxy handle refuses.
+//   * no reflink.  SMB block-cloning is ReFS-only
+//     (FSCTL_DUPLICATE_EXTENTS_TO_FILE); the server does not implement it and a
+//     Samba-on-ext4 mount could not either, so FICLONERANGE answers EOPNOTSUPP.
+//   * no sparse seek.  SEEK_DATA/SEEK_HOLE has no SMB2 wire equivalent the proxy
+//     translates, so it answers EINVAL.
+//
+// Owner/mode/nlink are conveyed for real via modefromsid (the server's
+// smb_mode_from_sid path), so the identity/attribute policies match memfs.
+{
+  "extends": "./posix_base.json",
+  "description": "chimera's POSIX surface reached over SMB2: server-side copy via FSCTL_SRV_COPYCHUNK, no reflink and no sparse seek.",
+  "traceStem": "posixSmb",
+
+  "features": {
+    "copyRange": "supported",
+    "cloneRange": "unsupported",
+    "seekHole": "unsupported"
+  },
+
+  "policies": {
+    "strictAtime": "unsupported",
+    "chownSuppGroup": "supported"
+  },
+
+  // Deviations from POSIX.1-2024 that this profile's stack still carries.
+  // The model takes chimera's branch for each, so the corpus expects what
+  // chimera does and replay is an exact match; the cell's strict twin
+  // regenerates the same batches with all of them off and its failures are
+  // the live conformance debt.  Every id is declared, with its citation, root
+  // cause and candidate fix, in the posix corpus.schema.json; tools/
+  // devliveness.py fails the build if one listed here is never exercised.
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },
+    { "flavor": "step",            "steps": 128, "traces": 6,  "seed": "0x2" },
+    { "flavor": "step",            "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "stepNamespace",   "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDescriptors", "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepMetadata",    "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDirs",        "steps": 128, "traces": 3,  "seed": "0x1" },
+    { "flavor": "stepData",        "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepPerms",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepLinks",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFds",         "steps": 128, "traces": 5,  "seed": "0x1" }
+  ]
+}

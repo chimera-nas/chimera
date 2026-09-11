@@ -10,8 +10,15 @@ model issued and the result the implementation must produce (see posix.qnt).
 This harness spawns posix_driver (an in-process memfs mount behind the
 chimera_posix_* API, speaking line-delimited JSON), replays every step, and
 compares the driver's actual result against the model's expectation.  Any
-mismatch not covered by the known-deviation registry (posix_deviations.py)
-is reported as a divergence with full context and fails the run.
+mismatch is reported as a divergence with full context and fails the run.
+
+Conformance is the MODEL's to state, not this file's.  Where chimera still
+diverges from POSIX.1-2024 the model takes chimera's branch, gated on the
+cell's config (posix.qnt's DEVS, declared with their citations in
+ext/specs/quint/posix/corpus.schema.json), so the trace's expectation already
+IS chimera's behaviour and the comparison is exact.  Where the standard permits
+several answers per call the model emits a sibling <field>Accept set beside the
+field and this file membership-tests it; an absent set means equality.
 
 Model-to-real mapping maintained here (DESIGN-POSIX.md "Step and trace
 contract"):
@@ -38,17 +45,14 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import posix_deviations  # noqa: E402
-
-# The Quint model (posix_ops.qnt) and the deviation registry (posix_deviations)
-# both encode Linux errno numbers.  The driver returns the host libc's errno,
+# The Quint model (posix_ops.qnt) encodes Linux errno numbers.  The driver
+# returns the host libc's errno,
 # which is identical on Linux but diverges on macOS/BSD for the higher codes --
 # and even swaps a pair: macOS has EAGAIN=35/EDEADLK=11 where Linux has 11/35,
 # ENOTSUP=45 vs 95, ENOTEMPTY=66 vs 39, ELOOP=62 vs 40, ENAMETOOLONG=63 vs 36,
 # ENOSYS=78 vs 38.  Translate host->Linux *by name* (never by number) so every
-# comparison and every reconcile() stays in the model's errno space no matter
-# which platform runs the suite.
+# comparison stays in the model's errno space no matter which platform runs
+# the suite.
 _LINUX_ERRNO = {
     "EPERM": 1, "ENOENT": 2, "EIO": 5, "ENXIO": 6, "EBADF": 9, "EAGAIN": 11,
     "EWOULDBLOCK": 11, "EACCES": 13, "EBUSY": 16, "EEXIST": 17, "EXDEV": 18,
@@ -94,89 +98,17 @@ LOCK_TYPE = {"LkRd": "rd", "LkWr": "wr", "LkUn": "un"}
 LOCKF_CMD = {"LfLock": "lock", "LfTlock": "tlock", "LfUlock": "ulock",
              "LfTst": "test"}
 
-# The capability/policy profile of chimera's POSIX client over memfs,
-# established empirically by the probe below (run with --probe) and pinned
-# here as a regression check; posix_run.qnt's posixMemfs instance pins trace
-# generation to the same profile.  A trace whose LInit profile disagrees is
-# skipped (exit 77); --check-profile re-measures and diffs against this.
-# None = not measurable / any value accepted (withRoot is harness-chosen;
-# errLockAgain is unobservable while memfs lacks lock support, see PD1).
-# Probed 2026-08-10 against memfs (block_size 4096):
-PROFILE = {
-    "copyRange": True,
-    "cloneRange": True,
-    "seekHole": True,
-    "withRoot": None,
-    "gidFromParent": False,
-    "sgidInherit": False,
-    "writeClearsSets": True,
-    "pwriteAppends": False,
-    "renameCtime": True,
-    "strictAtime": False,
-    "stickyWriteArm": False,
-    "chownSuppGroup": True,
-    "errNotempty": True,
-    "errStickyAcces": True,
-    "errUnlinkDirIsdir": True,
-    "errLockAgain": None,
-}
-
-# Per-backend live profiles.  diskfs and cairn probed identically on
-# 2026-08-11: the only drift from memfs is that clone_range is unsupported.
-# Trace generation for them uses posix_run.qnt's posixDisk instance, which
-# pins the same profile, so their traces never skip either.
-DISK_PROFILE = dict(PROFILE, cloneRange=False)
-
-# NFS loopback paths (client -> in-process server -> backend) probed
-# 2026-08-12; identical across the three backends behind each version, so
-# the profiles are version-keyed (posixNfs3/posixNfs4 instances match).
-NFS3_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
-                    seekHole=False, strictAtime=True)
-NFS4_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
-                    seekHole=True, strictAtime=False)
-
-# The FUSE server, probed 2026-08-26 through the in-process harness
-# (fuse_quint_driver: the server driven over a socketpair standing in for
-# /dev/fuse, no mount and no privileges).  All three drifts from the memfs
-# profile it serves are properties of the FUSE transport rather than of memfs:
-# FICLONERANGE is an ioctl with no FUSE request behind it and fuse's
-# file_operations has no ->remap_file_range, so the kernel answers EOPNOTSUPP
-# on its own; every read reaches the server, so memfs's relatime update is
-# observed instead of hidden behind a stale cached attribute; and
-# fuse_in_header carries a single gid, so a chgrp to a supplementary group is
-# refused EPERM (confirmed on a live mount: uid 200 gid 20 groups 20,30 can
-# chgrp to 20 but not to 30).  Trace generation uses posix_run.qnt's posixFuse
-# instance, which pins the same three, so their traces never skip.
-FUSE_PROFILE = dict(PROFILE, cloneRange=False, strictAtime=True,
-                    chownSuppGroup=False)
-
-# The SMB2 loopback (posix client -> vfs/smb proxy -> in-process chimera SMB
-# server -> memfs), probed 2026-09-01.  It reads like the NFS3 loopback except
-# that copy_file_range works, but the numbers below are less meaningful than
-# the other profiles' are: SMB2 carries no POSIX owner or mode, so every
-# permission-derived key is measuring an absence rather than a policy.
-# stickyWriteArm "true" and chownSuppGroup "true" are exactly that -- the
-# operations the probe expects to be refused simply are not checked, and
-# errStickyAcces comes back None because the denial never happens.  The
-# profile is pinned for --check-profile drift detection only; it is NOT a
-# statement that the backend implements this policy.  See the SD* list in
-# CMakeLists.txt for why no smb_ trace corpus is generated from it yet.
-SMB_PROFILE = dict(PROFILE, cloneRange=False, seekHole=False, strictAtime=True,
-                   stickyWriteArm=True, errStickyAcces=None)
-
-PROFILES = {
-    "memfs": PROFILE,
-    "smb_memfs": SMB_PROFILE,
-    "fuse_memfs": FUSE_PROFILE,
-    "diskfs": DISK_PROFILE,
-    "cairn": DISK_PROFILE,
-    "nfs3_memfs": NFS3_PROFILE,
-    "nfs3_diskfs": NFS3_PROFILE,
-    "nfs3_cairn": NFS3_PROFILE,
-    "nfs4_memfs": NFS4_PROFILE,
-    "nfs4_diskfs": NFS4_PROFILE,
-    "nfs4_cairn": NFS4_PROFILE,
-}
+# The backends this replayer can drive.  There is no pinned capability profile
+# here any more: a cell's config (src/posix/tests/quint/configs/*.json) states
+# what its surface does, mkconfig binds those constants into the model, and the
+# corpus is generated from them -- so a trace can no longer disagree with the
+# live profile and there is nothing to skip on.  The list below exists only to
+# reject a typo in --backend.
+BACKENDS = [
+    "memfs", "smb_memfs", "fuse_memfs", "diskfs", "cairn",
+    "nfs3_memfs", "nfs3_diskfs", "nfs3_cairn",
+    "nfs4_memfs", "nfs4_diskfs", "nfs4_cairn",
+]
 
 
 class TraceFormatError(Exception):
@@ -355,6 +287,7 @@ class Replayer:
         self.audit_exempt = set()  # model paths of PD24 residue nodes
         self._cur_tag = None
         self._cur_req = None
+        self._cur_res = None
         self._cur_fs = None
         self._cur_ps = None
 
@@ -436,11 +369,36 @@ class Replayer:
         """True if the errno matches (proceed with success-path checks)."""
         if actual == expected:
             return True
-        dev = posix_deviations.reconcile(self._cur_tag, self._cur_req,
-                                         expected, actual, self._cur_fs)
-        if dev is not None:
-            self.deviations_hit[dev.id] = self.deviations_hit.get(dev.id,
-                                                                  0) + 1
+        # TOLERANCES: one rule, every field.  Where the standard permits
+        # several answers per call the model emits a sibling <field>Accept set
+        # beside the field, its own answer always among the members; if the set
+        # is present the comparison is membership, if absent it is equality.
+        # Nothing here decides what is acceptable -- the model does, gated on
+        # the cell's config.
+        res_v = self._cur_res or {}
+        if actual in (res_v.get("eAccept") or ()):
+            return False
+        # PD17b / PD17d: EEXIST vs EACCES priority on a create whose target
+        # already exists AND whose path the caller may not fully traverse or
+        # whose parent it may not write.  POSIX orders neither, and neither
+        # could be moved into the model -- see the same block in
+        # posix_mbt_replay.c's check_status for what was measured.
+        if (expected, actual) in ((errno.EEXIST, errno.EACCES),
+                                  (errno.EACCES, errno.EEXIST)) \
+                and self._cur_tag in ("ROpen", "RMkdir", "RMknod",
+                                      "RSymlink", "RLink"):
+            key = "PD17b" if expected == errno.EEXIST else "PD17d"
+            self.deviations_hit[key] = self.deviations_hit.get(key, 0) + 1
+            return False
+        # PD24 is not a chimera deviation but a bound of the MODEL: its
+        # per-process descriptor table holds MAX_FDS = 16 and predicts EMFILE
+        # when it fills, while chimera's holds 1024.  Making the model predict
+        # chimera's answer means enlarging the model's universe, not describing
+        # a divergence, so it stays a harness-side allowance.
+        if expected == errno.EMFILE and actual == 0 and self._cur_tag in (
+                "ROpen", "RDup", "RFcntlDupfd", "ROpendir"):
+            self.deviations_hit["PD24"] = \
+                self.deviations_hit.get("PD24", 0) + 1
             return False
         mism.append(f"errno: expected {expected}, got {actual}")
         return False
@@ -647,13 +605,15 @@ class Replayer:
                              f"got {r['ret']}")
         if local and rv["wh"]["tag"] in ("WEnd", "WCur", "WData", "WHole") \
                 and self._fd_is_model_dir(pid, rv["fd"], post_fs):
-            # PD25: POSIX leaves a directory's st_size unspecified; the
-            # model abstracts it as 0 while memfs reports a block, so
+            # PD-DIRSIZE: POSIX leaves a directory's st_size unspecified;
+            # the model abstracts it as 0 while memfs reports a block, so
             # size-relative seeks (and SEEK_DATA/SEEK_HOLE, whose ENXIO
             # boundary is the size) on directory descriptors legitimately
-            # disagree.  Accepted, recorded, never fatal.
-            self.deviations_hit["PD25"] = \
-                self.deviations_hit.get("PD25", 0) + 1
+            # disagree.  Named apart from the model's PD* ids: this is a
+            # property of the abstraction, not a chimera defect, so there is
+            # no deviation branch for it to move into.
+            self.deviations_hit["PD-DIRSIZE"] = \
+                self.deviations_hit.get("PD-DIRSIZE", 0) + 1
         else:
             mism.extend(local)
         return r
@@ -1331,6 +1291,7 @@ class Replayer:
             mism = []
             self._cur_tag = tag
             self._cur_req = req["value"]
+            self._cur_res = res["value"]
             self._cur_fs = state["fs"]
             self._cur_ps = state.get("ps")
             r = handler(self, pid, req["value"], res["value"],
@@ -1354,159 +1315,6 @@ def diff_bytes(expect, actual, block_size):
                     f"expected byte {expect[i]:#x}, "
                     f"got byte {actual[i] if i < len(actual) else -1:#x}")
     return "; lengths differ only"
-
-
-# ---------------------------------------------------------------------------
-# Live-profile probe: measures the capability/policy profile of the backend
-# behind posix_driver, for pinning PROFILE and posix_run.qnt's posixMemfs.
-# ---------------------------------------------------------------------------
-
-def probe(driver_path, backend="memfs"):
-    drv = Driver(driver_path, backend)
-    bs = drv.block_size
-    out = {}
-    root = {"uid": 0, "gid": 10, "gids": [10, 30]}
-    user1 = {"uid": 100, "gid": 10, "gids": [10, 30]}
-    user2 = {"uid": 200, "gid": 20, "gids": [20, 30]}
-    drv.request(op="setcred", pid=0, **root)
-    drv.request(op="setcred", pid=1, **user2)
-    drv.request(op="setcred", pid=2, **user1)
-    blk = base64.b64encode(b"A" * bs).decode()
-
-    def mk(path, pid=0, mode=0o777):
-        drv.request(op="mkdir", pid=pid, path=path, mode=mode)
-
-    def touch(path, pid=0, mode=0o666, data=None):
-        r = drv.request(op="open", pid=pid, path=path,
-                        flags=os.O_CREAT | os.O_WRONLY, mode=mode)
-        if data:
-            drv.request(op="write", pid=pid, fd=r["ret"], data=data)
-        drv.request(op="close", pid=pid, fd=r["ret"])
-
-    # copy_file_range / clone_file_range / SEEK_HOLE
-    touch("/test/p_src", data=blk)
-    touch("/test/p_dst")
-    fin = drv.request(op="open", pid=0, path="/test/p_src",
-                      flags=os.O_RDONLY, mode=0)["ret"]
-    fout = drv.request(op="open", pid=0, path="/test/p_dst",
-                       flags=os.O_WRONLY, mode=0)["ret"]
-    r = drv.request(op="copy_range", pid=0, fd_in=fin, off_in=0,
-                    fd_out=fout, off_out=0, len=bs)
-    out["copyRange"] = r["ret"] >= 0
-    r = drv.request(op="clone_range", pid=0, dst_fd=fout, dst_off=0,
-                    src_fd=fin, src_off=0, len=bs)
-    out["cloneRange"] = r["ret"] >= 0
-    drv.request(op="ftruncate", pid=0, fd=fout, len=0)
-    drv.request(op="pwrite", pid=0, fd=fout, off=0, data=blk)
-    drv.request(op="ftruncate", pid=0, fd=fout, len=3 * bs)
-    r = drv.request(op="lseek", pid=0, fd=fout, off=0, whence="hole")
-    out["seekHole"] = r["ret"] == bs
-    out["seekHoleRaw"] = r["ret"]
-    drv.request(op="close", pid=0, fd=fin)
-    drv.request(op="close", pid=0, fd=fout)
-
-    # gidFromParent: dir gid 77, creator (root, egid 10) makes a file
-    mk("/test/p_gid")
-    drv.request(op="chown", pid=0, path="/test/p_gid", uid=0, gid=77,
-                follow=True)
-    touch("/test/p_gid/f")
-    r = drv.request(op="stat", pid=0, path="/test/p_gid/f", follow=True)
-    out["gidFromParent"] = r.get("gid") == 77
-    out["gidFromParentRaw"] = r.get("gid")
-
-    # sgidInherit: subdir of a setgid dir
-    mk("/test/p_sgid")
-    drv.request(op="chmod", pid=0, path="/test/p_sgid", mode=0o2777)
-    mk("/test/p_sgid/sub", mode=0o755)
-    r = drv.request(op="stat", pid=0, path="/test/p_sgid/sub", follow=True)
-    out["sgidInherit"] = bool(r.get("mode", 0) & 0o2000)
-
-    # writeClearsSets: unprivileged owner writes a setuid file
-    touch("/test/p_setid", pid=1, mode=0o700)
-    drv.request(op="chmod", pid=1, path="/test/p_setid", mode=0o4755)
-    fd = drv.request(op="open", pid=1, path="/test/p_setid",
-                     flags=os.O_WRONLY, mode=0)["ret"]
-    drv.request(op="write", pid=1, fd=fd, data=blk)
-    drv.request(op="close", pid=1, fd=fd)
-    r = drv.request(op="stat", pid=1, path="/test/p_setid", follow=True)
-    out["writeClearsSets"] = not (r.get("mode", 0) & 0o4000)
-
-    # pwriteAppends: pwrite at 0 through an O_APPEND descriptor
-    touch("/test/p_app", data=blk)
-    fd = drv.request(op="open", pid=0, path="/test/p_app",
-                     flags=os.O_WRONLY | os.O_APPEND, mode=0)["ret"]
-    drv.request(op="pwrite", pid=0, fd=fd, off=0,
-                data=base64.b64encode(b"B" * bs).decode())
-    drv.request(op="close", pid=0, fd=fd)
-    r = drv.request(op="stat", pid=0, path="/test/p_app", follow=True)
-    out["pwriteAppends"] = r.get("size") == 2 * bs
-
-    # renameCtime
-    touch("/test/p_ren")
-    r1 = drv.request(op="stat", pid=0, path="/test/p_ren", follow=True)
-    import time
-    time.sleep(0.02)
-    drv.request(op="rename", pid=0, old="/test/p_ren", new="/test/p_ren2")
-    r2 = drv.request(op="stat", pid=0, path="/test/p_ren2", follow=True)
-    out["renameCtime"] = tuple(r2["ctime"]) > tuple(r1["ctime"])
-
-    # strictAtime: read marks atime
-    touch("/test/p_at", data=blk)
-    r1 = drv.request(op="stat", pid=0, path="/test/p_at", follow=True)
-    time.sleep(0.02)
-    fd = drv.request(op="open", pid=0, path="/test/p_at",
-                     flags=os.O_RDONLY, mode=0)["ret"]
-    drv.request(op="read", pid=0, fd=fd, len=bs)
-    drv.request(op="close", pid=0, fd=fd)
-    r2 = drv.request(op="stat", pid=0, path="/test/p_at", follow=True)
-    out["strictAtime"] = tuple(r2["atime"]) > tuple(r1["atime"])
-
-    # sticky arm + errno: sticky dir owned by root; victim owned by uid 100
-    mk("/test/p_sticky")
-    drv.request(op="chmod", pid=0, path="/test/p_sticky", mode=0o1777)
-    touch("/test/p_sticky/w", mode=0o666)
-    drv.request(op="chown", pid=0, path="/test/p_sticky/w", uid=100,
-                gid=10, follow=True)
-    r = drv.request(op="unlink", pid=1, path="/test/p_sticky/w")
-    out["stickyWriteArm"] = r["ret"] == 0
-    touch("/test/p_sticky/s", mode=0o600)
-    drv.request(op="chown", pid=0, path="/test/p_sticky/s", uid=100,
-                gid=10, follow=True)
-    r = drv.request(op="unlink", pid=1, path="/test/p_sticky/s")
-    out["stickyDenyErrno"] = r["err"]
-    out["errStickyAcces"] = r["err"] == 13 if r["ret"] < 0 else None
-
-    # chownSuppGroup: an owner chgrps their own file to a group they are in
-    # only by way of the supplementary list (user2 is uid 200, egid 20, and
-    # additionally in 30).  A transport that carries no group list cannot see
-    # the membership and refuses with EPERM.
-    touch("/test/p_chgrp", pid=1, mode=0o600)
-    r = drv.request(op="chown", pid=1, path="/test/p_chgrp", uid=-1, gid=30,
-                    follow=True)
-    out["chownSuppGroup"] = r["ret"] == 0
-    out["chownSuppGroupErrno"] = r["err"]
-
-    # errNotempty / errUnlinkDirIsdir
-    mk("/test/p_ne")
-    mk("/test/p_ne/x")
-    r = drv.request(op="rmdir", pid=0, path="/test/p_ne")
-    out["errNotempty"] = r["err"] == 39
-    out["rmdirNonemptyErrno"] = r["err"]
-    r = drv.request(op="unlink", pid=0, path="/test/p_ne")
-    out["errUnlinkDirIsdir"] = r["err"] == 21
-    out["unlinkDirErrno"] = r["err"]
-
-    # record locks (expected EOPNOTSUPP on memfs, see PD1)
-    fd = drv.request(op="open", pid=0, path="/test/p_src",
-                     flags=os.O_RDWR, mode=0)["ret"]
-    r = drv.request(op="fcntl_lock", pid=0, fd=fd, cmd="setlk", type="wr",
-                    start=0, len=bs)
-    out["lockErrno"] = r["err"]
-    out["errLockAgain"] = None
-    drv.request(op="close", pid=0, fd=fd)
-
-    drv.close()
-    return out
 
 
 def report_divergence(trace_path, div, replayer, driver):
@@ -1548,12 +1356,6 @@ def replay_one(driver, trace_path, args):
         raise TraceFormatError(f"{trace_path}: first label is not LInit")
     caps = init["value"]["caps"]
 
-    for key, want in PROFILES[args.backend].items():
-        if want is not None and caps.get(key) != want:
-            print(f"{trace_path}: SKIP: trace profile {key}="
-                  f"{caps.get(key)} does not match live profile {want}")
-            return "skip"
-
     replayer = Replayer(driver, caps, verbose=args.verbose)
     audited = 0
     try:
@@ -1570,7 +1372,7 @@ def replay_one(driver, trace_path, args):
         parts = ", ".join(
             f"{k}x{v}"
             for k, v in sorted(replayer.deviations_hit.items()))
-        dev_summary = f"; known deviations: {parts}"
+        dev_summary = f"; harness allowances: {parts}"
     print(f"{trace_path}: {len(states) - 1} steps replayed, "
           f"{audited} objects audited{dev_summary}")
     return "ok"
@@ -1599,13 +1401,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="parse and validate traces without a driver")
     ap.add_argument("--backend", default="memfs",
-                    choices=sorted(PROFILES),
+                    choices=BACKENDS,
                     help="VFS backend behind the driver (default memfs)")
-    ap.add_argument("--probe", action="store_true",
-                    help="measure the live capability/policy profile")
-    ap.add_argument("--check-profile", action="store_true",
-                    help="measure the live profile and diff against the "
-                         "pinned PROFILE")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -1627,22 +1424,8 @@ def main():
 
     signal.signal(signal.SIGALRM, on_alarm)
 
-    if args.probe or args.check_profile:
-        if not args.driver:
-            ap.error("--driver is required for probing")
-        measured = probe(args.driver, args.backend)
-        print(json.dumps(measured, indent=2))
-        if args.check_profile:
-            bad = [k for k, v in PROFILES[args.backend].items()
-                   if v is not None and measured.get(k) != v]
-            if bad:
-                print(f"PROFILE drift on: {bad}", file=sys.stderr)
-                sys.exit(1)
-        return
-
     if not args.trace:
-        ap.error("--trace or a non-empty --trace-dir is required "
-                 "unless --probe")
+        ap.error("--trace or a non-empty --trace-dir is required")
     if not args.dry_run and not args.driver:
         ap.error("--driver is required unless --dry-run")
 
