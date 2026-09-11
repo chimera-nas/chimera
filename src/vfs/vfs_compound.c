@@ -150,6 +150,19 @@ chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
     free(compound);
 } /* chimera_vfs_compound_free */
 
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_handle(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    struct chimera_vfs_open_handle *handle)
+{
+    if (index >= compound->num_ops) {
+        return;
+    }
+
+    compound->ops[index].in_handle = handle;
+} /* chimera_vfs_compound_op_set_handle */
+
 SYMBOL_EXPORT struct chimera_vfs_open_handle *
 chimera_vfs_compound_take_handle(
     struct chimera_vfs_compound *compound,
@@ -1704,6 +1717,7 @@ static void
 chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
 {
     struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_open_handle *target;
     unsigned int                    open_flags;
 
     if (compound->index >= compound->num_ops) {
@@ -1712,6 +1726,12 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
     }
 
     op = &compound->ops[compound->index];
+
+    /* The object this op acts on: the one the caller handed in, or else the
+     * sequence's current object.  Ops that resolve a NAME use compound->handle
+     * directly instead, because for them it is the directory to resolve in and
+     * not the object being acted on. */
+    target = op->in_handle ? op->in_handle : compound->handle;
 
     /* op_open_flags cannot see the sequence, so tell it where the two-step I/O
      * has got to. */
@@ -1809,7 +1829,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY))) {
                 /* Resolve the name before opening it -- step one of two. */
                 chimera_vfs_lookup_at(compound->thread, compound->cred,
-                                      compound->handle,
+                                      target,
                                       op->name, op->name_len,
                                       CHIMERA_VFS_ATTR_MODE,
                                       0,
@@ -1819,7 +1839,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             }
 
             chimera_vfs_open_at(compound->thread, compound->cred,
-                                compound->handle,
+                                target,
                                 op->name, op->name_len,
                                 op->open_flags,
                                 &op->set_attr,
@@ -1834,7 +1854,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             switch (op->create_type) {
                 case CHIMERA_VFS_COMPOUND_CREATE_DIR:
                     chimera_vfs_mkdir_at(compound->thread, compound->cred,
-                                         compound->handle,
+                                         target,
                                          op->name, op->name_len,
                                          &op->set_attr,
                                          op->attr_mask | CHIMERA_VFS_ATTR_FH,
@@ -1847,7 +1867,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                     break;
                 case CHIMERA_VFS_COMPOUND_CREATE_SYMLINK:
                     chimera_vfs_symlink_at(compound->thread, compound->cred,
-                                           compound->handle,
+                                           target,
                                            op->name, op->name_len,
                                            op->link_target,
                                            (int) op->link_target_len,
@@ -1862,7 +1882,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                     break;
                 default:
                     chimera_vfs_mknod_at(compound->thread, compound->cred,
-                                         compound->handle,
+                                         target,
                                          op->name, op->name_len,
                                          &op->set_attr,
                                          op->attr_mask | CHIMERA_VFS_ATTR_FH,
@@ -1879,9 +1899,6 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         case CHIMERA_VFS_COMPOUND_OP_READ:
         case CHIMERA_VFS_COMPOUND_OP_WRITE:
         {
-            struct chimera_vfs_open_handle *target =
-                op->in_handle ? op->in_handle : compound->handle;
-
             /* An op addressing the current object establishes the object's
              * type before it is opened for data -- so a non-regular one is
              * refused here, and the data open is never attempted.  An op that
@@ -1889,7 +1906,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
              * established the type. */
             if (!op->in_handle && !compound->io_typechecked) {
                 chimera_vfs_getattr(compound->thread, compound->cred,
-                                    compound->handle,
+                                    target,
                                     CHIMERA_VFS_ATTR_MODE,
                                     chimera_vfs_compound_io_type_callback,
                                     compound);
@@ -1949,7 +1966,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                      compound);
             } else {
                 chimera_vfs_setattr(compound->thread, compound->cred,
-                                    compound->handle,
+                                    target,
                                     &op->set_attr,
                                     0, op->attr_mask,
                                     chimera_vfs_compound_setattr_callback,
@@ -2103,7 +2120,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
 
         case CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR:
             chimera_vfs_remove_xattr(compound->thread, compound->cred,
-                                     compound->handle,
+                                     target,
                                      op->name, op->name_len,
                                      chimera_vfs_compound_xattr_change_callback,
                                      compound);
@@ -2112,7 +2129,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
         case CHIMERA_VFS_COMPOUND_OP_ACCESS:
             chimera_vfs_getattr(compound->thread, compound->cred,
-                                compound->handle, op->attr_mask,
+                                target, op->attr_mask,
                                 chimera_vfs_compound_getattr_callback,
                                 compound);
             break;
