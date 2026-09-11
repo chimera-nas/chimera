@@ -785,7 +785,7 @@ chimera_vfs_claim_io_denied(
              * -- the HOLDER-exempt MAND row) passes. */
             bool self = actor &&
                 (chimera_claim_owner_equal(&cur->owner, &actor->owner) ||
-                 chimera_claim_owner_same_key(&cur->owner, &actor->owner) ||
+                 chimera_claim_owner_same_lease(&cur->owner, &actor->owner) ||
                  (actor->op_handle && cur->op_handle == actor->op_handle));
 
             if (!self) {

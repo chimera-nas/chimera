@@ -111,8 +111,11 @@ struct chimera_claim_range_conflict {
  * cluster-stable bytes (co_ownerid, ClientGuid, caller_name) are registered
  * separately by the protocol layer for projection serialization.  key[16] is
  * the KEY circle (SMB LeaseKey / ParentLeaseKey); all-zero means "no key".
- * The KEY circle is deliberately NOT nested inside CLIENT: SameLeaseKey
- * coalesces across ClientGuids (MS-SMB2; WPTS SameLeaseKey). */
+ *
+ * chimera_claim_owner_same_key() is the raw KEY comparison; what names a LEASE
+ * is chimera_claim_owner_same_lease(), which adds the client term MS-SMB2
+ * 3.3.5.9.8 requires.  Use the latter unless you specifically mean "these two
+ * carry the same 16 bytes". */
 struct chimera_claim_owner {
     uint8_t  proto;
     uint8_t  flags;
@@ -168,6 +171,35 @@ chimera_claim_owner_same_client(
 {
     return a->proto == b->proto && a->client_key == b->client_key;
 } /* chimera_claim_owner_same_client */
+
+/*
+ * same_lease: the same lease, not merely the same key bytes.
+ *
+ * MS-SMB2 3.3.5.9.8 locates a lease by looking the LeaseTable up in
+ * GlobalLeaseTableList by the ClientGuid of the connection that received the
+ * request, and only THEN the LeaseKey inside that table.  The same key value
+ * used by two different clients therefore names two SEPARATE leases, each with
+ * its own version, epoch and caching state.  Matching on the key alone let a
+ * second client's RqLs open land on the first client's lease -- and, because a
+ * key match also exempts the two from each other's deny rows, let both hold a
+ * write cache on one file (chimera CD-5).
+ *
+ * A zero client_key is a WILDCARD.  The directory-lease ParentLeaseKey
+ * self-exemption synthesizes an actor that is deliberately all zero but for the
+ * key (chimera_vfs_notify_dir_lease_break): it names a key, not a claimant, and
+ * must keep matching the lease that supplied it.  Every claim that carries a
+ * real key carries the client that owns it, so the wildcard never widens a
+ * claim-against-claim comparison.
+ */
+static inline bool
+chimera_claim_owner_same_lease(
+    const struct chimera_claim_owner *a,
+    const struct chimera_claim_owner *b)
+{
+    return chimera_claim_owner_same_key(a, b) &&
+           (a->client_key == 0 || b->client_key == 0 ||
+            a->client_key == b->client_key);
+} /* chimera_claim_owner_same_lease */
 
 /* -------------------------------------------------------------------- */
 /* Acquire results and the pending-acquire ticket                       */
