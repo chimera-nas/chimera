@@ -83,6 +83,9 @@ struct chimera_vfs_compound {
 
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
+
+    chimera_vfs_compound_gate_t     gate;
+    void                           *gate_private;
 };
 
 static void chimera_vfs_compound_step(
@@ -102,6 +105,16 @@ chimera_vfs_compound_alloc(
 
     return compound;
 } /* chimera_vfs_compound_alloc */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_set_gate(
+    struct chimera_vfs_compound *compound,
+    chimera_vfs_compound_gate_t  gate,
+    void                        *private_data)
+{
+    compound->gate         = gate;
+    compound->gate_private = private_data;
+} /* chimera_vfs_compound_set_gate */
 
 SYMBOL_EXPORT void
 chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
@@ -841,7 +854,6 @@ chimera_vfs_compound_op_done(
 {
     struct chimera_vfs_compound_op *done = &compound->ops[compound->index];
 
-    done->status        = status;
     compound->completed = compound->index + 1;
 
     /* Record what the op ended up addressing, so a caller describing the
@@ -850,6 +862,15 @@ chimera_vfs_compound_op_done(
         memcpy(done->fh, compound->fh, compound->fh_len);
         done->fh_len = compound->fh_len;
     }
+
+    /* The caller's veto, before anything behind this op runs -- and after the
+     * op's own results are recorded, because that is what it inspects. */
+    if (compound->gate) {
+        compound->gate(compound, compound->index, &status,
+                       compound->gate_private);
+    }
+
+    done->status = status;
 
     if (status != CHIMERA_VFS_OK) {
         /* Stop at the first failure: every later op addresses what an earlier

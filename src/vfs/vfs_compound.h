@@ -404,6 +404,36 @@ struct chimera_vfs_compound_op {
     uint32_t                            buffer_count;  /* LISTXATTRS: names   */
 };
 
+/*
+ * A caller's veto on an op that has just finished, before the sequence goes on.
+ *
+ * Some of what a protocol requires of an operation is not a property of the
+ * object and cannot be asked of the VFS -- NFSv4 calls a file handle stale when
+ * the object has no names left AND no client holds it open, and only the server
+ * knows the second half.  A caller that has to apply such a rule after the whole
+ * sequence has run has already let the ops behind it happen, which is fine while
+ * they only read and is not fine once one of them mutates.
+ *
+ * So the caller answers during the sequence instead.  It is handed the op that
+ * just finished and the status it is carrying, and may replace that status:
+ * leave it CHIMERA_VFS_OK to go on, set anything else to fail that op and stop
+ * the sequence, exactly as a failing VFS op would.
+ *
+ * (The status travels by pointer rather than as a return value because
+ * chimera_vfs_error is also a function-like logging macro, and a declaration
+ * naming the enum immediately before a '(' expands it.)
+ *
+ * It must answer FROM WHAT IT ALREADY HAS.  No I/O, no waiting, and no
+ * remembering that it was asked: it may be asked again for the same op if the
+ * sequence is ever retried, and the answer has to be the same question asked
+ * twice rather than a step taken twice.
+ */
+typedef void (*chimera_vfs_compound_gate_t)(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data);
+
 typedef void (*chimera_vfs_compound_callback_t)(
     struct chimera_vfs_compound *compound,
     void                        *private_data);
@@ -543,6 +573,15 @@ chimera_vfs_compound_add_open(
     uint32_t                        opts,
     const struct chimera_vfs_attrs *set_attr,
     uint64_t                        attr_mask);
+
+/* Register a veto consulted as each op finishes -- see
+ * chimera_vfs_compound_gate_t.  Optional; without one the sequence is governed
+ * by the ops' own statuses alone. */
+void
+chimera_vfs_compound_set_gate(
+    struct chimera_vfs_compound *compound,
+    chimera_vfs_compound_gate_t  gate,
+    void                        *private_data);
 
 /* Execute the sequence.  The callback fires exactly once, on the submitting
  * thread, when execution has stopped -- because every op ran or because one

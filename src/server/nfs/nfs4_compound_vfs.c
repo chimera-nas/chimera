@@ -917,6 +917,59 @@ nfs4_vfs_compound_give_back(
 } /* nfs4_vfs_compound_give_back */
 
 /*
+ * The NFSv4-side rules that decide whether an operation may proceed, applied as
+ * each op finishes rather than when its result is filled.
+ *
+ * PUTFH's staleness rule is the one that has to be here.  A file handle is
+ * stale when the object has no names left and no client holds it open -- and
+ * only the server knows the second half, so the VFS cannot answer it.  Applied
+ * at fill time it came too late: everything behind the PUTFH had already run,
+ * which was harmless while the sequence only read and stopped being harmless as
+ * soon as it could rename.
+ *
+ * It answers from the client table, which is memory the server already holds:
+ * no I/O, no waiting, and nothing remembered, so asking it twice asks the same
+ * question rather than taking a step twice.
+ */
+static void
+nfs4_vfs_compound_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct nfs4_vfs_compound_ctx *ctx = private_data;
+    struct nfs_request           *req = ctx->req;
+    uint32_t                      k;
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    for (k = 0; k < ctx->num_ops; k++) {
+        struct nfs4_vfs_op                   *map = &ctx->ops[k];
+        const struct chimera_vfs_compound_op *aux;
+
+        if (map->vfs_aux < 0 || (uint32_t) map->vfs_aux != index) {
+            continue;
+        }
+
+        if (req->args_compound->argarray[map->res_index].argop != OP_PUTFH) {
+            return;
+        }
+
+        aux = chimera_vfs_compound_op(compound, index);
+
+        if (chimera_nfs4_putfh_check_stale(req, &aux->attr, aux->fh,
+                                           (int) aux->fh_len) != NFS4_OK) {
+            *status = CHIMERA_VFS_ESTALE;
+        }
+
+        return;
+    }
+} /* nfs4_vfs_compound_gate */
+
+/*
  * The sequence is over.  Fill the results of every NFSv4 op that ran, stopping
  * at the first that failed, and hand the request back to the reply path exactly
  * as a failing per-op handler would.
@@ -1621,6 +1674,11 @@ chimera_nfs4_compound_try_vfs(
     /* Index of a SETATTR whose size change has to be authorized before the
      * sequence runs, or -1. */
     int                             setattr_at = -1;
+    /* The export the sequence runs under, established by the op that seeds the
+     * current object.  A later PUTFH is admitted only back into this one -- see
+     * the PUTFH case.  Read during the scan, which is before the seed handle is
+     * decoded, so it cannot come from req->export_id. */
+    uint16_t                        seq_export = req->export_id;
     /* Set when the scan meets an op the sequence cannot carry: the run ends in
      * front of it, and the dispatcher picks up from there. */
     int                             stop = 0;
@@ -1654,6 +1712,22 @@ chimera_nfs4_compound_try_vfs(
         return 0;
     }
 
+    /* When the remainder opens with a PUTFH, that handle names the export;
+    * otherwise the sequence inherits whatever the COMPOUND already had. */
+    if (req->args_compound->argarray[first].argop == OP_PUTFH) {
+        uint8_t seed_fh[CHIMERA_VFS_FH_SIZE];
+        int     seed_len;
+
+        if (chimera_nfs_fh_unwrap(
+                req->args_compound->argarray[first].opputfh.object.data,
+                (int) req->args_compound->argarray[first].opputfh.object.len,
+                &seq_export, seed_fh, &seed_len,
+                thread->shared->fh_key,
+                thread->shared->fh_sign) != CHIMERA_NFS_FH_OK) {
+            return 0;
+        }
+    }
+
     for (i = first; i < num; i++) {
         argop = &req->args_compound->argarray[i];
 
@@ -1685,7 +1759,8 @@ chimera_nfs4_compound_try_vfs(
          * half built would have to be abandoned after staging xattr names into
          * the reply buffer, which cannot be taken back. */
         vfs_ops += (argop->argop == OP_READLINK ||
-                    argop->argop == OP_COMMIT) ? 2 : 1;
+                    argop->argop == OP_COMMIT ||
+                    (argop->argop == OP_PUTFH && i != first)) ? 2 : 1;
 
         if (vfs_ops > NFS4_VFS_COMPOUND_MAX_OPS) {
             nenc = i;
@@ -1698,7 +1773,9 @@ chimera_nfs4_compound_try_vfs(
          * to carry an entry.  Nothing that mutates may follow one -- see the
          * MUTATION note at the top. */
         switch (argop->argop) {
-            case OP_PUTFH:
+            /* PUTFH is absent: its staleness rule runs in the gate, during the
+             * sequence, so it stops what is behind it rather than reporting
+             * after the fact.  See nfs4_vfs_compound_gate. */
             case OP_READLINK:
             case OP_COMMIT:
             case OP_READDIR:
@@ -1710,11 +1787,39 @@ chimera_nfs4_compound_try_vfs(
 
         switch (argop->argop) {
             case OP_PUTFH:
-                /* One PUTFH, at the head.  A later one would switch export --
-                 * and with it the squash policy and the credential the whole
-                 * sequence runs under, which is fixed at submission. */
+                /* A later PUTFH is allowed only back into the SAME export.
+                 *
+                 * What a second one threatens is the credential: a different
+                 * export has a different squash policy, and the sequence runs
+                 * under one credential fixed when it was submitted.  Into the
+                 * same export there is no such change -- same policy, same
+                 * credential, same security flavor, all of them already
+                 * established by the first.
+                 *
+                 * That is not a narrow escape hatch.  RENAME and LINK both
+                 * require their two objects to be in the same filesystem
+                 * (NFS4ERR_XDEV otherwise), so same-export is the only shape
+                 * either of them is ever legally given -- and they are what a
+                 * second PUTFH is nearly always for. */
                 if (i != first) {
-                    {
+                    uint8_t  later_fh[CHIMERA_VFS_FH_SIZE];
+                    int      later_len;
+                    uint16_t later_export;
+
+                    if (fh_is_nfs4_root(argop->opputfh.object.data,
+                                        argop->opputfh.object.len) ||
+                        argop->opputfh.object.len > NFS4_FHSIZE ||
+                        chimera_nfs_fh_unwrap(argop->opputfh.object.data,
+                                              (int) argop->opputfh.object.len,
+                                              &later_export,
+                                              later_fh, &later_len,
+                                              thread->shared->fh_key,
+                                              thread->shared->fh_sign) !=
+                        CHIMERA_NFS_FH_OK ||
+                        later_export != seq_export ||
+                        chimera_nfs4_fh_is_attrdir(later_fh, later_len) ||
+                        !chimera_vfs_fh_is_plausible(thread->vfs_thread,
+                                                     later_fh, later_len)) {
                         nenc = i;
                         stop = 1;
                         break;
@@ -2482,10 +2587,40 @@ chimera_nfs4_compound_try_vfs(
 
         switch (argop->argop) {
             case OP_PUTFH:
-                /* The seed PUTFH above is this op; stat the handle so the
-                 * zero-link staleness rule has something to test. */
-                map->vfs_res = idx;
-                idx          = chimera_vfs_compound_add_getattr(
+                if (i == first) {
+                    /* The seed PUTFH above is this op. */
+                    map->vfs_res = idx;
+                } else {
+                    /* A later PUTFH, into the same export -- see the scan.  It
+                     * moves the sequence's current object the way any other op
+                     * does, so it is an op of its own. */
+                    uint8_t  later_fh[CHIMERA_VFS_FH_SIZE];
+                    int      later_len;
+                    uint16_t later_export;
+
+                    if (chimera_nfs_fh_unwrap(argop->opputfh.object.data,
+                                              (int) argop->opputfh.object.len,
+                                              &later_export,
+                                              later_fh, &later_len,
+                                              thread->shared->fh_key,
+                                              thread->shared->fh_sign) !=
+                        CHIMERA_NFS_FH_OK) {
+                        goto refuse;
+                    }
+
+                    idx = chimera_vfs_compound_add_putfh(compound,
+                                                         later_fh,
+                                                         later_len);
+                    map->vfs_res = idx;
+
+                    if (idx < 0) {
+                        goto refuse;
+                    }
+                }
+
+                /* Stat the handle so the zero-link staleness rule has something
+                 * to test; the gate reads it as this op finishes. */
+                idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_NLINK);
                 map->vfs_aux = idx;
                 break;
@@ -2772,6 +2907,8 @@ chimera_nfs4_compound_try_vfs(
                 break;
         } /* switch */
     }
+
+    chimera_vfs_compound_set_gate(compound, nfs4_vfs_compound_gate, ctx);
 
     chimera_vfs_compound_submit(compound, nfs4_vfs_compound_complete, ctx);
 
