@@ -2670,10 +2670,17 @@ chimera_smb_conn_free(
     {
         struct chimera_smb_session *s = session_handle->session;
         int                         i;
+        int                         sibling_channel;
 
         if (!s) {
             continue;
         }
+
+        /* num_channels still counts this channel here -- conn_free does not
+         * release the session handles (and decrement it) until below. */
+        pthread_mutex_lock(&thread->shared->sessions_lock);
+        sibling_channel = s->num_channels > 1;
+        pthread_mutex_unlock(&thread->shared->sessions_lock);
 
         /* Walk the session's trees under session->lock, matching
          * chimera_smb_session_park_durables / _flush_notifies: a concurrent
@@ -2697,7 +2704,16 @@ chimera_smb_conn_free(
                 {
                     if (of->create_conn == conn) {
                         of->create_conn = NULL;
-                        if (of->handle && of->handle->fh_len &&
+                        /* Only when the client is still reachable: a session
+                         * with another bound channel is one whose holder is
+                         * merely unreachable on THIS transport, so the break it
+                         * never acked is ours to resolve.  A session losing its
+                         * last channel is a holder that has genuinely gone away
+                         * -- its durable handle is preserved for reconnect and
+                         * must come back with the full lease it never gave up
+                         * (smb2.durable-open.lease-disconnect-race), so leave
+                         * that break exactly as it is. */
+                        if (sibling_channel && of->handle && of->handle->fh_len &&
                             brk_n < CHIMERA_SMB_CONN_BREAK_FIXUP_MAX) {
                             memcpy(brk_fh[brk_n], of->handle->fh,
                                    of->handle->fh_len);
