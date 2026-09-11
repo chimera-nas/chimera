@@ -31,11 +31,16 @@ chimera_vfs_lookup_pathonly_complete(
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data);
 
-/* Length of the path prefix preceding the first ".." component (with the
- * separating slash stripped): -1 when there is no ".." component, 0 when the
- * path begins with "..". */
+/* Length of the path prefix preceding the first "." or ".." component (with
+ * the separating slash stripped): -1 when the path has neither, 0 when the
+ * path begins with one.
+ *
+ * Both need the same treatment for the same reason: a path-only backend
+ * collapses them LEXICALLY, which loses the requirement that whatever precedes
+ * them be a directory.  "b/.." and "b/." are each ENOTDIR when b is a file, and
+ * a backend that simply deletes the component answers about b instead. */
 static inline int
-chimera_vfs_dotdot_prefix_len(
+chimera_vfs_dot_prefix_len(
     const char *p,
     int         len)
 {
@@ -47,7 +52,8 @@ chimera_vfs_dotdot_prefix_len(
         while (i < len && p[i] != '/') {
             i++;
         }
-        if (i - start == 2 && p[start] == '.' && p[start + 1] == '.') {
+        if ((i - start == 1 && p[start] == '.') ||
+            (i - start == 2 && p[start] == '.' && p[start + 1] == '.')) {
             int end = start;
 
             while (end > 0 && p[end - 1] == '/') {
@@ -60,13 +66,14 @@ chimera_vfs_dotdot_prefix_len(
         }
     }
     return -1;
-} /* chimera_vfs_dotdot_prefix_len */
+} /* chimera_vfs_dot_prefix_len */
 
-/* Completion of the ".."-prefix resolution (follows symlinks) for a path-only
- * mount.  A path-only backend collapses ".." lexically, so "b/.." with a
- * dangling or non-directory "b" would wrongly succeed; resolving the prefix
- * first gives POSIX's ENOENT (dangling chain) or ENOTDIR (non-dir), and only a
- * real directory lets the whole path (with its ".." collapsed) resolve.  The
+/* Completion of the "."/".."-prefix resolution (follows symlinks) for a
+ * path-only mount.  A path-only backend collapses both lexically, so "b/.." or
+ * "b/." with a dangling or non-directory "b" would wrongly succeed; resolving
+ * the prefix first gives POSIX's ENOENT (dangling chain) or ENOTDIR (non-dir),
+ * and only a real directory lets the whole path (with its "."/".." collapsed)
+ * resolve.  The
  * prefix lookup is a whole-path resolution against the mount root, so DAC stays
  * server-delegated -- no per-component EACCES. */
 static void
@@ -139,10 +146,10 @@ chimera_vfs_lookup_open_dispatch(
     if (chimera_vfs_module_is_path_only(oh->vfs_module)) {
         const char *remaining  = lp_request->lookup.pathc;
         int         remlen     = strlen(remaining);
-        int         prefix_len = chimera_vfs_dotdot_prefix_len(remaining, remlen);
+        int         prefix_len = chimera_vfs_dot_prefix_len(remaining, remlen);
 
-        /* A ".." after a real component collapses lexically in the backend, so
-         * resolve the component(s) before the first ".." first (following
+        /* A "." or ".." after a real component collapses lexically in the
+         * backend, so resolve the component(s) before it first (following
          * symlinks, as POSIX does for a non-final component): a dangling chain
          * or missing prefix is ENOENT, a non-directory prefix is ENOTDIR, and
          * only a real directory prefix lets the whole path resolve. */
