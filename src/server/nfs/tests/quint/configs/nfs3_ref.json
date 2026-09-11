@@ -1,0 +1,33 @@
+{
+  "family": "nfs3",
+  "description": "chimera serving NFSv3 (RFC 1813) over the inproc transport. The model declares no feature or policy knobs -- an NFSv3 server has no optional surface to advertise and no minor version to pick -- so what this config carries besides the batch list is the deviations chimera still has and the places RFC 1813 permits more than one answer. The same corpus replays against every backend: it is protocol-level and backend-agnostic, which is what makes a divergence on diskfs/cairn/linux/io_uring a genuine backend deviation rather than a profile mismatch.",
+  "traceStem": "nfs3",
+
+  // Known chimera divergences from RFC 1813 the model is told to predict for
+  // this cell, so the trace's expectation is already what chimera does and
+  // replay is an exact match.  Declared with citations in
+  // ext/specs/quint/nfs3/corpus.schema.json.  The strict twin regenerates the
+  // same batches with all of them off, and its failures are the live debt.
+  "deviations": [
+  ],
+
+  // Where RFC 1813 itself permits more than one answer to a call.  Both are on
+  // here because this one corpus is replayed against the passthrough backends
+  // as well as the in-engine ones, and a server that resolves names through
+  // the host kernel legitimately takes the other answer in each case.  A cell
+  // that only ever faced memfs/diskfs/cairn would leave them off and demand
+  // the model's answer exactly.
+  "tolerances": {
+    "errorPrecedence": true,
+    "exclusiveRetryVerifier": true
+  },
+
+  "batches": [
+    { "flavor": "step",      "steps": 128, "traces": 10, "seed": "0x1"   },
+    { "flavor": "step",      "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "stepChurn", "steps": 128, "traces": 6,  "seed": "0x1"   },
+    { "flavor": "stepChurn", "steps": 256, "traces": 2,  "seed": "0x200" },
+    { "flavor": "stepDir",   "steps": 128, "traces": 4,  "seed": "0x1"   },
+    { "flavor": "stepExcl",  "steps": 128, "traces": 3,  "seed": "0x1"   }
+  ]
+}

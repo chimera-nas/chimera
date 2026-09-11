@@ -1,0 +1,15 @@
+{
+  "extends": "./nfs4_memfs42.json",
+  "description": "the 4.2 server with delegations SERVED: identical capabilities, but both delegation features asserted so the grant / recall / return lifecycle is generated rather than assumed absent. The grant policy these traces expect is the one nfs4_deleg_probe.c pins against the live server.",
+  "traceStem": "nfs4Memfs42Deleg",
+
+  "features": {
+    "readDelegation": "supported",
+    "writeDelegation": "supported"
+  },
+
+
+  "batches": [
+    { "flavor": "stepDeleg", "steps": 80, "traces": 10, "seed": "0x7" }
+  ]
+}

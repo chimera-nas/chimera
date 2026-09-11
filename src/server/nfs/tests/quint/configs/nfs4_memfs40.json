@@ -1,0 +1,14 @@
+{
+  "extends": "./nfs4_memfs41.json",
+  "description": "the same server at plain NFSv4.0 -- no sessions, so SETCLIENTID/SETCLIENTID_CONFIRM, per-owner seqids and OPEN_CONFIRM carry the state machine instead. Everything optional stays off, as at 4.1.",
+  "traceStem": "nfs4Memfs40",
+
+  // (D4-15 and D4-21 both used to sit here, one switched off and one on.
+  // D4-15 is gone entirely -- the WRONG_TYPE-vs-4.0-pair choice is a
+  // latitude the model now accepts unconditionally -- and D4-21 was FIXED:
+  // nfs4_proc_secinfo.c gates the filehandle consumption on minorversion.)
+
+  "policies": {
+    "minor": 0
+  }
+}

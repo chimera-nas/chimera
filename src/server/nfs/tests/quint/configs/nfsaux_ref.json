@@ -1,0 +1,39 @@
+{
+  "family": "nfsaux",
+  "description": "chimera's four auxiliary protocols -- an embedded portmapper that answers lookups but registers nothing that would let a client change the table, MOUNT, NLM and NSM in full. The monitor list is fed by lock grants rather than SM_MON, lock state does not survive a restart (so there is no grace window to sit out), DOS share reservations are accepted but not enforced, and one in-process transport means one peer address and one mount-table hostname.",
+  "traceStem": "nfsauxRef",
+
+  "features": {
+    "implemented": "PORTMAP_MINIMAL.union(MOUNT_PROCS).union(NLM_PROCS).union(NSM_PROCS)",
+    "nlmBlocking": true
+  },
+
+  "policies": {
+    "services": "NFS_SERVICES",
+    "uaddrHost": "127.0.0.1",
+    "pmSetMutates": false,
+    "exports": "TWO_EXPORTS",
+    "paths": "NFS_PATHS",
+    "mountHost": "inproc",
+    "nsmMonFromLocks": true,
+    "nsmAddrsDistinct": false,
+    "nsmInitialState": 1,
+    "nlmUpgradeIsNoop": true,
+    "nlmShareEnforced": false,
+    "nlmInGrace": false,
+    "nlmGrantCallbackObservable": false,
+    "nlmCancelMsgCancels": true
+  },
+
+  "batches": [
+    { "flavor": "stepPortmap",  "steps": 200, "traces": 4, "seed": "0x1" },
+    { "flavor": "stepMount",    "steps": 200, "traces": 4, "seed": "0x2" },
+    { "flavor": "stepLocks",    "steps": 200, "traces": 6, "seed": "0x3" },
+    { "flavor": "stepAsync",    "steps": 150, "traces": 4, "seed": "0x4" },
+    { "flavor": "stepRecovery", "steps": 200, "traces": 6, "seed": "0x5" },
+    { "flavor": "stepShare",    "steps": 150, "traces": 3, "seed": "0x6" },
+    { "flavor": "stepBlocking", "steps": 200, "traces": 6, "seed": "0x9" },
+    { "flavor": "step",         "steps": 200, "traces": 6, "seed": "0x7" },
+    { "flavor": "step",         "steps": 300, "traces": 3, "seed": "0x8" }
+  ]
+}

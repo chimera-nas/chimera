@@ -1,0 +1,26 @@
+{
+  "family": "nfsdrc",
+  "description": "chimera with the NFSv3 duplicate-request cache switched on. Every connection arrives from one address (the inproc transport gives every peer the same one) and both caches key on the credential.",
+  "traceStem": "nfsdrcRef",
+
+  "features": {
+    "v3Cache": true
+  },
+
+  "policies": {
+    "keyOnCredential": true,
+    "v40Slots": 16,
+    "addrOf": "ONE_ADDR",
+    "dir": "d",
+    "names": "THREE_NAMES",
+    "conns": "TWO_CONNS",
+    "creds": "TWO_CREDS",
+    "xids": "THREE_XIDS"
+  },
+
+  "batches": [
+    { "flavor": "step", "steps": 100, "traces": 6, "seed": "0x1" },
+    { "flavor": "step", "steps": 160, "traces": 4, "seed": "0x2" },
+    { "flavor": "step", "steps": 100, "traces": 4, "seed": "0x3" }
+  ]
+}

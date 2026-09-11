@@ -267,65 +267,35 @@ v4_wide_attr_mask(uint32_t *m)
         (1U << (FATTR4_TIME_MODIFY - 32));
 } /* v4_wide_attr_mask */
 
-/* ---- known-deviation registry (see DEVIATIONS-NFS4.md) ------------------- */
+/* ---- host-passthrough acceptances ---------------------------------------
+ *
+ * There is no deviation registry here any more.  What chimera does where it
+ * diverges from the RFCs is now stated by the MODEL, gated on the cell's
+ * config (quint/nfs4/corpus.schema.json's `known` block carries the citation
+ * for each), so the trace's expectation already IS chimera's answer and this
+ * file compares for equality with nothing to forgive.  Where the standard
+ * itself permits several answers to one call, the model emits a `<field>Accept`
+ * set beside the field and the comparison below is a membership test -- see
+ * v4_accept_i64().
+ *
+ * What survives is the one class the model cannot express: the deviations that
+ * exist because the HOST filesystem, not chimera, owns the behaviour.  They
+ * cannot move into the model as things stand, because the seven nfs4 cells
+ * each serve FIVE backends from one corpus -- batch_memfs, batch_diskfs,
+ * batch_cairn, batch_linux and batch_io_uring all replay the memfs4x traces --
+ * so no per-cell config knob can say "0777 symlink modes here, 0755 there".
+ * Migrating them needs a corpus per backend, which is a change to the cell
+ * topology and not to this file.  Until then they stay gated on the backend,
+ * which is what keeps the native backends' enforcement exact.
+ */
 
-enum v4_dev {
-    DEV_LOOKUPP_PSEUDOROOT = 0,   /* D4-1 */
-    DEV_ACCESS_NO_EXECUTE,        /* D4-2 */
-    DEV_SYMLINK_MODE_0755,        /* D4-4 */
-    DEV_LOOKUPP_SYMLINK,          /* D4-7 */
-    DEV_COARSE_TYPE_ERR,          /* D4-15 */
-    DEV_READLINK_DIR_INVAL,       /* D4-16 */
-    DEV_REAL_HOLES,               /* D4-17 */
-    DEV_CREATE_TYPE_BEFORE_PARENT, /* D4-18 */
-    DEV_DIROP_SYMLINK_NOTDIR,      /* D4-19 */
-    DEV_ACCESS_ROOT_EXECUTE,       /* D4-20 */
-    DEV_SECINFO_CONSUMES_FH,       /* D4-21 */
-    DEV_SEQ_REPLAY_UNCACHED,       /* D4-22 */
-    DEV_HOST_SYMLINK_MODE,        /* D4-23 */
-    DEV_COARSE_CHANGE,            /* D4-24 */
-    DEV_LINK_UNLINKED,            /* D4-25 */
-    DEV_HOST_SYMLINK_SETATTR,      /* D4-26 */
-    DEV_EXCL_VERF_LOST,           /* D4-27 */
-    DEV_COUNT,
-};
-
-static const char *v4_dev_ids[DEV_COUNT] = {
-    "D4-1-lookupp-pseudoroot",
-    "D4-2-access-no-execute",
-    "D4-4-symlink-mode-0755",
-    "D4-7-lookupp-symlink",
-    "D4-15-coarse-type-error",
-    "D4-16-readlink-dir-inval",
-    "D4-17-real-holes",
-    "D4-18-create-type-before-parent",
-    "D4-19-dirop-symlink-notdir",
-    "D4-20-access-root-execute",
-    "D4-21-secinfo-consumes-fh",
-    "D4-22-seq-replay-uncached",
-    "D4-23-host-symlink-mode",
-    "D4-24-coarse-change",
-    "D4-25-link-unlinked-source",
-    "D4-26-host-symlink-setattr",
-    "D4-27-exclusive-verifier-lost",
-};
-
-/* Set when the backend tracks holes for real (every backend but memfs, whose
-* block_size is pinned to the model's granularity): the model, like memfs,
-* reads every byte below EOF as data and puts the sole hole at EOF, while a
-* hole-tracking backend legitimately refines that -- SEEK_HOLE may find a
-* genuine hole earlier, SEEK_DATA may skip never-written ranges to a later
-* offset or answer NFS4ERR_NXIO when nothing but holes remain below EOF.
-* All of those are conformant (RFC 7862 15.11); D4-17 records the acceptance,
-* exactly as the posix suite's PT2 rule does for its passthrough backends. */
-static int g_backend_real_holes;
-
-/* Set for the host-passthrough backends (linux/io_uring): the deviations that
- * exist because the HOST filesystem, not chimera, owns the behavior --
- * symlink modes pinned at 0777 (no lchmod on Linux), the change attribute
- * derived from a kernel-tick-granular ctime (multigrain-ctime kernels retire
- * this), and the kernel's refusal to re-link an unlinked-but-open source.
- * Never set for a native backend, whose enforcement stays exact. */
+/* Set for the host-passthrough backends (linux/io_uring): symlink modes
+ * pinned at 0777 (Linux has no lchmod), the change attribute derived from a
+ * kernel-tick-granular ctime (multigrain-ctime kernels, 6.13+, retire this),
+ * the kernel's refusal to re-link an unlinked-but-open source, ENOTSUP for a
+ * mode-only SETATTR of a symlink, and an EXCLUSIVE4 verifier that
+ * relatime-updated timestamps did not preserve.  Never set for a native
+ * backend. */
 static int g_backend_passthrough;
 
 #define E_WRONG_TYPE 10083
@@ -526,8 +496,6 @@ struct oracle {
     uint8_t                recalls[64][12];
     int                    nrecalls;
 
-    int                    dev_hits[DEV_COUNT];
-
     /* caps reconciliation */
     const char            *mandatory[8];
     int                    nmandatory;
@@ -590,7 +558,7 @@ lock_range(
     }
 } /* lock_range */
 
-/* ---- caps / deviations --------------------------------------------------- */
+/* ---- capability reconciliation ------------------------------------------- */
 
 static int
 caps_mismatch(
@@ -745,7 +713,6 @@ check_change(
              * to supply the attribute at all, which stays a failure.
              * (Multigrain-ctime kernels, 6.13+, retire this deviation.) */
             if (g_backend_passthrough && wire != 0) {
-                o->dev_hits[DEV_COARSE_CHANGE]++;
                 return;
             }
             mism_add(m, "%s: ino %" PRId64 " change %#" PRIx64 " unchanged "
@@ -2843,14 +2810,12 @@ check_attrs(
                  want, ft, r->a_type);
     }
     if (r->a_mode != (uint32_t) jf_i64(exp, "mode")) {
-        if (strcmp(ft, "FLnk") == 0 && r->a_mode == 0755) {
-            o->dev_hits[DEV_SYMLINK_MODE_0755]++;
-        } else if (g_backend_passthrough && strcmp(ft, "FLnk") == 0 &&
-                   r->a_mode == 0777) {
-            /* D4-23: Linux has no lchmod -- a host symlink's mode is
-             * structurally 0777 whatever the create asked for. */
-            o->dev_hits[DEV_HOST_SYMLINK_MODE]++;
-        } else {
+        /* D4-23: Linux has no lchmod -- a host symlink's mode is
+         * structurally 0777 whatever the create asked for.  (The 0755 a
+         * NATIVE backend reports for a symlink is the model's
+         * D4-4-symlink-mode-0755, so there is nothing to forgive there.) */
+        if (!(g_backend_passthrough && strcmp(ft, "FLnk") == 0 &&
+              r->a_mode == 0777)) {
             mism_add(m, "getattr.mode: expected %#o, got %#o",
                      (unsigned) jf_i64(exp, "mode"), r->a_mode);
         }
@@ -2868,8 +2833,18 @@ check_attrs(
                      want_size, r->a_size);
         }
     }
-    check_change(o, ino, jf_i64(exp, "change"), r->a_change, m,
-                 "getattr.change");
+    /* `changeOpaque` is the model saying it can no longer predict this
+     * object's change attribute -- RFC 8276 leaves it open whether writing an
+     * extended attribute advances it, and chimera's backends answer
+     * differently.  It is the one tolerance that could not be a `<field>Accept`
+     * set: what is checked here is an INVARIANT across replies (equal abstract
+     * => equal wire value, distinct abstract => distinct wire value), not a
+     * value in this reply, so there is no set of acceptable answers to
+     * enumerate.  See the T_XATTR_CHANGE knob. */
+    if (!jf_bool(exp, "changeOpaque")) {
+        check_change(o, ino, jf_i64(exp, "change"), r->a_change, m,
+                     "getattr.change");
+    }
 } /* check_attrs */
 
 static void
@@ -2933,8 +2908,12 @@ check_deleg(
                          strcmp(t, "SLayoutcommit") == 0 || \
                          strcmp(t, "SGetdeviceinfo") == 0)
 
-/* Divergence in status: capability reconciliation or mismatch.  Mirrors
- * Replayer.classify_status_mismatch. */
+/* A status the model did not predict.  What is left here is capability
+ * reconciliation -- a cell whose live server does not advertise a feature the
+ * trace assumed skips rather than fails -- plus the host-passthrough
+ * acceptances documented at the top of this file.  Every divergence chimera
+ * has from the RFCs is stated by the model now, so anything else is a
+ * mismatch. */
 static void
 classify_status_mismatch(
     struct oracle *o,
@@ -2992,85 +2971,6 @@ classify_status_mismatch(
                       tag, est, ast);
         return;
     }
-    /* D4-7: wherever a path operation meets a symlink where a directory was
-    * required, chimera answers the more specific NFS4ERR_SYMLINK and the
-    * model predicts the generic NFS4ERR_NOTDIR.  RFC 7530 Table 7 lists both
-    * for every op that can hit it -- LOOKUPP and READDIR on a symlink cfh,
-    * and OPEN/CREATE/REMOVE/RENAME/LINK on a symlink *parent* -- so either is
-    * conformant.  Matched on the (NOTDIR, SYMLINK) status pair rather than an
-    * op list: the pair itself is the deviation, and enumerating tags would
-    * silently miss each new op the generator learns to aim at a symlink. */
-    if (est == NFS4ERR_NOTDIR && ast == V4_ERR_SYMLINK) {
-        o->dev_hits[DEV_LOOKUPP_SYMLINK]++;
-        o->status_dev = ast;
-        return;
-    }
-    /* D4-19: the mirror of D4-7.  Where a directory-requiring operation meets a
-     * symlink parent (or symlink cfh), the model answers the more specific
-     * NFS4ERR_SYMLINK and chimera the generic NFS4ERR_NOTDIR -- both listed by
-     * RFC 7530 Table 7 for LINK/RENAME/REMOVE/OPEN on a symlink parent, so
-     * either is conformant.  Matched on the (SYMLINK, NOTDIR) status pair for
-     * any op, exactly as D4-7 matches the reverse pair: the pair is the
-     * deviation, and an op list would silently miss each new op the generator
-     * learns to aim at a symlink.  Subsumes the CREATE case D4-18 used to carry. */
-    if (est == V4_ERR_SYMLINK && ast == NFS4ERR_NOTDIR) {
-        o->dev_hits[DEV_DIROP_SYMLINK_NOTDIR]++;
-        o->status_dev = ast;
-        return;
-    }
-    /* D4-18: CREATE into a bad parent.  The model reports the parent first,
-     * and distinguishes a symlink parent (NFS4ERR_SYMLINK) from any other
-     * non-directory (NFS4ERR_NOTDIR), matching NFS-Ganesha and the Linux
-     * server.  chimera answers differently on two axes, both conformant
-     * (RFC 7530 16.4.4 / RFC 8881 18.4 order neither, and 16.4.4 does not list
-     * SYMLINK for CREATE): it reports the illegal object type first
-     * (NFS4ERR_BADTYPE) for a type CREATE cannot make, and it uses the generic
-     * NFS4ERR_NOTDIR for a symlink parent.  Reconcile the model's
-     * NOTDIR/SYMLINK against chimera's BADTYPE here; the model's SYMLINK
-     * against chimera's generic NOTDIR is the same divergence CREATE shares
-     * with every other dir-requiring op, so D4-19 above carries it.  Nothing
-     * is created either way. */
-    if (strcmp(tag, "SCreate") == 0 &&
-        (est == NFS4ERR_NOTDIR || est == V4_ERR_SYMLINK) &&
-        ast == NFS4ERR_BADTYPE) {
-        o->dev_hits[DEV_CREATE_TYPE_BEFORE_PARENT]++;
-        o->status_dev = ast;
-        return;
-    }
-    /* D4-15: chimera answers the coarse 4.0-style type error on every
-     * data-path and size-setting op -- NFS4ERR_ISDIR for a directory,
-     * NFS4ERR_INVAL for every other non-regular object, in all minor
-     * versions -- where the model predicts the per-type split (SYMLINK for a
-     * symlink; WRONG_TYPE for a special file, and for a directory on a 4.1+
-     * SETATTR(size)).  Both are conformant: RFC 7530 Table 7 lists SYMLINK
-     * *and* INVAL for READ/WRITE/COMMIT on a symlink cfh (R-CORE-91/96/97),
-     * and RFC 8881 15.1.2.9 makes WRONG_TYPE the more specific successor of
-     * INVAL (R-ATTR-25 marks the exact choice server-specific).  The model
-     * stays RFC-first and reconciles here, exactly as D4-7 does. */
-    /* D4-16: READLINK on a *directory* answers NFS4ERR_INVAL where the model
-    * predicts NFS4ERR_ISDIR.  Here the model is right and chimera is not --
-    * RFC 7530 §16.25.4/.5 Table 7 (rfc-notes R-CORE-86) and RFC 8881
-    * §18.24.3 both make a directory cfh ISDIR, with INVAL reserved for the
-    * other non-symlink types.  It is registered rather than fixed because
-    * pynfs RDLK2d (st_readlink.testDir) asserts INVAL for a directory, so the
-    * RFC-correct answer fails the legacy suite: chimera stays bug-compatible
-    * with pynfs on purpose and the model tolerates it here.  Retire this row
-    * and restore the split in nfs4_proc_readlink.c if pynfs is corrected. */
-    if (strcmp(tag, "SReadlink") == 0 && est == NFS4ERR_ISDIR &&
-        ast == NFS4ERR_INVAL) {
-        o->dev_hits[DEV_READLINK_DIR_INVAL]++;
-        o->status_dev = ast;
-        return;
-    }
-    if (TYPEGATE_TAG(tag) &&
-        (est == V4_ERR_SYMLINK || est == E_WRONG_TYPE) &&
-        !(DATAGATE_TAG(tag) && est == V4_ERR_SYMLINK) &&
-        (ast == NFS4ERR_INVAL ||
-         (ast == NFS4ERR_ISDIR && strcmp(tag, "SSetattr") == 0))) {
-        o->dev_hits[DEV_COARSE_TYPE_ERR]++;
-        o->status_dev = ast;
-        return;
-    }
     /* D4-25: the kernel refuses to re-link a file whose link count reached
      * zero, however it is still open (linkat answers ENOENT, no capability
      * excepted) -- the native backends re-link an open-pinned source as the
@@ -3080,19 +2980,9 @@ classify_status_mismatch(
      * skip it the way a capability mismatch does. */
     if (g_backend_passthrough && strcmp(tag, "SLink") == 0 &&
         est == NFS4_OK && ast == NFS4ERR_NOENT) {
-        o->dev_hits[DEV_LINK_UNLINKED]++;
         caps_mismatch(o, m, "hostLinkUnlinked",
                       "LINK of an unlinked-but-open source: host refuses, "
                       "model links");
-        return;
-    }
-    /* D4-17: SEEK_DATA over ranges the model believes are data but the
-     * backend never materialized -- nothing but real holes remain below EOF,
-     * and NFS4ERR_NXIO is the conformant answer (RFC 7862 15.11.3). */
-    if (g_backend_real_holes && strcmp(tag, "SSeek") == 0 &&
-        est == NFS4_OK && ast == NFS4ERR_NXIO) {
-        o->dev_hits[DEV_REAL_HOLES]++;
-        o->status_dev = ast;
         return;
     }
     if (strcmp(tag, "SClose") == 0 &&
@@ -3118,7 +3008,6 @@ classify_status_mismatch(
         ((json_object_get(jf_val(req), "mode") &&
           jf_i64(jf_val(req), "sizeBlocks") < 0) ||
          strcmp(jf_tag(req), "RSetattrWide") == 0)) {
-        o->dev_hits[DEV_HOST_SYMLINK_SETATTR]++;
         o->status_dev = ast;
         return;
     }
@@ -3134,7 +3023,6 @@ classify_status_mismatch(
         (est == NFS4_OK || est == NFS4ERR_SHARE_DENIED) && req &&
         strcmp(jf_tag(json_object_get(jf_val(req), "how")),
                "HExclusive") == 0) {
-        o->dev_hits[DEV_EXCL_VERF_LOST]++;
         caps_mismatch(o, m, "hostExclusiveVerifier",
                       "EXCLUSIVE4 retry: host timestamps did not preserve "
                       "the verifier");
@@ -3142,6 +3030,66 @@ classify_status_mismatch(
     }
     mism_add(m, "%s: status: expected %u, got %u", tag, est, ast);
 } /* classify_status_mismatch */
+
+/* The tolerance rule, and there is only one of it.
+ *
+ * Where the STANDARD permits several answers to a single call, the model emits
+ * a set named `<field>Accept` beside `<field>`; this is a membership test over
+ * that set.  A field with no sibling accept set is compared for equality, and
+ * a cell whose config leaves the tolerance off gets the singleton of the exact
+ * answer -- which is equality said the long way.  Nothing here knows what the
+ * tolerance IS; that is stated once, in the model, with its citation.
+ */
+static int
+v4_accept_i64(
+    json_t     *v,
+    const char *field,
+    int64_t     actual,
+    int64_t     scale)
+{
+    char    key[64];
+    json_t *acc, *seq, *e;
+    size_t  i;
+
+    snprintf(key, sizeof(key), "%sAccept", field);
+    acc = json_object_get(v, key);
+    if (!acc) {
+        return jf_i64(v, field) * scale == actual;
+    }
+    seq = itf_seq(acc);
+    json_array_foreach(seq, i, e)
+    {
+        if (itf_i64(e) * scale == actual) {
+            return 1;
+        }
+    }
+    return 0;
+} /* v4_accept_i64 */
+
+static int
+v4_accept_bool(
+    json_t     *v,
+    const char *field,
+    int         actual)
+{
+    char    key[64];
+    json_t *acc, *seq, *e;
+    size_t  i;
+
+    snprintf(key, sizeof(key), "%sAccept", field);
+    acc = json_object_get(v, key);
+    if (!acc) {
+        return jf_bool(v, field) == actual;
+    }
+    seq = itf_seq(acc);
+    json_array_foreach(seq, i, e)
+    {
+        if (itf_bool(e) == actual) {
+            return 1;
+        }
+    }
+    return 0;
+} /* v4_accept_bool */
 
 /* Compare one expected OpRes against the wire result summary. */
 static void
@@ -3159,21 +3107,11 @@ check_result(
     uint32_t    ast = r->status;
 
     if (est != ast) {
-        if (strcmp(tag, "SLookupp") == 0 && est == NFS4ERR_NOENT &&
-            ast == NFS4_OK && ctx->cur == 0) {
-            o->dev_hits[DEV_LOOKUPP_PSEUDOROOT]++;
-            ctx->abort = 1;
-            return;
-        }
-        /* D4-21: SECINFO consumes the current filehandle (RFC 7530 17.31.3 /
-         * RFC 8881 18.29.3), so a following op that uses it answers
-         * NFS4ERR_NOFILEHANDLE -- as chimera and both reference servers do.
-         * The model does not model that consumption and still predicts success;
-         * ctx->cur == -1 is the harness already tracking the drop after
-         * SECINFO.  Reconciled here pending a model fix (make SECINFO consume
-         * the cfh so the following op predicts NOFILEHANDLE directly). */
-        if (est == NFS4_OK && ast == NFS4ERR_NOFILEHANDLE && ctx->cur == -1) {
-            o->dev_hits[DEV_SECINFO_CONSUMES_FH]++;
+        /* A status the model itself said was one of several conformant
+         * answers (SEEK's stAccept under the hole-tracking tolerance).  It
+         * can still end the compound where the model ran on, so record it the
+         * way an accepted status deviation is recorded. */
+        if (v4_accept_i64(v, "st", (int64_t) ast, 1)) {
             o->status_dev = ast;
             return;
         }
@@ -3220,27 +3158,7 @@ check_result(
         uint32_t esup = (uint32_t) jf_i64(v, "supported");
         uint32_t eacc = (uint32_t) jf_i64(v, "access");
 
-        if (r->supported == esup && r->access == eacc) {
-            /* exact */
-        } else if ((r->supported == (esup & 0x1f) &&
-                    r->access == (eacc & 0x1f)) ||
-                   (r->supported == (esup & 0x2d) &&
-                    r->access == (eacc & 0x2d))) {
-            /* Chimera restricts supported/access to type-applicable
-             * bits (dirs: no EXECUTE; files: no LOOKUP/DELETE). */
-            o->dev_hits[DEV_ACCESS_NO_EXECUTE]++;
-        } else if (r->supported == esup &&
-                   (eacc & 0x20) == 0 &&
-                   r->access == (eacc | 0x20)) {
-            /* D4-20: chimera's root/AUTH_NONE DAC override grants
-             * ACCESS4_EXECUTE (0x20) on a file with no execute mode bit, where
-             * the reference servers -- and the model -- withhold it (RFC 8881
-             * 18.1.4: the server SHOULD NOT set ACCESS4_EXECUTE unless an
-             * execute bit is set).  ACCESS is advisory (18.1: the real op is
-             * the authoritative check), so the coarser privileged override
-             * opens no hole; supported and every other bit match exactly. */
-            o->dev_hits[DEV_ACCESS_ROOT_EXECUTE]++;
-        } else {
+        {
             if (r->supported != esup) {
                 mism_add(m, "access.supported: expected %#x, got %#x",
                          esup, r->supported);
@@ -3634,30 +3552,15 @@ check_result(
                      r->newsize);
         }
     } else if (strcmp(tag, "SSeek") == 0) {
-        uint64_t moff = (uint64_t) jf_i64(v, "offset") * V4_BLOCK_SIZE;
-
-        if (g_backend_real_holes &&
-            (r->offset != moff || r->eof != jf_bool(v, "eof"))) {
-            uint64_t qoff = req ? (uint64_t) jf_i64(jf_val(req), "off") *
-                V4_BLOCK_SIZE : 0;
-            int      wdata = req ? jf_bool(jf_val(req), "whatData") : 0;
-
-            /* D4-17: accept the hole-tracking refinement -- a HOLE at or
-             * after the queried offset but no later than the model's EOF
-             * answer, or DATA at or past the model's offset (real holes
-             * skipped).  The eof flag follows the refined offset, so it is
-             * excused with it. */
-            if ((!wdata && r->offset >= qoff && r->offset <= moff) ||
-                (wdata && r->offset >= moff)) {
-                o->dev_hits[DEV_REAL_HOLES]++;
-                return;
-            }
-        }
-        if (r->eof != jf_bool(v, "eof")) {
+        /* offset/eof carry accept sets: RFC 7862 15.11 lets a hole-tracking
+         * backend refine both.  See the model's opSeek and the T_HOLE_TRACKING
+         * knob -- with the tolerance off these are singletons and this is an
+         * equality test. */
+        if (!v4_accept_bool(v, "eof", r->eof)) {
             mism_add(m, "seek.eof: expected %d, got %d",
                      jf_bool(v, "eof"), r->eof);
         }
-        if (r->offset != moff) {
+        if (!v4_accept_i64(v, "offset", (int64_t) r->offset, V4_BLOCK_SIZE)) {
             mism_add(m, "seek.offset: expected %" PRId64 ", got %" PRIu64,
                      jf_i64(v, "offset") * V4_BLOCK_SIZE, r->offset);
         }
@@ -3997,21 +3900,7 @@ run_compound(
         } else {
             struct v4_cached *c = &o->cache[sess][slot];
 
-            if (rep.status == NFS4ERR_RETRY_UNCACHED_REP) {
-                /* D4-22: the model predicts a SEQUENCE replay (the cached
-                 * reply) for this slot, but chimera answers
-                 * NFS4ERR_RETRY_UNCACHED_REP -- which RFC 8881 2.10.6.1.3
-                 * explicitly permits: the server MAY override sa_cachethis and
-                 * decline to replay a cached reply.  chimera's slot cache is
-                 * otherwise correct (it replays every genuinely-cached reply
-                 * verbatim); the trigger here is a model defect -- the model's
-                 * per-slot seqids are not strictly monotonic in some generated
-                 * traces (it re-emits an already-used seqid on a slot rather
-                 * than advancing), so its "replay" prediction does not
-                 * correspond to a reply chimera holds.  Reconciled pending a
-                 * model fix to enforce monotonic per-slot seqids. */
-                o->dev_hits[DEV_SEQ_REPLAY_UNCACHED]++;
-            } else if (c->status != rep.status || c->nres != rep.nres) {
+            if (c->status != rep.status || c->nres != rep.nres) {
                 mism_add(m, "SEQUENCE replay: reply differs from the "
                          "original (reply cache violation): "
                          "original status %u nres %d, replay status %u nres %d",
@@ -4544,6 +4433,7 @@ run_trace(
     size_t         idx;
     size_t         sweep_idx = 0;   /* state to close opens from (stop point) */
     int            minor;
+    int            root_export;
     int            failed = 0;
     int            c;
     struct mism    m;
@@ -4583,6 +4473,20 @@ run_trace(
     init  = jf_val(lastop);
     minor = (int) jf_i64(init, "minor");
 
+    /* Where this cell's filesystem sits in the server's NFSv4 namespace
+     * (P_ROOT_EXPORT / Caps.rootExport): the "/" export, or a named entry in
+     * the pseudo-filesystem.  It decides how the filesystem is exported below
+     * and how the export root is resolved, and the two shapes give LOOKUPP at
+     * the exported root different (both conformant) answers -- which is the
+     * point of having a cell for each.  Absent in an older trace: default to
+     * the named export, which is what every cell used to be. */
+    {
+        json_t *caps = json_object_get(init, "caps");
+        json_t *re   = caps ? json_object_get(caps, "rootExport") : NULL;
+
+        root_export = (re && json_is_true(re)) ? 1 : 0;
+    }
+
     /* Delegations are a server-init setting, so they are fixed once for the
      * whole batch in main() (off for the memfs corpus; the Deleg instances
      * skip on the capability mismatch), not toggled per trace here. */
@@ -4598,7 +4502,11 @@ run_trace(
 
     o = calloc(1, sizeof(*o));
 
-    mbt_env_fs_setup(env, fsname);
+    if (root_export) {
+        mbt_env_fs_setup_root_export(env, fsname);
+    } else {
+        mbt_env_fs_setup(env, fsname);
+    }
 
     /* The backchannel recorder (registered once in main) dispatches to the
      * oracle for the trace currently replaying.  Bump the owner epoch so this
@@ -4617,27 +4525,43 @@ run_trace(
     o->scratch = malloc(V4_DATA_ARENA);
 
     /* Resolve the export root with a minorversion-0 compound (4.1
-     * forbids non-session compounds beyond a tiny op set). */
+     * forbids non-session compounds beyond a tiny op set).
+     *
+     * The shape of that compound IS the cell's namespace shape.  With the
+     * filesystem exported as "/" the export root is simply what PUTROOTFH
+     * gives; with a named export it is one LOOKUP below it, in the server's
+     * pseudo-filesystem.  Either way what lands in fh[0] is the model's ROOT.
+     */
     {
         struct nfs_argop4    argarray[3];
         struct COMPOUND4args args;
         struct v4_reply      rep;
         struct v4_call_ctx   cctx = { .o = o, .rep = &rep };
+        int                  nops;
+        int                  fhidx;
 
         memset(&rep, 0, sizeof(rep));
         memset(&args, 0, sizeof(args));
         memset(argarray, 0, sizeof(argarray));
         argarray[0].argop = OP_PUTROOTFH;
-        argarray[1].argop = OP_LOOKUP;
-        /* The export is named after this trace's filesystem (see
-         * mbt_env_fs_setup), so a mount left stuck by an earlier diverging
-         * trace cannot be picked up here by mistake. */
-        argarray[1].oplookup.objname.data = (void *) fsname;
-        argarray[1].oplookup.objname.len  = (uint32_t) strlen(fsname);
-        argarray[2].argop                 = OP_GETFH;
-        args.minorversion                 = 0;
-        args.argarray                     = argarray;
-        args.num_argarray                 = 3;
+        if (root_export) {
+            argarray[1].argop = OP_GETFH;
+            nops              = 2;
+            fhidx             = 1;
+        } else {
+            argarray[1].argop = OP_LOOKUP;
+            /* The export is named after this trace's filesystem (see
+             * mbt_env_fs_setup), so a mount left stuck by an earlier diverging
+             * trace cannot be picked up here by mistake. */
+            argarray[1].oplookup.objname.data = (void *) fsname;
+            argarray[1].oplookup.objname.len  = (uint32_t) strlen(fsname);
+            argarray[2].argop                 = OP_GETFH;
+            nops                              = 3;
+            fhidx                             = 2;
+        }
+        args.minorversion = 0;
+        args.argarray     = argarray;
+        args.num_argarray = nops;
 
         o->env->nfs_v4.send_call_NFSPROC4_COMPOUND(&o->env->nfs_v4.rpc2,
                                                    env->evpl,
@@ -4648,14 +4572,14 @@ run_trace(
         while (!rep.done) {
             evpl_continue(env->evpl);
         }
-        if (rep.rpc_err != 0 || rep.status != NFS4_OK || rep.nres < 3 ||
-            !rep.res[2].fh.has) {
+        if (rep.rpc_err != 0 || rep.status != NFS4_OK ||
+            rep.nres < (size_t) nops || !rep.res[fhidx].fh.has) {
             fprintf(stderr, "%s: cannot resolve export root: %u\n",
                     trace_path, rep.status);
             failed = 1;
             goto out;
         }
-        o->fh[0] = rep.res[2].fh;
+        o->fh[0] = rep.res[fhidx].fh;
     }
 
     sweep_idx = nstates - 1;
@@ -4701,25 +4625,8 @@ run_trace(
         }
     }
 
-    {
-        char   devs[256] = "";
-        size_t used      = 0;
-        int    first     = 1;
-
-        for (c = 0; c < DEV_COUNT; c++) {
-            if (o->dev_hits[c]) {
-                used += snprintf(devs + used, sizeof(devs) - used,
-                                 "%s%s x%d", first ? "; known deviations: "
-                                 : ", ", v4_dev_ids[c], o->dev_hits[c]);
-                first = 0;
-                if (used >= sizeof(devs)) {
-                    break;
-                }
-            }
-        }
-        printf("%s: %zu compounds replayed, minor %d%s\n",
-               trace_path, nstates - 1, minor, devs);
-    }
+    printf("%s: %zu compounds replayed, minor %d\n",
+           trace_path, nstates - 1, minor);
 
  out:
     /* Replay the closes the trace left implicit (a bounded random walk can stop
@@ -4902,7 +4809,6 @@ main(
     /* memfs_config only reaches the memfs module; diskfs and cairn
      * self-provision their scratch under the env's session dir. */
     opts.module           = backend;
-    g_backend_real_holes  = strcmp(backend, "memfs") != 0;
     g_backend_passthrough = strcmp(backend, "linux") == 0 ||
         strcmp(backend, "io_uring") == 0;
 

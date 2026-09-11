@@ -152,6 +152,38 @@ itf_seq(json_t *v)
     exit(2);
 } /* itf_seq */
 
+/* One state variable out of an ITF state object.
+ *
+ * ITF names a variable by its fully qualified path, so a model reached through
+ * an instance module arrives as "<instance>::<model>::<var>", while a model
+ * imported flat keeps the bare "<var>".  Which shape a cell produces follows
+ * from whether its model declares constants to bind: nfs3 declares none, so
+ * configs/nfs3_ref.json renders to a flat import and the names stay bare today.
+ * Matching the suffix at a ':' boundary accepts both, so the day nfs3 grows its
+ * first knob the corpus does not silently stop being read.  Same accessor as
+ * nfs_drc_mbt_replay.c's. */
+static json_t *
+state_var(
+    json_t     *state,
+    const char *name)
+{
+    const char *key;
+
+    json_t     *val;
+    size_t      n = strlen(name);
+
+    json_object_foreach(state, key, val)
+    {
+        size_t klen = strlen(key);
+
+        if (klen >= n && strcmp(key + klen - n, name) == 0 &&
+            (klen == n || key[klen - n - 1] == ':')) {
+            return val;
+        }
+    }
+    return NULL;
+} /* state_var */
+
 static int64_t
 op_i64(
     json_t     *op,
@@ -275,109 +307,6 @@ ftype_wire(const char *tag)
     fprintf(stderr, "trace format error: unknown ftype %s\n", tag);
     exit(2);
 } /* ftype_wire */
-
-/* ---- known-deviation registry -------------------------------------------- */
-
-/* Registry of known chimera deviations from RFC 1813 (see DEVIATIONS.md):
- * the model always encodes the RFC-correct reply; a *status-only* divergence
- * listed here is recorded and tolerated instead of failing the replay.  A
- * tolerated deviation skips the OK-path checks (learn_fh/check_attrs), so it
- * cannot desync a stateful replay: the model leaves fs unchanged on the error
- * it asserts, and chimera's differing status is not accompanied by a state
- * change the model would miss.  New entries take the shape
- * { .id, .op_tag, .expected_status, .actual_status }.
- *
- * The entries below are backend-conditioned in practice by being self-selecting
- * on the actual status: the backend that answers RFC-correctly matches
- * `expected` exactly (reconcile is never consulted), and only the deviating
- * backend hits the tolerated pair.  Each is annotated with which backend
- * family deviates. */
-struct deviation {
-    const char *id;
-    const char *op_tag;
-    uint32_t    expected_status;
-    uint32_t    actual_status;
-};
-
-/* *INDENT-OFF* */
-/* uncrustify 0.78.1 oscillates on the aligned initializer columns below; pin a
- * stable manual alignment. */
-static const struct deviation known_deviations[] = {
-    /* EXCLUSIVE-create same-verifier retry (RFC 1813 3.3.8): the model asserts
-     * the idempotent OK the RFC recommends.  chimera stores the create verifier
-     * in the file's atime/mtime (the RFC's own agreed-upon mechanism); on the
-     * passthrough backends (linux/io_uring) an intervening READ of the file
-     * bumps atime in the kernel, so a later same-verifier retry no longer
-     * matches and returns EXIST.  RFC idempotency is only guaranteed for a true
-     * retransmit, so this is permitted; the mkfs backends do not touch atime on
-     * read and return the OK the model asserts. */
-    { "exclusive-create-retry-exist", "OCreate",  0, 17 },
-
-    /* CREATE over an existing name in a directory the caller cannot SEARCH
-     * (execute): the model requires search permission to resolve the name at
-     * all and asserts ACCES ahead of any existence/type result (POSIX path
-     * resolution).  The passthrough backends enforce this in the kernel and
-     * match ACCES directly.  The mkfs backends (memfs/diskfs/cairn) omit the
-     * search check on the existing-entry path -- chimera bug #1771 -- and leak
-     * the entry by returning its type-based reply instead: EISDIR over a
-     * directory, EXIST over another non-regular object, or OK (the existing
-     * regular file) for an UNCHECKED create.  Tracked for fix in #1771; when
-     * fixed, delete these three entries. */
-    { "create-search-perm-1771",      "OCreate", 13, 21 },
-    { "create-search-perm-1771",      "OCreate", 13, 17 },
-    { "create-search-perm-1771",      "OCreate", 13,  0 },
-};
-/* *INDENT-ON* */
-
-static const struct deviation *
-reconcile(
-    const char *tag,
-    uint32_t    expected,
-    uint32_t    actual)
-{
-    size_t i;
-
-    for (i = 0;
-         i < sizeof(known_deviations) / sizeof(known_deviations[0]);
-         i++) {
-        const struct deviation *dev = &known_deviations[i];
-
-        if (strcmp(dev->op_tag, tag) == 0 &&
-            dev->expected_status == expected &&
-            dev->actual_status == actual) {
-            return dev;
-        }
-    }
-    return NULL;
-} /* reconcile */
-
-/* RFC 1813 does not mandate error precedence when more than one error condition
- * applies to a single request.  The model commits to one choice (which the
- * mkfs backends mirror); the linux/io_uring passthrough backends follow the
- * host kernel's order, which is equally valid.  Accept those standard-permitted
- * alternatives so a legitimate precedence difference is not a divergence.  This
- * is distinct from a chimera deviation (reconcile above): neither answer is
- * wrong. */
-static int
-status_precedence_ok(
-    const char *tag,
-    uint32_t    expected,
-    uint32_t    actual)
-{
-    /* LINK whose source is a directory onto an already-existing name: the
-     * model reports ISDIR (21, source is a directory); Linux reports EXIST
-     * (17), having checked target existence first. */
-    if (strcmp(tag, "OLink") == 0 && expected == 21 && actual == 17) {
-        return 1;
-    }
-    /* RENAME onto a non-empty directory: the model reports ISDIR (21, target
-     * type conflict); Linux reports NOTEMPTY (66), having checked emptiness
-     * first. */
-    if (strcmp(tag, "ORename") == 0 && expected == 21 && actual == 66) {
-        return 1;
-    }
-    return 0;
-} /* status_precedence_ok */
 
 /* ---- oracle checks (ports of the Replayer methods) ----------------------- */
 
@@ -539,26 +468,50 @@ check_attrs(
     }
 } /* check_attrs */
 
-/* True if the reply status matches (proceed with OK-path checks).  A
- * registered deviation is tolerated; an unregistered mismatch is a hard
- * failure.  Mirrors Replayer.check_status. */
+/* True if the reply status matches and the OK-path checks should run.
+ *
+ * There is no deviation registry here, and no list of tolerated status pairs.
+ * The MODEL says what this server answers: a known chimera divergence from RFC
+ * 1813 is a branch in ext/specs/quint/nfs/nfs3.qnt gated on the DEVS set the
+ * cell's config binds, so the expectation in the trace is already what chimera
+ * does and the comparison is exact.
+ *
+ * The one thing the model cannot pin to a single value is a place where the
+ * STANDARD permits several answers -- RFC 1813 mandates no error precedence
+ * when two conditions apply at once, so a server resolving the name through a
+ * host kernel may legitimately report the other one.  The model emits those as
+ * a `statusAccept` set beside the `status` it predicts.  One rule, for every
+ * op: if the field is present, membership; otherwise equality.  An accepted
+ * alternative skips the OK-path checks, exactly as the old tolerated pair did:
+ * the model's own state follows the status it predicted, so the reply fields
+ * behind the other answer are not the model's to check.
+ *
+ * Mirrors Replayer.check_status. */
 static int
 check_status(
     struct oracle *o,
+    json_t        *op,
     const char    *tag,
     uint32_t       expected,
     uint32_t       actual,
     struct mism   *m)
 {
+    json_t *accept;
+    size_t  i;
+
     (void) o;
+    (void) tag;
     if (actual == expected) {
         return 1;
     }
-    if (status_precedence_ok(tag, expected, actual)) {
-        return 0;
-    }
-    if (reconcile(tag, expected, actual) != NULL) {
-        return 0;
+    /* Absent (every op but the three that can carry a tolerance) means exact
+     * match, so an empty set and a missing field are the same thing here. */
+    accept = op ? json_object_get(op, "statusAccept") : NULL;
+    accept = accept ? itf_seq(accept) : NULL;
+    for (i = 0; i < json_array_size(accept); i++) {
+        if ((uint32_t) itf_i64(json_array_get(accept, i)) == actual) {
+            return 0;
+        }
     }
     mism_add(m, "status: expected %u, got %u", expected, actual);
     return 0;
@@ -592,7 +545,7 @@ op_lookup(
     }
     name = op_str(op, "name");
     res  = mbt_lookup(o->env, dir, name, (uint32_t) strlen(name));
-    if (check_status(o, "OLookup", expected, res->status, m) &&
+    if (check_status(o, op, "OLookup", expected, res->status, m) &&
         expected == NFS3_OK) {
         learn_fh(o, op_i64(op, "child"), &res->obj_fh, m);
         check_attrs(o, op_i64(op, "child"), &res->obj_attrs, post_fs, m,
@@ -615,7 +568,7 @@ op_getattr(
         return;
     }
     res = mbt_getattr(o->env, fh);
-    if (check_status(o, "OGetattr", expected, res->status, m) &&
+    if (check_status(o, op, "OGetattr", expected, res->status, m) &&
         expected == NFS3_OK) {
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
                     "attrs");
@@ -637,7 +590,7 @@ op_stalegetattr(
         return;
     }
     res = mbt_getattr(o->env, fh);
-    check_status(o, "OStaleGetattr", (uint32_t) op_i64(op, "status"),
+    check_status(o, op, "OStaleGetattr", (uint32_t) op_i64(op, "status"),
                  res->status, m);
 } /* op_stalegetattr */
 
@@ -673,7 +626,7 @@ op_create(
                          strcmp(cmode, "Guarded") == 0 ? GUARDED : UNCHECKED,
                          (int) op_i64(op, "mode"), NULL);
     }
-    if (check_status(o, "OCreate", expected, res->status, m) &&
+    if (check_status(o, op, "OCreate", expected, res->status, m) &&
         expected == NFS3_OK) {
         learn_fh(o, op_i64(op, "obj"), &res->obj_fh, m);
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
@@ -720,7 +673,7 @@ op_setattr(
                       size_blk < 0 ? -1
                                    : (int64_t) size_blk * o->block_size,
                       guardp);
-    if (check_status(o, "OSetattr", expected, res->status, m) &&
+    if (check_status(o, op, "OSetattr", expected, res->status, m) &&
         expected == NFS3_OK) {
         check_attrs(o, op_i64(op, "obj"), &res->wcc_after, post_fs, m,
                     "wcc.after");
@@ -742,7 +695,7 @@ op_access(
         return;
     }
     res = mbt_access(o->env, fh, (uint32_t) op_i64(op, "mask"));
-    if (check_status(o, "OAccess", expected, res->status, m) &&
+    if (check_status(o, op, "OAccess", expected, res->status, m) &&
         expected == NFS3_OK) {
         uint32_t eacc = (uint32_t) op_i64(op, "access");
 
@@ -783,7 +736,7 @@ op_symlink(
      * store 0755 (see symlinkNode in nfs3.qnt). */
     res = mbt_symlink(o->env, dir, name, (uint32_t) strlen(name),
                       op_str(op, "target"), 0777);
-    if (check_status(o, "OSymlink", expected, res->status, m) &&
+    if (check_status(o, op, "OSymlink", expected, res->status, m) &&
         expected == NFS3_OK) {
         learn_fh(o, op_i64(op, "obj"), &res->obj_fh, m);
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
@@ -807,7 +760,7 @@ op_readlink(
         return;
     }
     res = mbt_readlink(o->env, fh);
-    if (check_status(o, "OReadlink", expected, res->status, m) &&
+    if (check_status(o, op, "OReadlink", expected, res->status, m) &&
         expected == NFS3_OK) {
         target = op_str(op, "target");
         if (strlen(target) != res->target_len ||
@@ -839,7 +792,7 @@ op_mknod(
     res  = mbt_mknod(o->env, dir, name, (uint32_t) strlen(name),
                      ftype_wire(op_tag(op, "ftype")),
                      (int) op_i64(op, "mode"));
-    if (check_status(o, "OMknod", expected, res->status, m) &&
+    if (check_status(o, op, "OMknod", expected, res->status, m) &&
         expected == NFS3_OK) {
         learn_fh(o, op_i64(op, "obj"), &res->obj_fh, m);
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
@@ -869,7 +822,7 @@ op_rename(
     res       = mbt_rename(o->env,
                            from_dir, from_name, (uint32_t) strlen(from_name),
                            to_dir, to_name, (uint32_t) strlen(to_name));
-    check_status(o, "ORename", (uint32_t) op_i64(op, "status"),
+    check_status(o, op, "ORename", (uint32_t) op_i64(op, "status"),
                  res->status, m);
 } /* op_rename */
 
@@ -891,7 +844,7 @@ op_link(
     }
     name = op_str(op, "name");
     res  = mbt_link(o->env, obj, dir, name, (uint32_t) strlen(name));
-    if (check_status(o, "OLink", expected, res->status, m) &&
+    if (check_status(o, op, "OLink", expected, res->status, m) &&
         expected == NFS3_OK) {
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
                     "file_attributes");
@@ -921,7 +874,7 @@ op_readdir(
         return;
     }
     res = plus ? mbt_readdirplus(o->env, dir) : mbt_readdir(o->env, dir);
-    if (!check_status(o, "OReaddir", expected, res->status, m) ||
+    if (!check_status(o, op, "OReaddir", expected, res->status, m) ||
         expected != NFS3_OK) {
         return;
     }
@@ -1078,7 +1031,7 @@ op_commit(
         return;
     }
     res = mbt_commit(o->env, fh);
-    if (check_status(o, "OCommit", expected, res->status, m) &&
+    if (check_status(o, op, "OCommit", expected, res->status, m) &&
         expected == NFS3_OK) {
         check_verf(o, res->verf, "commit", m);
     }
@@ -1096,7 +1049,7 @@ op_fsstat(
 
     (void) post_fs;
     res = mbt_fsstat(o->env, &o->root_fh);
-    if (!check_status(o, "OFsstat", expected, res->status, m) ||
+    if (!check_status(o, op, "OFsstat", expected, res->status, m) ||
         expected != NFS3_OK) {
         return;
     }
@@ -1137,7 +1090,7 @@ op_fsinfo(
 
     (void) post_fs;
     res = mbt_fsinfo(o->env, &o->root_fh);
-    if (!check_status(o, "OFsinfo", expected, res->status, m) ||
+    if (!check_status(o, op, "OFsinfo", expected, res->status, m) ||
         expected != NFS3_OK) {
         return;
     }
@@ -1184,7 +1137,7 @@ op_pathconf(
         return;
     }
     res = mbt_pathconf(o->env, fh);
-    if (!check_status(o, "OPathconf", expected, res->status, m) ||
+    if (!check_status(o, op, "OPathconf", expected, res->status, m) ||
         expected != NFS3_OK) {
         return;
     }
@@ -1224,7 +1177,7 @@ op_mkdir(
     name = op_str(op, "name");
     res  = mbt_mkdir(o->env, dir, name, (uint32_t) strlen(name),
                      (int) op_i64(op, "mode"));
-    if (check_status(o, "OMkdir", expected, res->status, m) &&
+    if (check_status(o, op, "OMkdir", expected, res->status, m) &&
         expected == NFS3_OK) {
         learn_fh(o, op_i64(op, "obj"), &res->obj_fh, m);
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
@@ -1260,7 +1213,7 @@ op_write(
     res = mbt_write(o->env, fh,
                     (uint64_t) op_i64(op, "offset") * o->block_size,
                     o->scratch, len, (stable_how) stable);
-    if (check_status(o, "OWrite", expected, res->status, m) &&
+    if (check_status(o, op, "OWrite", expected, res->status, m) &&
         expected == NFS3_OK) {
         if (res->count != len) {
             mism_add(m, "count: expected %u, got %u", len, res->count);
@@ -1297,7 +1250,7 @@ op_read(
     res = mbt_read(o->env, fh,
                    (uint64_t) op_i64(op, "offset") * o->block_size,
                    (uint32_t) (op_i64(op, "count") * o->block_size));
-    if (check_status(o, "ORead", expected, res->status, m) &&
+    if (check_status(o, op, "ORead", expected, res->status, m) &&
         expected == NFS3_OK) {
         blocks     = itf_seq(json_object_get(op, "blocks"));
         expect_len = (uint32_t) (json_array_size(blocks) * o->block_size);
@@ -1358,7 +1311,7 @@ op_remove(
     }
     name = op_str(op, "name");
     res  = mbt_remove(o->env, dir, name, (uint32_t) strlen(name));
-    check_status(o, "ORemove", (uint32_t) op_i64(op, "status"),
+    check_status(o, op, "ORemove", (uint32_t) op_i64(op, "status"),
                  res->status, m);
 } /* op_remove */
 
@@ -1379,7 +1332,7 @@ op_rmdir(
     }
     name = op_str(op, "name");
     res  = mbt_rmdir(o->env, dir, name, (uint32_t) strlen(name));
-    check_status(o, "ORmdir", (uint32_t) op_i64(op, "status"),
+    check_status(o, op, "ORmdir", (uint32_t) op_i64(op, "status"),
                  res->status, m);
 } /* op_rmdir */
 
@@ -1557,7 +1510,7 @@ mbt_collect_cred_uids(
 
         json_array_foreach(states, k, st)
         {
-            json_t  *last_op = json_object_get(st, "lastOp");
+            json_t  *last_op = state_var(st, "lastOp");
             json_t  *op      = last_op ? json_object_get(last_op, "value") : NULL;
             json_t  *cred    = op ? json_object_get(op, "cred") : NULL;
             uint32_t uid;
@@ -1733,8 +1686,8 @@ run_trace(
 
     for (idx = 1; idx < nstates; idx++) {
         state   = json_array_get(states, idx);
-        last_op = json_object_get(state, "lastOp");
-        fs      = json_object_get(state, "fs");
+        last_op = state_var(state, "lastOp");
+        fs      = state_var(state, "fs");
         if (!last_op || !fs) {
             fprintf(stderr, "%s: state %zu missing lastOp/fs\n",
                     trace_path, idx);
