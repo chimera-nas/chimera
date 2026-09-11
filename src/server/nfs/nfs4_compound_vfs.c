@@ -177,6 +177,8 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_OPEN:
         case OP_CREATE:
         case OP_REMOVE:
+        case OP_RENAME:
+        case OP_LINK:
         case OP_SETATTR:
         case OP_READ:
         case OP_WRITE:
@@ -718,6 +720,38 @@ nfs4_vfs_op_fill(
             rres->status = NFS4_OK;
             /* change_info4 for the parent directory (RFC 7530 §16.25.5). */
             chimera_nfs4_set_changeinfo(&rres->resok4.cinfo, &pre, &post);
+            return NFS4_OK;
+        }
+
+        case OP_RENAME:
+        {
+            struct RENAME4res       *rres      = &resop->oprename;
+            struct chimera_vfs_attrs from_pre  = vop->from_dir_pre_attr;
+            struct chimera_vfs_attrs from_post = vop->from_dir_post_attr;
+            struct chimera_vfs_attrs to_pre    = vop->dir_pre_attr;
+            struct chimera_vfs_attrs to_post   = vop->dir_post_attr;
+
+            rres->status = NFS4_OK;
+            /* Two change_info4s, because a rename changes two directories
+             * (RFC 7530 SS16.27.5).  The VFS op reports both for the same
+             * reason, so each half comes straight across. */
+            chimera_nfs4_set_changeinfo(&rres->resok4.source_cinfo,
+                                        &from_pre, &from_post);
+            chimera_nfs4_set_changeinfo(&rres->resok4.target_cinfo,
+                                        &to_pre, &to_post);
+            return NFS4_OK;
+        }
+
+        case OP_LINK:
+        {
+            struct LINK4res         *lres = &resop->oplink;
+            struct chimera_vfs_attrs pre  = vop->dir_pre_attr;
+            struct chimera_vfs_attrs post = vop->dir_post_attr;
+
+            lres->status = NFS4_OK;
+            /* One directory changed: the one the new name went into
+             * (RFC 7530 SS16.9.5). */
+            chimera_nfs4_set_changeinfo(&lres->resok4.cinfo, &pre, &post);
             return NFS4_OK;
         }
 
@@ -2068,6 +2102,62 @@ chimera_nfs4_compound_try_vfs(
                 }
                 break;
 
+            case OP_RENAME:
+                if (may_fail_late ||
+                    chimera_nfs4_validate_name(&argop->oprename.oldname) !=
+                    NFS4_OK ||
+                    chimera_nfs4_validate_name(&argop->oprename.newname) !=
+                    NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The source directory is the saved filehandle, and only a
+                 * slot this sequence filled will do -- the same rule, and for
+                 * the same reason, as RESTOREFH's above. */
+                if (!have_saved) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* A rename onto an existing name unlinks what was there, so it
+                 * has REMOVE's problem too: a delegation on the displaced
+                 * object to recall, or a data server backing it to delete.
+                 * Both are decisions about an object the sequence never names.
+                 */
+                if (chimera_server_config_get_nfs4_delegations(
+                        thread->shared->config) ||
+                    chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+                break;
+
+            case OP_LINK:
+                if (may_fail_late ||
+                    chimera_nfs4_validate_name(&argop->oplink.newname) !=
+                    NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The object to link is the saved filehandle; see RENAME. */
+                if (!have_saved) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* No delegation or pNFS gate: a LINK displaces nothing.  The
+                 * name it creates must not already exist -- RFC 7530 SS16.9.5
+                 * makes that NFS4ERR_EXIST -- so unlike RENAME there is never
+                 * a victim to recall a delegation on or a backing to delete. */
+                break;
+
             case OP_OPEN:
             {
                 struct OPEN4args *oa = &argop->opopen;
@@ -2538,6 +2628,27 @@ chimera_nfs4_compound_try_vfs(
                     compound,
                     (const char *) argop->opremove.target.data,
                     (int) argop->opremove.target.len);
+                map->vfs_res = idx;
+                break;
+
+            /* Source from the saved filehandle, target from the current one --
+             * which is what the VFS op takes, so neither needs anything said
+             * about where the other directory is. */
+            case OP_RENAME:
+                idx = chimera_vfs_compound_add_rename(
+                    compound,
+                    (const char *) argop->oprename.oldname.data,
+                    (int) argop->oprename.oldname.len,
+                    (const char *) argop->oprename.newname.data,
+                    (int) argop->oprename.newname.len);
+                map->vfs_res = idx;
+                break;
+
+            case OP_LINK:
+                idx = chimera_vfs_compound_add_link(
+                    compound,
+                    (const char *) argop->oplink.newname.data,
+                    (int) argop->oplink.newname.len);
                 map->vfs_res = idx;
                 break;
 
