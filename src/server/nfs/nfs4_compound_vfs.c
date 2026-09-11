@@ -70,6 +70,8 @@
 #include "vfs/sdk/vfs_xattr_name.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include <xxhash.h>
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_compound.h"
 
 /* One NFSv4 op encodes to at most two VFS ops, so the NFSv4 op count is bounded
@@ -143,6 +145,9 @@ struct nfs4_vfs_compound_ctx {
     /* The OPEN this sequence carries, if any -- recorded when the sequence is
      * built, because every way out of it has to go through the OPEN's own
      * completion, including the ways where the OPEN never ran. */
+    /* A SECINFO that succeeded has taken the current filehandle away. */
+    int                      fh_consumed;
+
     int                      open_present;
     uint32_t                 open_res_index;
 
@@ -182,6 +187,8 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_SETATTR:
         case OP_READ:
         case OP_WRITE:
+        case OP_LOCKT:
+        case OP_SECINFO:
             return 1;
         default:
             return 0;
@@ -233,7 +240,11 @@ nfs4_vfs_op_stages_early(uint32_t argop)
 static int
 nfs4_vfs_op_ends_run(uint32_t argop)
 {
-    return argop == OP_OPEN;
+    /* SECINFO joins OPEN, for the opposite reason: it CONSUMES the current
+     * filehandle (RFC 7530 §16.31.3), so every op behind it must fail
+     * NFS4ERR_NOFILEHANDLE -- and a sequence whose current object has been
+     * taken away has nothing left to address. */
+    return argop == OP_OPEN || argop == OP_SECINFO;
 } /* nfs4_vfs_op_ends_run */
 
 /*
@@ -660,6 +671,121 @@ nfs4_vfs_op_fill(
             return NFS4_OK;
         }
 
+        case OP_SECINFO:
+        {
+            struct SECINFO4res              *sires = &resop->opsecinfo;
+            const struct chimera_nfs_export *export;
+
+            /* The name resolved, so it lives in the current filehandle's
+             * export and that export's policy is the answer. */
+            export = chimera_nfs_get_export_by_id(req->thread->shared,
+                                                  req->export_id);
+
+            sires->resok4 = xdr_dbuf_alloc_space(4 * sizeof(struct secinfo4),
+                                                 req->encoding->dbuf);
+            chimera_nfs_abort_if(sires->resok4 == NULL,
+                                 "Failed to allocate space");
+
+            sires->num_resok4 = chimera_nfs_fill_secinfo(
+                sires->resok4,
+                export ? export->sec_allowed : 0,
+                req->thread->shared->gss_enabled);
+
+            /* RFC 7530 §16.31.3 / RFC 8881 §18.29.3: SECINFO consumes the
+            * current filehandle on success.  Recorded rather than applied,
+            * because the sequence sets req->fh from its last op after every
+            * result has been filled -- see nfs4_vfs_compound_complete. */
+            ctx->fh_consumed = 1;
+
+            sires->status = NFS4_OK;
+            return NFS4_OK;
+        }
+
+        case OP_LOCKT:
+        {
+            struct LOCKT4args                *largs     = &argop->oplockt;
+            struct LOCKT4res                 *lres      = &resop->oplockt;
+            struct chimera_vfs_state         *vfs_state =
+                req->thread->vfs->vfs_state;
+            struct chimera_vfs_file_state    *file_state;
+            struct chimera_vfs_claim          probe;
+            struct chimera_claim_owner        owner;
+            struct chimera_vfs_claim_conflict conflict;
+            enum chimera_vfs_claim_result     result;
+
+            /* RFC 7530 §16.11.4: byte-range locking is defined only for regular
+             * files.  A directory is NFS4ERR_ISDIR, anything else INVAL. */
+            if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+                !S_ISREG(vop->attr.va_mode)) {
+                return chimera_nfs4_data_nonreg_status(vop->attr.va_mode);
+            }
+
+            file_state = chimera_vfs_state_get(vfs_state, vop->fh,
+                                               (int) vop->fh_len,
+                                               chimera_vfs_hash(vop->fh,
+                                                                vop->fh_len),
+                                               false);
+
+            if (!file_state) {
+                /* No state on this file means no lock could conflict. */
+                lres->status = NFS4_OK;
+                return NFS4_OK;
+            }
+
+            memset(&owner, 0, sizeof(owner));
+            owner.proto = CHIMERA_CLAIM_PROTO_NFSV4;
+
+            /* RFC 8881 §2.4: in 4.1+ the client is the session's, not the one
+             * in lock_owner4, which clients routinely leave zero or stale.
+             * LOCK registers under the server-assigned id, so keying the probe
+             * on the wire field would make the caller's own locks look foreign.
+             */
+            if (req->minorversion > 0 && req->session &&
+                req->session->client_unified) {
+                owner.client_key = req->session->client_unified->client_id;
+            } else {
+                owner.client_key = largs->owner.clientid;
+            }
+            owner.owner_lo = XXH3_64bits(largs->owner.owner.data,
+                                         largs->owner.owner.len);
+            owner.owner_hi = 0;
+
+            chimera_vfs_claim_init_range(&probe,
+                                         !(largs->locktype == READ_LT ||
+                                           largs->locktype == READW_LT),
+                                         /*smb=*/ false,
+                                         largs->offset, largs->length,
+                                         &owner);
+
+            memset(&conflict, 0, sizeof(conflict));
+            conflict.length = UINT64_MAX;
+
+            result = chimera_vfs_claim_test(file_state, &probe, &conflict);
+
+            if (result == CHIMERA_CLAIM_GRANTED) {
+                lres->status = NFS4_OK;
+            } else {
+                lres->status        = NFS4ERR_DENIED;
+                lres->denied.offset = conflict.offset;
+                lres->denied.length = conflict.length;
+                /* WRITE_LT iff the holder writes: a write delegation (CW) must
+                 * report WRITE_LT though it holds no LW. */
+                lres->denied.locktype = (conflict.used & (CHIMERA_CLAIM_W |
+                                                          CHIMERA_CLAIM_CW |
+                                                          CHIMERA_CLAIM_LW))
+                    ? WRITE_LT : READ_LT;
+                nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
+                                       &conflict, &lres->denied.owner,
+                                       req->encoding->dbuf);
+            }
+
+            chimera_vfs_state_put(vfs_state, file_state);
+
+            /* DENIED is a successful query result, and travels as the op's
+             * status the same way it does on the per-op path. */
+            return lres->status;
+        }
+
         case OP_SETATTR:
         {
             struct SETATTR4args     *sargs   = &argop->opsetattr;
@@ -1045,6 +1171,13 @@ nfs4_vfs_compound_complete(
             memcpy(req->fh, vop->fh, vop->fh_len);
             req->fhlen = (int) vop->fh_len;
         }
+    }
+
+    /* A SECINFO took the current filehandle away.  Applied here, after the
+     * sequence has said where it ended up, because what it resolved on the way
+     * -- the name it looked up -- is not what the COMPOUND is left holding. */
+    if (ctx->fh_consumed) {
+        req->fhlen = 0;
     }
 
     /* Point req->index at the operation whose status the compound carries, so
@@ -2039,6 +2172,58 @@ chimera_nfs4_compound_try_vfs(
                 break;
             }
 
+            case OP_SECINFO:
+                if (chimera_nfs4_validate_name(&argop->opsecinfo.name) !=
+                    NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* At a "/" export's root a name matching a sibling export is a
+                 * junction, and SECINFO answers with THAT export's flavors --
+                 * a name the VFS cannot resolve and a policy it does not hold.
+                 */
+                if (thread->shared->root_export_id != 0) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* Everything after a SECINFO is dispatched op by op, against
+                 * the filehandle it took away. */
+                nenc = i + 1;
+                break;
+
+            case OP_LOCKT:
+            {
+                const struct LOCKT4args *la = &argop->oplockt;
+
+                /* Statuses the per-op path decides before it touches the VFS:
+                 * the grace window, and the same length rules as LOCK. */
+                if (nfs_recovery_io_check(&thread->shared->nfs4_recovery) !=
+                    NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                if (la->length == 0 ||
+                    (la->length != UINT64_MAX &&
+                     la->offset > UINT64_MAX - la->length)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The probe itself reads live claim state and reports DENIED,
+                 * which is an answer rather than a failure -- but it is still
+                 * decided when the result is filled, so nothing that mutates
+                 * may sit behind it. */
+                may_fail_late = 1;
+                break;
+            }
+
             case OP_READ:
             case OP_WRITE:
             {
@@ -2646,6 +2831,30 @@ chimera_nfs4_compound_try_vfs(
 
             case OP_CREATE:
                 idx          = nfs4_vfs_add_create_op(compound, argop);
+                map->vfs_res = idx;
+                break;
+
+            case OP_SECINFO:
+                /* The name lookup is the whole of the VFS work: it produces
+                 * NFS4ERR_NOTDIR for a current object that is not a directory
+                 * and NFS4ERR_NOENT for a name that is not there, which are the
+                 * two errors SECINFO is specified to return.  The flavors
+                 * themselves come from the export, which the request already
+                 * names. */
+                idx = chimera_vfs_compound_add_lookup(
+                    compound,
+                    (const char *) argop->opsecinfo.name.data,
+                    (int) argop->opsecinfo.name.len, 0);
+                map->vfs_res = idx;
+                break;
+
+            case OP_LOCKT:
+                /* All LOCKT asks of the VFS is the object's type; everything
+                 * else it needs -- the claim state on the file -- is memory the
+                 * server already holds, and is read when the result is
+                 * filled. */
+                idx = chimera_vfs_compound_add_getattr(
+                    compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_res = idx;
                 break;
 
