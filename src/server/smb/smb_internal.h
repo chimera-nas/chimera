@@ -680,6 +680,26 @@ struct chimera_smb_request {
             uint8_t                            gen_held_granted;
             uint8_t                            gen_held_denied;
             uint8_t                            gen_parked;
+            /* Whether this open may PARK on a conflicting batch-oplock break.
+             * Only the regular-file path (open_at_callback) may: the mkdir /
+             * stream / pipe paths resolve a BREAKING conflict straight to
+             * SHARING_VIOLATION.  Separate from gen_finish_cb, which every path
+             * that can defer its tail now sets. */
+            uint8_t                            gen_may_park;
+            /* Deferred content replacement (MS-FSA 2.1.5.1.2: an open is
+             * adjudicated BEFORE the file is modified, so a refused CREATE must
+             * leave it untouched).  A truncating disposition therefore does NOT
+             * carry CHIMERA_VFS_OPEN_TRUNCATE into the VFS open; trunc_deferred
+             * records that the replacement is still owed, and it is issued from
+             * chimera_smb_create_issue_truncate once the share reservation is
+             * granted -- while the transient write grant taken for the conflict
+             * check is still held, and before chimera_smb_create_finish_share_
+             * grant shrinks it away.  gen_truncating marks that setattr in
+             * flight, so the open's caller knows the tail has been deferred
+             * exactly as gen_parked does for a break park. */
+            uint8_t                            trunc_deferred;
+            uint8_t                            gen_truncating;
+            struct chimera_vfs_attrs           trunc_attr;
             /* Set by chimera_smb_create_gen_open_file_normal when the share
              * conflict it could not resolve is against a durable holder that will
              * park+yield shortly: an enum chimera_smb_durable_yield value telling
@@ -1941,6 +1961,10 @@ struct chimera_smb_lease_break_msg {
     uint8_t                             fh_len;
     uint64_t                            fh_hash;
     uint8_t                             lease_key[16];
+    /* The lease's owning client (the grant owner's client_key).  A LeaseKey
+     * names a lease only within one client (MS-SMB2 3.3.5.9.8), so the
+     * delivery marker below must match on both. */
+    uint64_t                            lease_client_key;
     uint8_t                             current_state;
     uint8_t                             new_state;
     bool                                ack_required;

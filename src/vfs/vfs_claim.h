@@ -638,7 +638,8 @@ chimera_vfs_claim_mark_break_notified(
     const uint8_t            *fh,
     uint8_t                   fh_len,
     uint64_t                  fh_hash,
-    const uint8_t            *lease_key);
+    const uint8_t            *lease_key,
+    uint64_t                  client_key);
 
 /* Register/retire a protocol request that is holding its reply until a break on
  * this file settles (see chimera_vfs_file_state::break_waiters).  Add on park,
@@ -826,7 +827,8 @@ chimera_vfs_claim_backend_flush_releases(
     struct chimera_vfs_thread     *thread,
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
-    void (                        *cb )(void *private_data),
+    void (                        *cb )(
+        void *private_data),
     void                          *private_data);
 
 /* Drain the projection work queue; runs ONLY on the service thread (wired
