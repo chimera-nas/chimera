@@ -1074,6 +1074,162 @@ main(
     }
     TEST_PASS("SETATTR applies to the current object or to a borrowed handle");
 
+    /* ---- READ, and the ownership of what it answers with ----
+     * The data arrives as references to the backend's buffers, not a copy, so
+     * it is owned exactly as an OPEN's handle is: the compound holds it until
+     * the caller takes it, and releases what was never taken. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *oh;
+        struct evpl_iovec              *riov;
+        struct evpl_iovec               rdiov[16];
+        int                             rniov, i_open, i_rd;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "rd", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* An empty file reads zero bytes at EOF rather than failing. */
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 4096, rdiov, 16, NULL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rd);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->read_len == 0);
+        assert(op->eof_read);
+
+        /* Taking it twice yields nothing the second time, so two callers
+         * cannot both believe they hold the references. */
+        chimera_vfs_compound_take_iov(cp, (uint32_t) i_rd, &riov, &rniov);
+        {
+            struct evpl_iovec *again;
+            int                again_n;
+
+            chimera_vfs_compound_take_iov(cp, (uint32_t) i_rd, &again,
+                                          &again_n);
+            assert(again_n == 0);
+        }
+        if (rniov) {
+            evpl_iovecs_release(ctx.evpl, riov, rniov);
+        }
+
+        chimera_vfs_compound_free(cp);
+
+        /* And a read whose data is never taken: free must release it. */
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 4096, rdiov, 16, NULL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_rd)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* A READ addressing the current object needs no handle at all. */
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "rd", 2, 0);
+        i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 4096, rdiov, 16, NULL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_op(cp, i_rd)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_rd)->eof_read);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("READ answers with data the compound owns until it is taken");
+
+    /* ---- WRITE, then READ it back in one sequence ----
+     * The data going in is borrowed -- the caller allocated it and releases it
+     * afterwards -- where the data coming out is owned.  The two directions are
+     * deliberately not symmetric, and this is where that shows. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *oh;
+        struct evpl_iovec               wiov;
+        struct evpl_iovec               rdiov[16];
+        int                             i_open, i_wr, i_rd;
+        const char                     *payload = "compound";
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "wr", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        assert(evpl_iovec_alloc(ctx.evpl, 8, 0, 1, 0, &wiov) == 1);
+        memcpy(evpl_iovec_data(&wiov), payload, 8);
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_wr = chimera_vfs_compound_add_write(cp, oh, 0, 8, 2, &wiov, 1, NULL);
+        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 8, rdiov, 16, NULL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_wr);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->written == 8);
+
+        /* The READ in the same sequence saw what the WRITE in front of it
+         * put there. */
+        op = chimera_vfs_compound_op(cp, i_rd);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->read_len == 8);
+        assert(op->niov >= 1);
+        assert(memcmp(evpl_iovec_data(&op->iov[0]), payload, 8) == 0);
+
+        chimera_vfs_compound_free(cp);
+
+        /* Borrowed: the compound did not release the payload, so it is still
+         * ours. */
+        evpl_iovec_release(ctx.evpl, &wiov);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("WRITE borrows its data; a READ behind it sees what it wrote");
+
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
     ctx.callbacks = 0;

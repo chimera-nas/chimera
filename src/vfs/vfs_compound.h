@@ -5,6 +5,7 @@
 #pragma once
 
 #include "vfs.h"
+#include "vfs_claim_types.h"
 
 /*
  * VFS compounds: submit a whole sequence of operations, get one callback.
@@ -67,20 +68,21 @@
  * An in_handle does not move the current object.  The op acts on the handle;
  * the sequence's own idea of where it is stays where it was.
  *
- * OPEN HANDLE OWNERSHIP.  Every other op leaves nothing behind: the executor
- * opens what it needs, and releases it when the current object moves on or the
- * sequence ends.  An OPEN is different -- an open handle is the whole point of
- * it, and the caller needs it to outlive the sequence.
+ * OPEN HANDLE OWNERSHIP.  Most ops leave nothing behind: the executor opens
+ * what it needs, and releases it when the current object moves on or the
+ * sequence ends.  Two are different, because what they produce is the whole
+ * point of them and has to outlive the sequence -- an OPEN's handle, and a
+ * READ's data iovecs.
  *
- * The rule is that the compound owns it until the caller takes it.  On the
- * completion callback the handle is readable as op->out_handle;
- * chimera_vfs_compound_take_handle() transfers it, after which the caller
- * releases it.  Anything the caller does NOT take is released by
- * chimera_vfs_compound_free(), so the failure paths -- a later op failed, the
- * caller decided not to install the state, the caller simply forgot -- leak
- * nothing.  Defaulting to "the compound still owns it" is deliberate: a caller
- * that must remember to release a handle on every error path is a caller that
- * eventually does not.
+ * The rule for both is that the compound owns it until the caller takes it.  On
+ * the completion callback they are readable as op->out_handle and op->iov;
+ * chimera_vfs_compound_take_handle() and chimera_vfs_compound_take_iov()
+ * transfer them, after which the caller releases them.  Anything the caller does
+ * NOT take is released by chimera_vfs_compound_free(), so the failure paths -- a
+ * later op failed, the caller decided not to install the state, the caller
+ * simply forgot -- leak nothing.  Defaulting to "the compound still owns it" is
+ * deliberate: a caller that must remember to release on every error path is a
+ * caller that eventually does not.
  */
 
 struct chimera_vfs_compound;
@@ -138,6 +140,15 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_CREATE,
     /* Unlink `name` from the current object, which stays current.  MUTATES. */
     CHIMERA_VFS_COMPOUND_OP_REMOVE,
+    /* Read from the current object, or from `in_handle`.  The data comes back
+     * as iovecs referencing the backend's own buffers rather than a copy, so
+     * they carry references and are owned the way an OPEN's handle is -- see
+     * OPEN HANDLE OWNERSHIP. */
+    CHIMERA_VFS_COMPOUND_OP_READ,
+    /* Write to the current object, or to `in_handle`.  The data iovecs are
+     * BORROWED, like in_handle: the caller owns the buffers and releases them
+     * once the sequence is over.  MUTATES. */
+    CHIMERA_VFS_COMPOUND_OP_WRITE,
     /* Apply `set_attr`.  With an `in_handle` the attributes are applied through
      * it with descriptor rights -- the ftruncate(2) rule, where the open's own
      * grant authorizes the change rather than the object's current mode --
@@ -267,6 +278,22 @@ struct chimera_vfs_compound_op {
     const void            *xattr_value; /* SETXATTR (borrowed from caller)    */
     uint32_t               xattr_value_len;
     uint32_t               buffer_max;  /* GETXATTR, LISTXATTRS               */
+    int                    max_iov;     /* READ                               */
+    /* WRITE: the data, BORROWED from the caller -- see ADDRESSING SOMETHING
+     * OTHER THAN CURRENT, which these are owned on the same terms as. */
+    struct evpl_iovec     *w_iov;
+    int                    w_niov;
+    uint32_t               sync;        /* WRITE: requested stability         */
+    /* READ, WRITE: whose I/O this is.  A caller holding a lease on the object
+     * has to say so, or the claim layer arbitrates its own I/O against its own
+     * reservation -- denying the write, and recalling the delegation the write
+     * is being done under. */
+    struct chimera_claim_actor io_owner;
+    uint8_t                have_io_owner;
+    /* Executor scratch: whether the two-step I/O type check has run.  Lives on
+     * the op only so the open-flags decision, which sees an op and not the
+     * sequence, can tell the two steps apart. */
+    uint8_t                io_typechecked_flag;
 
     /* ---- results ---- */
     /* LOOKUP, GETATTR, ACCESS.  va_acl is always NULL here and the ACL bit is
@@ -292,6 +319,21 @@ struct chimera_vfs_compound_op {
      * would double the size of a sequence for one field. */
     struct timespec          pre_ctime;
     struct timespec          post_ctime;
+
+    /* ---- READ results ---- */
+    /* The data, as references to the backend's buffers, written into the array
+     * the caller supplied.  The references are owned by the compound until
+     * chimera_vfs_compound_take_iov(); the array never is. */
+    struct evpl_iovec              *iov;
+    int                             niov;
+    uint32_t                        read_len;
+    uint32_t                        eof_read;
+
+    /* ---- WRITE results ---- */
+    uint32_t                        written;
+    /* Durability actually achieved, which may exceed what was asked for and
+     * may fall short of it only by the backend's own report. */
+    uint32_t                        committed;
 
     /* ---- OPEN results ---- */
     /* The open handle, owned by the CALLER once the sequence has finished --
@@ -523,6 +565,42 @@ chimera_vfs_compound_add_remove(
     const char                  *name,
     int                          namelen);
 
+/* Read `count` bytes from `offset` of the current object, or -- when `handle` is
+ * non-NULL -- of that handle, which is BORROWED.
+ *
+ * `iov` is space for `max_iov` descriptors, supplied by the caller and BORROWED
+ * the same way: an evpl_iovec records the address of the struct that owns it,
+ * so descriptors cannot be copied anywhere afterwards, which means the memory
+ * they are written into has to be memory the caller is willing to keep.  A read
+ * needing more than `max_iov` is served short, as any short read is.
+ *
+ * The DATA those descriptors reference is owned by the compound until taken --
+ * see OPEN HANDLE OWNERSHIP. */
+int
+chimera_vfs_compound_add_read(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    struct evpl_iovec              *iov,
+    int                             max_iov,
+    const struct chimera_claim_actor *io_owner);
+
+/* Write `count` bytes of `iov` at `offset` to the current object, or -- when
+ * `handle` is non-NULL -- to that handle.  Both `handle` and `iov` are
+ * BORROWED: the caller holds them for as long as the sequence runs and releases
+ * them afterwards. */
+int
+chimera_vfs_compound_add_write(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    uint32_t                        sync,
+    struct evpl_iovec              *iov,
+    int                             niov,
+    const struct chimera_claim_actor *io_owner);
+
 /* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
  * that handle with descriptor rights.  `handle` is BORROWED: see ADDRESSING
  * SOMETHING OTHER THAN CURRENT.  On return the op's `set_attr` reports which
@@ -541,3 +619,14 @@ struct chimera_vfs_open_handle *
 chimera_vfs_compound_take_handle(
     struct chimera_vfs_compound *compound,
     uint32_t                     index);
+
+/* Take ownership of a READ's data: on return the *iov / *niov references are the
+ * caller's to release, and the compound will not.  *iov is the array the caller
+ * supplied, which it has owned all along.  *niov is 0 if that op is not a READ,
+ * did not run, failed, or has already been taken. */
+void
+chimera_vfs_compound_take_iov(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    struct evpl_iovec          **iov,
+    int                         *niov);
