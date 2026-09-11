@@ -9,6 +9,20 @@
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 
+/*
+ * DeleteObject is idempotent (S3 API Reference, DeleteObject): deleting a key
+ * that is not there succeeds with 204, and so does deleting one whose prefix
+ * directory is not there.  Everything else keeps the status it earned.
+ */
+static enum chimera_s3_status
+chimera_s3_delete_status(enum chimera_vfs_error error_code)
+{
+    if (error_code == CHIMERA_VFS_ENOENT || error_code == CHIMERA_VFS_ENOTDIR) {
+        return CHIMERA_S3_STATUS_NO_CONTENT;
+    }
+    return chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
+} /* chimera_s3_delete_status */
+
 static void
 chimera_s3_delete_remove_callback(
     enum chimera_vfs_error    error_code,
@@ -24,7 +38,18 @@ chimera_s3_delete_remove_callback(
     chimera_vfs_release(thread->vfs, request->dir_handle);
 
     if (error_code) {
-        request->status = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
+        /* DeleteObject is IDEMPOTENT (S3 API Reference, DeleteObject): a key
+         * that was never there is a success, not a 404.  Only the not-found
+         * errors take that path; a permission or I/O failure is still a
+         * failure. */
+        if (error_code == CHIMERA_VFS_ENOENT) {
+            request->status = CHIMERA_S3_STATUS_NO_CONTENT;
+        } else {
+            request->status = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
+        }
+    } else {
+        /* 204 No Content for a key it removed, not 200. */
+        request->status = CHIMERA_S3_STATUS_NO_CONTENT;
     }
 
     request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
@@ -46,7 +71,7 @@ chimera_s3_delete_open_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
+        request->status    = chimera_s3_delete_status(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -85,7 +110,7 @@ chimera_s3_get_lookup_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
+        request->status    = chimera_s3_delete_status(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(thread->evpl, request);

@@ -57,6 +57,8 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Invalid Tag";
         case CHIMERA_S3_STATUS_NO_SUCH_TAG_SET:
             return "No Such Tag Set";
+        case CHIMERA_S3_STATUS_INVALID_REQUEST:
+            return "Invalid Request";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         case CHIMERA_S3_STATUS_INVALID_ARGUMENT:
@@ -197,6 +199,20 @@ chimera_s3_prepare_error_response(
             bp += sprintf(bp, "  <Message>The tag provided was not a valid tag. "
                           "This error can occur if the tag did not pass input "
                           "validation.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
+            bp += sprintf(bp, "  <Code>BucketNotEmpty</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>The bucket you tried to delete is not empty.</Message>\n");
+            code = 409;
+            break;
+        case CHIMERA_S3_STATUS_INVALID_REQUEST:
+            bp += sprintf(bp, "  <Code>InvalidRequest</Code>\n");
+            bp += sprintf(bp,
+                          "  <Message>This copy request is illegal because it is trying to copy an "
+                          "object to itself without changing the object's metadata, storage class, "
+                          "website redirect location or encryption attributes.</Message>\n");
             code = 400;
             break;
         case CHIMERA_S3_STATUS_NO_SUCH_TAG_SET:
