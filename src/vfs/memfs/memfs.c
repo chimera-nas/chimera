@@ -3594,6 +3594,25 @@ memfs_open_at(
         return;
     }
 
+    /* POSIX path resolution (XBD 4.13): search (EXECUTE) permission on the
+     * parent is what allows a name to be RESOLVED at all, so it is owed before
+     * the directory is examined -- otherwise an existing entry's presence and
+     * type leak to a caller who may not search the directory (EISDIR over a
+     * directory, EEXIST over another object, or the file's handle for an
+     * unchecked create; chimera #1771).  The create branch below adds
+     * WRITE_DATA on top for a fresh name.  AUTH_ATTR (SMB/Windows) is exempt:
+     * traverse checking is bypassed by default there
+     * (SeChangeNotifyPrivilege), which is why the existing create gate asks
+     * for EXECUTE only on the AUTH_UNIX arm. */
+    if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+        request->cred->uid != 0 &&
+        !memfs_inode_access(parent_inode, request->cred, CHIMERA_ACE_EXECUTE)) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EACCES;
+        request->complete(request);
+        return;
+    }
+
     memfs_map_pre_attr(fs, &request->open_at.r_dir_pre_attr, parent_inode, request->fh);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
@@ -3630,7 +3649,9 @@ memfs_open_at(
 
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             request->cred->uid != 0) {
-            create_access = CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE;
+            /* EXECUTE was already required above, for every caller that gets
+             * this far; WRITE_DATA is what a fresh name adds. */
+            create_access = CHIMERA_ACE_WRITE_DATA;
         } else if (request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
             create_access = CHIMERA_ACE_WRITE_DATA;
         }
@@ -5760,10 +5781,19 @@ memfs_symlink_at(
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 1;
-    inode->mode       = S_IFLNK | 0755;
-    inode->atime      = now;
-    inode->mtime      = now;
-    inode->ctime      = now;
+    /* RFC 7530 5.8.1.6 makes mode a plain attribute of every object, symbolic
+     * links included, and CREATE(NF4LNK) carries one -- so honour it when the
+     * caller set one.  0755 stays the default for the callers that do not
+     * (SYMLINK over NFSv3 sends no mode, and POSIX symlink() has none). */
+    if (request->symlink_at.set_attr &&
+        (request->symlink_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        inode->mode = S_IFLNK | (request->symlink_at.set_attr->va_mode & 07777);
+    } else {
+        inode->mode = S_IFLNK | 0755;
+    }
+    inode->atime = now;
+    inode->mtime = now;
+    inode->ctime = now;
     inode->change++;
     inode->btime = now;
 
