@@ -610,6 +610,20 @@ chimera_vfs_rename_at_gate_lookup(
                         chimera_vfs_rename_at_gate_src, gate);
 } /* chimera_vfs_rename_at_gate_lookup */
 
+static void
+chimera_vfs_rename_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx  *ctx      = private_data;
+    chimera_vfs_rename_at_callback_t callback = ctx->callback;
+    void                            *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, NULL, NULL, arg);
+} /* chimera_vfs_rename_at_toolong */
+
 SYMBOL_EXPORT void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
@@ -645,8 +659,22 @@ chimera_vfs_rename_at(
         return;
     }
 
-    if (namelen >= CHIMERA_VFS_NAME_MAX || new_namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, private_data);
+    /* Both names are bounded before dispatch, but the VERDICT is not
+     * unconditionally ENAMETOOLONG: search permission on the directory holding
+     * the over-long name is owed first (chimera_vfs_name_too_long_fh).  When
+     * both are over-long POSIX orders neither, so the source directory decides.
+     */
+    if (namelen >= CHIMERA_VFS_NAME_MAX) {
+        chimera_vfs_name_too_long_fh(thread, cred, fh, fhlen,
+                                     chimera_vfs_rename_at_toolong,
+                                     callback, private_data);
+        return;
+    }
+
+    if (new_namelen >= CHIMERA_VFS_NAME_MAX) {
+        chimera_vfs_name_too_long_fh(thread, cred, new_fh, new_fhlen,
+                                     chimera_vfs_rename_at_toolong,
+                                     callback, private_data);
         return;
     }
 

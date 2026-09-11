@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -16,7 +16,11 @@ chimera_stat(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode            = CHIMERA_CLIENT_OP_STAT;
+    request->opcode      = CHIMERA_CLIENT_OP_STAT;
+    request->stat.handle = NULL;
+    /* chimera_stat() is stat(2), not lstat(2): follow the final symlink.
+     * flags was previously left uninitialized. */
+    request->stat.flags        = CHIMERA_VFS_LOOKUP_FOLLOW;
     request->stat.callback     = callback;
     request->stat.private_data = private_data;
     request->stat.path_len     = path_len;

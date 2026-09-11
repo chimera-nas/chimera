@@ -643,25 +643,22 @@ chimera_vfs_lookup(
     }
 
     /* POSIX: a pathname longer than {PATH_MAX} (including the terminating null,
-     * so pathlen must be < CHIMERA_VFS_PATH_MAX), or any single component longer
-     * than {NAME_MAX} (CHIMERA_VFS_NAME_MAX includes room for the null), fails
-     * with ENAMETOOLONG before any lookup is attempted. */
+     * so pathlen must be < CHIMERA_VFS_PATH_MAX) fails with ENAMETOOLONG before
+     * any lookup is attempted -- the whole string is the caller's, so nothing
+     * has to be resolved to judge it.
+     *
+     * A single component longer than {NAME_MAX} is NOT judged here.  Pathname
+     * resolution (XBD 4.13) reaches a component only through the directories
+     * before it, so an over-long component behind a directory the caller cannot
+     * search owes EACCES, not ENAMETOOLONG; scanning the whole path up front
+     * answered the length first and got that backwards for every op that
+     * resolves a path (stat, chmod, chown, truncate, open).  The walk below
+     * hands each component to chimera_vfs_lookup_at() as it reaches it, and
+     * that is where the bound -- and the search check that outranks it -- now
+     * live. */
     if (pathlen >= CHIMERA_VFS_PATH_MAX) {
         callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
         return;
-    }
-
-    {
-        int complen = 0;
-
-        for (int i = 0; i < pathlen; i++) {
-            if (path[i] == '/') {
-                complen = 0;
-            } else if (++complen >= CHIMERA_VFS_NAME_MAX) {
-                callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
-                return;
-            }
-        }
     }
 
     if (pathlen == 0) {

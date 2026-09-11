@@ -26,6 +26,9 @@
 
 #define CHIMERA_VFS_GATE_ATTR_MASK (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL)
 
+_Static_assert(sizeof(struct chimera_vfs_toolong_ctx) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "over-long-name context outgrew the request gate scratch area");
+
 /* ----------------------------------------------------------------------------
  * chimera_vfs_gate_fh: require a fixed mask on a single object.
  * ------------------------------------------------------------------------- */
@@ -605,3 +608,116 @@ chimera_vfs_gate_delete_handle(
     chimera_vfs_getattr(thread, cred, parent_handle, CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_parent_getattr, ctx);
 } /* chimera_vfs_gate_delete_handle */
+
+/* ----------------------------------------------------------------------------
+ * chimera_vfs_name_too_long: the search check an over-long component owes.
+ *
+ * POSIX pathname resolution (XBD 4.13) requires search permission on a
+ * directory before the next component may be EXAMINED at all -- so a component
+ * longer than {NAME_MAX} sitting in a directory the caller cannot search owes
+ * [EACCES], and [ENAMETOOLONG] only once that directory is searchable.  Linux
+ * agrees: EACCES when the holding directory is unsearchable, ENAMETOOLONG when
+ * it is not.
+ *
+ * Every namespace wrapper bounds the name before dispatch -- an over-long name
+ * must never reach a passthrough backend that copies it into a fixed request
+ * buffer -- which puts the length verdict AHEAD of the permission one and gets
+ * the order backwards.  Rather than relax the bound, the wrappers hand the
+ * over-long name here.  The engine is about to answer the operation itself, so
+ * the engine -- not the backend -- has to evaluate the search permission, and
+ * the gate is FORCED for exactly the reason chimera_vfs_gate_fh_always() is
+ * (the unprivileged device-mknod EPERM): on a delegating backend the operation
+ * will never reach the kernel that would otherwise judge it.
+ *
+ * Only AUTH_UNIX callers are gated.  Root is exempt (it searches everything),
+ * and an AUTH_ATTR (SMB/Windows) caller bypasses traverse checking by default,
+ * so for both the answer is the plain length verdict.
+ *
+ * `resume` is called with the verdict and the ctx itself; it recovers the
+ * wrapper\'s own typed callback from ctx->callback, frees the scratch with
+ * chimera_vfs_toolong_free() and answers.
+ * ------------------------------------------------------------------------- */
+static void
+chimera_vfs_name_too_long_complete(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx = private_data;
+
+    /* The search check passed (or the object could not be judged at all): the
+     * name\'s length is what is wrong after all. */
+    ctx->resume(status == CHIMERA_VFS_OK ? CHIMERA_VFS_ENAMETOOLONG : status,
+                ctx);
+} /* chimera_vfs_name_too_long_complete */
+
+static inline int
+chimera_vfs_name_too_long_gated(const struct chimera_vfs_cred *cred)
+{
+    return cred->flavor == CHIMERA_VFS_AUTH_UNIX && cred->uid != 0;
+} /* chimera_vfs_name_too_long_gated */
+
+SYMBOL_EXPORT void
+chimera_vfs_name_too_long_handle(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_gate_callback_t     resume,
+    void                           *callback,
+    void                           *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx;
+
+    ctx               = chimera_vfs_gate_scratch_alloc(thread);
+    ctx->thread       = thread;
+    ctx->resume       = resume;
+    ctx->callback     = callback;
+    ctx->private_data = private_data;
+
+    if (!handle || !chimera_vfs_name_too_long_gated(cred)) {
+        resume(CHIMERA_VFS_ENAMETOOLONG, ctx);
+        return;
+    }
+
+    ctx->gate_ctx.any_type = 0;
+
+    chimera_vfs_gate_handle_impl(&ctx->gate_ctx, thread, cred, handle,
+                                 CHIMERA_ACE_EXECUTE, 1,
+                                 chimera_vfs_name_too_long_complete, ctx);
+} /* chimera_vfs_name_too_long_handle */
+
+SYMBOL_EXPORT void
+chimera_vfs_name_too_long_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    chimera_vfs_gate_callback_t    resume,
+    void                          *callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx;
+
+    ctx               = chimera_vfs_gate_scratch_alloc(thread);
+    ctx->thread       = thread;
+    ctx->resume       = resume;
+    ctx->callback     = callback;
+    ctx->private_data = private_data;
+
+    if (!chimera_vfs_name_too_long_gated(cred) ||
+        !chimera_vfs_get_module(thread, fh, fhlen)) {
+        resume(CHIMERA_VFS_ENAMETOOLONG, ctx);
+        return;
+    }
+
+    ctx->gate_ctx.any_type = 0;
+
+    chimera_vfs_gate_fh_impl(&ctx->gate_ctx, thread, cred, fh, fhlen,
+                             CHIMERA_ACE_EXECUTE, 1,
+                             chimera_vfs_name_too_long_complete, ctx);
+} /* chimera_vfs_name_too_long_fh */
+
+SYMBOL_EXPORT void
+chimera_vfs_toolong_free(struct chimera_vfs_toolong_ctx *ctx)
+{
+    chimera_vfs_gate_scratch_free(ctx->thread, ctx);
+} /* chimera_vfs_toolong_free */

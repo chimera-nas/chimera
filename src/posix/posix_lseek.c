@@ -58,13 +58,17 @@ chimera_posix_lseek_hole_data(
     struct chimera_client_request  req;
     struct chimera_posix_seek_ctx  ctx;
 
-    if (offset < 0) {
-        /* No data or hole can exist at a negative offset; this is the same
-         * out-of-range condition as an offset at/past EOF, which POSIX and
-         * Linux report as ENXIO (not EINVAL) for SEEK_DATA/SEEK_HOLE. */
-        errno = ENXIO;
-        return -1;
-    }
+    /*
+     * No data or hole can exist at a negative offset; this is the same
+     * out-of-range condition as an offset at/past EOF, which POSIX and Linux
+     * report as ENXIO (not EINVAL) for SEEK_DATA/SEEK_HOLE.  But [EINVAL] for
+     * a whence the file system does not implement outranks it, and we cannot
+     * know which backend is behind this descriptor without asking, so the
+     * request still goes down -- clamped to offset 0, which is side-effect
+     * free -- purely to learn whether SEEK is supported at all.  The answer
+     * is discarded: a negative offset never yields a position.
+     */
+    int probe = (offset < 0);
 
     entry = chimera_posix_fd_acquire(posix, fd, 0);
 
@@ -79,7 +83,7 @@ chimera_posix_lseek_hole_data(
 
     req.opcode            = CHIMERA_CLIENT_OP_SEEK;
     req.seek.handle       = entry->handle;
-    req.seek.offset       = (uint64_t) offset;
+    req.seek.offset       = probe ? 0 : (uint64_t) offset;
     req.seek.what         = what;
     req.seek.callback     = chimera_posix_seek_callback;
     req.seek.private_data = &ctx;
@@ -88,7 +92,7 @@ chimera_posix_lseek_hole_data(
 
     int err = chimera_posix_wait(&ctx.comp);
 
-    if (!err) {
+    if (!err && !probe) {
         pthread_mutex_lock(&entry->lock);
         entry->ofd->offset = ctx.r_offset;
         pthread_mutex_unlock(&entry->lock);
@@ -97,11 +101,22 @@ chimera_posix_lseek_hole_data(
     chimera_posix_fd_release(entry, 0);
     chimera_posix_completion_destroy(&ctx.comp);
 
+    /* POSIX/Linux: SEEK_DATA/SEEK_HOLE on a file system that does not
+     * implement them fail with EINVAL, not ENOTSUP (e.g. the NFSv3 backend,
+     * which has no SEEK operation). */
+    if (err == ENOTSUP) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (probe) {
+        /* SEEK is supported here, so the negative offset is what is wrong. */
+        errno = ENXIO;
+        return -1;
+    }
+
     if (err) {
-        /* POSIX/Linux: SEEK_DATA/SEEK_HOLE on a file system that does not
-         * implement them fail with EINVAL, not ENOTSUP (e.g. the NFSv3
-         * backend, which has no SEEK operation). */
-        errno = (err == ENOTSUP) ? EINVAL : err;
+        errno = err;
         return -1;
     }
 
