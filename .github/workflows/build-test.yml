@@ -727,7 +727,7 @@ jobs:
               # really 945 of 947, 99.8%.  Zero them so the number means what it
               # looks like it means.
               ccache -z > /dev/null
-              cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -D SPECS_BUNDLE=NONE ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja
+              cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -D CHIMERA_MBT_CORPUS=OFF ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja
               # The analyzer reads compile_commands.json, and several entries
               # include generated headers (xdrzcc, ndrzcc, flex, bison), so the
               # tree has to be built before it can run.  Against a primed cache
@@ -998,12 +998,11 @@ jobs:
           # full crypt(5) $-scheme verification.
           brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
                        xxhash libxcrypt uthash openssl@3 libnghttp2
-          # oras: ext/specs' trace corpus comes from the bundle its CI
-          # published for the pinned commit, rather than being regenerated
-          # here.  A CI checkout never has local edits to the submodule, so
-          # the bundle always applies, and pulling it is both lighter than
-          # running quint over every model and free of quint's
-          # parallel-generator download race.
+          # oras: both the pinned ccache below and the mirrored quint
+          # payload in the step further down are plain OCI artifacts on GHCR,
+          # and oras is what pulls them.  quint is not optional here any more:
+          # the MBT corpus is generated from ext/specs' models plus this repo's
+          # configs on every build, so there is nothing to fetch in its place.
           brew install oras
 
           # ccache from the same mirror the Linux images use, so every platform
@@ -1078,7 +1077,7 @@ jobs:
           # below describe this run alone.
           ccache -z > /dev/null
           cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                -DSPECS_BUNDLE=ON -DREQUIRE_CTL_MBT=ON \
+                -DREQUIRE_CTL_MBT=ON \
                 -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
           ninja -C "${{ runner.temp }}/build"
           ccache --show-stats || true
@@ -1212,7 +1211,7 @@ jobs:
           cmake -G Ninja -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} \
                 \
                 -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
-                -D SPECS_BUNDLE=NONE \
+                -D CHIMERA_MBT_CORPUS=OFF \
                 -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR"
           # compile_commands.json is not enough on its own: several entries
           # include generated headers, so the tree has to be built first.

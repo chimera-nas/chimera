@@ -721,12 +721,21 @@ endif()
 add_definitions(-DXDR_CUSTOM_IOVEC=${CHIMERA_EXT_SRC}/libevpl/src/rpc2/xdr_iovec.h)
 add_definitions(-DXDR_CUSTOM_DUMP=1)
 
-# MBT trace corpus (ext/specs): sets SPECS_BUNDLE_DIR / SPECS_BUNDLE_AVAILABLE
-# for the quint suites under src/ -- must run before add_subdirectory(src).
+# MBT trace corpus (ext/specs): defines specs_corpus() and sets
+# CHIMERA_MBT_AVAILABLE for the quint suites under src/ -- must run before
+# add_subdirectory(src), which is where the cells register themselves.
 if (NOT DISABLE_TESTS)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/SpecsBundle.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Specs.cmake)
 endif()
 
 add_subdirectory(src)
 add_subdirectory(tools)
 add_subdirectory(examples/vfs_module)
+
+# Emit the corpus build edges -- one per model family, covering every cell the
+# quint suites registered above.  Must come after add_subdirectory(src): a
+# family's elaboration is shared by all of its cells, so the edge cannot be
+# created until they are all known.
+if (CHIMERA_MBT_AVAILABLE)
+    specs_corpus_finalize()
+endif()
