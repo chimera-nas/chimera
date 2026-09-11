@@ -62,9 +62,10 @@ chimera_fuse_request_alloc(
         req->buf_allocated = 1;
     }
 
-    req->channel = channel;
-    req->handle  = NULL;
-    req->file    = NULL;
+    req->channel  = channel;
+    req->handle   = NULL;
+    req->compound = NULL;
+    req->file     = NULL;
 
     thread->active_requests++;
 
@@ -187,6 +188,11 @@ chimera_fuse_request_finish(struct chimera_fuse_request *req)
     if (req->handle) {
         chimera_vfs_release(thread->vfs_thread, req->handle);
         req->handle = NULL;
+    }
+
+    if (req->compound) {
+        chimera_vfs_compound_free(req->compound);
+        req->compound = NULL;
     }
 
     chimera_fuse_request_free(thread, req);
