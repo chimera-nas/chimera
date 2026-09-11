@@ -40,14 +40,35 @@ struct chimera_vfs_request;
  */
 #define CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED  (1U << 0)
 
-/* If set, module requires open handles for file operations
- * and for setattr on directories.
+/*
+ * Will the VFS keep the handle this open produces, and close it later?
  *
- * If not set, VFS may create synthetic open handles that
- * only contain the file handle w/o an explicit open callout
- * to the module for stateless operation (ie NFS3).
+ * A module that holds per-open state -- a refcount on an inode, a descriptor --
+ * has to take it exactly when the answer is yes, or it leaks what is never
+ * closed and poisons what is.  The core asks the same question to decide
+ * whether to cache the handle or synthesize one, so both ask it here rather
+ * than each spelling out a rule the other could drift from.
  */
-#define CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED  (1U << 1)
+static inline int
+chimera_vfs_open_handle_retained(
+    unsigned int flags,
+    uint64_t     capabilities)
+{
+    /* A data open is a capability and is always real. */
+    if (!(flags & CHIMERA_VFS_OPEN_PATH)) {
+        return 1;
+    }
+
+    if (capabilities & CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED) {
+        return 1;
+    }
+
+    /* An inferred path open is a name, and the file handle is already that. */
+    return !(flags & CHIMERA_VFS_OPEN_INFERRED);
+} /* chimera_vfs_open_handle_retained */
+
+/* (1U << 1) was CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED.  A data open is now always
+ * a real open: see the note on CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED. */
 
 /* If set, dispatch function is synchronous/blocking
  * and chimera will delegate VFS requests to a separate

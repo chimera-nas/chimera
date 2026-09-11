@@ -177,12 +177,35 @@ set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
 # the two caches, and the transport facts the model's constants record (one
 # address for every in-process peer, a new filehandle per incarnation).  Needs
 # no corpus.
-add_test(NAME chimera/server/nfs/mbtdrc/probe_memfs
-    COMMAND $<TARGET_FILE:nfs_drc_probe>)
-set_tests_properties(chimera/server/nfs/mbtdrc/probe_memfs PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_memfs"
-    LABELS "quint;nfsdrc_mbt;memfs"
-    TIMEOUT 120)
+#
+# Run on every backend, not just memfs.  What a file handle means once its
+# object is gone is a property of the VFS, not of one module, and registering
+# this against memfs alone hid a five-backends-to-two disagreement about
+# exactly that for as long as it has existed.
+foreach(dback memfs diskfs cairn linux io_uring)
+    if(dback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    if(dback STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    if(dback STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING)
+        continue()
+    endif()
+    if(dback STREQUAL "memfs")
+        set(_drc_probe_args "")
+    else()
+        set(_drc_probe_args --backend ${dback})
+    endif()
+
+    add_test(NAME chimera/server/nfs/mbtdrc/probe_${dback}
+        COMMAND $<TARGET_FILE:nfs_drc_probe> ${_drc_probe_args})
+    set_tests_properties(chimera/server/nfs/mbtdrc/probe_${dback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_${dback}"
+        LABELS "quint;nfsdrc_mbt;${dback}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120)
+endforeach()
 
 # Delegation policy probe: pins the deterministic grant/recall behavior the
 # delegation-enabled instances encode (see nfs4_deleg_probe.c).  Needs no corpus.

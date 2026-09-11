@@ -1337,7 +1337,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_smb = {
     /* Path-only backend: full mount-relative paths, opaque per-open handle
      * tokens, no FH-relative ops (no CAP_FS_RELATIVE_OP). */
     .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_PATH_OP |
-        CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED,
+        CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED,
     .init           = chimera_smb_client_init,
     .destroy        = chimera_smb_client_destroy,
     .thread_init    = chimera_smb_client_thread_init,

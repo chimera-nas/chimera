@@ -210,8 +210,9 @@ chimera_vfs_open_finish(struct chimera_vfs_request *request)
         fh_hash = chimera_vfs_hash(request->open_at.r_attr.va_fh,
                                    request->open_at.r_attr.va_fh_len);
 
-        if ((request->module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) ||
-            !(request->open_at.flags &  CHIMERA_VFS_OPEN_INFERRED)) {
+        if (chimera_vfs_open_handle_retained(
+                request->open_at.flags,
+                request->module->capabilities)) {
             chimera_vfs_open_cache_insert(
                 thread,
                 cache,

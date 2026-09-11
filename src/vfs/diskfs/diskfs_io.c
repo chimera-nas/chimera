@@ -1523,7 +1523,7 @@ diskfs_read(
     p->io_reading = 1;     /* cleared in diskfs_read_finish when the walk ends */
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    /* Warm-handle fast path: diskfs advertises CAP_OPEN_FILE_REQUIRED, so a read
+    /* Warm-handle fast path: a data open always reaches the module, so a read
      * is preceded by a real open that pinned the inode and stashed it in
      * handle->vfs_private.  Reuse it to skip the fh->inum decode + rb-tree
      * lookup.  Fall back to the by-fh resolve for any handle that lacks it. */
