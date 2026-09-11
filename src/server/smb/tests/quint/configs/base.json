@@ -1,0 +1,36 @@
+{
+  "family": "smb2",
+  "description": "chimera's SMB2 server with no caching grants at all: oplocks, leases, directory leases and durable handles are every one of them off. This is the deterministic filesystem core -- the CREATE disposition/type matrix, share arbitration, byte-range locks, I/O, delete-on-close, rename, compound threading and CHANGE_NOTIFY -- with no oplock/lease break lifecycle to interleave with it.",
+  "traceStem": "smb2Base",
+
+  "features": {
+    "oplocks": "unsupported",
+    "leases": "unsupported",
+    "dirLeases": "unsupported",
+    "durable": "unsupported"
+  },
+
+  "policies": {
+    // 0x0300
+    "dialect": 768,
+    "leaseOpenBreak": true,
+    "forceLevel2": false
+  },
+
+  // Known chimera divergences the model is told to predict for this cell, so
+  // the trace's expectation is already what chimera does and replay is an
+  // exact match.  Declared with citations in
+  // ext/specs/quint/smb2/corpus.schema.json.
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "stepCore",     "steps": 500, "traces": 8, "seed": "0x7"  },
+    { "flavor": "stepReq",      "steps": 500, "traces": 8, "seed": "0x11" },
+    { "flavor": "stepDir",      "steps": 500, "traces": 8, "seed": "0x5"  },
+    { "flavor": "stepInfo",     "steps": 500, "traces": 8, "seed": "0x9"  },
+    { "flavor": "stepNs",       "steps": 500, "traces": 8, "seed": "0xd"  },
+    { "flavor": "stepNotify",   "steps": 400, "traces": 8, "seed": "0x61" },
+    { "flavor": "stepNotifyNs", "steps": 400, "traces": 6, "seed": "0x71" }
+  ]
+}

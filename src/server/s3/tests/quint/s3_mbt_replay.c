@@ -19,13 +19,18 @@
  *    ListObjects <Contents>) to report the same value until the object is
  *    rewritten or deleted.
  *
- * Divergence policy (mirrors nfs3_mbt_replay.c): the model always encodes
- * the official AWS behavior.  A known, documented divergence of chimera is
- * listed in the deviation registry below and tolerated -- tolerating skips
- * the response-shape checks that assume the official status, but still
- * performs the state bookkeeping (ETag learn/forget) that keeps the replay
- * in sync.  Anything else is a divergence: the trace fails with a report of
- * the step, the mismatches, and recent history. */
+ * Divergence policy: there is none, by design.  This harness has no notion
+ * of a forgivable difference -- expected and actual must be equal.  chimera's
+ * known divergences from AWS S3 live in the model (quint/s3/s3.qnt, gated on
+ * the DEVS set the cell's config binds), so a trace generated for this cell
+ * already predicts the answer chimera gives, and every one of them is
+ * declared with a citation in quint/s3/corpus.schema.json before any config
+ * may enable it.  Two things keep that honest: the strict twin of each cell
+ * (same batches, DEVS = Set()), whose failures are the live conformance debt,
+ * and tools/devliveness.py, which fails a cell that enables a deviation its
+ * corpus never exercises.  Anything unexpected here is a divergence: the
+ * trace fails with a report of the step, the mismatches, and recent
+ * history. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,6 +92,31 @@ itf_i64(json_t *v)
     fprintf(stderr, "malformed ITF integer\n");
     exit(2);
 } /* itf_i64 */
+
+/* One state variable out of an ITF state.  A trace generated from a config
+ * cell names its variables "<cell>::<model>::<var>", one generated from the
+ * model directly names them "<var>"; match the suffix on a ':' boundary so
+ * either spelling resolves. */
+static json_t *
+state_var(
+    json_t     *state,
+    const char *name)
+{
+    const char *key;
+    json_t     *val;
+    size_t      n = strlen(name);
+
+    json_object_foreach(state, key, val)
+    {
+        size_t klen = strlen(key);
+
+        if (klen >= n && strcmp(key + klen - n, name) == 0 &&
+            (klen == n || key[klen - n - 1] == ':')) {
+            return val;
+        }
+    }
+    return NULL;
+} /* state_var */
 
 static json_t *
 op_field(
@@ -366,87 +396,6 @@ tagset_of(
     return n;
 } /* tagset_of */
 
-/* ---- deviation registry -------------------------------------------------- */
-
-/* Documented divergences of chimera from official AWS S3 behavior, verified
- * by s3_mbt_probe.c (which goes red when one stops reproducing -- the signal
- * to retire its entry here).  A status divergence listed here is tolerated;
- * everything else fails the trace.  `pred`, when set, must also hold for the
- * entry to apply. */
-struct deviation {
-    const char *id;
-    const char *op_tag;
-    unsigned    expected;
-    unsigned    actual;
-    int         (*pred)(
-        json_t *op);
-};
-
-/* range-full-200 applies only when the requested range resolves to the whole
- * object (the model's returned data spans block 0 through the full size). */
-static int
-dev_range_is_full(json_t *op)
-{
-    return op_i64(op, "first") == 0 &&
-           (int64_t) json_array_size(op_field(op, "data")) ==
-           op_i64(op, "total");
-} /* dev_range_is_full */
-
-/* copy-self-200 applies only to a copy of an object onto itself. */
-static int
-dev_copy_is_self(json_t *op)
-{
-    char sk[MBT_MAX_KEYLEN], dk[MBT_MAX_KEYLEN];
-
-    key_str(op_field(op, "srcKey"), sk, sizeof(sk));
-    key_str(op_field(op, "dstKey"), dk, sizeof(dk));
-    return strcmp(op_str(op, "srcBucket"), op_str(op, "dstBucket")) == 0 &&
-           strcmp(sk, dk) == 0;
-} /* dev_copy_is_self */
-
-static const struct deviation known_deviations[] = {
-    /* AWS DeleteObject returns 204 No Content; chimera returns 200 for an
-     * existing key... */
-    { "delete-object-200",          "ODeleteObject",            204,               200,               NULL
-    },
-    /* ...and 404 NoSuchKey for a missing one (AWS is idempotent). */
-    { "delete-object-missing-404",  "ODeleteObject",            204,               404,               NULL
-    },
-    /* AWS answers DELETE on a non-empty bucket with 409 BucketNotEmpty;
-     * chimera maps BUCKET_NOT_EMPTY through its default 500 InternalError. */
-    { "delete-bucket-nonempty-500", "ODeleteBucket",            409,               500,               NULL
-    },
-    /* AWS rejects a copy of an object onto itself (no metadata directive)
-     * with 400 InvalidRequest; chimera performs it and returns 200. */
-    { "copy-self-200",              "OCopyObject",              400,               200,               dev_copy_is_self
-    },
-    /* AWS returns 206 for every satisfiable Range, including one resolving
-    * to the whole object; chimera collapses whole-object ranges to 200. */
-    { "range-full-200",             "OGetObject",               206,               200,               dev_range_is_full
-    },
-};
-
-static const struct deviation *
-reconcile(
-    const char *tag,
-    json_t     *op,
-    unsigned    expected,
-    unsigned    actual)
-{
-    size_t i;
-
-    for (i = 0; i < sizeof(known_deviations) / sizeof(known_deviations[0]);
-         i++) {
-        const struct deviation *d = &known_deviations[i];
-
-        if (strcmp(d->op_tag, tag) == 0 && d->expected == expected &&
-            d->actual == actual && (!d->pred || d->pred(op))) {
-            return d;
-        }
-    }
-    return NULL;
-} /* reconcile */
-
 /* ---- oracle -------------------------------------------------------------- */
 
 struct etag_ent {
@@ -496,7 +445,6 @@ struct part_etag_ent {
 struct oracle {
     struct s3_mbt_env   *env;
     int                  block_size;
-    int                  verbose;
     struct etag_ent      etags[MBT_MAX_ETAGS];
     struct upl_ent       upls[MBT_MAX_UPLOADS];
     struct part_etag_ent petags[MBT_MAX_PART_ETAGS];
@@ -715,36 +663,26 @@ etag_check(
 
 /* ---- status comparison --------------------------------------------------- */
 
-enum st_result {
-    ST_MATCH,
-    ST_TOLERATED,
-    ST_MISMATCH,
-};
-
-static enum st_result
+/* The trace's status IS the expectation.  There is no notion of a forgivable
+ * difference here any more: chimera's known divergences from AWS S3 are
+ * encoded in the model, gated on the cell's config, so a trace generated for
+ * this cell already predicts the status chimera returns.  The strict twin of
+ * each cell regenerates the same batches with every deviation off, and its
+ * failures are the conformance debt -- re-measured on every run rather than
+ * remembered in a C registry that keeps forgiving after the bug is fixed.
+ *
+ * Returns 1 on a match. */
+static int
 check_status(
-    struct oracle *o,
-    const char    *tag,
-    json_t        *op,
-    unsigned       expected,
-    unsigned       actual,
-    struct mism   *m)
+    unsigned     expected,
+    unsigned     actual,
+    struct mism *m)
 {
-    const struct deviation *d;
-
     if (expected == actual) {
-        return ST_MATCH;
-    }
-    d = reconcile(tag, op, expected, actual);
-    if (d) {
-        if (o->verbose) {
-            fprintf(stderr, "  (deviation %s: %s expected %u, got %u)\n",
-                    d->id, tag, expected, actual);
-        }
-        return ST_TOLERATED;
+        return 1;
     }
     mism_add(m, "status: expected %u, got %u", expected, actual);
-    return ST_MISMATCH;
+    return 0;
 } /* check_status */
 
 /* ---- XML response parsing ------------------------------------------------ */
@@ -814,8 +752,8 @@ resp_error_code(
 } /* resp_error_code */
 
 /* Compare the XML error body's <Code> against the model's err field.  Only
- * meaningful when expected == actual (a tolerated deviation's body carries
- * the server's own code, not the model's). */
+ * called once the status matched, since a status mismatch means the body is
+ * some other response's body entirely. */
 static void
 check_error_code(
     struct oracle            *o,
@@ -907,8 +845,7 @@ op_create_bucket(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OCreateBucket", op, (unsigned) op_i64(op, "status"),
-                     (unsigned) res->status, m) != ST_MATCH) {
+    if (!check_status((unsigned) op_i64(op, "status"), (unsigned) res->status, m)) {
         return;
     }
     snprintf(want_loc, sizeof(want_loc), "%s", path);
@@ -935,7 +872,7 @@ op_head_bucket(
 
     res = s3_mbt_call(o->env, &req);
 
-    check_status(o, "OHeadBucket", op, (unsigned) op_i64(op, "status"),
+    check_status((unsigned) op_i64(op, "status"),
                  (unsigned) res->status, m);
     if (res->body_len != 0) {
         mism_add(m, "HeadBucket returned a body (%zu bytes)", res->body_len);
@@ -960,8 +897,7 @@ op_delete_bucket(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "ODeleteBucket", op, expected,
-                     (unsigned) res->status, m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 204) {
@@ -990,8 +926,7 @@ op_list_buckets(
     (void) post_bkts;
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OListBuckets", op, (unsigned) op_i64(op, "status"),
-                     (unsigned) res->status, m) != ST_MATCH) {
+    if (!check_status((unsigned) op_i64(op, "status"), (unsigned) res->status, m)) {
         return;
     }
 
@@ -1044,7 +979,7 @@ op_put_object(
     struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_PUT };
     struct s3_mbt_resp *res;
     unsigned            expected = (unsigned) op_i64(op, "status");
-    enum st_result      st;
+    int                 st;
 
     (void) post_bkts;
     snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
@@ -1062,14 +997,14 @@ op_put_object(
 
     res = s3_mbt_call(o->env, &req);
 
-    st = check_status(o, "OPutObject", op, expected, (unsigned) res->status, m);
+    st = check_status(expected, (unsigned) res->status, m);
 
     /* A successful write (whatever its exact 2xx shape) re-keys the ETag. */
     if (res->status >= 200 && res->status < 300 && expected == 200) {
         etag_forget(o, bucket, key);
         etag_check(o, bucket, key, res->etag, "PutObject", m);
     }
-    if (st == ST_MATCH && expected == 404) {
+    if (st && expected == 404) {
         check_error_code(o, res, op, m);
     }
 } /* op_put_object */
@@ -1131,7 +1066,6 @@ op_get_object(
     const char         *rtag     = op_tag(op, "range");
     json_t             *rval     = json_object_get(op_field(op, "range"), "value");
     int64_t             bs       = o->block_size;
-    enum st_result      st;
     size_t              got_len;
 
     (void) post_bkts;
@@ -1158,8 +1092,7 @@ op_get_object(
 
     res = s3_mbt_call(o->env, &req);
 
-    st = check_status(o, "OGetObject", op, expected, (unsigned) res->status, m);
-    if (st == ST_MISMATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
 
@@ -1172,9 +1105,11 @@ op_get_object(
         }
         etag_check(o, bucket, key, res->etag, "GetObject", m);
         check_meta_echo(o, res, post_bkts, bucket, key, "GetObject", m);
-        /* On a tolerated whole-object 200 (range-full-200) there is no
-        * Content-Range; only an exact 206 must carry the right one. */
-        if (st == ST_MATCH && expected == 206) {
+        /* A 206 must carry the right Content-Range.  Where the model
+         * predicts a 200 for a whole-object range (the range-full-200
+         * deviation, if this cell enables it) chimera sends none, and none
+         * is what a 200 calls for. */
+        if (expected == 206) {
             snprintf(want_cr, sizeof(want_cr),
                      "bytes %" PRId64 "-%" PRId64 "/%" PRId64,
                      op_i64(op, "first") * bs,
@@ -1185,7 +1120,7 @@ op_get_object(
                          want_cr, res->content_range);
             }
         }
-    } else if (expected == 416 && st == ST_MATCH) {
+    } else if (expected == 416) {
         snprintf(want_cr, sizeof(want_cr), "bytes */%" PRId64,
                  op_i64(op, "total") * bs);
         if (strcmp(res->content_range, want_cr) != 0) {
@@ -1193,7 +1128,7 @@ op_get_object(
                      want_cr, res->content_range);
         }
         check_error_code(o, res, op, m);
-    } else if (expected == 404 && st == ST_MATCH) {
+    } else if (expected == 404) {
         check_error_code(o, res, op, m);
     }
 } /* op_get_object */
@@ -1219,8 +1154,7 @@ op_head_object(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OHeadObject", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (res->body_len != 0) {
@@ -1274,7 +1208,7 @@ op_delete_object(
     struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_DELETE };
     struct s3_mbt_resp *res;
     unsigned            expected = (unsigned) op_i64(op, "status");
-    enum st_result      st;
+    int                 st;
 
     (void) post_bkts;
     snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
@@ -1284,15 +1218,17 @@ op_delete_object(
 
     res = s3_mbt_call(o->env, &req);
 
-    st = check_status(o, "ODeleteObject", op, expected, (unsigned) res->status,
-                      m);
+    st = check_status(expected, (unsigned) res->status, m);
 
     /* The object is gone (or never was) whenever the bucket existed --
-     * whichever of 204/200/404 came back; drop the learned ETag. */
-    if (expected == 204) {
+     * whichever of 204/200/404 the model predicted for this cell.  Keyed off
+     * the error code rather than the status, because 404 is NoSuchBucket
+     * (nothing happened) or NoSuchKey (it is gone) depending on which
+     * deviation is in play. */
+    if (strcmp(op_str(op, "err"), "NoSuchBucket") != 0) {
         etag_forget(o, bucket, key);
     }
-    if (st == ST_MATCH && expected == 404) {
+    if (st && expected == 404) {
         check_error_code(o, res, op, m);
     }
 } /* op_delete_object */
@@ -1311,7 +1247,7 @@ op_copy_object(
     struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_PUT };
     struct s3_mbt_resp *res;
     unsigned            expected = (unsigned) op_i64(op, "status");
-    enum st_result      st;
+    int                 st;
 
     (void) post_bkts;
     snprintf(sb, sizeof(sb), "%s", op_str(op, "srcBucket"));
@@ -1327,24 +1263,23 @@ op_copy_object(
 
     res = s3_mbt_call(o->env, &req);
 
-    st = check_status(o, "OCopyObject", op, expected, (unsigned) res->status,
-                      m);
+    st = check_status(expected, (unsigned) res->status, m);
 
-    if (res->status == 200 && (expected == 200 || st == ST_TOLERATED)) {
-        /* the destination was (re)written: its ETag is whatever
-         * <CopyObjectResult><ETag> reports */
+    /* A 200 means the destination was (re)written -- including the self-copy
+     * chimera performs where AWS answers 400, when this cell enables
+     * copy-self-200: its ETag is whatever <CopyObjectResult><ETag> reports. */
+    if (res->status == 200 && expected == 200) {
         etag_forget(o, db, dk);
         if (xml_text_after(resp_xml(o, res), "ETag", etag, sizeof(etag))) {
             etag_check(o, db, dk, etag, "CopyObject", m);
-        } else if (st == ST_MATCH) {
+        } else {
             mism_add(m, "CopyObject: response lacks <ETag>");
         }
-        if (st == ST_MATCH &&
-            !strstr(o->xml_buf, "<CopyObjectResult")) {
+        if (!strstr(o->xml_buf, "<CopyObjectResult")) {
             mism_add(m, "CopyObject: response lacks <CopyObjectResult>");
         }
     }
-    if (st == ST_MATCH && (expected == 404 || expected == 400)) {
+    if (st && (expected == 404 || expected == 400)) {
         check_error_code(o, res, op, m);
     }
 } /* op_copy_object */
@@ -1441,8 +1376,7 @@ op_list_objects(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OListObjects", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected == 404) {
@@ -1598,8 +1532,7 @@ op_delete_objects(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "ODeleteObjects", op, expected,
-                     (unsigned) res->status, m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -1677,8 +1610,7 @@ op_get_attrs(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OGetAttrs", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -1836,8 +1768,7 @@ tagging_common(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, tag, op, expected, (unsigned) res->status, m)
-        != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200 && expected != 204) {
@@ -1947,8 +1878,7 @@ op_create_mpu(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OCreateMpu", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -2000,8 +1930,7 @@ op_upload_part(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OUploadPart", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -2058,8 +1987,7 @@ op_upload_part_copy(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OUploadPartCopy", op, expected,
-                     (unsigned) res->status, m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -2127,8 +2055,7 @@ op_complete_mpu(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OCompleteMpu", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -2186,8 +2113,7 @@ op_abort_mpu(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OAbortMpu", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected == 204) {
@@ -2224,8 +2150,7 @@ op_list_parts(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OListParts", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -2296,8 +2221,7 @@ op_list_mpu(
 
     res = s3_mbt_call(o->env, &req);
 
-    if (check_status(o, "OListMpu", op, expected, (unsigned) res->status,
-                     m) != ST_MATCH) {
+    if (!check_status(expected, (unsigned) res->status, m)) {
         return;
     }
     if (expected != 200) {
@@ -2511,14 +2435,13 @@ run_trace(
     o             = calloc(1, sizeof(*o));
     o->env        = env;
     o->block_size = block_size;
-    o->verbose    = verbose;
     o->expect_buf = malloc((size_t) 64 * block_size);
     o->xml_buf    = malloc(S3_MBT_BODY_MAX + 1);
 
     for (idx = 1; idx < nstates; idx++) {
         json_t      *state     = json_array_get(states, idx);
-        json_t      *last_op   = json_object_get(state, "lastOp");
-        json_t      *post_bkts = json_object_get(state, "bkts");
+        json_t      *last_op   = state_var(state, "lastOp");
+        json_t      *post_bkts = state_var(state, "bkts");
         const char  *tag;
         json_t      *op;
         op_handler_t fn;

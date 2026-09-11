@@ -1,0 +1,18 @@
+{
+  "family": "s3",
+  "description": "the same gateway driven through multipart upload. A cell of its own because these traces must be replayed with a 5 MiB block size -- AWS's minimum part size -- which makes every non-empty part legal at that scale and leaves EntityTooSmall as the fate of an EMPTY non-final manifest part, exactly as the model encodes it.",
+  "traceStem": "s3mp",
+
+  // The block size is still a harness command-line argument (--block-size);
+  // recorded here as the fact that distinguishes this corpus from the base one.
+  "blockSize": 5242880,
+
+  // No deviations: every one this cell used to carry has been FIXED in the
+  // server (204 and idempotency on DeleteObject, 409 BucketNotEmpty, 400
+  // InvalidRequest for a self-copy, 206 for a whole-object range), so the
+  // cell states the S3 API exactly and is its own strict twin.
+  "batches": [
+    { "flavor": "stepMultipart", "steps": 64, "traces": 3, "seed": "0x1" },
+    { "flavor": "stepMultipart", "steps": 64, "traces": 2, "seed": "0x11" }
+  ]
+}

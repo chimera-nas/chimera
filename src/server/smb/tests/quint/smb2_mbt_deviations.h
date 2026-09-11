@@ -2,38 +2,37 @@
  *
  * SPDX-License-Identifier: LGPL-2.1-only
  *
- * Registry of known chimera divergences from the SMB2 model.
+ * What this replayer cannot DRIVE -- and nothing else.
  *
- * The models in ext/specs encode MS-SMB2 / MS-FSA, not chimera.  They are a
- * published corpus with other consumers, and the corpus is generated
- * UNCONDITIONALLY -- every instance and flavor, with nothing withheld on
- * account of what any one server does with it.  So where chimera and the
- * standard disagree, the disagreement is recorded HERE, in chimera, next to
- * the code that has to change.  It is not encoded in the specs project, and it
- * is never hidden by declining to generate the traces that would find it.
+ * This file used to hold two tables.  The first was a registry of known
+ * chimera divergences from the SMB2 model: a reply that did not match was
+ * looked up here, and a hit was reported as a DEVIATION rather than failing
+ * the run.  That table is GONE, and with it the idea that the harness decides
+ * what conformance is.
  *
- * Three outcomes, and the point of this file is to keep them apart:
+ * A known divergence is now a branch in the MODEL, gated on the DEVS set the
+ * cell's config binds (ext/specs/quint/smb2/smb2_ops.qnt, declared with its
+ * citation in ext/specs/quint/smb2/corpus.schema.json).  The model predicts
+ * what chimera actually does, so the trace's expectation is already the truth
+ * and replay is an exact match with nothing to forgive.  Three things follow
+ * that a registry could not give:
  *
- *   1. a MODEL bug -- the spec says what chimera does.  Fix the model in
- *      ext/specs; nothing belongs here.
- *   2. a chimera DEVIATION -- chimera does something the standard does not
- *      describe.  Record it here, with a citation, so the suite keeps running
- *      and the divergence stays enumerable and attributable.
- *   3. an unanalyzed difference -- neither of the above yet.  It must fail.
+ *   - a STATE-MUTATING divergence becomes expressible.  CD-3 -- a file
+ *     truncated by a CREATE that was then refused -- had an identical reply on
+ *     both sides and differed only in state, so the registry could only mark it
+ *     non-reconcilable and ABANDON the trace.  Stated in the model instead, the
+ *     model lost the data the same way and the rest of the trace kept testing,
+ *     which is what made the bug measurable rather than merely known.  It is
+ *     now fixed and no cell declares it.
+ *   - the STRICT TWIN of each cell (same batches, DEVS = Set()) re-measures
+ *     the conformance debt on every run, where a registry entry kept
+ *     forgiving after the bug was fixed.
+ *   - tools/devliveness.py fails a cell that enables a deviation its corpus
+ *     never exercises, so an entry cannot outlive its fix.
  *
- * This file is what separates (2) from (3).  A divergence matching an entry is
- * reported as a DEVIATION and does not fail the run; anything else is a
- * MISMATCH and does.  Same contract as the POSIX suite's
- * src/posix/tests/quint/posix_deviations.py and as the Samba conformance
- * harness in ext/specs/harness/samba -- never used to hide an unanalyzed
- * failure, always carrying a citation, a root cause, and something that would
- * retire it.
- *
- * Reconcilability.  Only divergences that leave chimera's state matching the
- * model's are reconcilable, so replay can continue.  One that leaves the two
- * holding different state would make every later command in the trace report a
- * consequence rather than a finding; those are marked reconcilable = false and
- * abandon the trace at the point they occur.
+ * What remains here is a different kind of claim, and the reason the file
+ * survives: not "this reply differs", but "this replayer cannot drive this
+ * batch at all".  Those are below.
  */
 
 #pragma once
@@ -41,99 +40,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-
-struct smb2_mbt_deviation {
-    const char *id;
-    const char *spec;          /* MS-SMB2 / MS-FSA citation */
-    const char *summary;
-    const char *root_cause;    /* chimera source location */
-    const char *candidate_fix;
-    /* Model result tag this applies to ("RCreate", "RLock", ...); NULL = any. */
-    const char *op;
-    /* Status pair.  SMB2_MBT_ANY on either side means "any value". */
-    uint32_t    expected;
-    uint32_t    actual;
-    bool        reconcilable;
-};
-
-#define SMB2_MBT_ANY 0xFFFFFFFFu
-
-/* ------------------------------------------------------------------------
- * Reply-level deviations.
- * ------------------------------------------------------------------------ */
-
-static const struct smb2_mbt_deviation smb2_mbt_deviations[] = {
-    /* Empty by construction, not by luck: every reply-level divergence the
-     * generated corpus found against chimera has been FIXED in chimera rather
-     * than recorded here --
-     *
-     *   FLUSH without write access        smb_proc_flush.c
-     *   LOCK without read or write access smb_proc_lock.c
-     *   the attribute-only share bypass   smb_proc_create.c (held_granted /
-     *                                     held_denied)
-     *   the lease-key binding with        smb_proc_create.c (config.leases
-     *   leasing disabled                  gate)
-     *
-     * A new entry here should be rare and should feel like a decision. */
-    {
-        .id   = "CD-3",
-        .spec = "MS-FSA 2.1.5.1.2 (Open of Existing File): the sharing check "
-            "precedes any modification of the file",
-        .summary = "a truncating CREATE that is REFUSED with a sharing "
-            "violation still truncates the file",
-        .root_cause = "smb_proc_create.c builds the VFS open flags with "
-            "CHIMERA_VFS_OPEN_TRUNCATE and hands them to "
-            "chimera_vfs_open_at BEFORE the share-mode claim is "
-            "arbitrated, so the backend has already emptied the file "
-            "by the time the claim refuses the open.  A failed "
-            "operation with a side effect, and a destructive one: "
-            "the data is gone and the client is told the open did "
-            "not happen.  Both the model and the wire answer "
-            "STATUS_SHARING_VIOLATION, so nothing catches it at the "
-            "CREATE -- it surfaces later as a read that should have "
-            "returned data.  check_refused_create_side_effect in "
-            "smb2_mbt_replay.c compares the model's post-state size "
-            "against the wire's at the step that causes it.",
-        .candidate_fix = "open without CHIMERA_VFS_OPEN_TRUNCATE, acquire the "
-            "share claim, and only then truncate -- moving the "
-            "ARCHIVE / AllocationSize stamping, which currently "
-            "rides on the create-or-truncate open, to that same "
-            "deferred step.  The named-stream path "
-            "(chimera_smb_create_open_stream_chain) needs the "
-            "same treatment.",
-        .op       = "RCreateSideEffect",
-        .expected = SMB2_MBT_ANY,
-        .actual   = SMB2_MBT_ANY,
-        /* chimera's file is now empty and the model's is not.  Every later
-         * read, size query and hole check on that file would diverge. */
-        .reconcilable = false,
-    },
-    { 0 }
-};
-
-/* Find the deviation covering this divergence, or NULL. */
-static inline const struct smb2_mbt_deviation *
-smb2_mbt_deviation_find(
-    const char *op,
-    uint32_t    expected,
-    uint32_t    actual)
-{
-    const struct smb2_mbt_deviation *d;
-
-    for (d = smb2_mbt_deviations; d->id; d++) {
-        if (d->op && (!op || strcmp(d->op, op) != 0)) {
-            continue;
-        }
-        if (d->expected != SMB2_MBT_ANY && d->expected != expected) {
-            continue;
-        }
-        if (d->actual != SMB2_MBT_ANY && d->actual != actual) {
-            continue;
-        }
-        return d;
-    }
-    return NULL;
-} /* smb2_mbt_deviation_find */
 
 /* ------------------------------------------------------------------------
  * Trace-level limits.

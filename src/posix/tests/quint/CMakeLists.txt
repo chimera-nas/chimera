@@ -11,15 +11,28 @@ set(CHIMERA_TEST_TIER quick)
 # This directory owns the replay harness -- posix_mbt_replay.c (a pure-C
 # replayer that runs the model oracle in-process against chimera's POSIX client
 # over an in-process memfs mount) and posix_driver.c / posix_replay.py (the
-# JSON line-protocol driver + Python replayer used for the NFS-loopback
-# backends) -- which drive that corpus against chimera and fail on any
-# unregistered divergence.
+# JSON line-protocol driver + Python replayer, now used only by the FUSE
+# suite) -- which drive that corpus against chimera and fail on ANY
+# divergence.
 #
-# The trace corpus is resolved once, at the top level, by cmake/SpecsBundle.cmake
-# into SPECS_BUNDLE_DIR.  The specs `posix` suite generates every backend
-# profile into one directory, distinguished by filename prefix (memfs has none;
-# nfs3_/nfs4_/disk_ for the loopback and diskfs/cairn profiles); the replay
-# selects a profile with --trace-dir plus --exclude-prefix.
+# The corpus is generated from the configs in configs/ beside this file.  Each
+# one binds every constant posix.qnt declares -- which offloads the surface
+# under test has, which of the legal behaviours it chose -- and carries its own
+# batch list, so one config fully determines one corpus.  specs_corpus() turns a
+# config into a cell with a trace directory of its own, and the replay ctest
+# runs ALL of that directory: no filename-prefix carving.
+#
+# Six configs, one per profile chimera actually serves.  Several backends share
+# a profile where they were measured to behave alike, and those backends share
+# the cell rather than each getting a corpus of their own -- generation cost
+# follows cells, not ctests.
+#
+# Each config also names the KNOWN DEVIATIONS that profile's stack still
+# carries.  The model takes chimera's branch for each, so a trace's expectation
+# already IS chimera's behaviour and replay is an exact match -- the harnesses
+# carry no registry of forgivable differences.  The strict twin of every cell
+# regenerates it with all of them off and measures the debt; devliveness.py
+# fails the build when a config enables one its corpus never exercises.
 
 add_executable(posix_quint_driver posix_driver.c)
 target_link_libraries(posix_quint_driver
@@ -235,29 +248,67 @@ set_tests_properties(chimera/posix/smb/loopback_wire_encrypt_required_refused
     LABELS "quint;posix_mbt;memfs;smb_mbt"
     TIMEOUT 300)
 
-if(NOT SPECS_BUNDLE_AVAILABLE)
+if(NOT CHIMERA_MBT_AVAILABLE)
     message(STATUS "posix MBT replay ctest skipped (no specs trace corpus)")
     return()
 endif()
 
-# One batched replay: a single posix_mbt_replay runs the model oracle in-process
-# across the whole memfs corpus, cycling a fresh uniquely-named filesystem per
-# trace ("newfs"), so the dominant per-trace cost -- driver server/client init +
-# mount -- is paid once instead of once per trace.  Traces whose LInit profile
-# does not match the backend skip individually; the batch reports SKIP (77) only
-# if every trace skips.
-#
-# The specs `posix` corpus carries per-backend profiles distinguished by
-# filename prefix: memfs (no prefix, and also what diskfs replays), the NFS
-# loopbacks (nfs3_/nfs4_), the no-clone profile (disk_, shared by cairn and
-# the linux/io_uring passthroughs) and FUSE (fuse_).  Each registered batch
-# selects its profile with --exclude-prefix.
+# ---------------------------------------------------------------------------
+# The cells: one per distinct corpus, not one per ctest.  memfs and diskfs
+# replay the same profile, cairn and the host passthroughs share another, and
+# each loopback profile is one corpus whatever backend sits behind the server --
+# so six configs serve the batches below.
+# ---------------------------------------------------------------------------
+specs_corpus(NAME    posix/memfs
+             FAMILY  posix
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/memfs.json
+             OUT_DIR posix_memfs_traces
+             STRICT_OUT_DIR posix_memfs_strict)
+
+specs_corpus(NAME    posix/disk
+             FAMILY  posix
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/disk.json
+             OUT_DIR posix_disk_traces
+             STRICT_OUT_DIR posix_disk_strict)
+
+specs_corpus(NAME    posix/nfs3
+             FAMILY  posix
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs3.json
+             OUT_DIR posix_nfs3_traces
+             STRICT_OUT_DIR posix_nfs3_strict)
+
+specs_corpus(NAME    posix/nfs4
+             FAMILY  posix
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4.json
+             OUT_DIR posix_nfs4_traces
+             STRICT_OUT_DIR posix_nfs4_strict)
+
+specs_corpus(NAME    posix/smb
+             FAMILY  posix
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/smb.json
+             OUT_DIR posix_smb_traces
+             STRICT_OUT_DIR posix_smb_strict)
+
+# The FUSE profile is a POSIX cell like the other five, so it is registered
+# here even though src/server/fuse/tests/quint is what replays it.  That
+# directory exists only on Linux and is configured before this one, and the
+# corpus must depend on neither: the same six cells are generated everywhere.
+# The suite there points at this cell's directory, which specs_corpus() derives
+# as ${SPECS_CORPUS_ROOT}/<cell name>.
+specs_corpus(NAME    posix/fuse
+             FAMILY  posix
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/fuse.json
+             OUT_DIR posix_fuse_traces
+             STRICT_OUT_DIR posix_fuse_strict)
+
+# One batched replay per cell per backend: a single posix_mbt_replay runs the
+# model oracle in-process across the whole corpus, cycling a fresh uniquely-named
+# filesystem per trace ("newfs"), so the dominant per-trace cost -- driver
+# server/client init + mount -- is paid once instead of once per trace.
 add_test(NAME chimera/posix/mbt/batch_memfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend memfs
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix smb_)
+            --trace-dir ${posix_memfs_traces})
 set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_memfs"
     LABELS "quint;posix_mbt;memfs"
@@ -266,20 +317,16 @@ set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
 
 # The memfs-profile corpus against diskfs: a chimera-native backend
 # (model-conformant DAC, no host-kernel deviations), so it replays the memfs
-# profile rather than the disk_ one, and the per-trace newfs recycle
-# mkfs-cycles it exactly like memfs.  The replay process self-provisions its
-# scratch device image under its own mkdtemp session dir (posix_env_setup) and
-# takes whichever libevpl block backend the platform has
-# (CHIMERA_DISKFS_DEVICE_TYPE).  Five traces are declined BY NAME in
-# posix_mbt_declines (posix_mbt_replay.c), each naming the diskfs bug that
-# retires the entry.
-#
+# cell rather than the disk one, and the per-trace newfs recycle mkfs-cycles it
+# exactly like memfs.  The replay process self-provisions its scratch device
+# image under its own mkdtemp session dir (posix_env_setup) and takes whichever
+# libevpl block backend the platform has (CHIMERA_DISKFS_DEVICE_TYPE).  Five
+# traces are declined BY NAME in posix_mbt_declines (posix_mbt_replay.c), each
+# naming the diskfs bug that retires the entry.
 add_test(NAME chimera/posix/mbt/batch_diskfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend diskfs
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix smb_)
+            --trace-dir ${posix_memfs_traces})
 set_tests_properties(chimera/posix/mbt/batch_diskfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_diskfs"
     LABELS "quint;posix_mbt;diskfs"
@@ -290,11 +337,9 @@ set_tests_properties(chimera/posix/mbt/batch_diskfs PROPERTIES
 # is the one engine backend the memfs profile does not fit: cairn advertises
 # neither CHIMERA_VFS_CAP_COPY_RANGE nor CHIMERA_VFS_CAP_CLONE_RANGE, and
 # while the VFS supplies a generic copy fallback for the former there is no
-# clone fallback -- clone answers ENOTSUP.  So cairn replays the `disk_`
-# profile (posix_run.qnt's posixDisk instance, F_CLONE_RANGE = FeatOff), the
-# same profile the linux/io_uring passthrough batches below replay, and
-# selects it the same way: exclude the unprefixed memfs traces (they all
-# begin "step") and the three prefixed profiles, leaving disk_ alone.
+# clone fallback -- clone answers ENOTSUP.  So cairn replays the disk cell
+# (cloneRange unsupported), the same corpus the linux/io_uring passthrough
+# batches below replay.
 #
 # diskfs stays on the memfs profile above rather than joining cairn here: it
 # does implement clone, so holding it to the model-conformant profile is what
@@ -303,31 +348,26 @@ set_tests_properties(chimera/posix/mbt/batch_diskfs PROPERTIES
 add_test(NAME chimera/posix/mbt/batch_cairn
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend cairn
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --exclude-prefix step --exclude-prefix nfs3_
-            --exclude-prefix nfs4_ --exclude-prefix fuse_ --exclude-prefix smb_)
+            --trace-dir ${posix_disk_traces})
 set_tests_properties(chimera/posix/mbt/batch_cairn PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_cairn"
     LABELS "quint;posix_mbt;cairn"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
-# The same corpus replayed through the NFS loopback: an in-process chimera
-# server exports a memfs filesystem over the inproc transport and the posix
-# client mounts it through the nfs proxy module (src/vfs/nfs) with vers=3 --
-# the whole client stack, wire included, under the POSIX model.  The nfs3_
-# profile pins the NFS-flavored capabilities (strict atime, no copy/clone/
-# seek offload); the client-behavior deviations a real NFS client cannot
-# avoid (silly rename and friends) reconcile in the replayer as the ND*
-# registry.  The per-trace recycle unmounts the client, cycles the
-# server-side filesystem, and remounts, so every trace also exercises the
-# proxy's mount/umount paths.
+# The same POSIX surface replayed through the NFS loopback: an in-process
+# chimera server exports a memfs filesystem over the inproc transport and the
+# posix client mounts it through the nfs proxy module (src/vfs/nfs) with
+# vers=3 -- the whole client stack, wire included, under the POSIX model.  The
+# nfs3 cell pins the NFS-flavored capabilities (strict atime, no copy/clone/
+# seek offload); the client-behavior deviations a real NFS client cannot avoid
+# (silly rename and friends) reconcile in the replayer as the ND* registry.
+# The per-trace recycle unmounts the client, cycles the server-side filesystem,
+# and remounts, so every trace also exercises the proxy's mount/umount paths.
 add_test(NAME chimera/posix/mbt/batch_nfs3_memfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend nfs3_memfs
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --exclude-prefix step --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix nfs4_ --exclude-prefix smb_)
+            --trace-dir ${posix_nfs3_traces})
 set_tests_properties(chimera/posix/mbt/batch_nfs3_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs3_memfs"
     LABELS "quint;posix_mbt;memfs;nfs3_mbt"
@@ -336,14 +376,12 @@ set_tests_properties(chimera/posix/mbt/batch_nfs3_memfs PROPERTIES
 
 # The same POSIX surface through the NFSv4.1 loopback: stateful opens,
 # sessions/slots, and the pseudo-fs export junction all sit on the path.
-# The nfs4_ trace profile models search permissions, so the DAC answers
-# are asserted directly rather than reconciled.
+# The nfs4 cell models search permissions, so the DAC answers are asserted
+# directly rather than reconciled.
 add_test(NAME chimera/posix/mbt/batch_nfs4_memfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend nfs4_memfs
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --exclude-prefix step --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix nfs3_ --exclude-prefix smb_)
+            --trace-dir ${posix_nfs4_traces})
 set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs4_memfs"
     LABELS "quint;posix_mbt;memfs;nfs4_mbt"
@@ -352,46 +390,44 @@ set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
 
 # The same corpus through the SMB2 loopback: the posix client mounts the
 # in-process chimera SMB server through the smb proxy VFS module (src/vfs/smb).
-# It replays the smb_ profile (posix_run.qnt's posixSmb instance): the memfs
-# profile with copy_file_range mandatory (SMB2 FSCTL_SRV_COPYCHUNK) but no
-# reflink or SEEK_DATA/SEEK_HOLE -- what the smb_memfs backend actually does.
+# It replays the smb cell: the memfs profile with copy_file_range mandatory
+# (SMB2 FSCTL_SRV_COPYCHUNK) but no reflink or SEEK_DATA/SEEK_HOLE -- what the
+# smb_memfs backend actually does.
 #
 # The original SD1-SD5 blockers are fixed (real owner/mode/nlink via
 # modefromsid, path-id fh re-open, readdir paging, symlink + specfile create,
-# stale-open-cache eviction on path-id reuse); the whole corpus now replays
-# clean.  Two properties of the loopback remain reconciled rather than fixed,
-# handled in posix_mbt_replay.c's KNOWN_DEVIATIONS: the SMB fh is a reused
-# interned path-id (not a stable per-object identity), so a dirfd captured
-# before its target is replaced resolves to the replacement (SD-DFD-REUSE); and
-# the driver pins core_threads=1 because a session is bound to the connection
-# that authenticated it (SD1 -- SMB3 multichannel session binding is what would
-# lift that).
+# stale-open-cache eviction on path-id reuse).  What the SMB wire still does
+# differently the MODEL states -- here only through the cell's feature set (no
+# reflink, no sparse seek), so the corpus expects it exactly with no SMB-
+# specific deviation left.  One property of the
+# loopback has no model branch to move into and stays a harness-side allowance
+# in posix_mbt_replay.c's check_status: the SMB fh is a reused interned path-id
+# (not a stable per-object identity), so a dirfd captured before its target is
+# replaced resolves to the replacement (SD-DFD-REUSE).  The driver also pins
+# core_threads=1 because a session is bound to the connection that
+# authenticated it (SD1 -- SMB3 multichannel session binding is what would lift
+# that).
 add_test(NAME chimera/posix/mbt/batch_smb_memfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend smb_memfs
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --exclude-prefix step --exclude-prefix disk_
-            --exclude-prefix fuse_ --exclude-prefix nfs3_
-            --exclude-prefix nfs4_)
+            --trace-dir ${posix_smb_traces})
 set_tests_properties(chimera/posix/mbt/batch_smb_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_smb_memfs"
     LABELS "quint;posix_mbt;memfs;smb_mbt"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
-# The disk_ profile replayed against the host-passthrough backends.  The
-# backing store is a fresh directory per trace under $CHIMERA_MBT_SCRATCH
-# (default: the build tree), whose filesystem must support name_to_handle_at
-# -- tmpfs/overlayfs do not, and the driver turns that ENOTSUP into a clean
-# SKIP.  The modules run with per-operation credential impersonation, so the
-# batch needs root (CI containers; skipped otherwise via the mount failure).
+# The disk cell replayed against the host-passthrough backends.  The backing
+# store is a fresh directory per trace under $CHIMERA_MBT_SCRATCH (default: the
+# build tree), whose filesystem must support name_to_handle_at -- tmpfs/overlayfs
+# do not, and the driver turns that ENOTSUP into a clean SKIP.  The modules run
+# with per-operation credential impersonation, so the batch needs root (CI
+# containers; skipped otherwise via the mount failure).
 if(CHIMERA_LINUX)
     add_test(NAME chimera/posix/mbt/batch_linux
         COMMAND $<TARGET_FILE:posix_mbt_replay>
                 --backend linux
-                --trace-dir ${SPECS_BUNDLE_DIR}/posix
-                --exclude-prefix step --exclude-prefix nfs3_
-                --exclude-prefix nfs4_ --exclude-prefix fuse_ --exclude-prefix smb_)
+                --trace-dir ${posix_disk_traces})
     set_tests_properties(chimera/posix/mbt/batch_linux PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_linux"
         LABELS "quint;posix_mbt;linux"
@@ -403,9 +439,7 @@ if(CHIMERA_VFS_IO_URING)
     add_test(NAME chimera/posix/mbt/batch_io_uring
         COMMAND $<TARGET_FILE:posix_mbt_replay>
                 --backend io_uring
-                --trace-dir ${SPECS_BUNDLE_DIR}/posix
-                --exclude-prefix step --exclude-prefix nfs3_
-                --exclude-prefix nfs4_ --exclude-prefix fuse_ --exclude-prefix smb_)
+                --trace-dir ${posix_disk_traces})
     set_tests_properties(chimera/posix/mbt/batch_io_uring PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_io_uring"
         LABELS "quint;posix_mbt;io_uring"
@@ -429,9 +463,7 @@ foreach(ptmod ${POSIX_MBT_PT_LOOPBACKS})
     add_test(NAME chimera/posix/mbt/batch_nfs3_${ptmod}
         COMMAND $<TARGET_FILE:posix_mbt_replay>
                 --backend nfs3_${ptmod}
-                --trace-dir ${SPECS_BUNDLE_DIR}/posix
-                --exclude-prefix step --exclude-prefix disk_
-                --exclude-prefix fuse_ --exclude-prefix nfs4_ --exclude-prefix smb_)
+                --trace-dir ${posix_nfs3_traces})
     set_tests_properties(chimera/posix/mbt/batch_nfs3_${ptmod} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs3_${ptmod}"
         LABELS "quint;posix_mbt;${ptmod};nfs3_mbt"
@@ -441,12 +473,77 @@ foreach(ptmod ${POSIX_MBT_PT_LOOPBACKS})
     add_test(NAME chimera/posix/mbt/batch_nfs4_${ptmod}
         COMMAND $<TARGET_FILE:posix_mbt_replay>
                 --backend nfs4_${ptmod}
-                --trace-dir ${SPECS_BUNDLE_DIR}/posix
-                --exclude-prefix step --exclude-prefix disk_
-                --exclude-prefix fuse_ --exclude-prefix nfs3_ --exclude-prefix smb_)
+                --trace-dir ${posix_nfs4_traces})
     set_tests_properties(chimera/posix/mbt/batch_nfs4_${ptmod} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs4_${ptmod}"
         LABELS "quint;posix_mbt;${ptmod};nfs4_mbt"
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
+endforeach()
+
+# ---------------------------------------------------------------------------
+# The strict twins, and the gate that keeps a deviation honest.
+#
+# Each cell above is registered with a STRICT_OUT_DIR, which generates a second
+# corpus from the SAME config with every deviation forced off -- the standard,
+# not chimera.  Replaying it measures the conformance debt instead of
+# remembering it: its failures ARE the open deviations, re-counted on every
+# run, so a deviation that has been fixed shows up as a strict cell that got
+# quieter rather than as a registry entry nobody revisits.  These are REPORTING
+# tests, not gates.
+#
+# devliveness.py is the other half, and it IS a gate: it fails when a config
+# enables a deviation its corpus never records taking.  That is what stops an
+# entry outliving its fix -- a claim nobody exercises stops being a claim.
+set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+# The strict replays are REPORTING, so they belong in the extended tier: the
+# quick tier is what the merge queue gates on and a known-open deviation must
+# not fail it.  The tier is decided by CHIMERA_TEST_TIER at the point of
+# add_test() (see the wrapper in the top-level CMakeLists.txt), so it is
+# flipped around these registrations and put back for the liveness gate below.
+set(CHIMERA_TEST_TIER extended)
+
+# name -> (strict trace dir, replay backend, config)
+foreach(cell "memfs|${posix_memfs_strict}|memfs"
+             "disk|${posix_disk_strict}|cairn"
+             "nfs3|${posix_nfs3_strict}|nfs3_memfs"
+             "nfs4|${posix_nfs4_strict}|nfs4_memfs"
+             "smb|${posix_smb_strict}|smb_memfs")
+    string(REPLACE "|" ";" parts "${cell}")
+    list(GET parts 0 sname)
+    list(GET parts 1 sdir)
+    list(GET parts 2 sbackend)
+    add_test(NAME chimera/posix/mbt/strict_${sname}
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend ${sbackend}
+                --trace-dir ${sdir})
+    set_tests_properties(chimera/posix/mbt/strict_${sname} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_strict_${sname}"
+        LABELS "quint;posix_mbt;strict;extended"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 900)
+endforeach()
+
+# Back to the quick tier: the liveness gate IS a gate.
+set(CHIMERA_TEST_TIER quick)
+
+# The liveness gate, one per cell, over the NON-strict corpus each cell's
+# replay ctests actually run.
+foreach(cell "memfs|${posix_memfs_traces}"
+             "disk|${posix_disk_traces}"
+             "nfs3|${posix_nfs3_traces}"
+             "nfs4|${posix_nfs4_traces}"
+             "smb|${posix_smb_traces}"
+             "fuse|${posix_fuse_traces}")
+    string(REPLACE "|" ";" parts "${cell}")
+    list(GET parts 0 lname)
+    list(GET parts 1 ldir)
+    add_test(NAME chimera/posix/mbt/devliveness_${lname}
+        COMMAND ${Python3_EXECUTABLE} ${SPECS_DEVLIVENESS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/configs/${lname}.json ${ldir})
+    set_tests_properties(chimera/posix/mbt/devliveness_${lname} PROPERTIES
+        LABELS "quint;posix_mbt;devliveness"
+        TIMEOUT 120)
 endforeach()

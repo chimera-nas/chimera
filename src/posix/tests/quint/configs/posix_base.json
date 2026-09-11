@@ -1,0 +1,30 @@
+// What every POSIX surface chimera serves has in common, whichever backend or
+// wire is underneath.  It is not a cell of its own: each of the six profiles
+// below extends it and states the five knobs that actually differ between them
+// (copyRange, cloneRange, seekHole, strictAtime, chownSuppGroup).
+//
+// The values here were measured, not assumed: each backend was driven through
+// the operations that distinguish these knobs and the answers written down.
+{
+  "family": "posix",
+  "description": "the knobs every chimera POSIX profile shares: gid/setgid inheritance off, setid-clearing and POSIX-canonical error codes on, pwrite ignoring O_APPEND.",
+
+  "features": {
+    // The harness picks the credentials it replays under, so both draws of the
+    // root/no-root profile are real for every backend here.
+    "root": "explore"
+  },
+
+  "policies": {
+    "gidFromParent": "unsupported",
+    "sgidInherit": "unsupported",
+    "writeClearsSetids": "supported",
+    "pwriteAppends": "unsupported",
+    "renameCtime": "supported",
+    "stickyWriteArm": "unsupported",
+    "rmdirEnotempty": "supported",
+    "stickyEacces": "supported",
+    "unlinkDirIsdir": "supported",
+    "lockEagain": "supported"
+  }
+}
