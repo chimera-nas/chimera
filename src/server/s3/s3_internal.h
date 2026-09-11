@@ -168,6 +168,11 @@ struct chimera_s3_request {
     int                              query_upload_idlen;
     int                              query_part_number;
     char                             query_upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];
+    /* Whether the client sent a Range header at all.  It cannot be recovered
+    * from file_offset/file_length once the range is RESOLVED against the
+    * object size: a whole-object range resolves to exactly the same pair as
+    * no range, and RFC 7233 4.1 makes that a 206 while no range is a 200. */
+    int                              has_range;
     int64_t                          file_offset;
     int64_t                          file_cur_offset;
     int64_t                          file_length;

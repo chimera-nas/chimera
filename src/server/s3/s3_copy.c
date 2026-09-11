@@ -877,6 +877,24 @@ chimera_s3_copy(
         return;
     }
 
+    /* Copying an object onto ITSELF with nothing to change is an
+     * InvalidRequest (S3 API Reference, CopyObject): the copy would be a
+     * no-op, and AWS refuses it rather than silently rewriting the object.
+     * The metadata directive is the only axis chimera implements, so REPLACE
+     * is what makes a self-copy legal here -- storage class, website redirect
+     * and encryption are the other AWS exemptions and none of them exists
+     * yet.  Both names are compared as slices: bucket_name points into the
+     * URL and is not NUL-terminated. */
+    if (ctx->meta_directive == CHIMERA_S3_COPY_META_COPY &&
+        ctx->src_bucket_namelen == request->bucket_namelen &&
+        memcmp(ctx->src_bucket_name, request->bucket_name,
+               request->bucket_namelen) == 0 &&
+        ctx->src_key_len == (int) request->path_len &&
+        memcmp(ctx->src_key, request->path, request->path_len) == 0) {
+        chimera_s3_copy_finish(ctx, 0, CHIMERA_S3_STATUS_INVALID_REQUEST, NULL);
+        return;
+    }
+
     /* chimera_s3_get_bucket() acquires the bucket-map read lock and leaves it
      * held; chimera_s3_release_bucket() drops it. The path string stays valid
      * past the unlock for the duration of the request (buckets are not freed
