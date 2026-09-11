@@ -50,6 +50,7 @@ chimera_posix_stat(
     path_len = strlen(path);
 
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
+    req.stat.handle       = NULL;
     req.stat.callback     = chimera_posix_stat_callback;
     req.stat.private_data = &comp;
     req.stat.flags        = CHIMERA_VFS_LOOKUP_FOLLOW;  /* stat() follows symlinks */

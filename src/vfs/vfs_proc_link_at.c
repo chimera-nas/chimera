@@ -207,6 +207,20 @@ chimera_vfs_link_at_gate_complete(
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_link_at_gate_complete */
 
+static void
+chimera_vfs_link_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx      = private_data;
+    chimera_vfs_link_at_callback_t  callback = ctx->callback;
+    void                           *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, NULL, arg);
+} /* chimera_vfs_link_at_toolong */
+
 SYMBOL_EXPORT void
 chimera_vfs_link_at(
     struct chimera_vfs_thread      *thread,
@@ -229,8 +243,13 @@ chimera_vfs_link_at(
     struct chimera_vfs_module       *module;
     struct chimera_vfs_link_at_gate *gate;
 
+    /* An over-long name is bounded before dispatch, but the VERDICT is not
+     * unconditionally ENAMETOOLONG: search permission on the destination
+     * directory is owed first (chimera_vfs_name_too_long_fh). */
     if (namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, private_data);
+        chimera_vfs_name_too_long_fh(thread, cred, dir_fh, dir_fhlen,
+                                     chimera_vfs_link_at_toolong,
+                                     callback, private_data);
         return;
     }
 

@@ -128,22 +128,28 @@ chimera_posix_faccessat(
     struct chimera_posix_worker         *worker = chimera_posix_choose_worker(posix);
     struct chimera_client_request        req;
     struct chimera_posix_faccessat_state state;
+    struct chimera_posix_fd_entry       *dir_entry = NULL;
     int                                  path_len;
 
     // AT_EACCESS and AT_SYMLINK_NOFOLLOW are not implemented
     (void) flags;
 
-    // For now, only support AT_FDCWD
-    if (dirfd != AT_FDCWD) {
-        errno = ENOSYS;
-        return -1;
-    }
-
     chimera_posix_completion_init(&state.comp, &req);
     state.access_mode = mode;
 
-    // Build path
-    if (pathname[0] == '/') {
+    /* dirfd resolution, exactly as fstatat does it. */
+    if (dirfd != AT_FDCWD && pathname[0] != '/') {
+        dir_entry = chimera_posix_fd_acquire(posix, dirfd, 0);
+
+        if (!dir_entry) {
+            errno = EBADF;
+            chimera_posix_completion_destroy(&state.comp);
+            return -1;
+        }
+
+        path_len = strlen(pathname);
+        memcpy(req.stat.path, pathname, path_len);
+    } else if (pathname[0] == '/') {
         path_len = strlen(pathname);
         memcpy(req.stat.path, pathname, path_len);
     } else {
@@ -153,6 +159,7 @@ chimera_posix_faccessat(
         path_len++;
     }
 
+    req.stat.handle       = dir_entry ? dir_entry->handle : NULL;
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_faccessat_callback;
     req.stat.private_data = &state;
@@ -165,6 +172,10 @@ chimera_posix_faccessat(
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_faccessat_exec);
 
     int err = chimera_posix_wait(&state.comp);
+
+    if (dir_entry) {
+        chimera_posix_fd_release(dir_entry, 0);
+    }
 
     chimera_posix_completion_destroy(&state.comp);
 
