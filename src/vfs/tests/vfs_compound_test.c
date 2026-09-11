@@ -162,17 +162,17 @@ main(
     int    argc,
     char **argv)
 {
-    struct test_ctx                ctx = { 0 };
-    struct chimera_vfs_module_cfg  module_cfgs[2];
-    struct prometheus_metrics     *metrics;
-    struct chimera_vfs_cred        cred;
-    struct chimera_vfs_compound   *cp;
-    uint8_t                        root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                       root_fh_len;
-    uint8_t                        a_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                       a_fh_len;
-    int                            i_put, i_look_a, i_look_b, i_getattr;
-    int                            i_getfh, i_access;
+    struct test_ctx                       ctx = { 0 };
+    struct chimera_vfs_module_cfg         module_cfgs[2];
+    struct prometheus_metrics            *metrics;
+    struct chimera_vfs_cred               cred;
+    struct chimera_vfs_compound          *cp;
+    uint8_t                               root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              root_fh_len;
+    uint8_t                               a_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              a_fh_len;
+    int                                   i_put, i_look_a, i_look_b, i_getattr;
+    int                                   i_getfh, i_access;
     const struct chimera_vfs_compound_op *op;
 
     (void) argc;
@@ -234,7 +234,7 @@ main(
                                                CHIMERA_VFS_ATTR_MASK_STAT);
     i_getattr = chimera_vfs_compound_add_getattr(cp,
                                                  CHIMERA_VFS_ATTR_MASK_STAT);
-    i_getfh   = chimera_vfs_compound_add_getfh(cp);
+    i_getfh = chimera_vfs_compound_add_getfh(cp);
 
     assert(i_put == 0 && i_look_a == 1 && i_look_b == 2 &&
            i_getattr == 3 && i_getfh == 4);
@@ -352,7 +352,7 @@ main(
         memcpy(f_fh, ctx.fh, ctx.fh_len);
         f_fh_len = ctx.fh_len;
 
-        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, f_fh, (int) f_fh_len);
         i_ga = chimera_vfs_compound_add_getattr(cp,
                                                 CHIMERA_VFS_ATTR_MASK_STAT);
@@ -393,7 +393,7 @@ main(
     {
         int i_save, i_lk, i_restore, i_fh_after;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         /* A getattr on each side of the save, so the sequence is actually
          * holding an open handle when the slot is written and when it is
@@ -457,7 +457,7 @@ main(
     {
         int i_lka, i_lkb, i_up;
 
-        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_lka = chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
         i_lkb = chimera_vfs_compound_add_lookup(cp, "b", 1, 0);
@@ -511,7 +511,7 @@ main(
         memcpy(c_fh, ctx.fh, ctx.fh_len);
         c_fh_len = ctx.fh_len;
 
-        cp       = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, c_fh, (int) c_fh_len);
         i_ga     = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
         i_commit = chimera_vfs_compound_add_commit(cp, 0, 0,
@@ -541,7 +541,7 @@ main(
         uint32_t e;
         int      saw_b = 0;
 
-        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
         i_rd = chimera_vfs_compound_add_readdir(cp, 0, 0, 8192, 8192, 32,
@@ -582,13 +582,13 @@ main(
     {
         int i_set, i_list, i_get, i_remove, i_get2;
 
-        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
         i_set = chimera_vfs_compound_add_setxattr(cp, 0, "user.k", 6,
                                                   "value", 5);
-        i_list  = chimera_vfs_compound_add_listxattrs(cp, 0, 4096);
-        i_get   = chimera_vfs_compound_add_getxattr(cp, "user.k", 6, 4096);
+        i_list = chimera_vfs_compound_add_listxattrs(cp, 0, 4096);
+        i_get  = chimera_vfs_compound_add_getxattr(cp, "user.k", 6, 4096);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -613,7 +613,7 @@ main(
         chimera_vfs_compound_free(cp);
 
         /* Removing it makes the next read of it fail, in the same sequence. */
-        cp       = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "a", 1, 0);
         i_remove = chimera_vfs_compound_add_removexattr(cp, "user.k", 6);
@@ -649,16 +649,16 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0644;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "o1", 2,
                                                CHIMERA_VFS_OPEN_CREATE |
                                                CHIMERA_VFS_OPEN_WRITE_ONLY,
                                                0, &sattr,
                                                CHIMERA_VFS_ATTR_MASK_STAT);
-        i_ga2  = chimera_vfs_compound_add_getattr(cp,
-                                                  CHIMERA_VFS_ATTR_MASK_STAT);
-        i_fh2  = chimera_vfs_compound_add_getfh(cp);
+        i_ga2 = chimera_vfs_compound_add_getattr(cp,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+        i_fh2 = chimera_vfs_compound_add_getfh(cp);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -711,7 +711,7 @@ main(
     {
         int i_open;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "a", 1,
                                                CHIMERA_VFS_OPEN_READ_ONLY,
@@ -749,7 +749,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0600;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "o2", 2,
                                                CHIMERA_VFS_OPEN_CREATE,
@@ -764,14 +764,14 @@ main(
         /* Re-open the same name asking for 0777. */
         sattr.va_mode = S_IFREG | 0777;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(
             cp, "o2", 2,
             CHIMERA_VFS_OPEN_CREATE,
             CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY,
             &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
-        i_ga3  = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+        i_ga3 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -798,10 +798,10 @@ main(
     TEST_PASS("OPEN with ATTRS_ON_CREATE_ONLY does not restyle an existing object");
 
     /* ---- an exclusive create that collides opens what is there ----
-     * The collision is the answer the caller wants, not an error: NFS4's
-     * EXCLUSIVE4 has to look at the object to tell its own earlier create from
-     * somebody else's file.  The re-open applies none of the create's
-     * attributes, so the object it finds is left exactly as it was. */
+    * The collision is the answer the caller wants, not an error: NFS4's
+    * EXCLUSIVE4 has to look at the object to tell its own earlier create from
+    * somebody else's file.  The re-open applies none of the create's
+    * attributes, so the object it finds is left exactly as it was. */
     {
         struct chimera_vfs_attrs sattr;
         int                      i_open, i_ga4;
@@ -810,7 +810,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0640;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "x1", 2,
                                                CHIMERA_VFS_OPEN_CREATE |
@@ -824,7 +824,7 @@ main(
         chimera_vfs_compound_free(cp);
 
         /* Without the option, a second exclusive create is refused. */
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "x1", 2,
                                                CHIMERA_VFS_OPEN_CREATE |
@@ -843,14 +843,14 @@ main(
          * for. */
         sattr.va_mode = S_IFREG | 0777;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(
             cp, "x1", 2,
             CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_EXCLUSIVE,
             CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY,
             &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
-        i_ga4  = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+        i_ga4 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -875,7 +875,7 @@ main(
     {
         int i_open;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "o1", 2, 0);
         i_open = chimera_vfs_compound_add_open(cp, NULL, 0,
@@ -912,13 +912,13 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = 0750;
 
-        cp      = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_mkdir = chimera_vfs_compound_add_create(
             cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "nd", 2, NULL, 0,
             &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
-        i_fh    = chimera_vfs_compound_add_getfh(cp);
-        i_ga5   = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+        i_fh  = chimera_vfs_compound_add_getfh(cp);
+        i_ga5 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -945,9 +945,9 @@ main(
         chimera_vfs_compound_free(cp);
 
         /* A symlink, and then unlinking it again. */
-        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_ln  = chimera_vfs_compound_add_create(
+        i_ln = chimera_vfs_compound_add_create(
             cp, CHIMERA_VFS_COMPOUND_CREATE_SYMLINK, "sl", 2,
             "nd", 2, NULL, CHIMERA_VFS_ATTR_MASK_STAT);
 
@@ -958,9 +958,9 @@ main(
         assert(S_ISLNK(chimera_vfs_compound_op(cp, i_ln)->attr.va_mode));
         chimera_vfs_compound_free(cp);
 
-        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_rm  = chimera_vfs_compound_add_remove(cp, "sl", 2);
+        i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2);
         /* Still the parent: a LOOKUP after the REMOVE resolves through it. */
         i_look = chimera_vfs_compound_add_lookup(cp, "nd", 2, 0);
 
@@ -983,7 +983,7 @@ main(
 
         /* The name is gone, and a second REMOVE says so rather than the
          * sequence swallowing it. */
-        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2);
 
@@ -1009,7 +1009,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0600;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "sa", 2,
                                                CHIMERA_VFS_OPEN_CREATE |
@@ -1028,11 +1028,11 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = 0640;
 
-        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "sa", 2, 0);
-        i_sa  = chimera_vfs_compound_add_setattr(cp, NULL, &sattr,
-                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+        i_sa = chimera_vfs_compound_add_setattr(cp, NULL, &sattr,
+                                                CHIMERA_VFS_ATTR_MASK_STAT);
         i_ga6 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
 
         ctx.callbacks = 0;
@@ -1075,9 +1075,9 @@ main(
     TEST_PASS("SETATTR applies to the current object or to a borrowed handle");
 
     /* ---- READ, and the ownership of what it answers with ----
-     * The data arrives as references to the backend's buffers, not a copy, so
-     * it is owned exactly as an OPEN's handle is: the compound holds it until
-     * the caller takes it, and releases what was never taken. */
+    * The data arrives as references to the backend's buffers, not a copy, so
+    * it is owned exactly as an OPEN's handle is: the compound holds it until
+    * the caller takes it, and releases what was never taken. */
     {
         struct chimera_vfs_attrs        sattr;
         struct chimera_vfs_open_handle *oh;
@@ -1089,7 +1089,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0600;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "rd", 2,
                                                CHIMERA_VFS_OPEN_CREATE |
@@ -1147,7 +1147,7 @@ main(
         chimera_vfs_compound_free(cp);
 
         /* A READ addressing the current object needs no handle at all. */
-        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "rd", 2, 0);
         i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 4096, rdiov, 16, NULL);
@@ -1180,7 +1180,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0600;
 
-        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "wr", 2,
                                                CHIMERA_VFS_OPEN_CREATE |
@@ -1229,6 +1229,121 @@ main(
         chimera_vfs_release(ctx.vfs_thread, oh);
     }
     TEST_PASS("WRITE borrows its data; a READ behind it sees what it wrote");
+
+    /* ---- RENAME and LINK read the SAVED slot, not just the current one ----
+     * Every other name-changing op works inside one directory.  These two take
+     * a source from the saved slot and a target from the current object, which
+     * is how NFSv4 already spells them -- and it means a sequence can move a
+     * name between two directories without leaving the submission to resolve
+     * the second one. */
+    {
+        struct chimera_vfs_attrs sattr;
+        int                      i_src, i_dst, i_ren, i_look, i_link, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0755;
+
+        /* Two directories, and a file in the first. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_src = chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "rnsrc", 5, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_NODE, "f", 1, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_dst = chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "rndst", 5, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_src)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_dst)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* Move it: source directory saved, target current. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "rnsrc", 5, 0);
+        chimera_vfs_compound_add_savefh(cp);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "rndst", 5, 0);
+        i_ren = chimera_vfs_compound_add_rename(cp, "f", 1, "g", 1);
+        /* The current object is still the TARGET directory afterwards, so a
+         * lookup behind the rename finds the name it just put there. */
+        i_look = chimera_vfs_compound_add_lookup(cp, "g", 1,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_ren);
+        assert(op->status == CHIMERA_VFS_OK);
+        /* Both directories changed, and both are reported: the saved one it
+         * took the name from, and the current one it put the name in. */
+        assert(op->from_dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->from_dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(chimera_vfs_compound_op(cp, i_look)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+        TEST_PASS("RENAME moves a name from the saved directory to the current one");
+
+        /* LINK: the saved slot is the OBJECT this time, not a directory. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "rndst", 5, 0);
+        chimera_vfs_compound_add_lookup(cp, "g", 1, 0);
+        chimera_vfs_compound_add_savefh(cp);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "rnsrc", 5, 0);
+        i_link = chimera_vfs_compound_add_link(cp, "h", 1);
+        i_ga   = chimera_vfs_compound_add_lookup(cp, "h", 1,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_link);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        /* Two names for one object now. */
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->attr.va_nlink == 2);
+        chimera_vfs_compound_free(cp);
+        TEST_PASS("LINK gives the saved object a second name in the current directory");
+    }
+
+    /* ---- a RENAME with nothing saved is EINVAL, not a crash ---- */
+    {
+        int i_bad;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_bad         = chimera_vfs_compound_add_rename(cp, "a", 1, "b", 1);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        /* The adder cannot tell -- whether a SAVEFH ran is a property of the
+         * sequence as it executes -- so the refusal lands on the op. */
+        assert(chimera_vfs_compound_op(cp, i_bad)->status == CHIMERA_VFS_EINVAL);
+        chimera_vfs_compound_free(cp);
+        TEST_PASS("a RENAME with an empty saved slot is EINVAL");
+    }
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);

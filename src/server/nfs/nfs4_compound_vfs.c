@@ -74,7 +74,7 @@
 
 /* One NFSv4 op encodes to at most two VFS ops, so the NFSv4 op count is bounded
  * by the VFS compound's own limit. */
-#define NFS4_VFS_COMPOUND_MAX_OPS CHIMERA_VFS_COMPOUND_MAX_OPS
+#define NFS4_VFS_COMPOUND_MAX_OPS  CHIMERA_VFS_COMPOUND_MAX_OPS
 
 /*
  * The least reply-buffer space one READDIR entry can consume: the attribute
@@ -113,22 +113,22 @@ nfs4_vfs_readdir_max_entries(
 } /* nfs4_vfs_readdir_max_entries */
 
 struct nfs4_vfs_op {
-    uint32_t res_index;   /* index into the COMPOUND's arg/res arrays        */
-    int      vfs_lo;      /* first VFS op belonging to this NFSv4 op         */
-    int      vfs_hi;      /* last VFS op belonging to this NFSv4 op          */
-    int      vfs_aux;     /* injected helper getattr, or -1                  */
-    int      vfs_res;     /* the VFS op this NFSv4 op's result comes from    */
+    uint32_t                        res_index; /* index into the COMPOUND's arg/res arrays        */
+    int                             vfs_lo; /* first VFS op belonging to this NFSv4 op         */
+    int                             vfs_hi; /* last VFS op belonging to this NFSv4 op          */
+    int                             vfs_aux; /* injected helper getattr, or -1                  */
+    int                             vfs_res; /* the VFS op this NFSv4 op's result comes from    */
     /* OPEN: an UNCHECKED4 create asked for size 0, which truncates an object
      * that already existed.  Recorded here because the create attributes it is
      * read from are blanked by the executor once the name resolves to something
      * (CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY), which is the same
      * blanking the per-op path does and for the same reason. */
-    int      open_trunc_if_existed;
+    int                             open_trunc_if_existed;
     /* OPEN: whether the open named a child (CLAIM_NULL) rather than re-opening
      * the current filehandle (CLAIM_FH).  The two differ in what the open
      * reports back -- an open-by-handle produces no attributes and no directory
      * change info -- and so in what may be passed on from it. */
-    int      open_by_name;
+    int                             open_by_name;
     /* READ, WRITE, SETATTR: the handle this op resolved from its stateid, and
      * holds a reference to for as long as the sequence runs.  Borrowed by the
      * VFS op; released here when the sequence is over, whatever the outcome. */
@@ -136,9 +136,9 @@ struct nfs4_vfs_op {
 };
 
 struct nfs4_vfs_compound_ctx {
-    struct nfs_request *req;
-    uint32_t            num_ops;
-    struct nfs4_vfs_op  ops[NFS4_VFS_COMPOUND_MAX_OPS];
+    struct nfs_request      *req;
+    uint32_t                 num_ops;
+    struct nfs4_vfs_op       ops[NFS4_VFS_COMPOUND_MAX_OPS];
 
     /* The OPEN this sequence carries, if any -- recorded when the sequence is
      * built, because every way out of it has to go through the OPEN's own
@@ -285,7 +285,7 @@ nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
                    CHIMERA_VFS_XATTR_NAME_MAX + slack;
         case OP_LISTXATTRS:
             /* The staged name buffer, plus the result array that points into
-             * it: at most one entry per two bytes of names, 16 bytes each. */
+            * it: at most one entry per two bytes of names, 16 bytes each. */
             return 9 * (uint64_t) argop->oplistxattrs.lxa_maxcount + slack;
         case OP_SETXATTR:
         case OP_REMOVEXATTR:
@@ -404,8 +404,8 @@ nfs4_vfs_open_verifier_matches(
     uint32_t       verf_atime, verf_mtime;
 
     verf = (args->openhow.how.mode == EXCLUSIVE4) ?
-           args->openhow.how.createverf :
-           args->openhow.how.ch_createboth.cva_verf;
+        args->openhow.how.createverf :
+        args->openhow.how.ch_createboth.cva_verf;
 
     memcpy(&verf_atime, verf, sizeof(verf_atime));
     memcpy(&verf_mtime, verf + sizeof(verf_atime), sizeof(verf_mtime));
@@ -490,9 +490,9 @@ nfs4_vfs_op_fill(
 {
     const struct chimera_vfs_compound_op *vop =
         chimera_vfs_compound_op(compound, (uint32_t) map->vfs_res);
-    nfsstat4 status;
-    uint32_t requested;
-    void    *names;
+    nfsstat4                              status;
+    uint32_t                              requested;
+    void                                 *names;
 
     switch (argop->argop) {
         case OP_OPEN:
@@ -569,8 +569,8 @@ nfs4_vfs_op_fill(
                 return status;
             }
 
-            ores->status             = NFS4_OK;
-            ores->resok4.rflags      = install_rflags |
+            ores->status        = NFS4_OK;
+            ores->resok4.rflags = install_rflags |
                 OPEN4_RESULT_LOCKTYPE_POSIX;
             ores->resok4.num_attrset = 0;
 
@@ -638,13 +638,13 @@ nfs4_vfs_op_fill(
 
         case OP_CREATE:
         {
-            struct CREATE4args      *cargs = &argop->opcreate;
-            struct CREATE4res       *cres  = &resop->opcreate;
+            struct CREATE4args      *cargs   = &argop->opcreate;
+            struct CREATE4res       *cres    = &resop->opcreate;
             struct chimera_vfs_attrs applied = vop->set_attr;
             struct chimera_vfs_attrs pre     = vop->dir_pre_attr;
             struct chimera_vfs_attrs post    = vop->dir_post_attr;
 
-            cres->status        = NFS4_OK;
+            cres->status         = NFS4_OK;
             cres->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t),
                                                         req->encoding->dbuf);
             chimera_nfs_abort_if(cres->resok4.attrset == NULL,
@@ -680,8 +680,8 @@ nfs4_vfs_op_fill(
         {
             struct WRITE4res *wrres = &resop->opwrite;
 
-            wrres->status           = NFS4_OK;
-            wrres->resok4.count     = vop->written;
+            wrres->status       = NFS4_OK;
+            wrres->resok4.count = vop->written;
             /* Achieved durability, which the backend may report as more than
              * was asked for. */
             wrres->resok4.committed = vop->committed;
@@ -899,9 +899,9 @@ nfs4_vfs_compound_complete(
     uint32_t                              completed;
     uint32_t                              k;
     int                                   j;
-    nfsstat4                              status    = NFS4_OK;
-    uint32_t                              fail_res  = 0;
-    int                                   failed    = 0;
+    nfsstat4                              status   = NFS4_OK;
+    uint32_t                              fail_res = 0;
+    int                                   failed   = 0;
 
     completed = chimera_vfs_compound_num_completed(compound);
 
@@ -1181,8 +1181,8 @@ nfs4_vfs_add_open_op(
 {
     const struct OPEN4args  *args = &argop->opopen;
     struct chimera_vfs_attrs attr;
-    unsigned int             flags = 0;
-    uint32_t                 opts  = 0;
+    unsigned int             flags   = 0;
+    uint32_t                 opts    = 0;
     const char              *name    = NULL;
     int                      namelen = 0;
     uint64_t                 attr_mask;
@@ -1298,14 +1298,14 @@ nfs4_vfs_io_authorize(
     struct chimera_claim_actor       *out_owner,
     int                              *have_owner)
 {
-    struct nfs_state_table *table = &thread->shared->nfs4_state_table;
-    struct nfs_open_state  *open_state;
-    struct nfs_lock_state  *lock_state;
+    struct nfs_state_table         *table = &thread->shared->nfs4_state_table;
+    struct nfs_open_state          *open_state;
+    struct nfs_lock_state          *lock_state;
     struct chimera_vfs_open_handle *state_handle;
-    uint32_t                current_seqid;
-    void                   *state_void;
-    uint8_t                 state_type;
-    nfsstat4                status;
+    uint32_t                        current_seqid;
+    void                           *state_void;
+    uint8_t                         state_type;
+    nfsstat4                        status;
 
     *out_handle = NULL;
     *have_owner = 0;
@@ -1571,38 +1571,38 @@ chimera_nfs4_compound_try_vfs(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
-    struct chimera_vfs_compound  *compound;
-    struct nfs4_vfs_compound_ctx *ctx;
-    struct nfs_argop4            *argop;
-    uint32_t                      first, num, nenc, i, k;
-    uint8_t                       cur_fh[NFS4_FHSIZE];
-    int                           cur_fhlen = 0;
-    int                           lead_putfh, have_lookup = 0, have_getattr = 0;
-    int                           have_lookupp = 0, have_saved = 0;
-    int                           cur_moved = 0, stages_early = 0;
-    int                           may_fail_late = 0;
+    struct chimera_vfs_compound    *compound;
+    struct nfs4_vfs_compound_ctx   *ctx;
+    struct nfs_argop4              *argop;
+    uint32_t                        first, num, nenc, i, k;
+    uint8_t                         cur_fh[NFS4_FHSIZE];
+    int                             cur_fhlen = 0;
+    int                             lead_putfh, have_lookup = 0, have_getattr = 0;
+    int                             have_lookupp = 0, have_saved = 0;
+    int                             cur_moved = 0, stages_early = 0;
+    int                             may_fail_late = 0;
     /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
      * always the last op of its run. */
-    int                           open_at = -1;
+    int                             open_at = -1;
     /* Index of a SETATTR whose size change has to be authorized before the
      * sequence runs, or -1. */
-    int                           setattr_at = -1;
+    int                             setattr_at = -1;
     /* Set when the scan meets an op the sequence cannot carry: the run ends in
      * front of it, and the dispatcher picks up from there. */
-    int                           stop = 0;
+    int                             stop = 0;
     /* The seed PUTFH the sequence always opens with. */
-    uint32_t                      vfs_ops = 1;
-    uint64_t                      reply_bound = 0, avail;
-    int                           idx, next;
-    int                           open_4_0_pinned = 0;
-    struct chimera_vfs_open_handle *setattr_handle = NULL;
+    uint32_t                        vfs_ops = 1;
+    uint64_t                        reply_bound = 0, avail;
+    int                             idx, next;
+    int                             open_4_0_pinned = 0;
+    struct chimera_vfs_open_handle *setattr_handle  = NULL;
 
     first = (uint32_t) req->index;
     num   = req->res_compound.num_resarray;
     /* One past the last op the sequence will carry.  Normally the whole
      * remainder; an op that ends the run (see nfs4_vfs_op_ends_run) pulls it
      * in, and what is left is dispatched op by op afterwards. */
-    nenc  = num;
+    nenc = num;
 
     if (first >= num) {
         return 0;
@@ -1681,10 +1681,10 @@ chimera_nfs4_compound_try_vfs(
                  * sequence runs under, which is fixed at submission. */
                 if (i != first) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 break;
 
@@ -1692,10 +1692,10 @@ chimera_nfs4_compound_try_vfs(
                 if (chimera_nfs4_validate_name(&argop->oplookup.objname) !=
                     NFS4_OK) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 have_lookup = 1;
                 cur_moved   = 1;
@@ -1711,10 +1711,10 @@ chimera_nfs4_compound_try_vfs(
                  * sequence has already run past it. */
                 if (cur_moved) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 have_lookupp = 1;
                 cur_moved    = 1;
@@ -1732,10 +1732,10 @@ chimera_nfs4_compound_try_vfs(
                  * was submitted. */
                 if (!have_saved) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 cur_moved = 1;
                 break;
@@ -1748,20 +1748,20 @@ chimera_nfs4_compound_try_vfs(
                     argop->opreaddir.cookie == 1 ||
                     argop->opreaddir.cookie == 2) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 if (chimera_nfs4_validate_getattr_request(
                         argop->opreaddir.num_attr_request,
                         argop->opreaddir.attr_request) != NFS4_OK) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* Per-entry ACLs are dropped for the same reason a GETATTR's
@@ -1770,10 +1770,10 @@ chimera_nfs4_compound_try_vfs(
                 if (argop->opreaddir.num_attr_request >= 1 &&
                     (argop->opreaddir.attr_request[0] & (1U << FATTR4_ACL))) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* A page the sequence could fill and the reply could not is
@@ -1783,20 +1783,20 @@ chimera_nfs4_compound_try_vfs(
                                                  avail) >
                     CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 break;
 
             case OP_GETXATTR:
                 if (!nfs4_vfs_xattr_name_ok(argop->opgetxattr.gxa_name.len)) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 break;
 
@@ -1804,10 +1804,10 @@ chimera_nfs4_compound_try_vfs(
                 if (may_fail_late ||
                     !nfs4_vfs_xattr_name_ok(argop->opsetxattr.sxa_key.len)) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* RFC 8276 §8.3: only the three defined option values are
@@ -1816,10 +1816,10 @@ chimera_nfs4_compound_try_vfs(
                     argop->opsetxattr.sxa_option != SETXATTR4_CREATE &&
                     argop->opsetxattr.sxa_option != SETXATTR4_REPLACE) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 break;
 
@@ -1827,10 +1827,10 @@ chimera_nfs4_compound_try_vfs(
                 if (may_fail_late ||
                     !nfs4_vfs_xattr_name_ok(argop->opremovexattr.rxa_name.len)) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 break;
 
@@ -1839,10 +1839,10 @@ chimera_nfs4_compound_try_vfs(
                         argop->opgetattr.num_attr_request,
                         argop->opgetattr.attr_request) != NFS4_OK) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* A backend owns the ACL it reports only for the duration of
@@ -1853,10 +1853,10 @@ chimera_nfs4_compound_try_vfs(
                 if (argop->opgetattr.num_attr_request >= 1 &&
                     (argop->opgetattr.attr_request[0] & (1U << FATTR4_ACL))) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
                 have_getattr = 1;
                 break;
@@ -2077,10 +2077,10 @@ chimera_nfs4_compound_try_vfs(
                  * after the sequence has run may precede it. */
                 if (may_fail_late) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* 4.0 classifies the open_owner's seqid before any VFS work,
@@ -2092,10 +2092,10 @@ chimera_nfs4_compound_try_vfs(
                  * chimera_nfs4_open_finish. */
                 if (req->minorversion == 0 && i != first) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* Only the two claims that are an ordinary open of a name or of
@@ -2105,10 +2105,10 @@ chimera_nfs4_compound_try_vfs(
                 if (oa->claim.claim != CLAIM_NULL &&
                     oa->claim.claim != CLAIM_FH) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* RFC 8881 §18.16.3: an EXCLUSIVE4_1 attribute outside
@@ -2138,19 +2138,19 @@ chimera_nfs4_compound_try_vfs(
                 if ((oa->share_access & (OPEN4_SHARE_ACCESS_READ |
                                          OPEN4_SHARE_ACCESS_WRITE)) == 0) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 if (oa->claim.claim == CLAIM_NULL &&
                     chimera_nfs4_validate_name(&oa->claim.file) != NFS4_OK) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 if (oa->openhow.opentype == OPEN4_CREATE &&
@@ -2160,23 +2160,23 @@ chimera_nfs4_compound_try_vfs(
                             oa->openhow.how.createattrs.num_attrmask,
                             oa->openhow.how.createattrs.attrmask) != NFS4_OK) {
                         {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                            nenc = i;
+                            stop = 1;
+                            break;
+                        }
                     }
 
                     /* An ACL in the create attributes would have to survive
-                     * from the moment the sequence is built to the moment it
-                     * runs, and the sequence deliberately carries no ACL. */
+                    * from the moment the sequence is built to the moment it
+                    * runs, and the sequence deliberately carries no ACL. */
                     if (oa->openhow.how.createattrs.num_attrmask >= 1 &&
                         (oa->openhow.how.createattrs.attrmask[0] &
                          (1U << FATTR4_ACL))) {
                         {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                            nenc = i;
+                            stop = 1;
+                            break;
+                        }
                     }
                 }
 
@@ -2188,10 +2188,10 @@ chimera_nfs4_compound_try_vfs(
                                             req->session->client_unified : NULL,
                                             false) != NFS4_OK) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 if (req->minorversion > 0 && req->session &&
@@ -2199,10 +2199,10 @@ chimera_nfs4_compound_try_vfs(
                         &thread->shared->nfs4_shared_clients,
                         req->session->nfs4_session_clientid)) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* A delegation grant can park on an in-flight CB_NULL probe,
@@ -2215,10 +2215,10 @@ chimera_nfs4_compound_try_vfs(
                 if (chimera_server_config_get_nfs4_delegations(
                         thread->shared->config)) {
                     {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* Everything after an OPEN is dispatched op by op. */
@@ -2431,7 +2431,7 @@ chimera_nfs4_compound_try_vfs(
 
             case OP_READLINK:
                 /* The type gate READLINK applies before it reads. */
-                idx          = chimera_vfs_compound_add_getattr(
+                idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_aux = idx;
 
@@ -2454,9 +2454,9 @@ chimera_nfs4_compound_try_vfs(
             case OP_READ:
             case OP_WRITE:
             {
-                const struct stateid4 *sid = (argop->argop == OP_READ) ?
+                const struct stateid4     *sid = (argop->argop == OP_READ) ?
                     &argop->opread.stateid : &argop->opwrite.stateid;
-                uint32_t               want = (argop->argop == OP_READ) ?
+                uint32_t                   want = (argop->argop == OP_READ) ?
                     OPEN4_SHARE_ACCESS_READ : OPEN4_SHARE_ACCESS_WRITE;
                 struct chimera_claim_actor io_owner;
                 int                        have_owner = 0;
@@ -2522,8 +2522,8 @@ chimera_nfs4_compound_try_vfs(
                     NULL, 0);
 
                 if ((int) i == setattr_at) {
-                    map->io_handle  = setattr_handle;
-                    setattr_handle  = NULL;
+                    map->io_handle = setattr_handle;
+                    setattr_handle = NULL;
                 }
 
                 idx = chimera_vfs_compound_add_setattr(compound,
@@ -2534,7 +2534,7 @@ chimera_nfs4_compound_try_vfs(
             }
 
             case OP_REMOVE:
-                idx          = chimera_vfs_compound_add_remove(
+                idx = chimera_vfs_compound_add_remove(
                     compound,
                     (const char *) argop->opremove.target.data,
                     (int) argop->opremove.target.len);
@@ -2546,7 +2546,7 @@ chimera_nfs4_compound_try_vfs(
                 ctx->open_res_index = i;
                 idx                 = nfs4_vfs_add_open_op(req, compound,
                                                            argop, map);
-                map->vfs_res        = idx;
+                map->vfs_res = idx;
                 break;
 
             case OP_SAVEFH:
@@ -2563,7 +2563,7 @@ chimera_nfs4_compound_try_vfs(
                 /* The regular-file gate COMMIT applies before it flushes, from
                  * a stat of the object taken through a path open -- the same
                  * two-open shape the per-op path has. */
-                idx          = chimera_vfs_compound_add_getattr(
+                idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_aux = idx;
 
@@ -2592,12 +2592,12 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_GETXATTR:
-                idx = nfs4_vfs_add_xattr_op(req, compound, argop);
+                idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
                 map->vfs_res = idx;
                 break;
 
             case OP_SETXATTR:
-                idx = nfs4_vfs_add_xattr_op(req, compound, argop);
+                idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
                 map->vfs_res = idx;
                 break;
 
@@ -2611,7 +2611,7 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_REMOVEXATTR:
-                idx = nfs4_vfs_add_xattr_op(req, compound, argop);
+                idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
                 map->vfs_res = idx;
                 break;
 

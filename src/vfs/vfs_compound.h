@@ -140,6 +140,30 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_CREATE,
     /* Unlink `name` from the current object, which stays current.  MUTATES. */
     CHIMERA_VFS_COMPOUND_OP_REMOVE,
+    /* Rename `name` in the SAVED object to `new_name` in the current object.
+     * The current object stays current.  MUTATES.
+     *
+     * The only two ops here that address the saved slot as well as the current
+     * one, and they do it because the operations themselves take two
+     * directories.  That is not a special case invented for the compound: it
+     * is how NFSv4 already spells them -- RENAME takes its source directory
+     * from the saved filehandle and its target from the current one, LINK its
+     * source object from saved and its target directory from current -- so a
+     * caller that has SAVEFH'd where it came from has already said everything
+     * these need.
+     *
+     * Neither opens anything.  rename_at and link_at take file handles, and
+     * the saved slot holds a file handle (see SAVEFH), so the pair costs no
+     * open that the op-at-a-time path would not also have paid.
+     *
+     * RENAME reports BOTH directories' change_info -- from_dir_* for the saved
+     * one and dir_* for the current one -- because rename_at hands back both
+     * and a protocol reply has a slot for each. */
+    CHIMERA_VFS_COMPOUND_OP_RENAME,
+    /* Link the SAVED object into the current object as `name`.  The current
+     * object stays current.  MUTATES.  See RENAME for why these two read the
+     * saved slot. */
+    CHIMERA_VFS_COMPOUND_OP_LINK,
     /* Read from the current object, or from `in_handle`.  The data comes back
      * as iovecs referencing the backend's own buffers rather than a copy, so
      * they carry references and are owned the way an OPEN's handle is -- see
@@ -165,8 +189,8 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR,
 };
 
-#define CHIMERA_VFS_COMPOUND_MAX_OPS  32
-#define CHIMERA_VFS_COMPOUND_NAME_MAX 255
+#define CHIMERA_VFS_COMPOUND_MAX_OPS             32
+#define CHIMERA_VFS_COMPOUND_NAME_MAX            255
 
 /*
  * A READDIR's result is a page, not the whole directory: the caller says how
@@ -215,7 +239,7 @@ enum chimera_vfs_compound_create_type {
  * socket or device can block or report a backend-specific errno where a
  * protocol wants to answer for the type.  The op fails, and `existing_mode`
  * carries the mode so the caller can say what it wants about it. */
-#define CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY   (1U << 0)
+#define CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY         (1U << 0)
 /* Apply `set_attr` only if the open actually creates the object.  An open that
  * finds an existing one leaves it alone.  (NFS4 UNCHECKED4 and NFS3 UNCHECKED
  * both mean this: the create attributes describe a creation, not an open.) */
@@ -241,59 +265,63 @@ struct chimera_vfs_compound_dirent {
 };
 
 struct chimera_vfs_compound_op {
-    uint8_t                type;
+    uint8_t                             type;
     /* CHIMERA_VFS_UNSET until the op has run. */
-    enum chimera_vfs_error status;
+    enum chimera_vfs_error              status;
 
     /* ---- arguments ---- */
-    uint8_t                arg_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t               arg_fh_len;
-    char                   name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
-    uint32_t               name_len;
-    uint64_t               attr_mask;
-    uint32_t               requested;
-    uint64_t               offset;      /* COMMIT                             */
-    uint64_t               count;       /* COMMIT                             */
-    uint64_t               cookie;      /* READDIR, LISTXATTRS                */
-    uint64_t               verifier;    /* READDIR                            */
-    uint32_t               dircount;    /* READDIR (advisory; see the adder)  */
-    uint32_t               maxcount;    /* READDIR (advisory; see the adder)  */
-    uint32_t               max_entries; /* READDIR                            */
+    uint8_t                             arg_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            arg_fh_len;
+    char                                name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    uint32_t                            name_len;
+    uint64_t                            attr_mask;
+    uint32_t                            requested;
+    uint64_t                            offset; /* COMMIT                             */
+    uint64_t                            count; /* COMMIT                             */
+    uint64_t                            cookie; /* READDIR, LISTXATTRS                */
+    uint64_t                            verifier; /* READDIR                            */
+    uint32_t                            dircount; /* READDIR (advisory; see the adder)  */
+    uint32_t                            maxcount; /* READDIR (advisory; see the adder)  */
+    uint32_t                            max_entries; /* READDIR                            */
     /* Address this handle instead of the current object.  BORROWED from the
      * caller -- see ADDRESSING SOMETHING OTHER THAN CURRENT above.  NULL for
      * every op that addresses the current object, which is most of them. */
-    struct chimera_vfs_open_handle *in_handle;
-    uint8_t                create_type; /* CREATE                             */
+    struct chimera_vfs_open_handle     *in_handle;
+    uint8_t                             create_type; /* CREATE                             */
     /* CREATE of a symlink: its target.  Copied by the adder and owned by the
      * compound, so the caller need not keep it alive. */
-    char                  *link_target;
-    uint32_t               link_target_len;
-    unsigned int           open_flags;  /* OPEN: CHIMERA_VFS_OPEN_*           */
-    uint32_t               open_opts;   /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
+    char                               *link_target;
+    uint32_t                            link_target_len;
+    /* RENAME: the name in the CURRENT object to rename to.  `name` is the one
+     * in the saved object to rename from. */
+    char                                new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    uint32_t                            new_name_len;
+    unsigned int                        open_flags; /* OPEN: CHIMERA_VFS_OPEN_*           */
+    uint32_t                            open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
     /* OPEN and CREATE: attributes to apply to a created object.  Read by the
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
      * name has been resolved. */
-    struct chimera_vfs_attrs set_attr;
-    uint32_t               xattr_option; /* SETXATTR                          */
-    const void            *xattr_value; /* SETXATTR (borrowed from caller)    */
-    uint32_t               xattr_value_len;
-    uint32_t               buffer_max;  /* GETXATTR, LISTXATTRS               */
-    int                    max_iov;     /* READ                               */
+    struct chimera_vfs_attrs            set_attr;
+    uint32_t                            xattr_option; /* SETXATTR                          */
+    const void                         *xattr_value; /* SETXATTR (borrowed from caller)    */
+    uint32_t                            xattr_value_len;
+    uint32_t                            buffer_max; /* GETXATTR, LISTXATTRS               */
+    int                                 max_iov; /* READ                               */
     /* WRITE: the data, BORROWED from the caller -- see ADDRESSING SOMETHING
      * OTHER THAN CURRENT, which these are owned on the same terms as. */
-    struct evpl_iovec     *w_iov;
-    int                    w_niov;
-    uint32_t               sync;        /* WRITE: requested stability         */
+    struct evpl_iovec                  *w_iov;
+    int                                 w_niov;
+    uint32_t                            sync; /* WRITE: requested stability         */
     /* READ, WRITE: whose I/O this is.  A caller holding a lease on the object
      * has to say so, or the claim layer arbitrates its own I/O against its own
      * reservation -- denying the write, and recalling the delegation the write
      * is being done under. */
-    struct chimera_claim_actor io_owner;
-    uint8_t                have_io_owner;
+    struct chimera_claim_actor          io_owner;
+    uint8_t                             have_io_owner;
     /* Executor scratch: whether the two-step I/O type check has run.  Lives on
      * the op only so the open-flags decision, which sees an op and not the
      * sequence, can tell the two steps apart. */
-    uint8_t                io_typechecked_flag;
+    uint8_t                             io_typechecked_flag;
 
     /* ---- results ---- */
     /* LOOKUP, GETATTR, ACCESS.  va_acl is always NULL here and the ACL bit is
@@ -303,55 +331,61 @@ struct chimera_vfs_compound_op {
      * pointer that looks valid and is not, the sequence drops it -- a caller
      * that needs an ACL issues that getattr itself.  ACCESS's `granted` is
      * computed while the ACL is still live, so it is unaffected. */
-    struct chimera_vfs_attrs attr;
+    struct chimera_vfs_attrs            attr;
     /* The current object AFTER this op ran: what a LOOKUP resolved, what a
      * PUTFH selected, and for everything else the object the op addressed.
      * A caller that must describe the object an op acted on -- which is most
      * of what a protocol reply is -- would otherwise have to re-derive it. */
-    uint8_t                  fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                 fh_len;
-    uint32_t                 granted;   /* ACCESS                            */
-    char                    *target;    /* READLINK (owned by the compound)  */
-    uint32_t                 target_len;
+    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            fh_len;
+    uint32_t                            granted; /* ACCESS                            */
+    char                               *target; /* READLINK (owned by the compound)  */
+    uint32_t                            target_len;
 
     /* SETXATTR, REMOVEXATTR.  Only the ctime is kept: it is the whole of what
      * a change_info reply needs, and keeping two more attribute sets per op
      * would double the size of a sequence for one field. */
-    struct timespec          pre_ctime;
-    struct timespec          post_ctime;
+    struct timespec                     pre_ctime;
+    struct timespec                     post_ctime;
 
     /* ---- READ results ---- */
     /* The data, as references to the backend's buffers, written into the array
      * the caller supplied.  The references are owned by the compound until
      * chimera_vfs_compound_take_iov(); the array never is. */
-    struct evpl_iovec              *iov;
-    int                             niov;
-    uint32_t                        read_len;
-    uint32_t                        eof_read;
+    struct evpl_iovec                  *iov;
+    int                                 niov;
+    uint32_t                            read_len;
+    uint32_t                            eof_read;
 
     /* ---- WRITE results ---- */
-    uint32_t                        written;
+    uint32_t                            written;
     /* Durability actually achieved, which may exceed what was asked for and
      * may fall short of it only by the backend's own report. */
-    uint32_t                        committed;
+    uint32_t                            committed;
 
     /* ---- OPEN results ---- */
     /* The open handle, owned by the CALLER once the sequence has finished --
      * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed. */
-    struct chimera_vfs_open_handle *out_handle;
+    struct chimera_vfs_open_handle     *out_handle;
     /* Whether the open created the object. */
-    uint8_t                         created;
+    uint8_t                             created;
     /* Set when the executor resolved the name before opening (which it does
      * for REGULAR_ONLY or ATTRS_ON_CREATE_ONLY) and found an existing object.
      * `existing_mode` is that object's mode -- the whole point of the
      * REGULAR_ONLY failure, whose status says only that the open was refused
      * and not what was in the way. */
-    uint8_t                         existed;
-    uint32_t                        existing_mode;
+    uint8_t                             existed;
+    uint32_t                            existing_mode;
     /* The parent directory before and after, for a change_info reply.  Set by
      * CREATE and REMOVE, and by an OPEN that named a child. */
-    struct chimera_vfs_attrs        dir_pre_attr;
-    struct chimera_vfs_attrs        dir_post_attr;
+    struct chimera_vfs_attrs            dir_pre_attr;
+    struct chimera_vfs_attrs            dir_post_attr;
+    /* RENAME only: the SOURCE directory's change_info.  The pair above is the
+     * target's, which is what every other name-changing op reports.  Both are
+     * filled because rename_at hands back both and NFSv4's RENAME reply has a
+     * slot for each -- source_cinfo and target_cinfo. */
+    struct chimera_vfs_attrs            from_dir_pre_attr;
+    struct chimera_vfs_attrs            from_dir_post_attr;
 
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
     struct chimera_vfs_compound_dirent *entries;
@@ -558,6 +592,25 @@ chimera_vfs_compound_add_create(
     const struct chimera_vfs_attrs *set_attr,
     uint64_t                        attr_mask);
 
+/* Rename `name` in the saved object to `new_name` in the current object.  A
+ * sequence that reaches this without a SAVEFH fails the op with EINVAL, the
+ * same answer RESTOREFH gives an empty saved slot -- the adder cannot tell,
+ * because whether a SAVEFH ran is a property of the sequence as it executes. */
+int
+chimera_vfs_compound_add_rename(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen,
+    const char                  *new_name,
+    int                          new_namelen);
+
+/* Link the saved object into the current object as `name`. */
+int
+chimera_vfs_compound_add_link(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen);
+
 /* Unlink `name` from the current object, which stays current. */
 int
 chimera_vfs_compound_add_remove(
@@ -578,12 +631,12 @@ chimera_vfs_compound_add_remove(
  * see OPEN HANDLE OWNERSHIP. */
 int
 chimera_vfs_compound_add_read(
-    struct chimera_vfs_compound    *compound,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint32_t                        count,
-    struct evpl_iovec              *iov,
-    int                             max_iov,
+    struct chimera_vfs_compound      *compound,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    struct evpl_iovec                *iov,
+    int                               max_iov,
     const struct chimera_claim_actor *io_owner);
 
 /* Write `count` bytes of `iov` at `offset` to the current object, or -- when
@@ -592,13 +645,13 @@ chimera_vfs_compound_add_read(
  * them afterwards. */
 int
 chimera_vfs_compound_add_write(
-    struct chimera_vfs_compound    *compound,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint32_t                        count,
-    uint32_t                        sync,
-    struct evpl_iovec              *iov,
-    int                             niov,
+    struct chimera_vfs_compound      *compound,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    uint32_t                          sync,
+    struct evpl_iovec                *iov,
+    int                               niov,
     const struct chimera_claim_actor *io_owner);
 
 /* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
