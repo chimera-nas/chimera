@@ -298,38 +298,6 @@ nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
 } /* nfs4_vfs_op_reply_bound */
 
 /*
- * The check an injected helper getattr exists for: PUTFH's zero-link staleness
- * rule and READLINK's symlink type gate.  Applied before the op's own VFS
- * status, because in the per-op path it is what decides whether the operation
- * proceeds at all.
- */
-static nfsstat4
-nfs4_vfs_op_precheck(
-    struct nfs_request                   *req,
-    uint32_t                              argop,
-    const struct chimera_vfs_compound_op *aux)
-{
-    switch (argop) {
-        case OP_PUTFH:
-            return chimera_nfs4_putfh_check_stale(req, &aux->attr,
-                                                  aux->fh, (int) aux->fh_len);
-        case OP_READLINK:
-            return chimera_nfs4_readlink_check_type(&aux->attr);
-        case OP_COMMIT:
-            /* RFC 7530 §16.4: COMMIT applies only to a regular file, and the
-             * per-op path establishes that from a stat before it opens the
-             * object for data. */
-            if ((aux->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-                !S_ISREG(aux->attr.va_mode)) {
-                return chimera_nfs4_data_nonreg_status(aux->attr.va_mode);
-            }
-            return NFS4_OK;
-        default:
-            return NFS4_OK;
-    } /* switch */
-} /* nfs4_vfs_op_precheck */
-
-/*
  * Marshal a READDIR page from the entries the sequence collected.
  *
  * The executor stops at its own entry bound; the reply's maxcount is applied
@@ -954,16 +922,37 @@ nfs4_vfs_compound_gate(
             continue;
         }
 
-        if (req->args_compound->argarray[map->res_index].argop != OP_PUTFH) {
-            return;
-        }
-
         aux = chimera_vfs_compound_op(compound, index);
 
-        if (chimera_nfs4_putfh_check_stale(req, &aux->attr, aux->fh,
-                                           (int) aux->fh_len) != NFS4_OK) {
-            *status = CHIMERA_VFS_ESTALE;
-        }
+        switch (req->args_compound->argarray[map->res_index].argop) {
+            case OP_PUTFH:
+                if (chimera_nfs4_putfh_check_stale(req, &aux->attr, aux->fh,
+                                                   (int) aux->fh_len) !=
+                    NFS4_OK) {
+                    *status = CHIMERA_VFS_ESTALE;
+                }
+                break;
+
+            case OP_READLINK:
+                /* RFC 7530 §16.25: READLINK applies to a symbolic link. */
+                if (!(aux->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+                    *status = CHIMERA_VFS_EFAULT;
+                } else if (!S_ISLNK(aux->attr.va_mode)) {
+                    *status = CHIMERA_VFS_EINVAL;
+                }
+                break;
+
+            case OP_COMMIT:
+                /* RFC 7530 §16.4: COMMIT applies to a regular file. */
+                if ((aux->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+                    !S_ISREG(aux->attr.va_mode)) {
+                    *status = chimera_vfs_nonreg_error(aux->attr.va_mode);
+                }
+                break;
+
+            default:
+                break;
+        } /* switch */
 
         return;
     }
@@ -1015,22 +1004,6 @@ nfs4_vfs_compound_complete(
             fail_res = map->res_index;
             failed   = 1;
             break;
-        }
-
-        if (map->vfs_aux >= 0) {
-            const struct chimera_vfs_compound_op *aux =
-                chimera_vfs_compound_op(compound, (uint32_t) map->vfs_aux);
-
-            if (aux->status == CHIMERA_VFS_OK) {
-                status = nfs4_vfs_op_precheck(req, argop->argop, aux);
-
-                if (status != NFS4_OK) {
-                    resop->opillegal.status = status;
-                    fail_res                = map->res_index;
-                    failed                  = 1;
-                    break;
-                }
-            }
         }
 
         for (j = map->vfs_lo; j <= map->vfs_hi; j++) {
@@ -1772,12 +1745,12 @@ chimera_nfs4_compound_try_vfs(
          * COMMIT's type gates) and READDIR, whose page can come back too small
          * to carry an entry.  Nothing that mutates may follow one -- see the
          * MUTATION note at the top. */
+        /* READDIR alone.  Every other NFSv4-side check runs in the gate now, as
+         * its op finishes, so it stops what is behind it instead of reporting
+         * after the fact -- see nfs4_vfs_compound_gate.  READDIR's cannot: its
+         * page is judged while being marshalled into the reply, which is the
+         * fill, and there is no earlier moment at which the answer exists. */
         switch (argop->argop) {
-            /* PUTFH is absent: its staleness rule runs in the gate, during the
-             * sequence, so it stops what is behind it rather than reporting
-             * after the fact.  See nfs4_vfs_compound_gate. */
-            case OP_READLINK:
-            case OP_COMMIT:
             case OP_READDIR:
                 may_fail_late = 1;
                 break;
