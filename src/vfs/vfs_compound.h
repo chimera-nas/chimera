@@ -111,6 +111,17 @@ enum chimera_vfs_compound_op_type {
      * Unlike every other op here, an OPEN produces a resource the caller keeps:
      * the open handle.  See OPEN HANDLE OWNERSHIP below. */
     CHIMERA_VFS_COMPOUND_OP_OPEN,
+    /* Create `name` in the current object; the new object becomes current.
+     * What is created is chosen by `create_type`, because the three shapes take
+     * different arguments -- a directory takes only attributes, a node takes
+     * its type and device numbers in the mode and rdev of those attributes, and
+     * a symlink takes a target.  MUTATES.
+     *
+     * (An ordinary file is not one of them: a protocol creates one by OPENing
+     * it, so that the create and the open it is for are a single act.) */
+    CHIMERA_VFS_COMPOUND_OP_CREATE,
+    /* Unlink `name` from the current object, which stays current.  MUTATES. */
+    CHIMERA_VFS_COMPOUND_OP_REMOVE,
     /* Extended attributes of the current object.  SETXATTR and REMOVEXATTR
      * MUTATE -- see the MUTATION note above. */
     CHIMERA_VFS_COMPOUND_OP_GETXATTR,
@@ -140,6 +151,16 @@ enum chimera_vfs_compound_op_type {
  * whose reply holds 32 entries pays for 32.
  */
 #define CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES 512
+
+/* What a CREATE makes. */
+enum chimera_vfs_compound_create_type {
+    CHIMERA_VFS_COMPOUND_CREATE_DIR = 0,
+    /* Device, socket or FIFO.  Which one is carried in set_attr's va_mode, and
+     * a device's numbers in its va_rdev -- the same way the underlying mknod
+     * takes them, so there is nothing here to translate. */
+    CHIMERA_VFS_COMPOUND_CREATE_NODE,
+    CHIMERA_VFS_COMPOUND_CREATE_SYMLINK,
+};
 
 /*
  * OPEN options.  These express the two things a protocol open wants that a
@@ -203,11 +224,16 @@ struct chimera_vfs_compound_op {
     uint32_t               dircount;    /* READDIR (advisory; see the adder)  */
     uint32_t               maxcount;    /* READDIR (advisory; see the adder)  */
     uint32_t               max_entries; /* READDIR                            */
+    uint8_t                create_type; /* CREATE                             */
+    /* CREATE of a symlink: its target.  Copied by the adder and owned by the
+     * compound, so the caller need not keep it alive. */
+    char                  *link_target;
+    uint32_t               link_target_len;
     unsigned int           open_flags;  /* OPEN: CHIMERA_VFS_OPEN_*           */
     uint32_t               open_opts;   /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
-    /* OPEN: attributes to apply to a created object.  Read by the executor at
-     * execution time, so ATTRS_ON_CREATE_ONLY can clear it once the name has
-     * been resolved. */
+    /* OPEN and CREATE: attributes to apply to a created object.  Read by the
+     * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
+     * name has been resolved. */
     struct chimera_vfs_attrs set_attr;
     uint32_t               xattr_option; /* SETXATTR                          */
     const void            *xattr_value; /* SETXATTR (borrowed from caller)    */
@@ -252,8 +278,8 @@ struct chimera_vfs_compound_op {
      * and not what was in the way. */
     uint8_t                         existed;
     uint32_t                        existing_mode;
-    /* The parent directory before and after, for a change_info reply.  Only
-     * meaningful for an OPEN that named a child. */
+    /* The parent directory before and after, for a change_info reply.  Set by
+     * CREATE and REMOVE, and by an OPEN that named a child. */
     struct chimera_vfs_attrs        dir_pre_attr;
     struct chimera_vfs_attrs        dir_post_attr;
 
@@ -447,6 +473,27 @@ const struct chimera_vfs_compound_op *
 chimera_vfs_compound_op(
     const struct chimera_vfs_compound *compound,
     uint32_t                           index);
+
+/* Create `name` in the current object; it becomes current.  `set_attr` may be
+ * NULL.  `target` is the symlink target and is required for -- and only read
+ * for -- CHIMERA_VFS_COMPOUND_CREATE_SYMLINK; it is copied. */
+int
+chimera_vfs_compound_add_create(
+    struct chimera_vfs_compound    *compound,
+    uint8_t                         create_type,
+    const char                     *name,
+    int                             namelen,
+    const char                     *target,
+    int                             targetlen,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+/* Unlink `name` from the current object, which stays current. */
+int
+chimera_vfs_compound_add_remove(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen);
 
 /* Take ownership of an OPEN's handle: returns it and clears out_handle, so the
  * compound will not release it and the caller must.  NULL if that op is not an
