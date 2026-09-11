@@ -17,6 +17,7 @@
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_acl.h"
@@ -354,6 +355,10 @@ struct chimera_fuse_request {
     /* Transient VFS handle for the op in flight; released by the terminal
      * completion before the reply. */
     struct chimera_vfs_open_handle *handle;
+    /* The VFS sequence this request submitted, freed with the request.  A
+     * sequence opens what it needs and releases it with itself, so a request
+     * driving one carries no handle of its own. */
+    struct chimera_vfs_compound    *compound;
     /* OPEN/CREATE result carrier. */
     struct chimera_fuse_open_file  *file;
     /* Receive buffer; request field pointers (names, write payload) point

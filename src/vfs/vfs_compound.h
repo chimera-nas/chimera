@@ -68,6 +68,14 @@
  * An in_handle does not move the current object.  The op acts on the handle;
  * the sequence's own idea of where it is stays where it was.
  *
+ * It names the object the op ACTS ON, so it is accepted by every op that
+ * addresses one -- the I/O ops, SETATTR, GETATTR, ACCESS, READLINK, COMMIT,
+ * READDIR and the xattr ops.  An op that resolves a NAME (LOOKUP, CREATE,
+ * REMOVE, RENAME, LINK, a named OPEN) takes its directory from the current
+ * object instead: there the handle is where the name is looked up rather than
+ * the thing being acted on, and a caller that wants a different directory says
+ * so by making it current.
+ *
  * OPEN HANDLE OWNERSHIP.  Most ops leave nothing behind: the executor opens
  * what it needs, and releases it when the current object moves on or the
  * sequence ends.  Two are different, because what they produce is the whole
@@ -703,6 +711,15 @@ chimera_vfs_compound_add_setattr(
     struct chimera_vfs_open_handle *handle,
     const struct chimera_vfs_attrs *set_attr,
     uint64_t                        attr_mask);
+
+/* Give an op the handle it should act on, after appending it -- see ADDRESSING
+ * SOMETHING OTHER THAN CURRENT.  Separate from the adders because most callers
+ * address the current object and would carry an argument they never use. */
+void
+chimera_vfs_compound_op_set_handle(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    struct chimera_vfs_open_handle *handle);
 
 /* Take ownership of an OPEN's handle: returns it and clears out_handle, so the
  * compound will not release it and the caller must.  NULL if that op is not an
