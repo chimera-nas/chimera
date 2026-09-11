@@ -578,6 +578,33 @@ chimera_vfs_compound_add_remove(
 } /* chimera_vfs_compound_add_remove */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_setattr(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_SETATTR, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle = handle;
+    op->attr_mask = attr_mask;
+
+    if (set_attr) {
+        op->set_attr = *set_attr;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_setattr */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_open(
     struct chimera_vfs_compound    *compound,
     const char                     *name,
@@ -1175,6 +1202,30 @@ chimera_vfs_compound_symlink_callback(
 } /* chimera_vfs_compound_symlink_callback */
 
 static void
+chimera_vfs_compound_setattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) pre_attr;
+    (void) set_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    chimera_vfs_compound_store_attr(op, post_attr);
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_setattr_callback */
+
+static void
 chimera_vfs_compound_remove_callback(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,
@@ -1216,6 +1267,11 @@ chimera_vfs_compound_remove_callback(
 static unsigned int
 chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
 {
+    /* An op that brought its own handle needs nothing opened for it. */
+    if (op->in_handle) {
+        return 0;
+    }
+
     switch (op->type) {
         case CHIMERA_VFS_COMPOUND_OP_OPEN:
             return op->name_len ? (CHIMERA_VFS_OPEN_INFERRED |
@@ -1231,6 +1287,7 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
         case CHIMERA_VFS_COMPOUND_OP_ACCESS:
         case CHIMERA_VFS_COMPOUND_OP_READLINK:
+        case CHIMERA_VFS_COMPOUND_OP_SETATTR:
             return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
         case CHIMERA_VFS_COMPOUND_OP_GETXATTR:
@@ -1435,6 +1492,28 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                          compound);
                     break;
             } /* switch */
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_SETATTR:
+            /* With the caller's own handle the change is authorized by that
+             * open's grant rather than re-checked against the object's mode --
+             * the difference between ftruncate(2) and truncate(2), and the
+             * whole reason a caller hands a handle in. */
+            if (op->in_handle) {
+                chimera_vfs_fsetattr(compound->thread, compound->cred,
+                                     op->in_handle,
+                                     &op->set_attr,
+                                     0, op->attr_mask,
+                                     chimera_vfs_compound_setattr_callback,
+                                     compound);
+            } else {
+                chimera_vfs_setattr(compound->thread, compound->cred,
+                                    compound->handle,
+                                    &op->set_attr,
+                                    0, op->attr_mask,
+                                    chimera_vfs_compound_setattr_callback,
+                                    compound);
+            }
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_REMOVE:

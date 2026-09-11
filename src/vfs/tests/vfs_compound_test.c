@@ -995,6 +995,85 @@ main(
     }
     TEST_PASS("CREATE makes the new object current; REMOVE keeps the parent");
 
+    /* ---- SETATTR against the current object, and against a handle ----
+     * The two are not the same operation: through a handle the change is
+     * authorized by that open's grant (ftruncate), through the current object
+     * by the object's own mode (truncate).  A caller that resolved a handle
+     * for itself -- from an NFSv4 stateid, say -- needs the first. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *oh;
+        int                             i_open, i_sa, i_ga6;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp     = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "sa", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* Through the current object. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0640;
+
+        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "sa", 2, 0);
+        i_sa  = chimera_vfs_compound_add_setattr(cp, NULL, &sattr,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga6 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_sa)->status == CHIMERA_VFS_OK);
+        assert((chimera_vfs_compound_op(cp, i_ga6)->attr.va_mode & 0777) ==
+               0640);
+        chimera_vfs_compound_free(cp);
+
+        /* Through the borrowed handle, with no current object established at
+         * all -- the op does not need one, which is the point. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        sattr.va_size     = 0;
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_sa = chimera_vfs_compound_add_setattr(cp, oh, &sattr,
+                                                CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_sa);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->attr.va_size == 0);
+
+        /* Borrowed means borrowed: freeing the compound must not have
+         * released it, so it is still ours to use and to release. */
+        chimera_vfs_compound_free(cp);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("SETATTR applies to the current object or to a borrowed handle");
+
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
     ctx.callbacks = 0;

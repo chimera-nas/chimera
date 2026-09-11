@@ -69,6 +69,7 @@
 #include "server/server.h"
 #include "vfs/sdk/vfs_xattr_name.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_release.h"
 #include "vfs/vfs_compound.h"
 
 /* One NFSv4 op encodes to at most two VFS ops, so the NFSv4 op count is bounded
@@ -134,6 +135,11 @@ struct nfs4_vfs_compound_ctx {
     /* The OPEN this sequence carries, if any -- recorded when the sequence is
      * built, because every way out of it has to go through the OPEN's own
      * completion, including the ways where the OPEN never ran. */
+    /* The handle a SETATTR resolved from its stateid, and holds a reference to
+     * for as long as the sequence runs.  Borrowed by the op; released here when
+     * the sequence is over, whatever the outcome. */
+    struct chimera_vfs_open_handle *setattr_handle;
+
     int                      open_present;
     uint32_t                 open_res_index;
 
@@ -168,6 +174,7 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_OPEN:
         case OP_CREATE:
         case OP_REMOVE:
+        case OP_SETATTR:
             return 1;
         default:
             return 0;
@@ -640,6 +647,25 @@ nfs4_vfs_op_fill(
             return NFS4_OK;
         }
 
+        case OP_SETATTR:
+        {
+            struct SETATTR4args     *sargs   = &argop->opsetattr;
+            struct SETATTR4res      *sres    = &resop->opsetattr;
+            struct chimera_vfs_attrs applied = vop->set_attr;
+
+            sres->status   = NFS4_OK;
+            sres->attrsset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t),
+                                                  req->encoding->dbuf);
+            chimera_nfs_abort_if(sres->attrsset == NULL,
+                                 "Failed to allocate space");
+            sres->num_attrsset = chimera_nfs4_mask2attr(
+                &applied,
+                sargs->obj_attributes.num_attrmask,
+                sargs->obj_attributes.attrmask,
+                sres->attrsset);
+            return NFS4_OK;
+        }
+
         case OP_REMOVE:
         {
             struct REMOVE4res       *rres = &resop->opremove;
@@ -805,6 +831,14 @@ nfs4_vfs_compound_complete(
         struct nfs_argop4  *argop = &req->args_compound->argarray[map->res_index];
         struct nfs_resop4  *resop = &req->res_compound.resarray[map->res_index];
 
+        /* Result slots come from a bump allocator that does not zero, and some
+         * result types marshal fields that sit OUTSIDE their status union --
+         * SETATTR4res carries num_attrsset and an attrsset pointer.  A fill
+         * that never runs, because the sequence failed in front of it, would
+         * otherwise leave the marshaller dereferencing whatever was there.
+         * Each per-op handler initializes its own result on entry; this is the
+         * same guarantee for every op the sequence carries. */
+        memset(resop, 0, sizeof(*resop));
         resop->resop = argop->argop;
 
         /* The same reply-buffer headroom gate the per-op dispatcher applies
@@ -891,6 +925,12 @@ nfs4_vfs_compound_complete(
      * one seqid behind, and the client's next OPEN is answered NFS4ERR_BAD_SEQID
      * for a request that was perfectly good.
      */
+    if (ctx->setattr_handle) {
+        /* The op borrowed it for the length of the sequence, which is over. */
+        chimera_vfs_release(thread->vfs_thread, ctx->setattr_handle);
+        ctx->setattr_handle = NULL;
+    }
+
     if (failed && ctx->open_present && fail_res == ctx->open_res_index) {
         req->index = (int) fail_res;
 
@@ -1158,6 +1198,88 @@ nfs4_vfs_add_open_op(
 } /* nfs4_vfs_add_open_op */
 
 /*
+ * Authorize a size-changing SETATTR, and resolve the handle it applies
+ * through.
+ *
+ * This is the per-op path's own rule, at the one moment this path can apply it:
+ * a size change is a write (RFC 7530 §9.1.4.3), so through a special stateid it
+ * must honour deny-WRITE reservations held by any owner of any client, and
+ * through a real one the stateid must name an open OF THIS OBJECT that was
+ * opened for writing.  The open's own handle then carries that grant, the way a
+ * descriptor carries ftruncate(2)'s -- which a fresh open by name would not.
+ *
+ * Returns NFS4_OK with *out_handle either a reference the caller must release,
+ * or NULL meaning "apply against the current object".
+ */
+static nfsstat4
+nfs4_vfs_setattr_authorize(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct SETATTR4args        *args,
+    const uint8_t                    *fh,
+    int                               fhlen,
+    struct chimera_vfs_open_handle  **out_handle)
+{
+    struct nfs_state_table *table = &thread->shared->nfs4_state_table;
+    struct nfs_open_state  *open_state;
+    void                   *state_void;
+    uint8_t                 state_type;
+    nfsstat4                status;
+    bool                    has_write;
+
+    *out_handle = NULL;
+
+    if (nfs4_stateid_is_special(&args->stateid)) {
+        return nfs4_clients_check_io_denied(&thread->shared->nfs4_shared_clients,
+                                            fh, fhlen,
+                                            OPEN4_SHARE_ACCESS_WRITE);
+    }
+
+    status = nfs_state_table_acquire(table, &args->stateid,
+                                     NFS4_SLOT_TYPE_OPEN,
+                                     &state_void, &state_type);
+
+    if (status != NFS4_OK) {
+        return status;
+    }
+
+    status = nfs_state_check_client(state_void, state_type,
+                                    req->session ?
+                                    req->session->client_unified : NULL);
+
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return status;
+    }
+
+    open_state = state_void;
+
+    /* RFC 7530 §9.1.4.3: the stateid must name an open of the object that is
+     * the current filehandle, not some other open file. */
+    if (open_state->fh_len != (uint32_t) fhlen ||
+        memcmp(open_state->fh, fh, (size_t) fhlen) != 0) {
+        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                thread->vfs_thread);
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    has_write = (open_state->share_access & OPEN4_SHARE_ACCESS_WRITE) != 0;
+
+    if (has_write && open_state->handle) {
+        /* A reference of our own, so the handle outlives the state slot --
+         * which the per-op path takes for the same reason. */
+        chimera_vfs_dup_handle(thread->vfs_thread, open_state->handle);
+        *out_handle = open_state->handle;
+    }
+
+    nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                            thread->vfs_thread);
+
+    return has_write ? NFS4_OK : NFS4ERR_OPENMODE;
+} /* nfs4_vfs_setattr_authorize */
+
+/*
  * Append a CREATE, translating the object type NFSv4 names into the three
  * shapes the VFS makes.  A device's numbers and a special file's type travel in
  * the attributes, which is where mknod wants them anyway, so the translation is
@@ -1248,6 +1370,9 @@ chimera_nfs4_compound_try_vfs(
     /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
      * always the last op of its run. */
     int                           open_at = -1;
+    /* Index of a SETATTR whose size change has to be authorized before the
+     * sequence runs, or -1. */
+    int                           setattr_at = -1;
     /* Set when the scan meets an op the sequence cannot carry: the run ends in
      * front of it, and the dispatcher picks up from there. */
     int                           stop = 0;
@@ -1256,6 +1381,7 @@ chimera_nfs4_compound_try_vfs(
     uint64_t                      reply_bound = 0, avail;
     int                           idx, next;
     int                           open_4_0_pinned = 0;
+    struct chimera_vfs_open_handle *setattr_handle = NULL;
 
     first = (uint32_t) req->index;
     num   = req->res_compound.num_resarray;
@@ -1587,6 +1713,81 @@ chimera_nfs4_compound_try_vfs(
                 break;
             }
 
+            case OP_SETATTR:
+            {
+                const struct SETATTR4args *sa = &argop->opsetattr;
+                int                        wants_size;
+
+                if (may_fail_late) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                if (chimera_nfs4_validate_createattrs(
+                        sa->obj_attributes.num_attrmask,
+                        sa->obj_attributes.attrmask) != NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The sequence carries no ACL. */
+                if (sa->obj_attributes.num_attrmask >= 1 &&
+                    (sa->obj_attributes.attrmask[0] & (1U << FATTR4_ACL))) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The "current stateid" (RFC 8881 §16.2.3.1.2) means whatever
+                 * the op before this one left, which the sequence applies in
+                 * bulk rather than between ops -- so it is not a value this
+                 * path can substitute correctly. */
+                if (chimera_nfs4_stateid_is_current(&sa->stateid)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                wants_size = sa->obj_attributes.num_attrmask >= 1 &&
+                    (sa->obj_attributes.attrmask[0] & (1U << FATTR4_SIZE));
+
+                if (wants_size) {
+                    /* A size change is a write, and everything that makes it
+                     * one is decided against the object the SETATTR addresses:
+                     * the grace window, deny-WRITE reservations held by any
+                     * client, and -- through a real stateid -- that the stateid
+                     * names THIS object and was opened for writing.  All of
+                     * that is settled before the sequence is submitted, so the
+                     * object has to be the one the sequence starts from. */
+                    if (cur_moved || setattr_at >= 0) {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
+
+                    if (nfs_recovery_io_check(&thread->shared->nfs4_recovery) !=
+                        NFS4_OK) {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
+
+                    /* A writable layout held anywhere has to be recalled and
+                     * flushed before the truncate; the sequence has no way to
+                     * wait for that. */
+                    if (chimera_vfs_pnfs_feature_enabled(thread->shared->vfs)) {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
+
+                    setattr_at = (int) i;
+                }
+                break;
+            }
+
             case OP_REMOVE:
                 if (may_fail_late ||
                     chimera_nfs4_validate_name(&argop->opremove.target) !=
@@ -1873,6 +2074,19 @@ chimera_nfs4_compound_try_vfs(
 
     /* ---- ops [first, nenc) are expressible: build the sequence ---- */
 
+    /* Authorize a size-changing SETATTR and resolve the handle it applies
+     * through.  Like the 4.0 OPEN entry below, this takes a reference, so it
+     * runs only once the sequence is certain to be built; a refusal from here
+     * sends the op back to the per-op path, which reaches the same answer. */
+    if (setattr_at >= 0) {
+        if (nfs4_vfs_setattr_authorize(
+                thread, req,
+                &req->args_compound->argarray[setattr_at].opsetattr,
+                cur_fh, cur_fhlen, &setattr_handle) != NFS4_OK) {
+            return 0;
+        }
+    }
+
     /* The 4.0 OPEN's entry-time seqid classification.  Deliberately the last
      * thing before the sequence is built: it pins the open_owner on the request
      * for chimera_nfs4_open_finish to advance, so it must not run ahead of a
@@ -1897,7 +2111,8 @@ chimera_nfs4_compound_try_vfs(
 
     ctx = calloc(1, sizeof(*ctx));
     chimera_nfs_abort_if(ctx == NULL, "Failed to allocate NFSv4 compound context");
-    ctx->req = req;
+    ctx->req            = req;
+    ctx->setattr_handle = setattr_handle;
 
     /* Seed the current object.  When the remainder opens with a PUTFH this is
      * that PUTFH; otherwise it re-states the COMPOUND's current filehandle and
@@ -1979,6 +2194,27 @@ chimera_nfs4_compound_try_vfs(
                 idx          = nfs4_vfs_add_create_op(compound, argop);
                 map->vfs_res = idx;
                 break;
+
+            case OP_SETATTR:
+            {
+                struct chimera_vfs_attrs sattr;
+
+                memset(&sattr, 0, sizeof(sattr));
+                chimera_nfs4_unmarshall_attrs(
+                    &sattr,
+                    argop->opsetattr.obj_attributes.num_attrmask,
+                    argop->opsetattr.obj_attributes.attrmask,
+                    argop->opsetattr.obj_attributes.attr_vals.data,
+                    argop->opsetattr.obj_attributes.attr_vals.len,
+                    NULL, 0);
+
+                idx = chimera_vfs_compound_add_setattr(
+                    compound,
+                    ((int) i == setattr_at) ? setattr_handle : NULL,
+                    &sattr, 0);
+                map->vfs_res = idx;
+                break;
+            }
 
             case OP_REMOVE:
                 idx          = chimera_vfs_compound_add_remove(
@@ -2121,6 +2357,10 @@ chimera_nfs4_compound_try_vfs(
     if (open_4_0_pinned && req->open_4_0_owner) {
         nfs_open_owner_put(req->open_4_0_owner);
         req->open_4_0_owner = NULL;
+    }
+
+    if (setattr_handle) {
+        chimera_vfs_release(thread->vfs_thread, setattr_handle);
     }
 
     chimera_vfs_compound_free(compound);

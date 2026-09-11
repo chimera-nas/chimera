@@ -51,6 +51,22 @@
  * advance until it completes.  Nothing is held that would not otherwise be
  * held, because the ops are the same ops.
  *
+ * ADDRESSING SOMETHING OTHER THAN CURRENT.  Ops address the current object,
+ * which is what makes a sequence a sequence.  One kind of caller cannot: a
+ * protocol whose request names an object by something it resolved itself -- an
+ * NFSv4 stateid, an SMB2 file id -- already holds an open handle for it, and
+ * the operation has to run against that handle rather than against whatever the
+ * sequence last resolved.
+ *
+ * Such an op carries an `in_handle`.  It is BORROWED: the caller opened it, the
+ * caller holds the reference for as long as the sequence runs, and the caller
+ * releases it afterwards.  The executor uses it and does nothing else with it,
+ * which is the whole of the rule -- the mirror of OPEN's out_handle, where the
+ * ownership runs the other way.
+ *
+ * An in_handle does not move the current object.  The op acts on the handle;
+ * the sequence's own idea of where it is stays where it was.
+ *
  * OPEN HANDLE OWNERSHIP.  Every other op leaves nothing behind: the executor
  * opens what it needs, and releases it when the current object moves on or the
  * sequence ends.  An OPEN is different -- an open handle is the whole point of
@@ -122,6 +138,14 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_CREATE,
     /* Unlink `name` from the current object, which stays current.  MUTATES. */
     CHIMERA_VFS_COMPOUND_OP_REMOVE,
+    /* Apply `set_attr`.  With an `in_handle` the attributes are applied through
+     * it with descriptor rights -- the ftruncate(2) rule, where the open's own
+     * grant authorizes the change rather than the object's current mode --
+     * which is why a protocol that resolved a handle for itself hands it in
+     * rather than letting this re-open by name.  Without one, the current
+     * object is opened and the attributes applied against the object's mode.
+     * MUTATES. */
+    CHIMERA_VFS_COMPOUND_OP_SETATTR,
     /* Extended attributes of the current object.  SETXATTR and REMOVEXATTR
      * MUTATE -- see the MUTATION note above. */
     CHIMERA_VFS_COMPOUND_OP_GETXATTR,
@@ -224,6 +248,10 @@ struct chimera_vfs_compound_op {
     uint32_t               dircount;    /* READDIR (advisory; see the adder)  */
     uint32_t               maxcount;    /* READDIR (advisory; see the adder)  */
     uint32_t               max_entries; /* READDIR                            */
+    /* Address this handle instead of the current object.  BORROWED from the
+     * caller -- see ADDRESSING SOMETHING OTHER THAN CURRENT above.  NULL for
+     * every op that addresses the current object, which is most of them. */
+    struct chimera_vfs_open_handle *in_handle;
     uint8_t                create_type; /* CREATE                             */
     /* CREATE of a symlink: its target.  Copied by the adder and owned by the
      * compound, so the caller need not keep it alive. */
@@ -494,6 +522,17 @@ chimera_vfs_compound_add_remove(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen);
+
+/* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
+ * that handle with descriptor rights.  `handle` is BORROWED: see ADDRESSING
+ * SOMETHING OTHER THAN CURRENT.  On return the op's `set_attr` reports which
+ * attributes were actually applied. */
+int
+chimera_vfs_compound_add_setattr(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
 
 /* Take ownership of an OPEN's handle: returns it and clears out_handle, so the
  * compound will not release it and the caller must.  NULL if that op is not an
