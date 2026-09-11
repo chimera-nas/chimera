@@ -248,6 +248,50 @@ void chimera_vfs_gate_handle_dac(
     chimera_vfs_gate_callback_t     callback,
     void                           *private_data);
 
+/*
+ * Resume state for the over-long-name search check (chimera_vfs_name_too_long_*
+ * in vfs_proc_gate.c).  The helper allocates it from the request gate scratch,
+ * runs a FORCED search gate on the directory that would have held the name, and
+ * calls `resume` with the verdict and this context; the wrapper's resume
+ * recovers its own typed callback, releases the context with
+ * chimera_vfs_toolong_free() and answers.
+ */
+struct chimera_vfs_toolong_ctx {
+    struct chimera_vfs_gate_ctx gate_ctx;
+    struct chimera_vfs_thread  *thread;
+    chimera_vfs_gate_callback_t resume;
+    void                       *callback;      /* the wrapper's typed callback */
+    void                       *private_data;  /* the wrapper's private data */
+};
+
+/*
+ * A component longer than {NAME_MAX} in `handle` (or `fh`): answer
+ * [EACCES] when the caller may not search that directory and [ENAMETOOLONG]
+ * when it may, which is the order POSIX pathname resolution requires.  See the
+ * commentary at chimera_vfs_name_too_long_complete().
+ */
+void chimera_vfs_name_too_long_handle(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_gate_callback_t     resume,
+    void                           *callback,
+    void                           *private_data);
+
+void chimera_vfs_name_too_long_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    chimera_vfs_gate_callback_t    resume,
+    void                          *callback,
+    void                          *private_data);
+
+/* Release an over-long-name context.  Read `callback` and `private_data` out
+ * of it FIRST: the scratch goes straight back on the thread's free list. */
+void chimera_vfs_toolong_free(
+    struct chimera_vfs_toolong_ctx *ctx);
+
 /* As chimera_vfs_gate_handle(), enforced additionally for remote-DAC proxies
  * (the lookup prefix search).  See chimera_vfs_gate_needed_prefix. */
 void chimera_vfs_gate_handle_prefix(

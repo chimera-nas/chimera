@@ -295,6 +295,20 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     chimera_vfs_open_finish(request);
 } /* chimera_vfs_open_complete */
 
+static void
+chimera_vfs_open_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx      = private_data;
+    chimera_vfs_open_at_callback_t  callback = ctx->callback;
+    void                           *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, NULL, NULL, NULL, arg);
+} /* chimera_vfs_open_at_toolong */
+
 SYMBOL_EXPORT void
 chimera_vfs_open_at_hs(
     struct chimera_vfs_thread       *thread,
@@ -316,20 +330,26 @@ chimera_vfs_open_at_hs(
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
 
     /* On a creating open the trailing component is a new name; reject one longer
-     * than {NAME_MAX} with ENAMETOOLONG.  FS_PATH_OP backends receive the whole
-     * path as `name` and let the kernel enforce this. */
+     * than {NAME_MAX} -- but search permission on the directory that would hold
+     * it is owed first (chimera_vfs_name_too_long_handle).  FS_PATH_OP backends
+     * receive the whole path as `name` and let the kernel enforce this. */
     if ((flags & CHIMERA_VFS_OPEN_CREATE) &&
         !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
         namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL, private_data);
+        chimera_vfs_name_too_long_handle(thread, cred, handle,
+                                         chimera_vfs_open_at_toolong,
+                                         callback, private_data);
         return;
     }
 
     /* An FS_PATH_OP backend receives the whole path as `name` and answers a
      * too-long name with ENOENT, not ENAMETOOLONG (the server cannot distinguish
-     * the two from a wire CREATE).  Enforce the POSIX limits here, per component,
-     * exactly as chimera_vfs_lookup does -- so chmod/chown/utimens/open by an
-     * over-long path report ENAMETOOLONG rather than ENOENT. */
+     * the two from a wire CREATE).  Enforce the POSIX limits here, per component
+     * -- so chmod/chown/utimens/open by an over-long path report ENAMETOOLONG
+     * rather than ENOENT.  Unlike the handle-relative case above this cannot
+     * defer to a search check: `name` is a whole path, and the directory that
+     * holds an over-long component past the first is not resolved here.  The
+     * path-only backend resolves the prefix itself and answers the denial. */
     if (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         int complen = 0, i;
 
