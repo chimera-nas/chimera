@@ -96,7 +96,7 @@ chimera_vfs_open_fh_hs(
         return;
     }
 
-    if ((module->capabilities & CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED) || !(flags & CHIMERA_VFS_OPEN_INFERRED) ||
+    if (chimera_vfs_open_handle_retained(flags, module->capabilities) ||
         chimera_vfs_gate_needed(module->capabilities, cred)) {
 
         /* We really need to open the file -- or we are on an engine-authoritative

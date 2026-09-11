@@ -1794,7 +1794,7 @@ diskfs_open_at_finish(
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
 
-    /* diskfs is CAP_OPEN_FILE_REQUIRED: every open (inferred or not) yields a
+    /* every open (inferred or not) yields a
      * cached handle matched by a diskfs_close, so always pin the inode and stash
      * the real pointer in vfs_private.  read/write reuse it (and close releases
      * the pin); there is no throwaway/synthetic open_at for this backend. */

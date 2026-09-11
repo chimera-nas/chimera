@@ -478,11 +478,14 @@ main(
     struct mbt_fh         v3_dir = { 0 }, v4_dir = { 0 };
     struct drc_dirsnap    snap;
     uint32_t              st1, st2;
+    const char           *backend = NULL;
     int                   i;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dump") == 0) {
             dump = 1;
+        } else if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+            backend = argv[++i];
         } else if (strcmp(argv[i], "--no-caches") == 0) {
             /* What the replay harness runs with: exact comparison of the
              * directory after every step cannot tolerate a stale cache. */
@@ -494,6 +497,7 @@ main(
 
     memset(&opts, 0, sizeof(opts));
     opts.sec            = mbt_sec_scan_argv(argc, argv);
+    opts.module         = backend;
     opts.nfs3_drc       = 1;
     opts.disable_caches = no_caches;
 
@@ -719,19 +723,27 @@ main(
                      v3_setsize(&c, 0, &u1, x++, &d_fh, 0), NFS3ERR_ISDIR);
 
         /*
-         * A handle whose object is gone is NFS3ERR_STALE (RFC 1813 section 3.3:
-         * "the file referred to by that file handle no longer exists").  It is
-         * also the state a retransmit can legitimately be in, which is what the
-         * replay check further down turns on.
+         * A CREATE opens the file it makes, and the VFS holds that open in its
+         * handle cache until the close sweep gets to it.  So the object
+         * outlives its last name, and its file handle goes on working -- the
+         * same thing Linux does, where an inode pinned by an open file or a
+         * cached dentry is returned without the free-inode check, and the same
+         * thing NFSv4 read-after-unlink depends on.
+         *
+         * RFC 1813 section 3.3 describes the other outcome, and it is reached
+         * by any object nothing opened: see op/getattr-removed-directory just
+         * below, where a MKDIR leaves nothing holding the directory and its
+         * handle is stale the moment the name goes.
          */
         (void) v3_create(&c, 0, &u1, x++, "j", &gone_fh);
         (void) v3_remove(&c, 0, &u1, x++, "j");
-        check_status("op/setsize-stale-handle",
-                     v3_setsize(&c, 0, &u1, x++, &gone_fh, 0), NFS3ERR_STALE);
-        check_status("op/link-stale-handle",
-                     v3_link(&c, 0, &u1, x++, &gone_fh, "k"), NFS3ERR_STALE);
+        check_status("op/setsize-removed-file-still-held",
+                     v3_setsize(&c, 0, &u1, x++, &gone_fh, 0), NFS3_OK);
+        check_status("op/link-removed-file-still-held",
+                     v3_link(&c, 0, &u1, x++, &gone_fh, "k"), NFS3_OK);
 
-        /* A removed directory's handle, the same way. */
+        /* A directory nothing opened: its handle IS stale once the name is
+         * gone, which is the RFC 1813 section 3.3 case. */
         {
             struct mbt_fh dead_dir;
 

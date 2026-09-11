@@ -3769,11 +3769,10 @@ memfs_open_at(
     * re-check here -- a coarse read/write test would mis-handle SMB opens that
     * carry only control rights (e.g. WRITE_DAC) and not data access. */
 
-    if (flags & CHIMERA_VFS_OPEN_INFERRED) {
-        /* If this is an inferred open (ie an NFS3 create)
-         * then we aren't returning a handle so we don't need
-         * to increment the refcnt */
-
+    if (!chimera_vfs_open_handle_retained(flags,
+                                          request->module->capabilities)) {
+        /* The VFS will not keep this handle, so there is nothing for a
+         * refcount to hold open and nothing that will ever be closed. */
         request->open_at.r_vfs_private = 0xdeadbeefUL;
 
     } else {
