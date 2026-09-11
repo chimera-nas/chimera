@@ -3,12 +3,30 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 /* Ground-truth probe for the S3 MBT harness: brings up the in-process S3
- * server + HTTP client (s3_mbt_common.h), walks the modeled surface once
- * end-to-end, and asserts each documented chimera deviation from official
- * AWS S3 behavior still reproduces.  Goes red when chimera is fixed -- the
- * signal to retire the corresponding entry in s3_mbt_replay.c's deviation
- * registry (and flip the model expectation if one was encoded there) -- or
- * if a deviation's shape drifts.  Needs no trace corpus. */
+ * server + HTTP client (s3_mbt_common.h) and walks the surface the trace
+ * corpus cannot reach.  Needs no trace corpus itself.
+ *
+ * It used to double as the deviation probe -- one CHECK per documented
+ * chimera divergence from AWS, going red when chimera was fixed.  That job
+ * is now done generically and per cell: the deviations live in the model
+ * (quint/s3/s3.qnt, gated on DEVS), tools/devliveness.py fails a cell whose
+ * corpus stops exercising one it enables, and each cell's strict twin
+ * (DEVS = Set()) re-measures the debt on every run.  Those assertions are
+ * gone from here; what is left is the ground the model does not describe:
+ *
+ *  - request-level concerns outside the modeled surface: SigV4 and SigV2
+ *    authentication and their failure codes, virtual-host addressing, the
+ *    aws-chunked (STREAMING-AWS4-HMAC-SHA256-PAYLOAD) body framing, and
+ *    Content-Type echo;
+ *  - the credential cache's synthetic clock -- TTL expiry, re-add, pinning,
+ *    explicit removal (never a wall-clock wait);
+ *  - per-key identity (#494): a valid signature is not authority;
+ *  - listing corner cases that turn on the BACKING filesystem rather than on
+ *    the object namespace the model holds -- a key-path directory that
+ *    outlives its objects must not surface as a phantom CommonPrefix, and an
+ *    unencoded '/' delimiter must not corrupt the bucket/key split;
+ *  - the empty-object GET, whose send path must still run to completion and
+ *    release its handle (a leak there pins the filesystem). */
 
 #include "s3_mbt_common.h"
 #include "common/mbt_watchdog.h"
@@ -204,16 +222,6 @@ main(
         CHECK(strcmp(r->content_range, want_cr) == 0,
               "416 Content-Range: got '%s' want '%s'",
               r->content_range, want_cr);
-
-        /* DEVIATION range-full-200: a Range resolving to the entire object
-         * (bytes=0- here) is 206 Partial Content on AWS; chimera collapses
-         * it to a plain 200. */
-        req.range = "bytes=0-";
-        r         = s3_mbt_call(&env, &req);
-        CHECK(r->status == 200,
-              "deviation range-full-200 no longer reproduces: got %d "
-              "(fixed? retire it in s3_mbt_replay.c)", r->status);
-        CHECK(body_is_blocks(r, s123, 3), "full-range GET body mismatch");
     }
 
     /* ---- zero-length object ---------------------------------------------- */
@@ -317,46 +325,14 @@ main(
         CHECK(r->status == 404, "copy missing src: got %d want 404", r->status);
         CHECK(body_has(r, "<Code>NoSuchKey</Code>"),
               "copy missing src: body lacks NoSuchKey");
-
-        /* DEVIATION copy-self-200: copying an object onto itself with no
-         * metadata directive is 400 InvalidRequest on AWS; chimera performs
-         * the copy and returns 200. */
-        req.path        = "/bk0/a";
-        req.copy_source = "/bk0/a";
-        r               = s3_mbt_call(&env, &req);
-        CHECK(r->status == 200,
-              "deviation copy-self-200 no longer reproduces: got %d "
-              "(fixed? retire it in s3_mbt_replay.c)", r->status);
     }
 
     /* ---- delete ---------------------------------------------------------- */
 
-    /* DEVIATION delete-object-200: AWS DeleteObject returns 204 No Content;
-     * chimera returns 200 with an empty body. */
-    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/c");
-    CHECK(r->status == 200,
-          "deviation delete-object-200 no longer reproduces: got %d "
-          "(fixed? retire it in s3_mbt_replay.c)", r->status);
-    CHECK(r->body_len == 0, "DeleteObject returned a body");
-
-    /* DEVIATION delete-object-missing-404: AWS DeleteObject is idempotent
-     * (204 for a missing key); chimera returns 404 NoSuchKey. */
-    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/c");
-    CHECK(r->status == 404,
-          "deviation delete-object-missing-404 no longer reproduces: got %d "
-          "(fixed? retire it in s3_mbt_replay.c)", r->status);
-
-    /* DEVIATION delete-bucket-nonempty-500: AWS answers DELETE on a
-     * non-empty bucket with 409 BucketNotEmpty; chimera maps its internal
-     * BUCKET_NOT_EMPTY through the default 500 InternalError. */
-    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0");
-    CHECK(r->status == 500,
-          "deviation delete-bucket-nonempty-500 no longer reproduces: got %d "
-          "(fixed? retire it in s3_mbt_replay.c)", r->status);
-    CHECK(body_has(r, "<Code>InternalError</Code>"),
-          "non-empty DeleteBucket: body lacks InternalError");
-
-    /* drain the bucket, then it deletes cleanly */
+    /* Status here is the model's business (DeleteObject/DeleteBucket are in
+     * the modeled surface, deviations and all); this drains the bucket to set
+     * up the phantom-CommonPrefix check below, which is not. */
+    simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/c");
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/a");
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/b");
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/d/a");
@@ -384,11 +360,6 @@ main(
     r = simple(&env, EVPL_HTTP_REQUEST_TYPE_HEAD, "/bk0");
     CHECK(r->status == 404, "HeadBucket after delete: got %d want 404",
           r->status);
-
-    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0");
-    CHECK(r->status == 404, "DeleteBucket missing: got %d want 404", r->status);
-    CHECK(body_has(r, "<Code>NoSuchBucket</Code>"),
-          "DeleteBucket missing: body lacks NoSuchBucket");
 
     /* ---- authentication -------------------------------------------------- */
 

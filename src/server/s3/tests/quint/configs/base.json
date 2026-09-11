@@ -1,0 +1,18 @@
+{
+  "family": "s3",
+  "description": "chimera's S3 gateway over the modeled surface at the default block size: buckets, objects, listings, tagging and batch delete. No multipart, so no part-size floor applies and the harness leaves --block-size at its 8 KiB default.",
+  "traceStem": "s3",
+
+  // No deviations: every one this cell used to carry has been FIXED in the
+  // server (204 and idempotency on DeleteObject, 409 BucketNotEmpty, 400
+  // InvalidRequest for a self-copy, 206 for a whole-object range), so the
+  // cell states the S3 API exactly and is its own strict twin.
+  "batches": [
+    { "flavor": "step",       "steps": 128, "traces": 8, "seed": "0x1" },
+    { "flavor": "step",       "steps": 256, "traces": 3, "seed": "0x100" },
+    { "flavor": "stepData",   "steps": 128, "traces": 5, "seed": "0x1" },
+    { "flavor": "stepList",   "steps": 128, "traces": 5, "seed": "0x1" },
+    { "flavor": "stepBucket", "steps": 64,  "traces": 4, "seed": "0x1" },
+    { "flavor": "stepTag",    "steps": 128, "traces": 4, "seed": "0x1" }
+  ]
+}

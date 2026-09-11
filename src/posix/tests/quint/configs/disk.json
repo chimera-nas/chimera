@@ -1,0 +1,61 @@
+// The no-reflink profile, measured against cairn on 2026-08-11 and against the
+// linux/io_uring passthroughs: identical to memfs except that
+// clone_file_range is unavailable.  cairn advertises neither
+// CHIMERA_VFS_CAP_COPY_RANGE nor CHIMERA_VFS_CAP_CLONE_RANGE, and while the VFS
+// supplies a generic copy fallback for the former there is no clone fallback --
+// clone answers ENOTSUP.  The host passthroughs sit here for the same reason.
+{
+  "extends": "./posix_base.json",
+  "description": "the on-disk and host-passthrough surface: copy_file_range and SEEK_HOLE/SEEK_DATA present, no reflink. Replayed by cairn and by the linux/io_uring passthroughs.",
+  "traceStem": "posixDisk",
+
+  "features": {
+    "copyRange": "supported",
+    "cloneRange": "unsupported",
+    "seekHole": "supported"
+  },
+
+  "policies": {
+    "strictAtime": "unsupported",
+    "chownSuppGroup": "supported"
+  },
+
+  // The one place this cell's backends legitimately differ.  A removal denied
+  // by the sticky-bit rule may answer EACCES or EPERM -- unlink() names both
+  // and POSIX orders neither -- and this corpus is replayed by cairn, which
+  // answers what policies.stickyEacces names, AND by the linux/io_uring
+  // passthroughs, whose host kernel answers EPERM.  No boolean pins that per
+  // call, so the model emits both as an acceptance set and the harness
+  // membership-tests it.  Off everywhere else, where the exact answer is owed.
+  "tolerances": {
+    "stickyRemovalEperm": true
+  },
+
+  // Deviations from POSIX.1-2024 that this profile's stack still carries.
+  // The model takes chimera's branch for each, so the corpus expects what
+  // chimera does and replay is an exact match; the cell's strict twin
+  // regenerates the same batches with all of them off and its failures are
+  // the live conformance debt.  Every id is declared, with its citation, root
+  // cause and candidate fix, in the posix corpus.schema.json; tools/
+  // devliveness.py fails the build if one listed here is never exercised.
+
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },
+    { "flavor": "step",            "steps": 128, "traces": 6,  "seed": "0x2" },
+    { "flavor": "step",            "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "step",            "steps": 512, "traces": 2,  "seed": "0x5" },
+    { "flavor": "stepNamespace",   "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepNamespace",   "steps": 256, "traces": 2,  "seed": "0x9" },
+    { "flavor": "stepDescriptors", "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepMetadata",    "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDirs",        "steps": 128, "traces": 3,  "seed": "0x1" },
+    { "flavor": "stepData",        "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepLocks",       "steps": 128, "traces": 6,  "seed": "0x1" },
+    { "flavor": "stepPerms",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepLinks",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFds",         "steps": 128, "traces": 5,  "seed": "0x1" }
+  ]
+}
