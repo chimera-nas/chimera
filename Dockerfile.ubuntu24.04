@@ -42,8 +42,9 @@ COPY --from=ccache /ccache /usr/local/bin/ccache
 # node + quint + the warmed Rust evaluator, from the mirrored toolchain image.
 # Without quint on PATH libevpl's Core/HTTP/RPC2 conformance suites and its
 # quint_model checks disable themselves, which is why they had only ever run in
-# the devcontainer.  chimera's own MBT suites do not need it -- they replay the
-# prebuilt specs bundle.
+# the devcontainer.  chimera's own MBT suites need it too: their trace corpus is
+# generated from ext/specs' models plus this repo's configs on every build, so
+# without quint (and the node it ships with) no model-based test runs at all.
 COPY --from=quint /opt/quint   /opt/quint
 COPY --from=quint /quint-home  /root/.quint
 ENV PATH=/opt/quint/bin:${PATH}

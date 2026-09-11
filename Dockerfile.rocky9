@@ -16,22 +16,30 @@ ARG DOCKER_MIRROR=""
 # rocky9 and ubuntu22 ship 4.6, which reads the pre-rename name and so silently
 # ignored the shared cache -- those cells compiled everything cold, every run.
 # One pinned upstream binary everywhere retires that whole class of skew.
-# No quint in this image, deliberately.  quint's Rust evaluator is published
-# only as *-unknown-linux-gnu and is built against glibc 2.39, which is newer
-# than this distro's, so it loads and then dies the first time a generator runs:
+# quint IS in this image, but without its Rust evaluator.  That evaluator is
+# published only as *-unknown-linux-gnu built against glibc 2.39, newer than
+# this distro's, so it loads and then dies the first time a generator runs:
 #   quint_evaluator: /lib/.../libc.so.6: version `GLIBC_2.39' not found
-# There is no musl build upstream to mirror instead.  libevpl's Core/HTTP/RPC2
-# conformance suites and its quint_model checks therefore stay disabled here,
-# exactly as they always have been; they run on ubuntu 24.04/26.04, rocky 10,
-# the devcontainer and macOS, which is the same code on four other platforms.
+# and there is no musl build upstream to mirror instead.
 #
-# chimera's own model-based suites are NOT affected and must keep running: they
-# replay the prebuilt specs bundle that cmake/SpecsBundle.cmake fetches with
-# oras, and need quint only as the fallback when no bundle can be had.  This
-# image is unchanged from before in that respect.
+# This image used to carry no quint at all, which was tolerable only while a
+# prebuilt trace bundle existed: the model-based suites replayed a corpus
+# generated elsewhere.  The corpus is now generated from ext/specs' models plus
+# this repo's configs on every build (cmake/Specs.cmake), so "no quint" would
+# have meant "no model-based tests on this cell" -- the merge queue's oldest
+# glibc, silently covering less than the others.
+#
+# Generation therefore runs quint's TypeScript backend everywhere
+# (SPECS_QUINT_BACKEND, defaulted in ext/specs/cmake/SpecsCorpus.cmake).  It is
+# slower than the Rust one on the large families and walks differently for the
+# same seed, so the corpus is a different -- equally valid -- set of traces.
+# Both costs were accepted so that every platform generates and replays.
 
+ARG QUINT_REGISTRY=ghcr.io/chimera-nas/quint
+ARG QUINT_VERSION=0.32.0
 ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
 ARG CCACHE_VERSION=4.14
+FROM ${QUINT_REGISTRY}:${QUINT_VERSION} AS quint
 FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
 
 FROM ${DOCKER_MIRROR}rockylinux/rockylinux:9
@@ -40,6 +48,20 @@ ARG ENABLE_FIO=0
 
 # The mirrored ccache, ahead of anything the distro might provide on PATH.
 COPY --from=ccache /ccache /usr/local/bin/ccache
+
+# node + quint, from the mirrored toolchain image.  Generation runs quint's
+# TYPESCRIPT simulator backend here, not the Rust one: the Rust evaluator is
+# published only as *-unknown-linux-gnu built against glibc 2.39, newer than
+# this distro's, so it loads and then dies with
+#   quint_evaluator: /lib/.../libc.so.6: version `GLIBC_2.39' not found
+# and there is no musl build upstream to mirror.  ext/specs/tools/gen.js
+# defaults to the typescript backend for exactly this reason (SPECS_QUINT_BACKEND
+# selects it), which is what lets this image generate its own trace corpus --
+# there is no prebuilt bundle any more, so an image without a working backend
+# would run no model-based tests at all.  The warmed Rust evaluator is
+# deliberately NOT copied: it would not run.
+COPY --from=quint /opt/quint /opt/quint
+ENV PATH=/opt/quint/bin:${PATH}
 
 RUN dnf install -y epel-release && \
     dnf config-manager --set-enabled crb

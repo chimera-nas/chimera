@@ -12,8 +12,9 @@ name: Mirror quint
 # Core/HTTP/RPC2 conformance suites and its quint_model checks disable
 # themselves.  They have only ever run in the devcontainer -- every other image
 # reported "conformance test disabled (needs quint and python3 on PATH)" and
-# ran zero libevpl quint tests.  chimera's own MBT suites are unaffected: they
-# replay the prebuilt specs bundle and need no quint at all.
+# ran zero libevpl quint tests.  chimera's own MBT suites need it too: their
+# trace corpus is generated from ext/specs' models on every build, so an image
+# without quint runs no model-based tests at all.
 #
 # Manual, not on push: the toolchain moves when someone bumps a version, and
 # the images pin QUINT_VERSION, so nothing changes under CI on its own.
