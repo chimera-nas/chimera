@@ -1,0 +1,13 @@
+{
+  "extends": "./drc_ref.json",
+  "description": "the same server with the NFSv3 cache switched off, which is the shipped default. Its whole job is to show the switch is real: every NFSv3 retransmit re-executes, and the NFSv4.0 cache is unaffected.",
+  "traceStem": "nfsdrcNoV3",
+
+  "features": {
+    "v3Cache": false
+  },
+
+  "batches": [
+    { "flavor": "step", "steps": 100, "traces": 3, "seed": "0x4" }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "family": "nfs4",
+  "description": "the same server spoken to at NFSv4.1: sessions, the slot replay discipline and EXCHANGE_ID/CREATE_SESSION, with none of the 4.2 data operations -- the model gates every one of them on MINOR >= 2, so at 4.1 they are simply not part of the protocol.",
+  "traceStem": "nfs4Memfs41",
+
+  "features": {
+    "pnfs": "unsupported",
+    "readDelegation": "unsupported",
+    "writeDelegation": "unsupported",
+    "xattr": "unsupported",
+    "sparse": "unsupported",
+    "copy": "unsupported",
+    "readPlus": "unsupported",
+    "ioAdvise": "unsupported",
+    "writeSame": "unsupported",
+    "clone": "unsupported"
+  },
+
+  // No divergences from the RFCs at 4.1.  A deviation would be a branch in
+  // ext/specs/quint/nfs/nfs4_ops.qnt gated on the DEVS set and declared with
+  // its citation in that family's corpus.schema.json; the strict twin
+  // regenerates the same cell with all of them off, so with the list empty it
+  // agrees with this one and the conformance debt is nil.
+  "deviations": [
+  ],
+
+
+  "policies": {
+    "minor": 1,
+    "conflictDelays": true,
+    "closeFreesLocks": true,
+    "layoutWholeFile": true,
+
+    // The filesystem is a NAMED export -- one entry in the server's
+    // pseudo-filesystem -- so the exported root is NOT the root of the
+    // namespace served and a LOOKUPP there walks onto the pseudo-root.
+    // nfs4_memfs41_root.json is the same cell with the other shape; between
+    // them they cover both halves of RFC 7530 16.14.4.  Stated rather than
+    // defaulted because it is the half being contrasted.
+    "rootExport": false
+  },
+
+  "batches": [
+    { "flavor": "step",          "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepState",     "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepNamespace", "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepData",      "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepTypes",     "steps": 80, "traces": 6, "seed": "0x7" }
+  ]
+}

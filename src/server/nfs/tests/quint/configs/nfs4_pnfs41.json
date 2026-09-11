@@ -1,0 +1,15 @@
+{
+  "extends": "./nfs4_memfs41.json",
+  "description": "the metadata server spoken to at 4.1, which is the minor version pNFS was introduced in and the one a flex-files client is most likely to use. No 4.2 data operations.",
+  "traceStem": "nfs4Pnfs41",
+
+  "features": {
+    "pnfs": "supported"
+  },
+
+
+  "batches": [
+    { "flavor": "stepPnfs", "steps": 80, "traces": 6, "seed": "0x7" },
+    { "flavor": "stepData", "steps": 80, "traces": 6, "seed": "0x7" }
+  ]
+}

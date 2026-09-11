@@ -1,0 +1,30 @@
+// The 4.1 cell served as the ROOT export rather than a named one.
+//
+// Everything about the protocol is identical; what differs is where the
+// exported filesystem sits in the server's NFSv4 namespace.  Here it IS the
+// "/" export, so PUTROOTFH lands directly on its root and the model's ROOT is
+// the root of the namespace served.  That makes LOOKUPP there parent-less --
+// NFS4ERR_NOENT, RFC 7530 16.14.4 / RFC 8881 18.14.4 -- where the named-export
+// cell walks onto the pseudo-root instead.
+//
+// Both shapes are conformant, both are deployments chimera actually serves,
+// and chimera answers them from different arms of
+// chimera_nfs4_lookupp_continue (the "/"-export root comparison vs the
+// mount-root arm).  One cell could only ever test one of them, which is why
+// there are two: this one is deliberately narrow -- the namespace flavors,
+// which are the ones that walk the tree -- because the rest of the surface is
+// already covered by nfs4_memfs41.json and would only be replayed twice.
+{
+  "extends": "./nfs4_memfs41.json",
+  "description": "the 4.1 server with its filesystem exported as \"/\" rather than under a name, so the exported root is the root of the namespace served and LOOKUPP there is NFS4ERR_NOENT. The contrast cell for nfs4_memfs41.json.",
+  "traceStem": "nfs4Memfs41Root",
+
+  "policies": {
+    "rootExport": true
+  },
+
+  "batches": [
+    { "flavor": "stepNamespace", "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "step",          "steps": 80, "traces": 4, "seed": "0x7" }
+  ]
+}
