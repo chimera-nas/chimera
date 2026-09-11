@@ -1755,6 +1755,15 @@ diskfs_open_fh_inode_cb(
         return;
     }
 
+    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: this open is about to carry data, so
+     * refuse a type it does not apply to and say which.  Before the reference,
+     * so a refused open takes nothing. */
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) &&
+        !S_ISREG(inode->mode)) {
+        diskfs_op_fail(request, p->txn, chimera_vfs_nonreg_error(inode->mode));
+        return;
+    }
+
     diskfs_inode_ref_get(p->thread, inode);
 
     request->open_fh.r_vfs_private = (uint64_t) inode;
@@ -1845,6 +1854,14 @@ diskfs_open_at_existing_cb(
         diskfs_op_fail(request, p->txn,
                        S_ISDIR(inode->mode) ? CHIMERA_VFS_EISDIR
                        : CHIMERA_VFS_EEXIST);
+        return;
+    }
+
+    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: this open is about to carry data, so
+     * refuse a type it does not apply to and say which.  From inode metadata. */
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) &&
+        !S_ISREG(inode->mode)) {
+        diskfs_op_fail(request, p->txn, chimera_vfs_nonreg_error(inode->mode));
         return;
     }
 
