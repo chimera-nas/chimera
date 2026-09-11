@@ -49,6 +49,21 @@ chimera_nfs4_access_complete(
     granted = chimera_vfs_access_check(attr, &req->cred,
                                        chimera_nfs4_access4_to_mask(requested));
 
+    /* RFC 8881 18.1.4: the server SHOULD NOT set ACCESS4_EXECUTE unless an
+     * execute bit is set.  A privileged caller's DAC override grants
+     * ACE_EXECUTE on a file with no execute bit anywhere in its mode, which is
+     * right for the OPEN that follows and wrong for the advisory answer -- so
+     * withhold that ONE bit here rather than weakening the override.
+     *
+     * Restricted to non-directories on purpose: a directory's search
+     * permission travels as ACCESS4_LOOKUP, which maps to the same ACE bit and
+     * which the RFC does NOT qualify this way -- stripping it there would
+     * refuse a privileged caller the traversal it really does have. */
+    if (!S_ISDIR(attr->va_mode) &&
+        !(attr->va_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        granted &= ~CHIMERA_ACE_EXECUTE;
+    }
+
     res->status           = NFS4_OK;
     res->resok4.supported = requested;
     res->resok4.access    = chimera_nfs4_access_from_granted(requested, granted);
