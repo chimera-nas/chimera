@@ -2130,7 +2130,12 @@ cairn_apply_attrs(
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
+    /* A symbolic link's permission bits are fixed at 0777 and cannot be
+     * changed: Linux has no lchmod(), so a server over a real filesystem
+     * cannot honour this either, and honouring it here would make an ACCESS
+     * or GETATTR of the same link answer differently per backend.  The mask
+     * is not echoed back, so the caller sees that nothing was applied. */
+    if ((set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISLNK(inode->mode)) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
@@ -4899,16 +4904,14 @@ cairn_symlink_at(
     new_inode.refcnt = 1;       /* open reference (see cairn_open_at); without it
                                  * unlink underflows the count and leaks the inode */
     new_inode.rdev   = 0;
-    /* RFC 7530 5.8.1.6 makes mode a plain attribute of every object, symbolic
-     * links included, and CREATE(NF4LNK) carries one -- so honour it when the
-     * caller set one.  0755 stays the default for the callers that do not
-     * (SYMLINK over NFSv3 sends no mode, and POSIX symlink() has none). */
-    if (request->symlink_at.set_attr &&
-        (request->symlink_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-        new_inode.mode = S_IFLNK | (request->symlink_at.set_attr->va_mode & 07777);
-    } else {
-        new_inode.mode = S_IFLNK | 0755;
-    }
+    /* A symbolic link's permission bits are not a portable observable.  POSIX
+    * leaves them unspecified, and Linux fixes every symlink at 0777 and
+    * silently discards whatever mode a creator asks for -- so a passthrough
+    * backend CANNOT honour one.  Honouring it here only split the in-engine
+    * backends from the passthrough ones and made the model describe half of
+    * them (an NFSv4 ACCESS then granted EXECUTE on one backend and not the
+    * other for the same link).  Match Linux: always 0777, request ignored. */
+    new_inode.mode  = S_IFLNK | 0777;
     new_inode.atime = now;
     new_inode.mtime = now;
     new_inode.ctime = now;

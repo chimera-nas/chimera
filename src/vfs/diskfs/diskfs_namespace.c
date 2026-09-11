@@ -2396,16 +2396,14 @@ diskfs_symlink_at_alloc_cb(
     inode->gid = (parent->mode & S_ISGID) ?
         parent->gid : request->cred->gid;
     inode->nlink = 1;
-    /* RFC 7530 5.8.1.6 makes mode a plain attribute of every object, symbolic
-     * links included, and CREATE(NF4LNK) carries one -- so honour it when the
-     * caller set one.  0755 stays the default for the callers that do not
-     * (SYMLINK over NFSv3 sends no mode, and POSIX symlink() has none). */
-    if (request->symlink_at.set_attr &&
-        (request->symlink_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-        inode->mode = S_IFLNK | (request->symlink_at.set_attr->va_mode & 07777);
-    } else {
-        inode->mode = S_IFLNK | 0755;
-    }
+    /* A symbolic link's permission bits are not a portable observable.  POSIX
+    * leaves them unspecified, and Linux fixes every symlink at 0777 and
+    * silently discards whatever mode a creator asks for -- so a passthrough
+    * backend CANNOT honour one.  Honouring it here only split the in-engine
+    * backends from the passthrough ones and made the model describe half of
+    * them (an NFSv4 ACCESS then granted EXECUTE on one backend and not the
+    * other for the same link).  Match Linux: always 0777, request ignored. */
+    inode->mode       = S_IFLNK | 0777;
     inode->atime_sec  = now.tv_sec;
     inode->atime_nsec = now.tv_nsec;
     inode->mtime_sec  = now.tv_sec;
