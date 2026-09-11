@@ -3764,6 +3764,18 @@ cairn_open_fh(
         return;
     }
 
+    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: this open is about to carry data.  Checked
+     * before the refcount, so a refused open takes nothing. */
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) &&
+        !S_ISREG(inode->mode)) {
+        enum chimera_vfs_error e = chimera_vfs_nonreg_error(inode->mode);
+
+        cairn_inode_handle_release(&ih);
+        request->status = e;
+        request->complete(request);
+        return;
+    }
+
     inode->refcnt++;
 
     request->open_fh.r_vfs_private = (uint64_t) inode->inum;
@@ -3981,9 +3993,15 @@ cairn_open_at(
          * must yield a regular file, so an existing non-regular object is not
          * opened -- a directory gives EISDIR, any other type EEXIST.  Answered
          * from the inode metadata, no data open. */
-        if ((flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) && !S_ISREG(inode->mode)) {
-            enum chimera_vfs_error e = S_ISDIR(inode->mode) ?
-                CHIMERA_VFS_EISDIR : CHIMERA_VFS_EEXIST;
+        if (((flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) ||
+             (flags & CHIMERA_VFS_OPEN_REGULAR_ONLY)) && !S_ISREG(inode->mode)) {
+            /* CHIMERA_VFS_OPEN_REGULAR_ONLY says what the object is, because
+             * the operation does not apply to it; CREATE_REGULAR says the name
+             * is taken.  Both from inode metadata, no data open. */
+            enum chimera_vfs_error e = (flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) ?
+                chimera_vfs_nonreg_error(inode->mode) :
+                (S_ISDIR(inode->mode) ? CHIMERA_VFS_EISDIR :
+                 CHIMERA_VFS_EEXIST);
             cairn_inode_handle_release(&parent_ih);
             cairn_inode_handle_release(&child_ih);
             request->status = e;

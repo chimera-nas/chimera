@@ -22,6 +22,7 @@
 #include <time.h>
 
 #include "vfs_attrs.h"
+#include <sys/stat.h>
 #include "vfs_error.h"
 #include "vfs_cred.h"
 #include "vfs_claim_types.h"
@@ -149,6 +150,45 @@ struct chimera_vfs_mount_options {
  * hold; passthrough resolves the leaf type without a data open.  SMB leaves it
  * clear and keeps its open-any-type disposition. */
 #define CHIMERA_VFS_OPEN_CREATE_REGULAR         (1U << 10)
+
+/* The object this open yields must be a REGULAR file: if it is not, the module
+ * refuses instead of opening it, and says what was in the way --
+ * CHIMERA_VFS_EISDIR for a directory, CHIMERA_VFS_ESYMLINK for a symlink,
+ * CHIMERA_VFS_EINVAL for anything else non-regular.  (Those three are what the
+ * protocols' own type errors map from, so a caller needs no second question to
+ * answer for the type.)
+ *
+ * Set it on an open that is about to carry data.  Without it a caller has to
+ * establish the type for itself before opening -- and a stat holds no state, so
+ * what it established can be untrue by the time the open happens, and on some
+ * backends the refused open has already had an effect.  The module can answer
+ * atomically because it is resolving the object anyway: native backends from
+ * the inode metadata they already hold, passthrough from the leaf it already
+ * walked or an fstat of what it opened.
+ *
+ * CHIMERA_VFS_OPEN_CREATE_REGULAR is the same idea for a create that collides,
+ * and differs only in what it reports: a create says EEXIST of a non-regular
+ * name, because what matters there is that the name is taken, while this says
+ * what the object is, because what matters here is that the operation does not
+ * apply to it. */
+#define CHIMERA_VFS_OPEN_REGULAR_ONLY           (1U << 12)
+
+/* The error CHIMERA_VFS_OPEN_REGULAR_ONLY refuses a non-regular object with.
+ * Shared so every module answers the same way; a caller that maps these to its
+ * own type errors can rely on the mapping. */
+static inline enum chimera_vfs_error
+chimera_vfs_nonreg_error(uint32_t mode)
+{
+    if (S_ISDIR(mode)) {
+        return CHIMERA_VFS_EISDIR;
+    }
+
+    if (S_ISLNK(mode)) {
+        return CHIMERA_VFS_ESYMLINK;
+    }
+
+    return CHIMERA_VFS_EINVAL;
+} /* chimera_vfs_nonreg_error */
 
 /* Suppress the VFS core's FILE_ADDED change-notify emission when this open
  * creates a file.  Set by the SMB create path, which owns a richer emission

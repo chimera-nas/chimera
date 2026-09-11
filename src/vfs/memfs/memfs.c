@@ -3527,6 +3527,18 @@ memfs_open_fh(
         return;
     }
 
+    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: see memfs_open_at.  Checked before the
+     * refcount, so a refused open takes nothing. */
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) &&
+        !S_ISREG(inode->mode)) {
+        enum chimera_vfs_error e = chimera_vfs_nonreg_error(inode->mode);
+
+        pthread_mutex_unlock(&inode->lock);
+        request->status = e;
+        request->complete(request);
+        return;
+    }
+
     inode->refcnt++;
     pthread_mutex_unlock(&inode->lock);
 
@@ -3710,6 +3722,18 @@ memfs_open_at(
         if ((flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) && !S_ISREG(inode->mode)) {
             enum chimera_vfs_error e = S_ISDIR(inode->mode) ?
                 CHIMERA_VFS_EISDIR : CHIMERA_VFS_EEXIST;
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = e;
+            request->complete(request);
+            return;
+        }
+
+        /* CHIMERA_VFS_OPEN_REGULAR_ONLY: this open is about to carry data, so
+         * refuse a type it does not apply to and say which.  From the inode we
+         * are already holding. */
+        if ((flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) && !S_ISREG(inode->mode)) {
+            enum chimera_vfs_error e = chimera_vfs_nonreg_error(inode->mode);
             pthread_mutex_unlock(&inode->lock);
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = e;

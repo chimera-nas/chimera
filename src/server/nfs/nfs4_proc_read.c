@@ -112,66 +112,6 @@ chimera_nfs4_read_open_callback(
                      req);
 } /* chimera_nfs4_read_open_callback */
 
-static void
-chimera_nfs4_read_typecheck_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request *req = private_data;
-    struct READ4res    *res = &req->res_compound.resarray[req->index].opread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISREG(attr->va_mode)) {
-        res->status = chimera_nfs4_data_nonreg_status(attr->va_mode);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    req->handle = NULL;
-
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
-                        chimera_nfs4_read_open_callback,
-                        req);
-} /* chimera_nfs4_read_typecheck_complete */
-
-static void
-chimera_nfs4_read_typecheck_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req = private_data;
-    struct READ4res    *res = &req->res_compound.resarray[req->index].opread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MODE,
-                        chimera_nfs4_read_typecheck_complete,
-                        req);
-} /* chimera_nfs4_read_typecheck_open_callback */
-
 void
 chimera_nfs4_read(
     struct chimera_server_nfs_thread *thread,
@@ -247,8 +187,11 @@ chimera_nfs4_read(
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_read_typecheck_open_callback,
+                            CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_READ_ONLY |
+                            CHIMERA_VFS_OPEN_NOFOLLOW |
+                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
+                            chimera_nfs4_read_open_callback,
                             req);
         return;
     }
@@ -291,8 +234,11 @@ chimera_nfs4_read(
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_read_typecheck_open_callback,
+                            CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_READ_ONLY |
+                            CHIMERA_VFS_OPEN_NOFOLLOW |
+                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
+                            chimera_nfs4_read_open_callback,
                             req);
         return;
     }

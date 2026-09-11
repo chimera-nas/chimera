@@ -1650,6 +1650,7 @@ chimera_io_uring_open_fh(
     void                       *private_data)
 {
     struct chimera_io_uring_thread *thread = private_data;
+    struct stat                     st;
     int                             flags  = 0;
     int                             fd;
 
@@ -1714,6 +1715,26 @@ chimera_io_uring_open_fh(
         }
         request->complete(request);
         return;
+    }
+
+    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: this open is about to carry data, so
+     * refuse a type it does not apply to and say which.  The descriptor is
+     * already here, so the type comes from it rather than from a second
+     * resolution that could disagree with what was opened. */
+    if (request->open_fh.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) {
+        if (fstat(fd, &st) != 0) {
+            request->status = chimera_linux_errno_to_status(errno);
+            close(fd);
+            request->complete(request);
+            return;
+        }
+
+        if (!S_ISREG(st.st_mode)) {
+            request->status = chimera_vfs_nonreg_error(st.st_mode);
+            close(fd);
+            request->complete(request);
+            return;
+        }
     }
 
     request->open_fh.r_vfs_private = fd;
