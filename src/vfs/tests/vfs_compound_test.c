@@ -898,6 +898,103 @@ main(
     }
     TEST_PASS("an OPEN with no name re-opens the current object");
 
+    /* ---- CREATE makes the object current; REMOVE leaves the parent ----
+     * The two move the current object in opposite ways, and both report the
+     * parent either side so a caller can say what changed.  A CREATE puts the
+     * new object in hand, which is what lets the ops after it describe what was
+     * just made; a REMOVE unlinks a name FROM the current object, so the
+     * current object is still the directory afterwards. */
+    {
+        struct chimera_vfs_attrs sattr;
+        int                      i_mkdir, i_fh, i_ln, i_rm, i_ga5, i_look;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0750;
+
+        cp      = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_mkdir = chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "nd", 2, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_fh    = chimera_vfs_compound_add_getfh(cp);
+        i_ga5   = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MODE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_mkdir);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->created);
+        assert(S_ISDIR(op->attr.va_mode));
+        assert(op->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+
+        /* The ops after it addressed the directory that was just made, not the
+         * one it was made in. */
+        assert(chimera_vfs_compound_op(cp, i_fh)->fh_len == op->fh_len);
+        assert(memcmp(chimera_vfs_compound_op(cp, i_fh)->fh, op->fh,
+                      op->fh_len) == 0);
+        assert(S_ISDIR(chimera_vfs_compound_op(cp, i_ga5)->attr.va_mode));
+        assert(memcmp(op->fh, root_fh, root_fh_len) != 0);
+
+        chimera_vfs_compound_free(cp);
+
+        /* A symlink, and then unlinking it again. */
+        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_ln  = chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_SYMLINK, "sl", 2,
+            "nd", 2, NULL, CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(S_ISLNK(chimera_vfs_compound_op(cp, i_ln)->attr.va_mode));
+        chimera_vfs_compound_free(cp);
+
+        cp    = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_rm  = chimera_vfs_compound_add_remove(cp, "sl", 2);
+        /* Still the parent: a LOOKUP after the REMOVE resolves through it. */
+        i_look = chimera_vfs_compound_add_lookup(cp, "nd", 2, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_rm);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->fh_len == root_fh_len);
+        assert(memcmp(op->fh, root_fh, root_fh_len) == 0);
+        assert(chimera_vfs_compound_op(cp, i_look)->status == CHIMERA_VFS_OK);
+
+        chimera_vfs_compound_free(cp);
+
+        /* The name is gone, and a second REMOVE says so rather than the
+         * sequence swallowing it. */
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_rm)->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("CREATE makes the new object current; REMOVE keeps the parent");
+
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
     ctx.callbacks = 0;

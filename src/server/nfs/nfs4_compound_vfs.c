@@ -166,6 +166,8 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_LISTXATTRS:
         case OP_REMOVEXATTR:
         case OP_OPEN:
+        case OP_CREATE:
+        case OP_REMOVE:
             return 1;
         default:
             return 0;
@@ -614,6 +616,41 @@ nfs4_vfs_op_fill(
             return NFS4_OK;
         }
 
+
+        case OP_CREATE:
+        {
+            struct CREATE4args      *cargs = &argop->opcreate;
+            struct CREATE4res       *cres  = &resop->opcreate;
+            struct chimera_vfs_attrs applied = vop->set_attr;
+            struct chimera_vfs_attrs pre     = vop->dir_pre_attr;
+            struct chimera_vfs_attrs post    = vop->dir_post_attr;
+
+            cres->status        = NFS4_OK;
+            cres->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t),
+                                                        req->encoding->dbuf);
+            chimera_nfs_abort_if(cres->resok4.attrset == NULL,
+                                 "Failed to allocate space");
+            cres->resok4.num_attrset = chimera_nfs4_mask2attr(
+                &applied,
+                cargs->createattrs.num_attrmask,
+                cargs->createattrs.attrmask,
+                cres->resok4.attrset);
+
+            chimera_nfs4_set_changeinfo(&cres->resok4.cinfo, &pre, &post);
+            return NFS4_OK;
+        }
+
+        case OP_REMOVE:
+        {
+            struct REMOVE4res       *rres = &resop->opremove;
+            struct chimera_vfs_attrs pre  = vop->dir_pre_attr;
+            struct chimera_vfs_attrs post = vop->dir_post_attr;
+
+            rres->status = NFS4_OK;
+            /* change_info4 for the parent directory (RFC 7530 §16.25.5). */
+            chimera_nfs4_set_changeinfo(&rres->resok4.cinfo, &pre, &post);
+            return NFS4_OK;
+        }
 
         case OP_PUTFH:
             /* The staleness rule already ran as the precheck; nothing else in
@@ -1120,6 +1157,79 @@ nfs4_vfs_add_open_op(
                                          &attr, attr_mask);
 } /* nfs4_vfs_add_open_op */
 
+/*
+ * Append a CREATE, translating the object type NFSv4 names into the three
+ * shapes the VFS makes.  A device's numbers and a special file's type travel in
+ * the attributes, which is where mknod wants them anyway, so the translation is
+ * all here and there is none on the other side.
+ */
+static int
+nfs4_vfs_add_create_op(
+    struct chimera_vfs_compound *compound,
+    const struct nfs_argop4     *argop)
+{
+    const struct CREATE4args *args = &argop->opcreate;
+    struct chimera_vfs_attrs  attr;
+    uint8_t                   type;
+    const char               *target    = NULL;
+    int                       targetlen = 0;
+
+    memset(&attr, 0, sizeof(attr));
+
+    chimera_nfs4_unmarshall_attrs(&attr,
+                                  args->createattrs.num_attrmask,
+                                  args->createattrs.attrmask,
+                                  args->createattrs.attr_vals.data,
+                                  args->createattrs.attr_vals.len,
+                                  NULL, 0);
+
+    switch (args->objtype.type) {
+        case NF4DIR:
+            type = CHIMERA_VFS_COMPOUND_CREATE_DIR;
+            break;
+        case NF4LNK:
+            type      = CHIMERA_VFS_COMPOUND_CREATE_SYMLINK;
+            target    = (const char *) args->objtype.linkdata.data;
+            targetlen = (int) args->objtype.linkdata.len;
+            break;
+        default:
+            /* NF4BLK, NF4CHR, NF4SOCK or NF4FIFO -- the scan admits no other
+             * type here. */
+            type              = CHIMERA_VFS_COMPOUND_CREATE_NODE;
+            attr.va_set_mask |= CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
+            attr.va_rdev      = 0;
+
+            switch (args->objtype.type) {
+                case NF4BLK:
+                    attr.va_mode = (attr.va_mode & ~S_IFMT) | S_IFBLK;
+                    attr.va_rdev =
+                        ((uint64_t) args->objtype.devdata.specdata1 << 32) |
+                        (uint64_t) args->objtype.devdata.specdata2;
+                    break;
+                case NF4CHR:
+                    attr.va_mode = (attr.va_mode & ~S_IFMT) | S_IFCHR;
+                    attr.va_rdev =
+                        ((uint64_t) args->objtype.devdata.specdata1 << 32) |
+                        (uint64_t) args->objtype.devdata.specdata2;
+                    break;
+                case NF4SOCK:
+                    attr.va_mode = (attr.va_mode & ~S_IFMT) | S_IFSOCK;
+                    break;
+                default: /* NF4FIFO */
+                    attr.va_mode = (attr.va_mode & ~S_IFMT) | S_IFIFO;
+                    break;
+            } /* switch */
+            break;
+    } /* switch */
+
+    return chimera_vfs_compound_add_create(compound, type,
+                                           (const char *) args->objname.data,
+                                           (int) args->objname.len,
+                                           target, targetlen,
+                                           &attr,
+                                           CHIMERA_VFS_ATTR_FH);
+} /* nfs4_vfs_add_create_op */
+
 int
 chimera_nfs4_compound_try_vfs(
     struct chimera_server_nfs_thread *thread,
@@ -1409,6 +1519,95 @@ chimera_nfs4_compound_try_vfs(
                 }
                 }
                 have_getattr = 1;
+                break;
+
+            case OP_CREATE:
+            {
+                const struct CREATE4args *ca = &argop->opcreate;
+
+                /* CREATE mutates, so the rule that applies to SETXATTR applies
+                 * to it: nothing whose NFSv4-side check fails after the
+                 * sequence has run may precede it. */
+                if (may_fail_late) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* Only the types a CREATE actually makes, named explicitly:
+                 * everything else is a status the per-op path decides and this
+                 * path has no vocabulary for -- NFS4ERR_BADTYPE for a regular
+                 * file (that is what OPEN is for), NOTSUPP for the synthetic
+                 * named-attribute objects.  An allow-list, because guessing
+                 * what an unlisted type meant is how NF4REG became a FIFO. */
+                switch (ca->objtype.type) {
+                    case NF4DIR:
+                    case NF4BLK:
+                    case NF4CHR:
+                    case NF4SOCK:
+                    case NF4FIFO:
+                        break;
+                    case NF4LNK:
+                        /* An empty target is NFS4ERR_INVAL, decided before any
+                         * VFS call. */
+                        if (ca->objtype.linkdata.len == 0) {
+                            nenc = i;
+                            stop = 1;
+                        }
+                        break;
+                    default:
+                        nenc = i;
+                        stop = 1;
+                        break;
+                } /* switch */
+
+                if (stop) {
+                    break;
+                }
+
+                if (chimera_nfs4_validate_name(&ca->objname) != NFS4_OK ||
+                    chimera_nfs4_validate_createattrs(
+                        ca->createattrs.num_attrmask,
+                        ca->createattrs.attrmask) != NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The sequence carries no ACL: a backend owns the one it
+                 * reports only while its own completion runs. */
+                if (ca->createattrs.num_attrmask >= 1 &&
+                    (ca->createattrs.attrmask[0] & (1U << FATTR4_ACL))) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                cur_moved = 1;
+                break;
+            }
+
+            case OP_REMOVE:
+                if (may_fail_late ||
+                    chimera_nfs4_validate_name(&argop->opremove.target) !=
+                    NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* With either in play the per-op path looks the victim up
+                 * before unlinking it -- to recall a delegation on it (RFC 7530
+                 * §10.4.4), or to learn the data-server backing it has to
+                 * delete afterwards.  Both are decisions about the object being
+                 * removed that the sequence has no way to reach. */
+                if (chimera_server_config_get_nfs4_delegations(
+                        thread->shared->config) ||
+                    chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
                 break;
 
             case OP_OPEN:
@@ -1773,6 +1972,19 @@ chimera_nfs4_compound_try_vfs(
 
             case OP_LOOKUPP:
                 idx          = chimera_vfs_compound_add_lookupp(compound, 0);
+                map->vfs_res = idx;
+                break;
+
+            case OP_CREATE:
+                idx          = nfs4_vfs_add_create_op(compound, argop);
+                map->vfs_res = idx;
+                break;
+
+            case OP_REMOVE:
+                idx          = chimera_vfs_compound_add_remove(
+                    compound,
+                    (const char *) argop->opremove.target.data,
+                    (int) argop->opremove.target.len);
                 map->vfs_res = idx;
                 break;
 
