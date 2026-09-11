@@ -761,9 +761,30 @@ struct diskfs_inode_cache {
 
 #define DISKFS_BLOCK_SIZE                    SM_BLOCK_SIZE   /* 4096 */
 
-#define DISKFS_BLOCK_CACHE_SHARDS            256
+/*
+ * Shards exist to spread block-cache lock contention, but the pool is divided
+ * evenly between them (shard_cap = total / num_shards) and a block's shard is
+ * fixed by its address -- so the shard count is also the divisor on how much
+ * cache any single address may occupy.  A hot block holds one live CoW
+ * generation per un-pushed record that snapshotted it, a count bounded by the
+ * intent log's depth, and every generation shares its address and therefore its
+ * shard.  Fixing the count at 256 made that ceiling total/256 regardless of how
+ * small the pool was: with a 4 MiB journal the default pool is 2048 blocks, or
+ * 8 per shard, and one block could exhaust its shard while 99% of the cache sat
+ * idle (the synchronous claim then aborts -- it cannot park).
+ *
+ * So treat 256 as a MAXIMUM and scale down to the pool: the largest power of
+ * two no greater than it that still leaves each shard MIN_SHARD_BLOCKS.  Small
+ * caches get fewer, fatter shards (less lock spreading, but they are small
+ * enough that contention is not the binding concern); large caches are
+ * unchanged at 256.
+ */
+#define DISKFS_BLOCK_CACHE_MAX_SHARDS        256
 
-#define DISKFS_BLOCK_CACHE_SHARD_MASK        (DISKFS_BLOCK_CACHE_SHARDS - 1)
+/* Floor on shard_cap.  Must comfortably exceed the live CoW generations one hot
+ * block can accumulate: measured peak on an idle box is ~22, and the abort was
+ * reached in CI at 64. */
+#define DISKFS_BLOCK_CACHE_MIN_SHARD_BLOCKS  256
 
 #define DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD 1024
 
@@ -886,10 +907,13 @@ struct diskfs_block_shard {
 
 struct diskfs_block_cache {
     uint32_t                  shard_cap;   /* max resident buffers per shard */
+    uint32_t                  num_shards;  /* power of two, <= MAX_SHARDS */
+    uint32_t                  shard_mask;  /* num_shards - 1 */
     uint32_t                  buffer_extra_per_shard;
     int                       buffers_ready;
     pthread_mutex_t           prealloc_lock;
-    struct diskfs_block_shard shards[DISKFS_BLOCK_CACHE_SHARDS];
+    /* Sized for the maximum; only the first num_shards are initialised/used. */
+    struct diskfs_block_shard shards[DISKFS_BLOCK_CACHE_MAX_SHARDS];
 };
 
 
@@ -4341,7 +4365,7 @@ diskfs_block_shard(
 {
     uint64_t hash = diskfs_block_hash(device_id, device_offset);
 
-    return &cache->shards[hash & DISKFS_BLOCK_CACHE_SHARD_MASK];
+    return &cache->shards[hash & cache->shard_mask];
 } /* diskfs_block_shard */
 
 
