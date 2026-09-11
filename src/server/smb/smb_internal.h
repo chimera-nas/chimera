@@ -324,9 +324,6 @@ struct chimera_smb_share {
  * frees the share.  Safe to call with no lock held: the share is already
  * unlinked from shared->shares before its list reference is dropped, so no new
  * tree can find it, and every remaining reference is a tree's. */
-
-
-
 static inline void
 chimera_smb_share_release(struct chimera_smb_share *share)
 {
@@ -724,13 +721,6 @@ struct chimera_smb_request {
              * leases settling for an ordinary ack-required park.  (smb2.lease.
              * unlink cross-connection ordering.) */
             uint8_t                            park_on_notify;
-            /* This park is counted in the file state's break_waiters, so the
-             * claim layer knows an opener is blocked on that break (see
-             * chimera_vfs_claim_break_waiter_add).  Set at park, cleared by the
-             * first path that retires the park -- resume, deadline, CANCEL or
-             * connection teardown -- so the count is symmetric however the wait
-             * ends. */
-            uint8_t                            break_waiter_counted;
             /* Durable-reconnect retry: a reclaim that finds its handle still
              * flagged live (the previous connection's disconnect has not yet
              * been processed -- a cross-connection race) re-arms a short timer
@@ -2537,62 +2527,6 @@ void chimera_smb_notify_cancel(
 void chimera_smb_notify_drop(
     struct chimera_smb_notify_request *nr);
 
-/*
- * Break-waiter accounting for an MS-SMB2 3.3.5.9 pending open.
- *
- * A CREATE that parks on another holder's ack-required break holds its reply on
- * conn->parked_requests, which the claim layer cannot see.  Count the park on
- * the file's claim state so the layer that owns the break can tell a holder
- * whose disappearance blocks an opener from one whose disappearance blocks
- * nobody -- the two want opposite handling when the holder's channel dies
- * mid-break.  Register once at park; retire on whichever path ends the wait.
- */
-static inline void
-chimera_smb_create_break_waiter_register(struct chimera_smb_request *request)
-{
-    struct chimera_vfs_state *vfs_state;
-
-    if (request->create.break_waiter_counted ||
-        request->create.park_fh_len == 0) {
-        return;
-    }
-
-    vfs_state = request->compound->thread->vfs_thread->vfs->vfs_state;
-    chimera_vfs_claim_break_waiter_add(vfs_state,
-                                       request->create.park_fh,
-                                       request->create.park_fh_len,
-                                       request->create.park_fh_hash);
-    request->create.break_waiter_counted = 1;
-} /* chimera_smb_create_break_waiter_register */
-
-/* Idempotent: safe to call from every path that retires a park, and on requests
- * that never parked (or are not CREATEs at all -- the parked list carries other
- * commands, whose union members must not be read). */
-static inline void
-chimera_smb_create_break_waiter_retire(struct chimera_smb_request *request)
-{
-    struct chimera_vfs_state *vfs_state;
-
-    if (request->smb2_hdr.command != SMB2_CREATE ||
-        !request->create.break_waiter_counted) {
-        return;
-    }
-
-    request->create.break_waiter_counted = 0;
-    vfs_state                            = request->compound->thread->vfs_thread->vfs->vfs_state;
-    chimera_vfs_claim_break_waiter_remove(vfs_state,
-                                          request->create.park_fh,
-                                          request->create.park_fh_len,
-                                          request->create.park_fh_hash);
-} /* chimera_smb_create_break_waiter_retire */
-
-/*
- * Opens whose undeliverable break conn_free resolves in one pass.  A dying
- * channel carries a handful at most; the cap just bounds the on-stack list, and
- * anything beyond it keeps the pre-existing lapse-at-deadline behaviour.
- */
-#define CHIMERA_SMB_CONN_BREAK_FIXUP_MAX 64
-
 /* Defined in smb_async_interim.c -- forward-declared so the inline conn_free
  * below can drain without including the header (which would create a cycle
  * through smb_internal.h). */
@@ -2644,28 +2578,7 @@ chimera_smb_conn_free(
      * this conn.  When the session refcount drops to zero below, the
      * trees and their opens get torn down — but if multi-channel keeps
      * the session alive past this conn, the opens persist with stale
-     * create_conn pointers that the OPLOCK_BREAK path would dereference.
-     *
-     * A break notification is pinned to the connection that created the open,
-     * so an open whose create_conn is this dying channel has an in-flight break
-     * that can no longer be delivered -- while under multichannel the session,
-     * and the client, outlive the channel.  Left alone the claim sits BREAKING
-     * until the break deadline.
-     *
-     * Whether that is right depends on who is waiting.  If nobody is, abandon
-     * it: a durable reconnect must get its full lease back, which is what
-     * smb2.durable-open.lease-disconnect-race asserts, and applying the break
-     * would cost the holder caching rights nobody asked it to give up.  If an
-     * opener is parked on it, abandoning strands that opener for the whole
-     * deadline -- 30 s, longer than the 20 s the MS-SMB2 adapter waits -- so
-     * the break must be applied and the opener released.  Collect the affected
-     * files here and resolve them below, once the tree/session locks this walk
-     * holds are dropped (the claim layer takes file->lock). */
-    uint64_t brk_fh_hash[CHIMERA_SMB_CONN_BREAK_FIXUP_MAX];
-    uint8_t  brk_fh[CHIMERA_SMB_CONN_BREAK_FIXUP_MAX][CHIMERA_VFS_FH_SIZE];
-    uint8_t  brk_fh_len[CHIMERA_SMB_CONN_BREAK_FIXUP_MAX];
-    int      brk_n = 0;
-
+     * create_conn pointers that the OPLOCK_BREAK path would dereference. */
     HASH_ITER(hh, conn->session_handles, session_handle, tmp)
     {
         struct chimera_smb_session *s = session_handle->session;
@@ -2697,52 +2610,12 @@ chimera_smb_conn_free(
                 {
                     if (of->create_conn == conn) {
                         of->create_conn = NULL;
-                        if (of->handle && of->handle->fh_len &&
-                            brk_n < CHIMERA_SMB_CONN_BREAK_FIXUP_MAX) {
-                            memcpy(brk_fh[brk_n], of->handle->fh,
-                                   of->handle->fh_len);
-                            brk_fh_len[brk_n]  = of->handle->fh_len;
-                            brk_fh_hash[brk_n] = of->handle->fh_hash;
-                            brk_n++;
-                        }
                     }
                 }
                 pthread_mutex_unlock(&t->open_files_lock[b]);
             }
         }
         pthread_mutex_unlock(&s->lock);
-    }
-
-    /* Resolve the undeliverable breaks collected above, now that no tree or
-    * session lock is held.  Only the ones an opener is actually parked on:
-    * everything else keeps today's behaviour of letting the break lapse. */
-    if (brk_n) {
-        struct chimera_vfs_state *vfs_state =
-            thread->vfs_thread->vfs->vfs_state;
-        int                       i;
-        bool                      released = false;
-
-        for (i = 0; i < brk_n; i++) {
-            if (!chimera_vfs_claim_has_break_waiter(vfs_state, brk_fh[i],
-                                                    brk_fh_len[i],
-                                                    brk_fh_hash[i])) {
-                continue;
-            }
-            chimera_smb_info(
-                "break holder's channel died with an opener parked on it: "
-                "fh_hash %016lx conn %p -- applying the break",
-                (unsigned long) brk_fh_hash[i], (void *) conn);
-            chimera_vfs_claim_revoke_breaks(vfs_state, brk_fh[i],
-                                            brk_fh_len[i], brk_fh_hash[i],
-                                            NULL);
-            released = true;
-        }
-
-        /* The parked CREATE lives on some other connection, possibly on another
-         * thread; ring every thread's resume doorbell so each completes its own. */
-        if (released) {
-            chimera_smb_create_resume_parked_broadcast(thread);
-        }
     }
 
     HASH_ITER(hh, conn->session_handles, session_handle, tmp)
