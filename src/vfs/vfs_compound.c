@@ -113,6 +113,7 @@ chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
             compound->ops[i].out_handle = NULL;
         }
         free(compound->ops[i].target);
+        free(compound->ops[i].link_target);
         free(compound->ops[i].entries);
         free(compound->ops[i].buffer);
     }
@@ -493,6 +494,88 @@ chimera_vfs_compound_add_removexattr(
 
     return index;
 } /* chimera_vfs_compound_add_removexattr */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_create(
+    struct chimera_vfs_compound    *compound,
+    uint8_t                         create_type,
+    const char                     *name,
+    int                             namelen,
+    const char                     *target,
+    int                             targetlen,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        return -1;
+    }
+
+    if (create_type == CHIMERA_VFS_COMPOUND_CREATE_SYMLINK &&
+        (!target || targetlen <= 0)) {
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_CREATE, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    memcpy(op->name, name, namelen);
+    op->name[namelen] = '\0';
+    op->name_len      = (uint32_t) namelen;
+    op->create_type   = create_type;
+    op->attr_mask     = attr_mask;
+
+    if (set_attr) {
+        op->set_attr = *set_attr;
+    }
+
+    if (create_type == CHIMERA_VFS_COMPOUND_CREATE_SYMLINK) {
+        op->link_target = malloc((size_t) targetlen + 1);
+
+        if (!op->link_target) {
+            return -1;
+        }
+
+        memcpy(op->link_target, target, targetlen);
+        op->link_target[targetlen] = '\0';
+        op->link_target_len        = (uint32_t) targetlen;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_create */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_remove(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_REMOVE, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    memcpy(op->name, name, namelen);
+    op->name[namelen] = '\0';
+    op->name_len      = (uint32_t) namelen;
+
+    return index;
+} /* chimera_vfs_compound_add_remove */
 
 SYMBOL_EXPORT int
 chimera_vfs_compound_add_open(
@@ -1038,6 +1121,82 @@ chimera_vfs_compound_open_fh_callback(
 } /* chimera_vfs_compound_open_fh_callback */
 
 /*
+ * A CREATE finished.  The three underlying calls answer with the same three
+ * things -- the new object's attributes and the parent's, either side -- so one
+ * completion serves all of them.
+ */
+static void
+chimera_vfs_compound_create_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) set_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    chimera_vfs_compound_store_attr(op, attr);
+    op->dir_pre_attr  = *dir_pre_attr;
+    op->dir_post_attr = *dir_post_attr;
+    op->created       = 1;
+
+    /* The new object becomes current, which is what lets a caller ask for its
+     * file handle or its attributes without naming it again. */
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+        chimera_vfs_compound_set_current(compound, attr->va_fh,
+                                         attr->va_fh_len);
+    }
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_create_callback */
+
+/* symlink_at reports no set_attr, so it needs its own entry point into the
+ * completion above rather than a different completion. */
+static void
+chimera_vfs_compound_symlink_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    chimera_vfs_compound_create_callback(error_code, NULL, attr,
+                                         dir_pre_attr, dir_post_attr,
+                                         private_data);
+} /* chimera_vfs_compound_symlink_callback */
+
+static void
+chimera_vfs_compound_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    /* A REMOVE does not move the current object: it unlinks a name FROM it. */
+    op->dir_pre_attr  = *pre_attr;
+    op->dir_post_attr = *post_attr;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_remove_callback */
+
+/*
  * The flags this op needs the current object opened with, or 0 if it addresses
  * the current object without a handle at all.
  *
@@ -1065,6 +1224,8 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
         case CHIMERA_VFS_COMPOUND_OP_LOOKUPP:
         case CHIMERA_VFS_COMPOUND_OP_READDIR:
+        case CHIMERA_VFS_COMPOUND_OP_CREATE:
+        case CHIMERA_VFS_COMPOUND_OP_REMOVE:
             return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                    CHIMERA_VFS_OPEN_DIRECTORY;
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
@@ -1228,6 +1389,66 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                 CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
                                 chimera_vfs_compound_open_at_callback,
                                 compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_CREATE:
+            switch (op->create_type) {
+                case CHIMERA_VFS_COMPOUND_CREATE_DIR:
+                    chimera_vfs_mkdir_at(compound->thread, compound->cred,
+                                         compound->handle,
+                                         op->name, op->name_len,
+                                         &op->set_attr,
+                                         op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                         CHIMERA_VFS_ATTR_CHANGE |
+                                         CHIMERA_VFS_ATTR_CTIME,
+                                         CHIMERA_VFS_ATTR_CHANGE |
+                                         CHIMERA_VFS_ATTR_CTIME,
+                                         chimera_vfs_compound_create_callback,
+                                         compound);
+                    break;
+                case CHIMERA_VFS_COMPOUND_CREATE_SYMLINK:
+                    chimera_vfs_symlink_at(compound->thread, compound->cred,
+                                           compound->handle,
+                                           op->name, op->name_len,
+                                           op->link_target,
+                                           (int) op->link_target_len,
+                                           &op->set_attr,
+                                           op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                           CHIMERA_VFS_ATTR_CHANGE |
+                                           CHIMERA_VFS_ATTR_CTIME,
+                                           CHIMERA_VFS_ATTR_CHANGE |
+                                           CHIMERA_VFS_ATTR_CTIME,
+                                           chimera_vfs_compound_symlink_callback,
+                                           compound);
+                    break;
+                default:
+                    chimera_vfs_mknod_at(compound->thread, compound->cred,
+                                         compound->handle,
+                                         op->name, op->name_len,
+                                         &op->set_attr,
+                                         op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                         CHIMERA_VFS_ATTR_CHANGE |
+                                         CHIMERA_VFS_ATTR_CTIME,
+                                         CHIMERA_VFS_ATTR_CHANGE |
+                                         CHIMERA_VFS_ATTR_CTIME,
+                                         chimera_vfs_compound_create_callback,
+                                         compound);
+                    break;
+            } /* switch */
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_REMOVE:
+            chimera_vfs_remove_at(compound->thread, compound->cred,
+                                  compound->handle,
+                                  op->name, op->name_len,
+                                  NULL, 0, 0,
+                                  CHIMERA_VFS_ATTR_CHANGE |
+                                  CHIMERA_VFS_ATTR_CTIME,
+                                  CHIMERA_VFS_ATTR_CHANGE |
+                                  CHIMERA_VFS_ATTR_CTIME,
+                                  NULL,
+                                  chimera_vfs_compound_remove_callback,
+                                  compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
