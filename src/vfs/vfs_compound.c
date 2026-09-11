@@ -73,6 +73,14 @@ struct chimera_vfs_compound {
      * itself retry.  Cleared whenever the sequence advances. */
     uint8_t                         open_retried;
 
+    /* A READ or WRITE that addresses the current object establishes that the
+     * object is a regular file before it opens it for data -- so a protocol
+     * answers for the type rather than for whatever errno a backend's data
+     * open of a directory happens to produce, and so that open is never
+     * attempted at all.  This says that step has been done.  Cleared whenever
+     * the sequence advances. */
+    uint8_t                         io_typechecked;
+
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
 };
@@ -112,6 +120,14 @@ chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
             chimera_vfs_release(compound->thread, compound->ops[i].out_handle);
             compound->ops[i].out_handle = NULL;
         }
+        /* Data the caller did not take, for the same reason and on the same
+         * terms as the handle above. */
+        if (compound->ops[i].niov) {
+            evpl_iovecs_release(compound->thread->evpl,
+                                compound->ops[i].iov,
+                                compound->ops[i].niov);
+            compound->ops[i].niov = 0;
+        }
         free(compound->ops[i].target);
         free(compound->ops[i].link_target);
         free(compound->ops[i].entries);
@@ -137,6 +153,29 @@ chimera_vfs_compound_take_handle(
 
     return handle;
 } /* chimera_vfs_compound_take_handle */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_take_iov(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    struct evpl_iovec          **iov,
+    int                         *niov)
+{
+    *iov  = NULL;
+    *niov = 0;
+
+    if (index >= compound->num_ops) {
+        return;
+    }
+
+    *iov  = compound->ops[index].iov;
+    *niov = compound->ops[index].niov;
+
+    /* Only the references move.  The array holding the descriptors stays the
+     * compound's and is freed with it, so a caller that needs them to outlive
+     * the sequence copies them somewhere that does. */
+    compound->ops[index].niov = 0;
+} /* chimera_vfs_compound_take_iov */
 
 /* Claim the next op slot, or -1 when the sequence is full. */
 static struct chimera_vfs_compound_op *
@@ -578,6 +617,80 @@ chimera_vfs_compound_add_remove(
 } /* chimera_vfs_compound_add_remove */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_read(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    struct evpl_iovec              *iov,
+    int                             max_iov,
+    const struct chimera_claim_actor *io_owner)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (max_iov <= 0 || !iov) {
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_READ, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->iov       = iov;
+    op->in_handle = handle;
+
+    if (io_owner) {
+        op->io_owner      = *io_owner;
+        op->have_io_owner = 1;
+    }
+    op->offset    = offset;
+    op->count     = count;
+    op->max_iov   = max_iov;
+
+    return index;
+} /* chimera_vfs_compound_add_read */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_write(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        count,
+    uint32_t                        sync,
+    struct evpl_iovec              *iov,
+    int                             niov,
+    const struct chimera_claim_actor *io_owner)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_WRITE, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle = handle;
+    op->offset    = offset;
+    op->count     = count;
+    op->sync      = sync;
+    op->w_iov     = iov;
+    op->w_niov    = niov;
+
+    if (io_owner) {
+        op->io_owner      = *io_owner;
+        op->have_io_owner = 1;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_write */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_setattr(
     struct chimera_vfs_compound    *compound,
     struct chimera_vfs_open_handle *handle,
@@ -687,6 +800,7 @@ chimera_vfs_compound_op_done(
     compound->index++;
     compound->open_resolved = 0;
     compound->open_retried  = 0;
+    compound->io_typechecked = 0;
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_op_done */
 
@@ -1201,6 +1315,96 @@ chimera_vfs_compound_symlink_callback(
                                          private_data);
 } /* chimera_vfs_compound_symlink_callback */
 
+/* Step one of a two-step READ or WRITE: the object's type, from a path open,
+ * before it is opened for data. */
+static void
+chimera_vfs_compound_io_type_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    compound->io_typechecked = 1;
+
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        op->existing_mode = attr->va_mode;
+
+        if (!S_ISREG(attr->va_mode)) {
+            chimera_vfs_compound_op_done(
+                compound,
+                chimera_vfs_compound_nonreg_error(attr->va_mode));
+            return;
+        }
+    }
+
+    /* Re-enter: the op now wants a data handle, which the step will open
+     * because a path handle cannot serve it. */
+    chimera_vfs_compound_step(compound);
+} /* chimera_vfs_compound_io_type_callback */
+
+static void
+chimera_vfs_compound_read_callback(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  count,
+    uint32_t                  eof,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Nothing was handed over, so nothing is ours to keep. */
+        evpl_iovecs_release(compound->thread->evpl, iov, niov);
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    /* iov is the array the adder allocated, filled in place. */
+    op->niov     = niov;
+    op->read_len = count;
+    op->eof_read = eof;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_read_callback */
+
+static void
+chimera_vfs_compound_write_callback(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  length,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    op->written   = length;
+    op->committed = sync;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_write_callback */
+
 static void
 chimera_vfs_compound_setattr_callback(
     enum chimera_vfs_error    error_code,
@@ -1289,6 +1493,18 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_READLINK:
         case CHIMERA_VFS_COMPOUND_OP_SETATTR:
             return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
+        case CHIMERA_VFS_COMPOUND_OP_READ:
+        case CHIMERA_VFS_COMPOUND_OP_WRITE:
+            /* The type check comes first, through a PATH open; the data then
+             * comes through a DATA one.  They are different handles from
+             * different caches, so the sequence opens twice -- exactly as the
+             * per-op path does, and for the same reason. */
+            if (!op->io_typechecked_flag) {
+                return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
+            }
+            return op->type == CHIMERA_VFS_COMPOUND_OP_READ ?
+                   (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY) :
+                   CHIMERA_VFS_OPEN_INFERRED;
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
         case CHIMERA_VFS_COMPOUND_OP_GETXATTR:
         case CHIMERA_VFS_COMPOUND_OP_SETXATTR:
@@ -1334,7 +1550,12 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         return;
     }
 
-    op         = &compound->ops[compound->index];
+    op = &compound->ops[compound->index];
+
+    /* op_open_flags cannot see the sequence, so tell it where the two-step I/O
+     * has got to. */
+    op->io_typechecked_flag = compound->io_typechecked;
+
     open_flags = chimera_vfs_compound_op_open_flags(op);
 
     if (open_flags) {
@@ -1493,6 +1714,65 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                     break;
             } /* switch */
             break;
+
+        case CHIMERA_VFS_COMPOUND_OP_READ:
+        case CHIMERA_VFS_COMPOUND_OP_WRITE:
+        {
+            struct chimera_vfs_open_handle *target =
+                op->in_handle ? op->in_handle : compound->handle;
+
+            /* An op addressing the current object establishes the object's
+             * type before it is opened for data -- so a non-regular one is
+             * refused here, and the data open is never attempted.  An op that
+             * brought its own handle needs none of this: opening it is what
+             * established the type. */
+            if (!op->in_handle && !compound->io_typechecked) {
+                chimera_vfs_getattr(compound->thread, compound->cred,
+                                    compound->handle,
+                                    CHIMERA_VFS_ATTR_MODE,
+                                    chimera_vfs_compound_io_type_callback,
+                                    compound);
+                break;
+            }
+
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_READ) {
+                if (op->have_io_owner) {
+                    chimera_vfs_read_owned(compound->thread, compound->cred,
+                                           target,
+                                           op->offset, op->count,
+                                           op->iov, op->max_iov,
+                                           0, &op->io_owner,
+                                           chimera_vfs_compound_read_callback,
+                                           compound);
+                } else {
+                    chimera_vfs_read(compound->thread, compound->cred,
+                                     target,
+                                     op->offset, op->count,
+                                     op->iov, op->max_iov,
+                                     0,
+                                     chimera_vfs_compound_read_callback,
+                                     compound);
+                }
+            } else if (op->have_io_owner) {
+                chimera_vfs_write_owned(compound->thread, compound->cred,
+                                        target,
+                                        op->offset, op->count, op->sync,
+                                        0, 0,
+                                        op->w_iov, op->w_niov,
+                                        &op->io_owner,
+                                        chimera_vfs_compound_write_callback,
+                                        compound);
+            } else {
+                chimera_vfs_write(compound->thread, compound->cred,
+                                  target,
+                                  op->offset, op->count, op->sync,
+                                  0, 0,
+                                  op->w_iov, op->w_niov,
+                                  chimera_vfs_compound_write_callback,
+                                  compound);
+            }
+            break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_SETATTR:
             /* With the caller's own handle the change is authorized by that

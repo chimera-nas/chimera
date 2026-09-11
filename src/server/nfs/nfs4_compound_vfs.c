@@ -84,6 +84,10 @@
  */
 #define NFS4_VFS_READDIR_MIN_ENTRY 256
 
+/* How many iovecs one READ's answer may arrive in; the per-op path reserves the
+ * same number. */
+#define NFS4_VFS_READ_MAX_IOV      256
+
 /*
  * How many entries a READDIR's reply could possibly hold.
  *
@@ -125,6 +129,10 @@ struct nfs4_vfs_op {
      * reports back -- an open-by-handle produces no attributes and no directory
      * change info -- and so in what may be passed on from it. */
     int      open_by_name;
+    /* READ, WRITE, SETATTR: the handle this op resolved from its stateid, and
+     * holds a reference to for as long as the sequence runs.  Borrowed by the
+     * VFS op; released here when the sequence is over, whatever the outcome. */
+    struct chimera_vfs_open_handle *io_handle;
 };
 
 struct nfs4_vfs_compound_ctx {
@@ -135,11 +143,6 @@ struct nfs4_vfs_compound_ctx {
     /* The OPEN this sequence carries, if any -- recorded when the sequence is
      * built, because every way out of it has to go through the OPEN's own
      * completion, including the ways where the OPEN never ran. */
-    /* The handle a SETATTR resolved from its stateid, and holds a reference to
-     * for as long as the sequence runs.  Borrowed by the op; released here when
-     * the sequence is over, whatever the outcome. */
-    struct chimera_vfs_open_handle *setattr_handle;
-
     int                      open_present;
     uint32_t                 open_res_index;
 
@@ -175,6 +178,8 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_CREATE:
         case OP_REMOVE:
         case OP_SETATTR:
+        case OP_READ:
+        case OP_WRITE:
             return 1;
         default:
             return 0;
@@ -463,6 +468,13 @@ nfs4_vfs_op_errno(
                                                vop->existing_mode);
     }
 
+    /* I/O the executor refused on the object's type, before it opened it for
+     * data.  It reports the nearest POSIX answer; NFSv4 has its own. */
+    if ((argop == OP_READ || argop == OP_WRITE) && vop->existing_mode &&
+        !S_ISREG(vop->existing_mode)) {
+        return chimera_nfs4_data_nonreg_status(vop->existing_mode);
+    }
+
     return chimera_nfs4_errno_to_nfsstat4(err);
 } /* nfs4_vfs_op_errno */
 
@@ -647,6 +659,37 @@ nfs4_vfs_op_fill(
             return NFS4_OK;
         }
 
+        case OP_READ:
+        {
+            struct READ4res   *rdres = &resop->opread;
+            struct evpl_iovec *riov;
+            int                rniov;
+
+            chimera_vfs_compound_take_iov(compound, (uint32_t) map->vfs_res,
+                                          &riov, &rniov);
+
+            rdres->status             = NFS4_OK;
+            rdres->resok4.eof         = vop->eof_read;
+            rdres->resok4.data.length = vop->read_len;
+            rdres->resok4.data.niov   = rniov;
+            rdres->resok4.data.iov    = riov;
+            return NFS4_OK;
+        }
+
+        case OP_WRITE:
+        {
+            struct WRITE4res *wrres = &resop->opwrite;
+
+            wrres->status           = NFS4_OK;
+            wrres->resok4.count     = vop->written;
+            /* Achieved durability, which the backend may report as more than
+             * was asked for. */
+            wrres->resok4.committed = vop->committed;
+            memcpy(wrres->resok4.writeverf, &req->thread->shared->nfs_verifier,
+                   sizeof(wrres->resok4.writeverf));
+            return NFS4_OK;
+        }
+
         case OP_SETATTR:
         {
             struct SETATTR4args     *sargs   = &argop->opsetattr;
@@ -804,6 +847,42 @@ nfs4_vfs_op_fill(
 } /* nfs4_vfs_op_fill */
 
 /*
+ * Give back everything the sequence borrowed on the caller's behalf: the
+ * handles its I/O ops resolved from stateids, and the payload of any WRITE it
+ * carried.
+ *
+ * A WRITE's payload is released here rather than in its fill, because it has to
+ * be released whether or not the fill ran -- the op may have failed, or the
+ * sequence may have stopped in front of it.  Zeroing niov is what stops the
+ * dispatcher's own sweep of undispatched WRITEs from releasing it a second
+ * time.
+ */
+static void
+nfs4_vfs_compound_give_back(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs4_vfs_compound_ctx     *ctx)
+{
+    struct nfs_request *req = ctx->req;
+    uint32_t            k;
+
+    for (k = 0; k < ctx->num_ops; k++) {
+        struct nfs_argop4 *argop =
+            &req->args_compound->argarray[ctx->ops[k].res_index];
+
+        if (ctx->ops[k].io_handle) {
+            chimera_vfs_release(thread->vfs_thread, ctx->ops[k].io_handle);
+            ctx->ops[k].io_handle = NULL;
+        }
+
+        if (argop->argop == OP_WRITE && argop->opwrite.data.niov) {
+            evpl_iovecs_release(thread->evpl, argop->opwrite.data.iov,
+                                argop->opwrite.data.niov);
+            argop->opwrite.data.niov = 0;
+        }
+    }
+} /* nfs4_vfs_compound_give_back */
+
+/*
  * The sequence is over.  Fill the results of every NFSv4 op that ran, stopping
  * at the first that failed, and hand the request back to the reply path exactly
  * as a failing per-op handler would.
@@ -925,11 +1004,7 @@ nfs4_vfs_compound_complete(
      * one seqid behind, and the client's next OPEN is answered NFS4ERR_BAD_SEQID
      * for a request that was perfectly good.
      */
-    if (ctx->setattr_handle) {
-        /* The op borrowed it for the length of the sequence, which is over. */
-        chimera_vfs_release(thread->vfs_thread, ctx->setattr_handle);
-        ctx->setattr_handle = NULL;
-    }
+    nfs4_vfs_compound_give_back(thread, ctx);
 
     if (failed && ctx->open_present && fail_res == ctx->open_res_index) {
         req->index = (int) fail_res;
@@ -1196,6 +1271,145 @@ nfs4_vfs_add_open_op(
     return chimera_vfs_compound_add_open(compound, name, namelen, flags, opts,
                                          &attr, attr_mask);
 } /* nfs4_vfs_add_open_op */
+
+/*
+ * Resolve the handle a READ or WRITE runs against, and authorize it.
+ *
+ * A special stateid is anonymous: there is no open to consult, so the I/O runs
+ * against the current object and the deny-share reservations held by any owner
+ * of any client are what authorize it.  A real one names an open (or a lock,
+ * which has one), and then that open's own handle and its granted access mode
+ * are what authorize it -- the OPENMODE rule.
+ *
+ * Any non-OK return sends the op back to the per-op path, which reaches the
+ * same answer.  That includes the cases this path declines rather than fails:
+ * a delegation stateid, which authorizes the I/O but carries no handle and
+ * changes which lease the I/O is attributed to.
+ */
+static nfsstat4
+nfs4_vfs_io_authorize(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct stateid4            *sid,
+    uint32_t                          share_access,
+    const uint8_t                    *fh,
+    int                               fhlen,
+    struct chimera_vfs_open_handle  **out_handle,
+    struct chimera_claim_actor       *out_owner,
+    int                              *have_owner)
+{
+    struct nfs_state_table *table = &thread->shared->nfs4_state_table;
+    struct nfs_open_state  *open_state;
+    struct nfs_lock_state  *lock_state;
+    struct chimera_vfs_open_handle *state_handle;
+    uint32_t                current_seqid;
+    void                   *state_void;
+    uint8_t                 state_type;
+    nfsstat4                status;
+
+    *out_handle = NULL;
+    *have_owner = 0;
+
+    if (nfs4_stateid_is_special(sid)) {
+        return nfs4_clients_check_io_denied(&thread->shared->nfs4_shared_clients,
+                                            fh, fhlen, share_access);
+    }
+
+    status = nfs_state_table_acquire(table, sid, 0, &state_void, &state_type);
+
+    if (status != NFS4_OK) {
+        return status;
+    }
+
+    status = nfs_state_check_client(state_void, state_type,
+                                    req->session ?
+                                    req->session->client_unified : NULL);
+
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return status;
+    }
+
+    if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        /* Authorizes the I/O but carries no handle, and the per-op path
+         * attributes the on-the-fly I/O to the delegation holder so it does not
+         * recall the client's own delegation.  Leave it there. */
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return NFS4ERR_NOTSUPP;
+    }
+
+    if (state_type == NFS4_SLOT_TYPE_OPEN) {
+        open_state    = state_void;
+        state_handle  = open_state->handle;
+        current_seqid = open_state->seqid;
+    } else {
+        lock_state    = state_void;
+        open_state    = lock_state->open_state;
+        state_handle  = lock_state->handle;
+        current_seqid = lock_state->seqid;
+    }
+
+    if (req->minorversion == 0) {
+        status = nfs4_stateid_check_seqid(current_seqid, sid->seqid);
+
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, state_void, state_type,
+                                    thread->vfs_thread);
+            return status;
+        }
+    }
+
+    /* RFC 7530 §9.1.4 / RFC 8881 §9.1.2: I/O through an open (or lock) stateid
+     * is limited to the associated open's granted access mode. */
+    if ((open_state->share_access & share_access) == 0) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return NFS4ERR_OPENMODE;
+    }
+
+    status = nfs_open_state_check_io_denied(open_state, share_access);
+
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return status;
+    }
+
+    if (!nfs_open_state_check_principal(open_state,
+                                        req->principal_flavor,
+                                        req->principal_machinename,
+                                        req->principal_machinename_len)) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return NFS4ERR_ACCESS;
+    }
+
+    if (!state_handle) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        return NFS4ERR_NOTSUPP;
+    }
+
+    /* Whose I/O this is.  Without it the claim layer arbitrates the client's
+     * own I/O against the client's own share reservation -- denying it, and
+     * recalling the very delegation it is being done under. */
+    memset(out_owner, 0, sizeof(*out_owner));
+    out_owner->owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    out_owner->owner.client_key = open_state->owner->client->client_id;
+    out_owner->owner.owner_lo   = state_handle->fh_hash;
+    out_owner->owner.owner_hi   = 0;
+    *have_owner                 = 1;
+
+    /* A reference of our own, so the handle outlives the state slot. */
+    chimera_vfs_dup_handle(thread->vfs_thread, state_handle);
+    *out_handle = state_handle;
+
+    nfs_state_table_release(table, state_void, state_type, thread->vfs_thread);
+
+    return NFS4_OK;
+} /* nfs4_vfs_io_authorize */
 
 /*
  * Authorize a size-changing SETATTR, and resolve the handle it applies
@@ -1713,6 +1927,49 @@ chimera_nfs4_compound_try_vfs(
                 break;
             }
 
+            case OP_READ:
+            case OP_WRITE:
+            {
+                const struct stateid4 *sid = (argop->argop == OP_READ) ?
+                    &argop->opread.stateid : &argop->opwrite.stateid;
+
+                if (argop->argop == OP_WRITE && may_fail_late) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* See the SETATTR case: substituting the current stateid means
+                 * knowing what the op before this one left. */
+                if (chimera_nfs4_stateid_is_current(sid)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* An anonymous I/O is authorized against the object it
+                 * addresses, and that authorization is settled before the
+                 * sequence is submitted -- so the object has to be the one the
+                 * sequence starts from. */
+                if (nfs4_stateid_is_special(sid) && cur_moved) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* A data server serves I/O by file handle without a state
+                 * table, on the metadata server's authority; that is a
+                 * different authorization model, not this one. */
+                if (chimera_server_config_get_nfs_data_server(
+                        thread->shared->config)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                break;
+            }
+
             case OP_SETATTR:
             {
                 const struct SETATTR4args *sa = &argop->opsetattr;
@@ -2111,8 +2368,7 @@ chimera_nfs4_compound_try_vfs(
 
     ctx = calloc(1, sizeof(*ctx));
     chimera_nfs_abort_if(ctx == NULL, "Failed to allocate NFSv4 compound context");
-    ctx->req            = req;
-    ctx->setattr_handle = setattr_handle;
+    ctx->req = req;
 
     /* Seed the current object.  When the remainder opens with a PUTFH this is
      * that PUTFH; otherwise it re-states the COMPOUND's current filehandle and
@@ -2195,6 +2451,63 @@ chimera_nfs4_compound_try_vfs(
                 map->vfs_res = idx;
                 break;
 
+            case OP_READ:
+            case OP_WRITE:
+            {
+                const struct stateid4 *sid = (argop->argop == OP_READ) ?
+                    &argop->opread.stateid : &argop->opwrite.stateid;
+                uint32_t               want = (argop->argop == OP_READ) ?
+                    OPEN4_SHARE_ACCESS_READ : OPEN4_SHARE_ACCESS_WRITE;
+                struct chimera_claim_actor io_owner;
+                int                        have_owner = 0;
+
+                if (nfs4_vfs_io_authorize(thread, req, sid, want,
+                                          cur_fh, cur_fhlen,
+                                          &map->io_handle,
+                                          &io_owner, &have_owner) != NFS4_OK) {
+                    goto refuse;
+                }
+
+                if (argop->argop == OP_READ) {
+                    {
+                        struct evpl_iovec *riov = xdr_dbuf_alloc_space(
+                            sizeof(*riov) * NFS4_VFS_READ_MAX_IOV,
+                            req->encoding->dbuf);
+
+                        chimera_nfs_abort_if(riov == NULL,
+                                             "Failed to allocate space");
+
+                        /* From the reply's own memory, because the descriptors
+                         * the read writes here are where the reply will read
+                         * them from and cannot be moved afterwards. */
+                        idx = chimera_vfs_compound_add_read(
+                            compound, map->io_handle,
+                            argop->opread.offset, argop->opread.count,
+                            riov, NFS4_VFS_READ_MAX_IOV,
+                            have_owner ? &io_owner : NULL);
+                    }
+                } else {
+                    /* Ownership of the payload moves off the RPC2 message, so
+                     * that freeing the message does not release iovecs this
+                     * sequence is about to hand to the backend.  A no-op unless
+                     * the data arrived in an RDMA read chunk. */
+                    evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL,
+                                                       NULL);
+
+                    idx = chimera_vfs_compound_add_write(
+                        compound, map->io_handle,
+                        argop->opwrite.offset,
+                        argop->opwrite.data.length,
+                        argop->opwrite.stable,
+                        argop->opwrite.data.iov,
+                        argop->opwrite.data.niov,
+                        have_owner ? &io_owner : NULL);
+                }
+
+                map->vfs_res = idx;
+                break;
+            }
+
             case OP_SETATTR:
             {
                 struct chimera_vfs_attrs sattr;
@@ -2208,10 +2521,14 @@ chimera_nfs4_compound_try_vfs(
                     argop->opsetattr.obj_attributes.attr_vals.len,
                     NULL, 0);
 
-                idx = chimera_vfs_compound_add_setattr(
-                    compound,
-                    ((int) i == setattr_at) ? setattr_handle : NULL,
-                    &sattr, 0);
+                if ((int) i == setattr_at) {
+                    map->io_handle  = setattr_handle;
+                    setattr_handle  = NULL;
+                }
+
+                idx = chimera_vfs_compound_add_setattr(compound,
+                                                       map->io_handle,
+                                                       &sattr, 0);
                 map->vfs_res = idx;
                 break;
             }
@@ -2361,6 +2678,16 @@ chimera_nfs4_compound_try_vfs(
 
     if (setattr_handle) {
         chimera_vfs_release(thread->vfs_thread, setattr_handle);
+    }
+
+    /* The build gave up partway; anything it resolved goes back.  The WRITE
+     * payloads stay put -- the per-op path is about to run and releases them
+     * itself. */
+    for (k = 0; k < NFS4_VFS_COMPOUND_MAX_OPS; k++) {
+        if (ctx->ops[k].io_handle) {
+            chimera_vfs_release(thread->vfs_thread, ctx->ops[k].io_handle);
+            ctx->ops[k].io_handle = NULL;
+        }
     }
 
     chimera_vfs_compound_free(compound);
