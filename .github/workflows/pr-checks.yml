@@ -175,7 +175,7 @@ jobs:
               # --show-stats below describes this run rather than this run plus
               # the Extended run that produced the cache.
               ccache -z > /dev/null
-              cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -D SPECS_BUNDLE=NONE -B /build -S /workspace -G Ninja
+              cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -D CHIMERA_MBT_CORPUS=OFF -B /build -S /workspace -G Ninja
               ninja -C /build
               python3 /workspace/scripts/analyze_cached.py \
                       --build-dir /build --report-dir /scan-report \
@@ -240,20 +240,12 @@ jobs:
 
       # Captured on the runner rather than in the container below: the
       # bind-mounted checkout is not owned by the container's root, so git
-      # there refuses the repository as dubiously owned (the same trap
-      # cmake/SpecsBundle.cmake documents).  -U0 keeps hunk headers to exactly
-      # the changed runs, with no context lines to subtract back out.
+      # there refuses the repository as dubiously owned.  -U0 keeps hunk
+      # headers to exactly the changed runs, with no context lines to subtract
+      # back out.
       - name: Capture the pull request diff
         if: ${{ github.event_name == 'pull_request' }}
         run: git diff -U0 HEAD^1 HEAD > pr.diff
-
-      # oras lets cmake fetch the prebuilt trace bundle for the pinned
-      # ext/specs commit instead of regenerating it with quint; the image
-      # carries quint either way, so this is a speedup, not a requirement.
-      - name: Fetch oras CLI
-        uses: ./.github/actions/fetch-oras
-        with:
-          arch: amd64
 
       # A Coverage build (clang source-based instrumentation, -O0) rather than
       # Debug: the suite still reports pass/fail, and the same run answers the
@@ -262,7 +254,7 @@ jobs:
       # jobs, which now have a trace corpus too.
       #
       # --no-tests=error is the point of the label: a configuration that
-      # silently loses its MBT suites (no quint, no bundle) must fail here
+      # silently loses its MBT suites (no quint, no node) must fail here
       # rather than report a vacuous pass.  It only catches losing the label
       # ENTIRELY, though, so REQUIRE_CTL_MBT=ON covers the narrower case of
       # the in-tree control-plane corpus alone going missing.
@@ -280,7 +272,6 @@ jobs:
             -e GH_REPO="$GH_REPO" \
             -e PR_HEAD_SHA="$PR_HEAD_SHA" \
             -v "${{ github.workspace }}:/workspace" \
-            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ env.DEV_IMAGE }} \
@@ -438,7 +429,7 @@ jobs:
           ccache -z > /dev/null
           cmake -G Ninja -D CMAKE_BUILD_TYPE=Release \
                 -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
-                -D SPECS_BUNDLE=NONE \
+                -D CHIMERA_MBT_CORPUS=OFF \
                 -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR"
           # compile_commands.json is not sufficient alone: several entries
           # include generated headers, so the tree has to be built first.
