@@ -28,7 +28,7 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION             2
+#define CHIMERA_VFS_SDK_VERSION            2
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -38,7 +38,7 @@ struct chimera_vfs_request;
  * only contain the file handle w/o an explicit open callout
  * to the module for stateless operation (ie NFS3).
  */
-#define CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED  (1U << 0)
+#define CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED (1U << 0)
 
 /*
  * Will the VFS keep the handle this open produces, and close it later?

@@ -739,8 +739,23 @@ main(
         (void) v3_remove(&c, 0, &u1, x++, "j");
         check_status("op/setsize-removed-file-still-held",
                      v3_setsize(&c, 0, &u1, x++, &gone_fh, 0), NFS3_OK);
+
+        /*
+         * LINK is the one operation that cannot follow the object there, and
+         * only on a passthrough backend.  Writing through the handle goes to
+         * the descriptor, which is what holds the object; giving it a NEW NAME
+         * has to go through the filesystem, and POSIX does not let linkat(2)
+         * name an inode whose last link is gone.  A handle-based backend has
+         * its own namespace and is under no such rule.
+         *
+         * So this is a property of the backing filesystem, not of the protocol
+         * or of the handle -- which is why it is asserted per backend rather
+         * than recorded as a deviation from one answer.
+         */
         check_status("op/link-removed-file-still-held",
-                     v3_link(&c, 0, &u1, x++, &gone_fh, "k"), NFS3_OK);
+                     v3_link(&c, 0, &u1, x++, &gone_fh, "k"),
+                     mbt_module_is_passthrough(env.module) ? NFS3ERR_NOENT :
+                     NFS3_OK);
 
         /* A directory nothing opened: its handle IS stale once the name is
          * gone, which is the RFC 1813 section 3.3 case. */
