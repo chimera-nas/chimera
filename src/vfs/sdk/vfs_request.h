@@ -151,6 +151,14 @@ struct chimera_vfs_mount_options {
  * clear and keeps its open-any-type disposition. */
 #define CHIMERA_VFS_OPEN_CREATE_REGULAR         (1U << 10)
 
+/* Suppress the VFS core's FILE_ADDED change-notify emission when this open
+ * creates a file.  Set by the SMB create path, which owns a richer emission
+ * of its own (disposition policy, DIR/STREAM_NAME classes, directory-lease
+ * key sparing) and would otherwise deliver duplicate CHANGE_NOTIFY events.
+ * Every other caller leaves it clear so a create is observable by change
+ * watchers and directory-lease holders regardless of arrival protocol. */
+#define CHIMERA_VFS_OPEN_NO_NOTIFY              (1U << 11)
+
 /* The object this open yields must be a REGULAR file: if it is not, the module
  * refuses instead of opening it, and says what was in the way --
  * CHIMERA_VFS_EISDIR for a directory, CHIMERA_VFS_ESYMLINK for a symlink,
@@ -172,31 +180,6 @@ struct chimera_vfs_mount_options {
  * what the object is, because what matters here is that the operation does not
  * apply to it. */
 #define CHIMERA_VFS_OPEN_REGULAR_ONLY           (1U << 12)
-
-/* The error CHIMERA_VFS_OPEN_REGULAR_ONLY refuses a non-regular object with.
- * Shared so every module answers the same way; a caller that maps these to its
- * own type errors can rely on the mapping. */
-static inline enum chimera_vfs_error
-chimera_vfs_nonreg_error(uint32_t mode)
-{
-    if (S_ISDIR(mode)) {
-        return CHIMERA_VFS_EISDIR;
-    }
-
-    if (S_ISLNK(mode)) {
-        return CHIMERA_VFS_ESYMLINK;
-    }
-
-    return CHIMERA_VFS_EINVAL;
-} /* chimera_vfs_nonreg_error */
-
-/* Suppress the VFS core's FILE_ADDED change-notify emission when this open
- * creates a file.  Set by the SMB create path, which owns a richer emission
- * of its own (disposition policy, DIR/STREAM_NAME classes, directory-lease
- * key sparing) and would otherwise deliver duplicate CHANGE_NOTIFY events.
- * Every other caller leaves it clear so a create is observable by change
- * watchers and directory-lease holders regardless of arrival protocol. */
-#define CHIMERA_VFS_OPEN_NO_NOTIFY              (1U << 11)
 
 /* remove_at flags: an optional assertion about the target's type, letting the
  * single VFS remove op express the rmdir(2)/RMDIR vs unlink(2)/REMOVE
@@ -258,6 +241,23 @@ chimera_vfs_nonreg_error(uint32_t mode)
 
 #define CHIMERA_VFS_ACCESS_MODE_RW              0
 #define CHIMERA_VFS_ACCESS_MODE_RO              1
+
+/* The error CHIMERA_VFS_OPEN_REGULAR_ONLY refuses a non-regular object with.
+ * Shared so every module answers the same way; a caller that maps these onto
+ * its own type errors can rely on the mapping. */
+static inline enum chimera_vfs_error
+chimera_vfs_nonreg_error(uint32_t mode)
+{
+    if (S_ISDIR(mode)) {
+        return CHIMERA_VFS_EISDIR;
+    }
+
+    if (S_ISLNK(mode)) {
+        return CHIMERA_VFS_ESYMLINK;
+    }
+
+    return CHIMERA_VFS_EINVAL;
+} /* chimera_vfs_nonreg_error */
 
 struct chimera_vfs_open_handle {
     /* Identity: the owning module plus the handle's place in the open cache. */

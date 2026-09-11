@@ -34,3 +34,7 @@ venv/
 .pytest_cache/
 .plan
 .claude/scheduled_tasks.lock
+
+# Probe and replayer artifacts, written into whatever directory a test ran from.
+*.debug.log
+*.metrics.prom

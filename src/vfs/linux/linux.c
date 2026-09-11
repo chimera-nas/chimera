@@ -804,6 +804,45 @@ chimera_linux_open_fh(
 
     flags = chimera_linux_set_open_flags(request->open_fh.flags);
 
+    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: establish the type BEFORE opening for
+     * data, not after.  Opening a FIFO for data blocks until a peer appears,
+     * and a device can have side effects of its own, so the open that would
+     * tell us what this is must not be the open we are trying to gate.  O_PATH
+     * resolves without any of that.
+     *
+     * Two opens on this backend, then -- the same two the caller used to make
+     * for itself.  What changes is that they are one VFS operation and the
+     * answer is the module's, rather than a stat the caller took separately and
+     * then acted on. */
+    if (request->open_fh.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) {
+        int probe_fd = linux_open_by_handle(&thread->mount_table,
+                                            request->fh,
+                                            request->fh_len,
+                                            O_PATH | O_NOFOLLOW);
+
+        if (probe_fd < 0) {
+            request->status = chimera_linux_handle_open_status(errno);
+            request->complete(request);
+            return;
+        }
+
+        if (fstat(probe_fd, &st) != 0) {
+            request->status = chimera_linux_errno_to_status(errno);
+            close(probe_fd);
+            request->complete(request);
+            return;
+        }
+
+        close(probe_fd);
+
+        if (!S_ISREG(st.st_mode)) {
+            request->status = chimera_vfs_nonreg_error(st.st_mode);
+            request->complete(request);
+            return;
+        }
+    }
+
+
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
                               request->fh_len,
@@ -846,26 +885,6 @@ chimera_linux_open_fh(
         }
         request->complete(request);
         return;
-    }
-
-    /* CHIMERA_VFS_OPEN_REGULAR_ONLY: this open is about to carry data, so
-     * refuse a type it does not apply to and say which.  The descriptor is
-     * already here, so the type comes from it rather than from a second
-     * resolution that could disagree with what was opened. */
-    if (request->open_fh.flags & CHIMERA_VFS_OPEN_REGULAR_ONLY) {
-        if (fstat(fd, &st) != 0) {
-            request->status = chimera_linux_errno_to_status(errno);
-            close(fd);
-            request->complete(request);
-            return;
-        }
-
-        if (!S_ISREG(st.st_mode)) {
-            request->status = chimera_vfs_nonreg_error(st.st_mode);
-            close(fd);
-            request->complete(request);
-            return;
-        }
     }
 
     request->open_fh.r_vfs_private = fd;
