@@ -205,6 +205,7 @@ chimera_smb_lease_break_cb(
     uint8_t  fh[CHIMERA_VFS_FH_SIZE] = { 0 };
     uint8_t  fh_len                  = 0;
     uint64_t fh_hash                 = 0;
+    uint64_t lease_client_key        = 0;
 
     /* Select a live member under the grant's file->lock (the holder list is
      * mutated by add/remove-member under the same lock).  A member is live when
@@ -237,8 +238,9 @@ chimera_smb_lease_break_cb(
          * and file_id are written once at CREATE time and never change. */
         oplock_level = open_file->oplock_level;
         memcpy(lease_key, open_file->lease_key, 16);
-        file_id_pid = open_file->file_id.pid;
-        file_id_vid = open_file->file_id.vid;
+        lease_client_key = grant->claim.owner.client_key;
+        file_id_pid      = open_file->file_id.pid;
+        file_id_vid      = open_file->file_id.vid;
 
         /* Snapshot the file handle for the lease-break notification too: it is
          * read from grant->file, which a concurrent close can recycle once the
@@ -380,6 +382,7 @@ chimera_smb_lease_break_cb(
             msg->fh_len  = fh_len;
             msg->fh_hash = fh_hash;
             memcpy(msg->lease_key, lease_key, 16);
+            msg->lease_client_key          = lease_client_key;
             msg->current_state             = current_smb;
             msg->new_state                 = new_smb;
             msg->ack_required              = break_ack_required;
@@ -504,7 +507,8 @@ chimera_smb_lease_break_flush(struct chimera_server_smb_thread *thread)
              * delete-on-close open parked for delivery (not for an ack) resumes
              * with its reply ordered AFTER this break (smb2.lease.unlink). */
             chimera_vfs_claim_mark_break_notified(vfs_state, msg->fh, msg->fh_len,
-                                                  msg->fh_hash, msg->lease_key);
+                                                  msg->fh_hash, msg->lease_key,
+                                                  msg->lease_client_key);
             sent_lease = true;
         } else {
             chimera_smb_send_oplock_break_legacy(msg->conn,

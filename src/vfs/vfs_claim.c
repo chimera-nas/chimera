@@ -409,13 +409,16 @@ chimera_vfs_claim_circle_exempt(
             return chimera_claim_owner_equal(&holder->owner, &probe->owner) ||
                    chimera_vfs_claim_same_holder(holder, probe);
         case CHIMERA_CIRCLE_KEY:
-            return chimera_claim_owner_same_key(&holder->owner, &probe->owner) ||
+            /* The KEY circle is "the same lease", which carries a client term:
+             * two clients using one LeaseKey value hold two leases and must
+             * not be exempt from each other (chimera_claim_owner_same_lease). */
+            return chimera_claim_owner_same_lease(&holder->owner, &probe->owner) ||
                    chimera_vfs_claim_same_holder(holder, probe);
         case CHIMERA_CIRCLE_CLIENT:
             return chimera_claim_owner_same_client(&holder->owner, &probe->owner);
         case CHIMERA_CIRCLE_OWNER_OR_KEY:
             return chimera_claim_owner_equal(&holder->owner, &probe->owner) ||
-                   chimera_claim_owner_same_key(&holder->owner, &probe->owner) ||
+                   chimera_claim_owner_same_lease(&holder->owner, &probe->owner) ||
                    chimera_vfs_claim_same_holder(holder, probe);
         default:
             return false;
@@ -964,7 +967,7 @@ chimera_vfs_claim_batch_escape(
             chimera_vfs_claim_revocable(cand) &&
             (cand->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
              cand->break_state == CHIMERA_CLAIM_BREAK_BREAKING) &&
-            !chimera_claim_owner_same_key(&cand->owner, &probe->owner)) {
+            !chimera_claim_owner_same_lease(&cand->owner, &probe->owner)) {
             return cand;
         }
     }
@@ -981,7 +984,7 @@ chimera_vfs_claim_batch_escape(
         if (!(cur->used & CHIMERA_CLAIM_H) || !chimera_vfs_claim_revocable(cur)) {
             continue;
         }
-        if (chimera_claim_owner_same_key(&cur->owner, &probe->owner)) {
+        if (chimera_claim_owner_same_lease(&cur->owner, &probe->owner)) {
             continue;
         }
         if (cur->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
@@ -1998,17 +2001,24 @@ chimera_vfs_claim_grant_find_locked(
 {
     struct chimera_vfs_claim_grant *g;
 
+    /*
+     * A lease is identified by (ClientGuid, LeaseKey) -- MS-SMB2 3.3.5.9.8
+     * looks the LeaseTable up in GlobalLeaseTableList by the ClientGuid of the
+     * connection that received the request, and only THEN the LeaseKey inside
+     * it.  owner_equal is exactly that test for an RqLs or directory-lease
+     * owner: the protocol layer stamps the key's two halves into owner_lo/hi
+     * alongside client_key, so (proto, client, lo, hi) IS (proto, client, key).
+     *
+     * There used to be a second arm here that joined on the KEY ALONE, so that
+     * "SameLeaseKey coalesces across ClientGuids".  That is not what the
+     * standard says, and it is what handed a second client the first client's
+     * grant: a v2 request that met another client's v1 lease was answered as
+     * v1 at epoch 0, and its later breaks carried epoch 0 too (chimera CD-5).
+     * With the client term restored that arm matches nothing owner_equal has
+     * not already matched, so it is gone rather than merely narrowed.
+     */
     for (g = file->grants; g; g = g->grant_next) {
         if (chimera_claim_owner_equal(&g->claim.owner, owner)) {
-            return g;
-        }
-        /* SameLeaseKey joins the grant regardless of ClientGuid (R32);
-         * restricted to RqLs/dir constructs (a legacy oplock's owner is a
-         * per-open file id, never a shareable key). */
-        if (g->claim.construct != CHIMERA_CONSTRUCT_OPLOCK_II &&
-            g->claim.construct != CHIMERA_CONSTRUCT_OPLOCK_EX &&
-            g->claim.construct != CHIMERA_CONSTRUCT_OPLOCK_BATCH &&
-            chimera_claim_owner_same_key(&g->claim.owner, owner)) {
             return g;
         }
     }
