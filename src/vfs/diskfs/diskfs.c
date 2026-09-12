@@ -194,10 +194,6 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
-        /* Require a real open so every file op carries a pinned inode in
-         * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
-         * to skip per-I/O inode resolution. */
-        CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
         CHIMERA_VFS_CAP_CLONE_RANGE |

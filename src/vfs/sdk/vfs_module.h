@@ -37,6 +37,17 @@ struct chimera_vfs_request;
  * If not set, VFS may create synthetic open handles that
  * only contain the file handle w/o an explicit open callout
  * to the module for stateless operation (ie NFS3).
+ *
+ * SET THIS ONLY IF THE HANDLE CARRIES THE ADDRESSING.  The question is not
+ * whether the module has something useful to do at open time -- it is whether
+ * a later operation can still find the object without having opened it.  A
+ * module whose ops work from the file handle can always find it and does not
+ * need this, however much per-open state it would like to keep; state that
+ * only data operations consume is what a data open (always real) is for.
+ * The modules that do need it are the ones where the open produces the only
+ * thing that names the object afterwards: an O_PATH descriptor for the *at()
+ * families (linux, io_uring), or the interning of a path id against the path
+ * it resolved from (smb, which has no fh-relative ops at all).
  */
 #define CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED (1U << 0)
 
