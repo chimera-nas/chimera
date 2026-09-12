@@ -32,6 +32,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+
+#include <utlist.h>
 
 #include "vfs_compound.h"
 #include "vfs_procs.h"
@@ -44,7 +47,12 @@ struct chimera_vfs_compound {
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
 
-    struct chimera_vfs_compound_op  ops[CHIMERA_VFS_COMPOUND_MAX_OPS];
+    /* Link for the owning thread's free list.  Everything from here down to
+     * (but not including) ops[] is cleared wholesale by chimera_vfs_compound_
+     * reset(), so a field added to this struct is reset without being named --
+     * which is why ops[] is last. */
+    struct chimera_vfs_compound    *next;
+
     uint32_t                        num_ops;
     uint32_t                        index;       /* op being executed        */
     uint32_t                        completed;   /* ops that ran             */
@@ -86,7 +94,21 @@ struct chimera_vfs_compound {
 
     chimera_vfs_compound_gate_t     gate;
     void                           *gate_private;
+
+    /* Last: see the note on ->next.  This array is the whole reason a compound
+     * is recycled rather than malloc'd per request -- it is by far the largest
+     * thing in the struct, and only the ops a sequence actually used are ever
+     * touched, so resetting is proportional to the sequence, not to the cap. */
+    struct chimera_vfs_compound_op  ops[CHIMERA_VFS_COMPOUND_MAX_OPS];
 };
+
+/*
+ * How many spent compounds a thread keeps.  Each one is large, so this is a
+ * cap on retained memory rather than a hit-rate target: a thread's steady
+ * state is a handful in flight at once, and a burst past the cap simply frees
+ * the excess instead of holding it for a peak that has passed.
+ */
+#define CHIMERA_VFS_COMPOUND_FREE_MAX 64
 
 static void chimera_vfs_compound_step(
     struct chimera_vfs_compound *compound);
@@ -98,7 +120,15 @@ chimera_vfs_compound_alloc(
 {
     struct chimera_vfs_compound *compound;
 
-    compound         = calloc(1, sizeof(*compound));
+    compound = thread->free_compounds;
+
+    if (compound) {
+        LL_DELETE(thread->free_compounds, compound);
+        thread->num_free_compounds--;
+    } else {
+        compound = calloc(1, sizeof(*compound));
+    }
+
     compound->thread = thread;
     compound->cred   = cred;
     compound->status = CHIMERA_VFS_OK;
@@ -116,10 +146,17 @@ chimera_vfs_compound_set_gate(
     compound->gate_private = private_data;
 } /* chimera_vfs_compound_set_gate */
 
-SYMBOL_EXPORT void
-chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
+/*
+ * Release everything the sequence holds and return the compound to its
+ * initial state, ready to be handed out again.  Only the ops the sequence
+ * actually used are touched: a one-op FUSE request costs one op's worth of
+ * clearing, not the whole CHIMERA_VFS_COMPOUND_MAX_OPS array.
+ */
+static void
+chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
 {
-    uint32_t i;
+    struct chimera_vfs_thread *thread = compound->thread;
+    uint32_t                   i;
 
     if (compound->handle) {
         chimera_vfs_release(compound->thread, compound->handle);
@@ -130,25 +167,59 @@ chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
          * Releasing here is what makes "take it if you want it" safe, rather
          * than making every one of the caller's error paths responsible. */
         if (compound->ops[i].out_handle) {
-            chimera_vfs_release(compound->thread, compound->ops[i].out_handle);
-            compound->ops[i].out_handle = NULL;
+            chimera_vfs_release(thread, compound->ops[i].out_handle);
         }
         /* Data the caller did not take, for the same reason and on the same
          * terms as the handle above. */
         if (compound->ops[i].niov) {
-            evpl_iovecs_release(compound->thread->evpl,
+            evpl_iovecs_release(thread->evpl,
                                 compound->ops[i].iov,
                                 compound->ops[i].niov);
-            compound->ops[i].niov = 0;
         }
         free(compound->ops[i].target);
         free(compound->ops[i].link_target);
         free(compound->ops[i].entries);
         free(compound->ops[i].buffer);
+
+        memset(&compound->ops[i], 0, sizeof(compound->ops[i]));
     }
 
-    free(compound);
+    /* Everything ahead of ops[] in one go, so a field added to the struct
+     * later is reset whether or not anyone remembers to name it here. */
+    memset(compound, 0, offsetof(struct chimera_vfs_compound, ops));
+
+    compound->thread = thread;
+} /* chimera_vfs_compound_reset */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
+{
+    struct chimera_vfs_thread *thread = compound->thread;
+
+    chimera_vfs_compound_reset(compound);
+
+    if (thread->num_free_compounds >= CHIMERA_VFS_COMPOUND_FREE_MAX) {
+        free(compound);
+        return;
+    }
+
+    LL_PREPEND(thread->free_compounds, compound);
+    thread->num_free_compounds++;
 } /* chimera_vfs_compound_free */
+
+void
+chimera_vfs_compound_thread_destroy(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_compound *compound;
+
+    while (thread->free_compounds) {
+        compound = thread->free_compounds;
+        LL_DELETE(thread->free_compounds, compound);
+        free(compound);
+    }
+
+    thread->num_free_compounds = 0;
+} /* chimera_vfs_compound_thread_destroy */
 
 SYMBOL_EXPORT void
 chimera_vfs_compound_op_set_handle(

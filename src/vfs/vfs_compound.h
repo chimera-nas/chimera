@@ -600,9 +600,22 @@ chimera_vfs_compound_submit(
     chimera_vfs_compound_callback_t callback,
     void                           *private_data);
 
+/*
+ * Return a finished compound.  This releases anything the sequence still
+ * holds -- see OPEN HANDLE OWNERSHIP -- and recycles the compound onto the
+ * thread's free list rather than returning it to the allocator.
+ */
 void
 chimera_vfs_compound_free(
     struct chimera_vfs_compound *compound);
+
+/*
+ * Discard a thread's recycled compounds.  For chimera_vfs_thread_destroy();
+ * no caller outside the VFS core has any business with this.
+ */
+void
+chimera_vfs_compound_thread_destroy(
+    struct chimera_vfs_thread *thread);
 
 /* ---- results ---- */
 
