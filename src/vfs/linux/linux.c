@@ -993,6 +993,22 @@ chimera_linux_open_at(
                 fd = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
             }
             reopened = 1;
+        } else if (errno == EEXIST && chimera_linux_leaf_is_symlink(
+                       parent_fd, fullname, request->open_at.flags)) {
+            /* The name is a symbolic link and this open follows it.  Do NOT
+             * let the host kernel do that: the link body is a path in the
+             * EXPORT's namespace, and an absolute one ("/d") resolves from
+             * the HOST's root instead -- which answers for a file outside the
+             * export, or ENOENT where resolution inside it would have found
+             * the target (or looped).  Hand the link itself back, O_PATH so
+             * no data access is taken on it, and the engine resolves the
+             * target within the export exactly as it does for memfs.
+             *
+             * Caught by the posix model: open("/a", O_CREAT) on a chain
+             * /a -> /d -> /d owes ELOOP and the passthrough answered ENOENT,
+             * which is the host root talking. */
+            fd       = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
+            reopened = 1;
         } else if (errno == EEXIST) {
             /* The object exists: re-open WITHOUT O_CREAT.  Semantically
              * equivalent for an existing file, and immune to the kernel's
