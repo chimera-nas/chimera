@@ -195,6 +195,8 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_SETXATTR,
     CHIMERA_VFS_COMPOUND_OP_LISTXATTRS,
     CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR,
+    CHIMERA_VFS_COMPOUND_OP_ALLOCATE,
+    CHIMERA_VFS_COMPOUND_OP_SEEK,
 };
 
 #define CHIMERA_VFS_COMPOUND_MAX_OPS             32
@@ -358,6 +360,12 @@ struct chimera_vfs_compound_op {
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
      * name has been resolved. */
     struct chimera_vfs_attrs              set_attr;
+    uint32_t                              allocate_flags; /* ALLOCATE: CHIMERA_VFS_ALLOCATE_* */
+    uint64_t                              length; /* ALLOCATE                           */
+    /* ALLOCATE: the attributes to fetch after the change.  `attr_mask` is the
+     * pre-change one, as it is for COMMIT. */
+    uint64_t                              post_attr_mask;
+    uint32_t                              seek_what; /* SEEK: data (0) or hole (1)         */
     uint32_t                              xattr_option; /* SETXATTR                          */
     const void                           *xattr_value; /* SETXATTR (borrowed from caller)    */
     uint32_t                              xattr_value_len;
@@ -398,6 +406,10 @@ struct chimera_vfs_compound_op {
     uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                              fh_len;
     uint32_t                              granted; /* ACCESS                            */
+    /* SEEK: where the next data or hole begins, and whether the search ran off
+     * the end of the file without finding one. */
+    uint64_t                              seek_offset;
+    uint32_t                              seek_eof;
     char                                 *target; /* READLINK (owned by the compound)  */
     uint32_t                              target_len;
 
@@ -562,6 +574,38 @@ chimera_vfs_compound_add_commit(
     uint64_t                     offset,
     uint64_t                     count,
     uint64_t                     pre_attr_mask);
+
+/* Allocate (or, with CHIMERA_VFS_ALLOCATE_DEALLOCATE, punch) `length` bytes at
+ * `offset` in the current object, or -- when `handle` is non-NULL -- in that
+ * handle, which is BORROWED.  This is NFSv4.2's ALLOCATE and DEALLOCATE and
+ * POSIX's fallocate; which one is `flags`, not a separate op, because the VFS
+ * call they all reach is one call. */
+int
+chimera_vfs_compound_add_allocate(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length,
+    uint32_t                        flags,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask);
+
+/* Where the next data (`what` 0) or hole (`what` 1) begins at or after
+ * `offset` in the current object, or -- when `handle` is non-NULL -- in that
+ * handle, which is BORROWED.
+ *
+ * This asks the backend's allocation map a question; it does not move anything.
+ * Nothing in the VFS carries a file position -- NFSv4 has none and the FUSE
+ * kernel keeps its own -- so SEEK here is what SEEK_DATA/SEEK_HOLE and
+ * NFSv4.2's SEEK are, and nothing else.  The answer lands in the op's
+ * seek_offset and seek_eof.
+ */
+int
+chimera_vfs_compound_add_seek(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        what);
 
 /* One page of entries from `cookie`, at most `max_entries` of them (0 to
  * CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES; larger is refused).  `dircount` and

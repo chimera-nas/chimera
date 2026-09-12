@@ -547,7 +547,7 @@ chimera_fuse_op_write(
 /* --- FLUSH / FSYNC --- */
 
 static void
-chimera_fuse_commit_sequence_complete(
+chimera_fuse_status_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
@@ -556,7 +556,7 @@ chimera_fuse_commit_sequence_complete(
     chimera_fuse_reply(req,
                        chimera_fuse_errno(chimera_vfs_compound_status(compound)),
                        NULL, 0);
-} /* chimera_fuse_commit_sequence_complete */
+} /* chimera_fuse_status_sequence_complete */
 
 /* FLUSH and FSYNC are the same sequence against an already-open file. */
 static void
@@ -573,7 +573,7 @@ chimera_fuse_commit_submit(
     chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx, oh);
 
     chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_commit_sequence_complete, req);
+                                chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_commit_submit */
 
 void
@@ -649,18 +649,6 @@ chimera_fuse_op_release(
 
 /* --- FALLOCATE --- */
 
-static void
-chimera_fuse_fallocate_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-} /* chimera_fuse_fallocate_complete */
-
 void
 chimera_fuse_op_fallocate(
     struct chimera_fuse_request *req,
@@ -670,6 +658,7 @@ chimera_fuse_op_fallocate(
 {
     const struct fuse_fallocate_in *in = arg;
     uint32_t                        flags;
+    int                             idx;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -685,42 +674,56 @@ chimera_fuse_op_fallocate(
         return;
     }
 
-    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred,
-                         chimera_fuse_file(in->fh)->handle,
-                         in->offset, in->length, flags,
-                         0, 0,
-                         chimera_fuse_fallocate_complete, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* The kernel named an open file; the sequence acts on that handle and has
+     * no current object.  fallocate(2) reports only success, so neither
+     * attribute set is asked for. */
+    idx = chimera_vfs_compound_add_allocate(req->compound,
+                                            chimera_fuse_file(in->fh)->handle,
+                                            in->offset, in->length, flags,
+                                            0, 0);
+    (void) idx;
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_op_fallocate */
 
 /* --- LSEEK (SEEK_DATA / SEEK_HOLE) --- */
 
 static void
-chimera_fuse_lseek_complete(
-    enum chimera_vfs_error error_code,
-    int                    sr_eof,
-    uint64_t               sr_offset,
-    void                  *private_data)
+chimera_fuse_lseek_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
-    const struct fuse_in_header *hdr = chimera_fuse_request_hdr(req);
-    const struct fuse_lseek_in  *in  = (const struct fuse_lseek_in *) (hdr + 1);
-    struct fuse_lseek_out        out;
+    struct chimera_fuse_request          *req = private_data;
+    const struct fuse_in_header          *hdr = chimera_fuse_request_hdr(req);
+    const struct fuse_lseek_in           *in  = (const struct fuse_lseek_in *) (hdr + 1);
+    const struct chimera_vfs_compound_op *op;
+    struct fuse_lseek_out                 out;
+    enum chimera_vfs_error                status;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
-    if (sr_eof && in->whence == SEEK_DATA) {
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    if (op->seek_eof && in->whence == SEEK_DATA) {
         chimera_fuse_reply(req, ENXIO, NULL, 0);
         return;
     }
 
     memset(&out, 0, sizeof(out));
-    out.offset = sr_offset;
+    out.offset = op->seek_offset;
 
     chimera_fuse_reply(req, 0, &out, sizeof(out));
-} /* chimera_fuse_lseek_complete */
+} /* chimera_fuse_lseek_sequence_complete */
 
 void
 chimera_fuse_op_lseek(
@@ -745,14 +748,21 @@ chimera_fuse_op_lseek(
             what = 1;
             break;
         default:
+            /* The kernel resolves SEEK_SET/CUR/END itself and only asks us
+             * where data and holes are; nothing here tracks a position. */
             chimera_fuse_reply(req, EINVAL, NULL, 0);
             return;
     } /* switch */
 
-    chimera_vfs_seek(req->thread->vfs_thread, &req->cred,
-                     chimera_fuse_file(in->fh)->handle,
-                     in->offset, what,
-                     chimera_fuse_lseek_complete, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_seek(req->compound,
+                                  chimera_fuse_file(in->fh)->handle,
+                                  in->offset, what);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_lseek_sequence_complete, req);
 } /* chimera_fuse_op_lseek */
 
 /* --- COPY_FILE_RANGE --- */
