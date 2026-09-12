@@ -127,6 +127,8 @@ chimera_fuse_op_opendir(
 
 static int
 chimera_fuse_readdir_entry(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
     uint64_t                        inum,
     uint64_t                        cookie,
     const char                     *name,
@@ -265,25 +267,55 @@ chimera_fuse_readdirplus_unwind(struct chimera_fuse_request *req)
     }
 } /* chimera_fuse_readdirplus_unwind */
 
+/*
+ * Put the reply back as it was before the first entry.
+ *
+ * The buffer itself is only a cursor, but a READDIRPLUS entry is not just
+ * bytes: each one interned a nodeid and took a lookup count on it, and may
+ * have armed coverage.  Unwinding those is what makes re-filling safe, and is
+ * the same walk the send-failure path does -- both are cases where entries
+ * were packed and the kernel never saw them.
+ */
 static void
-chimera_fuse_readdir_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *dir_attr,
-    void                           *private_data)
+chimera_fuse_readdir_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
 {
     struct chimera_fuse_request *req = private_data;
-    int                          rc;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    if (req->u.readdir.plus) {
+        chimera_fuse_readdirplus_unwind(req);
+    }
+
+    req->u.readdir.used = 0;
+} /* chimera_fuse_readdir_reset */
+
+static void
+chimera_fuse_readdir_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    int                                   rc;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        /* Entries may already be packed -- a backend can emit some and then
+         * fail -- and the kernel will never see them, so give back what they
+         * took before replying the error. */
+        chimera_fuse_readdir_reset(compound, 0, req);
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
-    req->file->readdir_verifier = verifier;
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    req->file->readdir_verifier = op->r_verifier;
 
     rc = chimera_fuse_send_only(req, 0, chimera_fuse_reply_space(req),
                                 req->u.readdir.used);
@@ -293,7 +325,7 @@ chimera_fuse_readdir_complete(
     }
 
     chimera_fuse_request_finish(req);
-} /* chimera_fuse_readdir_complete */
+} /* chimera_fuse_readdir_sequence_complete */
 
 void
 chimera_fuse_op_readdir(
@@ -305,6 +337,7 @@ chimera_fuse_op_readdir(
     const struct fuse_read_in     *in = arg;
     struct chimera_fuse_open_file *file;
     uint64_t                       attr_mask;
+    int                            idx;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -336,16 +369,24 @@ chimera_fuse_op_readdir(
         CHIMERA_FUSE_ATTR_MASK :
         (CHIMERA_VFS_ATTR_INUM | CHIMERA_VFS_ATTR_MODE);
 
-    chimera_vfs_readdir(req->thread->vfs_thread, &req->cred,
-                        file->handle,
-                        attr_mask, 0,
-                        in->offset,
-                        file->readdir_verifier,
-                        CHIMERA_VFS_READDIR_EMIT_DOT,
-                        NULL, 0,
-                        chimera_fuse_readdir_entry,
-                        chimera_fuse_readdir_complete,
-                        req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* Streaming: entries are packed into the reply as the backend produces
+    * them, so the page ends on the entry that does not fit rather than at an
+    * entry count this would otherwise have to guess from a byte budget. */
+    idx = chimera_vfs_compound_add_readdir_stream(req->compound,
+                                                  in->offset,
+                                                  file->readdir_verifier,
+                                                  attr_mask,
+                                                  chimera_fuse_readdir_reset,
+                                                  chimera_fuse_readdir_entry,
+                                                  req);
+    chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx,
+                                       file->handle);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_readdir_sequence_complete, req);
 } /* chimera_fuse_op_readdir */
 
 /* --- RELEASEDIR --- */

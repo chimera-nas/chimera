@@ -261,6 +261,46 @@ enum chimera_vfs_compound_create_type {
  * caller closes or keeps it. */
 #define CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY      (1U << 2)
 
+/*
+ * Streaming READDIR: the caller marshals each entry as it arrives, instead of
+ * the sequence staging a copy of every entry for the caller to walk afterwards.
+ *
+ * WHY THIS AND NOT IDEMPOTENCE.  Everything else a caller does during a
+ * sequence has to be answerable from memory and repeatable, because a retried
+ * sequence asks again.  Marshalling cannot be either: it writes, and it writes
+ * different bytes the second time if the directory changed underneath.  So the
+ * requirement here is not that appending be repeatable but that it be
+ * REVERSIBLE -- `reset` must leave the caller exactly as it was before the
+ * first entry, at which point re-running is a first run.
+ *
+ * The executor calls `reset` immediately before every execution of the op, not
+ * only before a retry, so a caller never has to know which one it is in: the
+ * first call resets nothing and the cost is a cursor assignment.
+ *
+ * `append` returns 0 to take the entry and -1 to stop the enumeration there,
+ * exactly as the per-op entry callback does -- so a caller bounded in bytes
+ * stops on the entry that does not fit rather than guessing a count up front.
+ * The page then ends at that entry's cookie with eof clear.
+ *
+ * WHAT APPEND MAY NOT DO is anything reset cannot take back -- above all,
+ * emit.  A caller that writes to its own reply buffer and sends only when the
+ * sequence has finished is fine; one that streams onto a socket is not.
+ */
+typedef void (*chimera_vfs_compound_readdir_reset_t)(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data);
+
+typedef int (*chimera_vfs_compound_readdir_append_t)(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *private_data);
+
 struct chimera_vfs_compound_dirent {
     uint64_t                 inum;
     uint64_t                 cookie;
@@ -273,66 +313,71 @@ struct chimera_vfs_compound_dirent {
 };
 
 struct chimera_vfs_compound_op {
-    uint8_t                             type;
+    uint8_t                               type;
     /* CHIMERA_VFS_UNSET until the op has run. */
-    enum chimera_vfs_error              status;
+    enum chimera_vfs_error                status;
 
     /* ---- arguments ---- */
-    uint8_t                             arg_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                            arg_fh_len;
-    char                                name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
-    uint32_t                            name_len;
-    uint64_t                            attr_mask;
-    uint32_t                            requested;
-    uint64_t                            offset; /* COMMIT                             */
-    uint64_t                            count; /* COMMIT                             */
-    uint64_t                            cookie; /* READDIR, LISTXATTRS                */
-    uint64_t                            verifier; /* READDIR                            */
-    uint32_t                            dircount; /* READDIR (advisory; see the adder)  */
-    uint32_t                            maxcount; /* READDIR (advisory; see the adder)  */
-    uint32_t                            max_entries; /* READDIR                            */
+    uint8_t                               arg_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              arg_fh_len;
+    char                                  name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    uint32_t                              name_len;
+    uint64_t                              attr_mask;
+    uint32_t                              requested;
+    uint64_t                              offset; /* COMMIT                             */
+    uint64_t                              count; /* COMMIT                             */
+    uint64_t                              cookie; /* READDIR, LISTXATTRS                */
+    uint64_t                              verifier; /* READDIR                            */
+    uint32_t                              dircount; /* READDIR (advisory; see the adder)  */
+    uint32_t                              maxcount; /* READDIR (advisory; see the adder)  */
+    uint32_t                              max_entries; /* READDIR                            */
+    /* READDIR, streaming variant: with these set the sequence stages nothing
+     * and the caller marshals each entry itself.  See the typedefs above. */
+    chimera_vfs_compound_readdir_reset_t  readdir_reset;
+    chimera_vfs_compound_readdir_append_t readdir_append;
+    void                                 *readdir_private;
     /* Address this handle instead of the current object.  BORROWED from the
      * caller -- see ADDRESSING SOMETHING OTHER THAN CURRENT above.  NULL for
      * every op that addresses the current object, which is most of them. */
-    struct chimera_vfs_open_handle     *in_handle;
-    uint8_t                             create_type; /* CREATE                             */
+    struct chimera_vfs_open_handle       *in_handle;
+    uint8_t                               create_type; /* CREATE                             */
     /* CREATE of a symlink: its target.  Copied by the adder and owned by the
      * compound, so the caller need not keep it alive. */
-    char                               *link_target;
-    uint32_t                            link_target_len;
+    char                                 *link_target;
+    uint32_t                              link_target_len;
     /* RENAME: the name in the CURRENT object to rename to.  `name` is the one
      * in the saved object to rename from. */
-    char                                new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
-    uint32_t                            new_name_len;
-    unsigned int                        open_flags; /* OPEN: CHIMERA_VFS_OPEN_*           */
+    char                                  new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    uint32_t                              new_name_len;
+    unsigned int                          open_flags; /* OPEN: CHIMERA_VFS_OPEN_*           */
     /* REMOVE, RENAME: CHIMERA_VFS_REMOVE_* -- the type assertion and the
      * lease-recall request, which are the caller's to make. */
-    unsigned int                        remove_flags;
-    uint32_t                            open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
+    unsigned int                          remove_flags;
+    uint32_t                              open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
     /* OPEN and CREATE: attributes to apply to a created object.  Read by the
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
      * name has been resolved. */
-    struct chimera_vfs_attrs            set_attr;
-    uint32_t                            xattr_option; /* SETXATTR                          */
-    const void                         *xattr_value; /* SETXATTR (borrowed from caller)    */
-    uint32_t                            xattr_value_len;
-    uint32_t                            buffer_max; /* GETXATTR, LISTXATTRS               */
-    int                                 max_iov; /* READ                               */
+    struct chimera_vfs_attrs              set_attr;
+    uint32_t                              xattr_option; /* SETXATTR                          */
+    const void                           *xattr_value; /* SETXATTR (borrowed from caller)    */
+    uint32_t                              xattr_value_len;
+    uint32_t                              buffer_max; /* GETXATTR, LISTXATTRS               */
+    int                                   max_iov; /* READ                               */
     /* WRITE: the data, BORROWED from the caller -- see ADDRESSING SOMETHING
      * OTHER THAN CURRENT, which these are owned on the same terms as. */
-    struct evpl_iovec                  *w_iov;
-    int                                 w_niov;
-    uint32_t                            sync; /* WRITE: requested stability         */
+    struct evpl_iovec                    *w_iov;
+    int                                   w_niov;
+    uint32_t                              sync; /* WRITE: requested stability         */
     /* READ, WRITE: whose I/O this is.  A caller holding a lease on the object
      * has to say so, or the claim layer arbitrates its own I/O against its own
      * reservation -- denying the write, and recalling the delegation the write
      * is being done under. */
-    struct chimera_claim_actor          io_owner;
-    uint8_t                             have_io_owner;
+    struct chimera_claim_actor            io_owner;
+    uint8_t                               have_io_owner;
     /* Executor scratch: whether the two-step I/O type check has run.  Lives on
      * the op only so the open-flags decision, which sees an op and not the
      * sequence, can tell the two steps apart. */
-    uint8_t                             io_typechecked_flag;
+    uint8_t                               io_typechecked_flag;
 
     /* ---- results ---- */
     /* LOOKUP, GETATTR, ACCESS.  va_acl is always NULL here and the ACL bit is
@@ -342,77 +387,80 @@ struct chimera_vfs_compound_op {
      * pointer that looks valid and is not, the sequence drops it -- a caller
      * that needs an ACL issues that getattr itself.  ACCESS's `granted` is
      * computed while the ACL is still live, so it is unaffected. */
-    struct chimera_vfs_attrs            attr;
+    struct chimera_vfs_attrs              attr;
     /* The current object AFTER this op ran: what a LOOKUP resolved, what a
      * PUTFH selected, and for everything else the object the op addressed.
+     * A streaming READDIR is the one op that fills this BEFORE it runs rather
+     * than after, because its append callback needs to know which directory it
+     * is listing and a READDIR cannot move the current object anyway.
      * A caller that must describe the object an op acted on -- which is most
      * of what a protocol reply is -- would otherwise have to re-derive it. */
-    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                            fh_len;
-    uint32_t                            granted; /* ACCESS                            */
-    char                               *target; /* READLINK (owned by the compound)  */
-    uint32_t                            target_len;
+    uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              fh_len;
+    uint32_t                              granted; /* ACCESS                            */
+    char                                 *target; /* READLINK (owned by the compound)  */
+    uint32_t                              target_len;
 
     /* SETXATTR, REMOVEXATTR.  Only the ctime is kept: it is the whole of what
      * a change_info reply needs, and keeping two more attribute sets per op
      * would double the size of a sequence for one field. */
-    struct timespec                     pre_ctime;
-    struct timespec                     post_ctime;
+    struct timespec                       pre_ctime;
+    struct timespec                       post_ctime;
 
     /* ---- READ results ---- */
     /* The data, as references to the backend's buffers, written into the array
      * the caller supplied.  The references are owned by the compound until
      * chimera_vfs_compound_take_iov(); the array never is. */
-    struct evpl_iovec                  *iov;
-    int                                 niov;
-    uint32_t                            read_len;
-    uint32_t                            eof_read;
+    struct evpl_iovec                    *iov;
+    int                                   niov;
+    uint32_t                              read_len;
+    uint32_t                              eof_read;
 
     /* ---- WRITE results ---- */
-    uint32_t                            written;
+    uint32_t                              written;
     /* Durability actually achieved, which may exceed what was asked for and
      * may fall short of it only by the backend's own report. */
-    uint32_t                            committed;
+    uint32_t                              committed;
 
     /* ---- OPEN results ---- */
     /* The open handle, owned by the CALLER once the sequence has finished --
      * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed. */
-    struct chimera_vfs_open_handle     *out_handle;
+    struct chimera_vfs_open_handle       *out_handle;
     /* Whether the open created the object. */
-    uint8_t                             created;
+    uint8_t                               created;
     /* Set when the executor resolved the name before opening (which it does
      * for REGULAR_ONLY or ATTRS_ON_CREATE_ONLY) and found an existing object.
      * `existing_mode` is that object's mode -- the whole point of the
      * REGULAR_ONLY failure, whose status says only that the open was refused
      * and not what was in the way. */
-    uint8_t                             existed;
-    uint32_t                            existing_mode;
+    uint8_t                               existed;
+    uint32_t                              existing_mode;
     /* The parent directory before and after, for a change_info reply.  Set by
      * CREATE and REMOVE, and by an OPEN that named a child. */
-    struct chimera_vfs_attrs            dir_pre_attr;
-    struct chimera_vfs_attrs            dir_post_attr;
+    struct chimera_vfs_attrs              dir_pre_attr;
+    struct chimera_vfs_attrs              dir_post_attr;
     /* RENAME only: the SOURCE directory's change_info.  The pair above is the
      * target's, which is what every other name-changing op reports.  Both are
      * filled because rename_at hands back both and NFSv4's RENAME reply has a
      * slot for each -- source_cinfo and target_cinfo. */
-    struct chimera_vfs_attrs            from_dir_pre_attr;
-    struct chimera_vfs_attrs            from_dir_post_attr;
+    struct chimera_vfs_attrs              from_dir_pre_attr;
+    struct chimera_vfs_attrs              from_dir_post_attr;
 
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
-    struct chimera_vfs_compound_dirent *entries;
-    uint32_t                            num_entries;
+    struct chimera_vfs_compound_dirent   *entries;
+    uint32_t                              num_entries;
     /* READDIR and LISTXATTRS: whether the enumeration reached the end, and the
      * cookie to resume it from, as the backend reported them when it stopped.
      * r_verifier is the directory's verifier (READDIR only). */
-    uint32_t                            eof;
-    uint64_t                            r_cookie;
-    uint64_t                            r_verifier;
+    uint32_t                              eof;
+    uint64_t                              r_cookie;
+    uint64_t                              r_verifier;
 
     /* GETXATTR (value), LISTXATTRS (back-to-back NUL-terminated names).  Owned
      * by the compound, buffer_max bytes, valid until it is freed. */
-    void                               *buffer;
-    uint32_t                            buffer_len;
-    uint32_t                            buffer_count;  /* LISTXATTRS: names   */
+    void                                 *buffer;
+    uint32_t                              buffer_len;
+    uint32_t                              buffer_count; /* LISTXATTRS: names   */
 };
 
 /*
@@ -531,6 +579,23 @@ chimera_vfs_compound_add_readdir(
     uint32_t                     maxcount,
     uint32_t                     max_entries,
     uint64_t                     attr_mask);
+
+/* READDIR that streams: no entry is staged, `append` is called with each one as
+ * the backend produces it, and `reset` is called before the op runs (and so
+ * again before any retry of it).  `max_entries` is not taken because the
+ * caller's own bound is what stops the enumeration -- which is the point.
+ *
+ * The contract on the two callbacks is on their typedefs; the short version is
+ * that reset must undo everything append did, and append must not emit. */
+int
+chimera_vfs_compound_add_readdir_stream(
+    struct chimera_vfs_compound          *compound,
+    uint64_t                              cookie,
+    uint64_t                              verifier,
+    uint64_t                              attr_mask,
+    chimera_vfs_compound_readdir_reset_t  reset,
+    chimera_vfs_compound_readdir_append_t append,
+    void                                 *private_data);
 
 /* `name` is the fully-qualified xattr name ("user.foo"), as the VFS xattr calls
  * take it.  `value` must outlive the submission; the compound copies neither it

@@ -115,6 +115,13 @@ nfs4_vfs_readdir_max_entries(
 } /* nfs4_vfs_readdir_max_entries */
 
 struct nfs4_vfs_op {
+    /* READDIR, which marshals its page entry by entry as the sequence produces
+     * it: the entry list being built, and the reply-buffer mark it started
+     * from so a retried sequence can put the buffer back. */
+    struct nfs_nfs4_readdir_cursor  readdir_cursor;
+    uint32_t                        readdir_mark;
+    int                             readdir_have_mark;
+
     uint32_t                        res_index; /* index into the COMPOUND's arg/res arrays        */
     int                             vfs_lo; /* first VFS op belonging to this NFSv4 op         */
     int                             vfs_hi; /* last VFS op belonging to this NFSv4 op          */
@@ -308,66 +315,119 @@ nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
     } /* switch */
 } /* nfs4_vfs_op_reply_bound */
 
-/*
- * Marshal a READDIR page from the entries the sequence collected.
- *
- * The executor stops at its own entry bound; the reply's maxcount is applied
- * here, entry by entry, by the same code the per-op path runs from inside the
- * enumeration.  Encoding was refused unless maxcount is small enough that it
- * must bind first (NFS4_VFS_READDIR_MAX_MAXCOUNT), so a truncation here is the
- * same truncation the per-op path would have made at the same entry -- and when
- * nothing truncates here, the page ended exactly where the backend ended it and
- * carries the backend's own eof and cookie.
- */
-static nfsstat4
-nfs4_vfs_readdir_fill(
-    struct nfs_request                   *req,
-    struct READDIR4args                  *args,
-    struct READDIR4res                   *res,
-    const struct chimera_vfs_compound_op *vop)
+/* The NFSv4 op a given VFS op carries the result of. */
+static struct nfs4_vfs_op *
+nfs4_vfs_op_by_vfs_res(
+    struct nfs4_vfs_compound_ctx *ctx,
+    uint32_t                      index)
 {
-    struct nfs_nfs4_readdir_cursor cursor;
-    uint32_t                       i;
-    uint32_t                       eof    = vop->eof;
-    uint64_t                       cookie = vop->r_cookie;
-    uint64_t                       cv;
+    uint32_t k;
 
-    /* The fixed READDIR4resok overhead maxcount is charged before any entry:
-     * cookieverf (8) plus the dirlist4 booleans (4 each). */
-    cursor.count   = 16;
-    cursor.entries = NULL;
-    cursor.last    = NULL;
-
-    for (i = 0; i < vop->num_entries; i++) {
-        const struct chimera_vfs_compound_dirent *ent = &vop->entries[i];
-
-        if (chimera_nfs4_readdir_entry_fill(req, args, &cursor,
-                                            vop->fh, (int) vop->fh_len,
-                                            ent->cookie,
-                                            ent->name, (int) ent->name_len,
-                                            &ent->attr) != 0) {
-            /* This entry did not fit, so the page ends before it and there is
-             * more to come from its cookie. */
-            eof    = 0;
-            cookie = ent->cookie;
-            break;
+    for (k = 0; k < ctx->num_ops; k++) {
+        if (ctx->ops[k].vfs_res >= 0 &&
+            (uint32_t) ctx->ops[k].vfs_res == index) {
+            return &ctx->ops[k];
         }
     }
 
-    /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are not
-     * at end-of-directory, the buffer is too small.  Returning an empty,
-     * non-eof page would stall a paging client. */
-    if (!eof && cursor.entries == NULL) {
-        return NFS4ERR_TOOSMALL;
+    return NULL;
+} /* nfs4_vfs_op_by_vfs_res */
+
+/*
+ * Discard whatever a previous attempt at this READDIR marshalled.
+ *
+ * Rewinding the reply buffer to the mark, rather than merely stopping at it,
+ * is safe because during a sequence the entry fill is the ONLY thing that
+ * allocates from that buffer: every other result is marshalled after the
+ * sequence has finished, and what the build staged (the xattr names) it staged
+ * before the sequence started.  So everything past the mark belongs to this op.
+ */
+static void
+nfs4_vfs_readdir_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct nfs4_vfs_compound_ctx *ctx = private_data;
+    struct nfs4_vfs_op           *map = nfs4_vfs_op_by_vfs_res(ctx, index);
+
+    if (!map) {
+        return;
     }
 
-    cv = vop->r_verifier ? vop->r_verifier : cookie;
+    if (map->readdir_have_mark) {
+        ctx->req->encoding->dbuf->used = map->readdir_mark;
+    } else {
+        map->readdir_mark      = ctx->req->encoding->dbuf->used;
+        map->readdir_have_mark = 1;
+    }
+
+    /* The fixed READDIR4resok overhead is charged before any entry:
+     * cookieverf (8) plus the dirlist4 booleans (4 each). */
+    map->readdir_cursor.count   = 16;
+    map->readdir_cursor.entries = NULL;
+    map->readdir_cursor.last    = NULL;
+} /* nfs4_vfs_readdir_reset */
+
+/*
+ * Marshal one entry, by the same code and at the same moment the per-op path
+ * runs it from: inside the enumeration, while the backend still owns the
+ * attributes it is handing over -- which is what lets a per-entry ACL be
+ * encoded here at all.  maxcount is applied entry by entry through the cursor,
+ * so the page ends on the entry that does not fit rather than at a count
+ * guessed before anything was marshalled.
+ */
+static int
+nfs4_vfs_readdir_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *private_data)
+{
+    struct nfs4_vfs_compound_ctx         *ctx = private_data;
+    struct nfs4_vfs_op                   *map = nfs4_vfs_op_by_vfs_res(ctx, index);
+    const struct chimera_vfs_compound_op *vop;
+
+    (void) inum;
+
+    if (!map) {
+        return -1;
+    }
+
+    vop = chimera_vfs_compound_op(compound, index);
+
+    return chimera_nfs4_readdir_entry_fill(
+        ctx->req,
+        &ctx->req->args_compound->argarray[map->res_index].opreaddir,
+        &map->readdir_cursor,
+        vop->fh, (int) vop->fh_len,
+        cookie, name, namelen, attrs);
+} /* nfs4_vfs_readdir_append */
+
+/*
+ * Finish a READDIR whose page is already marshalled.  All that is left is what
+ * the per-op path does in its own completion: the too-small judgement, the
+ * cookie verifier, and pointing the result at the list.
+ */
+static void
+nfs4_vfs_readdir_fill(
+    struct READDIR4res                   *res,
+    const struct chimera_vfs_compound_op *vop,
+    const struct nfs4_vfs_op             *map)
+{
+    uint64_t cv;
+
+    /* The too-small judgement (RFC 7530 16.24.4) is the gate's: a READDIR that
+     * reaches here passed it. */
+    cv = vop->r_verifier ? vop->r_verifier : vop->r_cookie;
     memcpy(res->resok4.cookieverf, &cv, sizeof(res->resok4.cookieverf));
 
-    res->resok4.reply.eof     = eof;
-    res->resok4.reply.entries = cursor.entries;
-
-    return NFS4_OK;
+    res->resok4.reply.eof     = vop->eof;
+    res->resok4.reply.entries = map->readdir_cursor.entries;
 } /* nfs4_vfs_readdir_fill */
 
 /*
@@ -424,7 +484,11 @@ nfs4_vfs_op_errno(
         return chimera_nfs4_putfh_errno(err);
     }
 
-    if (argop == OP_LISTXATTRS && err == CHIMERA_VFS_ERANGE) {
+    /* LISTXATTRS and READDIR both turn a too-small buffer into
+     * NFS4ERR_TOOSMALL rather than the generic size error -- READDIR's is set
+     * by the gate, which is where its page is judged. */
+    if ((argop == OP_LISTXATTRS || argop == OP_READDIR) &&
+        err == CHIMERA_VFS_ERANGE) {
         return NFS4ERR_TOOSMALL;
     }
 
@@ -893,8 +957,8 @@ nfs4_vfs_op_fill(
             return status;
 
         case OP_READDIR:
-            status = nfs4_vfs_readdir_fill(req, &argop->opreaddir,
-                                           &resop->opreaddir, vop);
+            nfs4_vfs_readdir_fill(&resop->opreaddir, vop, map);
+            status                  = NFS4_OK;
             resop->opreaddir.status = status;
             return status;
 
@@ -1038,6 +1102,34 @@ nfs4_vfs_compound_gate(
 
     if (*status != CHIMERA_VFS_OK) {
         return;
+    }
+
+    /* READDIR judges its own page, and now can: the page is marshalled inside
+     * the enumeration, so by the time the op finishes the answer exists.  It
+     * used to be settled after the sequence, which is what forced the rule
+     * that nothing mutating may follow a READDIR. */
+    for (k = 0; k < ctx->num_ops; k++) {
+        struct nfs4_vfs_op                   *map = &ctx->ops[k];
+        const struct chimera_vfs_compound_op *vop;
+
+        if (map->vfs_res < 0 || (uint32_t) map->vfs_res != index) {
+            continue;
+        }
+
+        if (req->args_compound->argarray[map->res_index].argop != OP_READDIR) {
+            break;
+        }
+
+        vop = chimera_vfs_compound_op(compound, index);
+
+        /* RFC 7530 16.24.4, applied here so it stops the sequence rather than
+         * being discovered once the ops behind it have already run. */
+        if (!vop->eof && map->readdir_cursor.entries == NULL) {
+            *status = CHIMERA_VFS_ERANGE;
+            return;
+        }
+
+        break;
     }
 
     for (k = 0; k < ctx->num_ops; k++) {
@@ -1878,18 +1970,13 @@ chimera_nfs4_compound_try_vfs(
          * COMMIT's type gates) and READDIR, whose page can come back too small
          * to carry an entry.  Nothing that mutates may follow one -- see the
          * MUTATION note at the top. */
-        /* READDIR alone.  Every other NFSv4-side check runs in the gate now, as
-         * its op finishes, so it stops what is behind it instead of reporting
-         * after the fact -- see nfs4_vfs_compound_gate.  READDIR's cannot: its
-         * page is judged while being marshalled into the reply, which is the
-         * fill, and there is no earlier moment at which the answer exists. */
-        switch (argop->argop) {
-            case OP_READDIR:
-                may_fail_late = 1;
-                break;
-            default:
-                break;
-        } /* switch */
+        /* Nothing fails late any more.  Every NFSv4-side check runs in the
+         * gate as its op finishes, so it stops what is behind it instead of
+         * reporting after the fact -- see nfs4_vfs_compound_gate.  READDIR was
+         * the last exception, because its page was judged while being
+         * marshalled and that happened after the sequence; now the page is
+         * marshalled inside the enumeration and the judgement moves into the
+         * gate with everything else. */
 
         switch (argop->argop) {
             case OP_PUTFH:
@@ -2009,30 +2096,10 @@ chimera_nfs4_compound_try_vfs(
                     }
                 }
 
-                /* Per-entry ACLs are dropped for the same reason a GETATTR's
-                 * is: the backend owns them only while the entry callback
-                 * runs. */
-                if (argop->opreaddir.num_attr_request >= 1 &&
-                    (argop->opreaddir.attr_request[0] & (1U << FATTR4_ACL))) {
-                    {
-                        nenc = i;
-                        stop = 1;
-                        break;
-                    }
-                }
-
-                /* A page the sequence could fill and the reply could not is
-                 * fine; a page the reply could fill and the sequence could not
-                 * would truncate for a reason the per-op path does not have. */
-                if (nfs4_vfs_readdir_max_entries(argop->opreaddir.maxcount,
-                                                 avail) >
-                    CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES) {
-                    {
-                        nenc = i;
-                        stop = 1;
-                        break;
-                    }
-                }
+                /* Per-entry ACLs need no exception: the page is marshalled
+                 * inside the enumeration, while the backend still owns the
+                 * ACL it is handing over -- the same moment the per-op path
+                 * encodes it. */
                 break;
 
             case OP_GETXATTR:
@@ -3014,16 +3081,15 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_READDIR:
-                idx = chimera_vfs_compound_add_readdir(
+                idx = chimera_vfs_compound_add_readdir_stream(
                     compound,
                     argop->opreaddir.cookie,
                     nfs4_vfs_readdir_verifier(&argop->opreaddir),
-                    argop->opreaddir.dircount,
-                    argop->opreaddir.maxcount,
-                    nfs4_vfs_readdir_max_entries(argop->opreaddir.maxcount,
-                                                 avail),
                     chimera_nfs4_attr2mask(argop->opreaddir.attr_request,
-                                           argop->opreaddir.num_attr_request));
+                                           argop->opreaddir.num_attr_request),
+                    nfs4_vfs_readdir_reset,
+                    nfs4_vfs_readdir_append,
+                    ctx);
                 map->vfs_res = idx;
                 break;
 
