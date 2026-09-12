@@ -16,22 +16,66 @@
 
 /* --- OPENDIR --- */
 
+/*
+ * opendir(3) requires read permission on the directory, and opening by file
+ * handle does not check it: chimera_vfs_open_fh opens by handle without a DAC
+ * gate, so an unreadable directory opened successfully and READDIR then listed
+ * it.  A default mount hides this because default_permissions has the kernel
+ * check the mode bits first -- but no_default_permissions is a supported
+ * option, and there the server is the only thing standing in the way.
+ *
+ * The sequence asks for the rights and then opens, and this veto is what turns
+ * the answer into a refusal.  It is answered from the ACCESS result already in
+ * the sequence, so it takes no I/O and gives the same answer if asked twice.
+ */
 static void
-chimera_fuse_opendir_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_fuse_opendir_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_fuse_request   *req    = private_data;
-    struct chimera_fuse_thread    *thread = req->thread;
-    struct chimera_fuse_mount     *mount  = req->channel->mount;
-    struct chimera_fuse_open_file *file;
-    struct fuse_open_out           out;
+    const struct chimera_vfs_compound_op *op;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    if (*status != CHIMERA_VFS_OK) {
         return;
     }
+
+    op = chimera_vfs_compound_op(compound, index);
+
+    if (op->type != CHIMERA_VFS_COMPOUND_OP_ACCESS) {
+        return;
+    }
+
+    if (!(op->granted & CHIMERA_ACE_READ_DATA)) {
+        *status = CHIMERA_VFS_EACCES;
+    }
+} /* chimera_fuse_opendir_gate */
+
+static void
+chimera_fuse_opendir_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request    *req    = private_data;
+    struct chimera_fuse_thread     *thread = req->thread;
+    struct chimera_fuse_mount      *mount  = req->channel->mount;
+    struct chimera_fuse_open_file  *file;
+    struct chimera_vfs_open_handle *oh;
+    struct fuse_open_out            out;
+    enum chimera_vfs_error          status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    /* The open's handle outlives the sequence -- it is what the kernel's fh
+     * will name -- so it has to be taken from the compound. */
+    oh = chimera_vfs_compound_take_handle(
+        compound, chimera_vfs_compound_num_ops(compound) - 1);
 
     file = calloc(1, sizeof(*file));
 
@@ -49,26 +93,7 @@ chimera_fuse_opendir_callback(
         chimera_vfs_release(thread->vfs_thread, file->handle);
         free(file);
     }
-} /* chimera_fuse_opendir_callback */
-
-static void
-chimera_fuse_opendir_gated(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_opendir_callback, req);
-} /* chimera_fuse_opendir_gated */
+} /* chimera_fuse_opendir_sequence_complete */
 
 void
 chimera_fuse_op_opendir(
@@ -82,19 +107,23 @@ chimera_fuse_op_opendir(
         return;
     }
 
-    /*
-     * opendir(3) requires read permission on the directory, and nothing below
-     * this point checks it: chimera_vfs_open_fh opens by handle without a DAC
-     * gate, so an unreadable directory opened successfully and READDIR then
-     * listed it.  A default mount hides this because default_permissions has
-     * the kernel check the mode bits first -- but no_default_permissions is a
-     * supported option, and there the server is the only thing standing in
-     * the way.  Gate it here, the same way the other servers do.
-     */
-    chimera_vfs_gate_fh(&req->u.gate, req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_ACE_READ_DATA,
-                        chimera_fuse_opendir_gated, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_set_gate(req->compound, chimera_fuse_opendir_gate,
+                                  req);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_access(req->compound, CHIMERA_ACE_READ_DATA);
+    /* A NULL name opens the current object itself. */
+    chimera_vfs_compound_add_open(req->compound, NULL, 0,
+                                  CHIMERA_VFS_OPEN_INFERRED |
+                                  CHIMERA_VFS_OPEN_PATH |
+                                  CHIMERA_VFS_OPEN_DIRECTORY,
+                                  0, NULL, 0);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_opendir_sequence_complete, req);
 } /* chimera_fuse_op_opendir */
 
 /* --- READDIR / READDIRPLUS --- */
@@ -353,16 +382,16 @@ chimera_fuse_op_releasedir(
 /* --- FSYNCDIR --- */
 
 static void
-chimera_fuse_fsyncdir_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_fuse_fsyncdir_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_fuse_request *req = private_data;
 
-    chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-} /* chimera_fuse_fsyncdir_complete */
+    chimera_fuse_reply(req,
+                       chimera_fuse_errno(chimera_vfs_compound_status(compound)),
+                       NULL, 0);
+} /* chimera_fuse_fsyncdir_sequence_complete */
 
 void
 chimera_fuse_op_fsyncdir(
@@ -372,14 +401,22 @@ chimera_fuse_op_fsyncdir(
     uint32_t                     arglen)
 {
     const struct fuse_fsync_in *in = arg;
+    int                         idx;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
-                       chimera_fuse_file(in->fh)->handle,
-                       0, 0, 0, 0,
-                       chimera_fuse_fsyncdir_complete, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* The kernel named an open directory; the sequence acts on that handle,
+     * which stays owned by the open, so there is no current object at all. */
+    idx = chimera_vfs_compound_add_commit(req->compound, 0, 0, 0);
+    chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx,
+                                       chimera_fuse_file(in->fh)->handle);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_fsyncdir_sequence_complete, req);
 } /* chimera_fuse_op_fsyncdir */
