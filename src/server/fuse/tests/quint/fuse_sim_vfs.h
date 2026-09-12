@@ -637,11 +637,24 @@ fsim_fd_put(
         return -EBADF;
     }
 
+    /* FLUSH goes on EVERY close(2), RELEASE only when the last descriptor for
+     * the open file description goes.  That split is the whole reason the two
+     * opcodes exist: POSIX drops every lock a process holds on a file when it
+     * closes ANY descriptor for that file -- not merely the last one, and not
+     * merely the description the lock was taken through -- and FLUSH's
+     * lock_owner is how the kernel tells the server which process just closed.
+     *
+     * Flushing only on the final put left a dup'ed descriptor's close silent,
+     * so the server kept locks the model had already released and a later
+     * blocking F_SETLKW from another process waited on them forever. */
+    if (!o->isdir) {
+        fuse_sim_flush(&f->sim, o->nodeid, o->fh, f->sim.cur_pid);
+    }
+
     if (--o->refs == 0) {
         if (o->isdir) {
             fuse_sim_releasedir(&f->sim, o->nodeid, o->fh);
         } else {
-            fuse_sim_flush(&f->sim, o->nodeid, o->fh, f->sim.cur_pid);
             fuse_sim_release(&f->sim, o->nodeid, o->fh);
         }
     }
