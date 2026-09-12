@@ -804,6 +804,15 @@ smb_build_create_owner_attrs(
         out->va_gid       = request->cred->gid;
         out->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
     }
+    /* A group the engine named outranks the creator's: it carries either the
+     * caller's own request or the set-group-ID inheritance from the parent
+     * directory, neither of which this backend can work out for itself (the
+     * mount authenticates as one identity, so the server assigns nothing
+     * useful and the owner is stamped afterwards). */
+    if (set_attr && (set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID)) {
+        out->va_gid       = set_attr->va_gid;
+        out->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+    }
     if (set_attr && (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
         out->va_mode      = set_attr->va_mode;
         out->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
@@ -1059,12 +1068,13 @@ smb_parse_symlink_error(
  * if it would not fit. */
 static int
 smb_splice_symlink_target(
-    char       *path,
-    int         path_len,
-    const char *target,
-    int         tlen,
-    int         relative,
-    int         unparsed)
+    const struct chimera_smb_client_server *server,
+    char                                   *path,
+    int                                     path_len,
+    const char                             *target,
+    int                                     tlen,
+    int                                     relative,
+    int                                     unparsed)
 {
     int  base, parsed_len, suffix_len, newlen;
     char scratch[CHIMERA_SMB_PATH_MAX + 1];
@@ -1084,11 +1094,35 @@ smb_splice_symlink_target(
     suffix_len = unparsed;
 
     if (!relative) {
-        /* Absolute target: resolve from the share root (drop the whole prefix
-         * up to and including the symlink), keeping the suffix. */
+        /* Absolute target: a path in the CLIENT's namespace, where this share
+         * is mounted at server->mount_path -- so "/test/c" on a share mounted
+         * at "/test" is the share-relative "c".  Strip the leading '/' and
+         * then that prefix; without the second step the splice climbs into a
+         * "test" directory the share does not have and the answer comes back
+         * ENOENT where the target resolves perfectly well.
+         *
+         * A target OUTSIDE the mount cannot be resolved on this wire at all
+         * (it names something in another mount, or nothing): refuse, and the
+         * caller surfaces the server's STOPPED_ON_SYMLINK as ELOOP rather
+         * than inventing a path. */
         while (tlen > 0 && target[0] == '/') {
             target++;
             tlen--;
+        }
+        if (server->mount_pathlen > 0) {
+            int mpl = server->mount_pathlen;
+
+            if (tlen < mpl ||
+                memcmp(target, server->mount_path, mpl) != 0 ||
+                (tlen > mpl && target[mpl] != '/')) {
+                return -1;
+            }
+            target += mpl;
+            tlen   -= mpl;
+            while (tlen > 0 && target[0] == '/') {
+                target++;
+                tlen--;
+            }
         }
         base = 0;
     } else {
@@ -1110,6 +1144,13 @@ smb_splice_symlink_target(
     memcpy(scratch, path, base);
     memcpy(scratch + base, target, tlen);
     memcpy(scratch + base + tlen, path + parsed_len, suffix_len);
+
+    /* A target that IS the mount root reduces to nothing, leaving the suffix's
+     * own separator at the front; mount-relative paths never carry one. */
+    if (newlen > 0 && scratch[0] == '/') {
+        memmove(scratch, scratch + 1, --newlen);
+    }
+
     memcpy(path, scratch, newlen);
     return newlen;
 } /* smb_splice_symlink_target */
@@ -1157,10 +1198,20 @@ smb_create_follow_shim(
         }
 
         if (tlen > 0 &&
-            (newlen = smb_splice_symlink_target(fc->path, fc->path_len, target,
+            (newlen = smb_splice_symlink_target(conn->server, fc->path,
+                                                fc->path_len, target,
                                                 tlen, relative, unparsed)) >= 0) {
+            struct chimera_smb_op_state *state = request->plugin_data;
+
             fc->path_len = newlen;
             fc->hops--;
+
+            /* Publish the rewrite: the object this CREATE finally opens lives
+            * at the spliced path, and that is the path its fh must intern. */
+            state->followed_pathlen = newlen;
+            memcpy(state->followed_path, fc->path, newlen);
+            state->followed_path[newlen] = '\0';
+
             smb_send_create_ex(conn, request, fc->path, fc->path_len,
                                fc->desired_access, fc->share_access,
                                fc->disposition, fc->options,
@@ -1202,6 +1253,8 @@ smb_send_create_follow(
         return;
     }
 
+    ((struct chimera_smb_op_state *) request->plugin_data)->followed_pathlen = 0;
+
     fc                 = calloc(1, sizeof(*fc));
     fc->request        = request;
     fc->real_cb        = reply_cb;
@@ -1223,6 +1276,33 @@ smb_send_create_follow(
                        cctx_len ? fc->cctx : NULL, cctx_len,
                        smb_create_follow_shim, fc);
 } /* smb_send_create_follow */
+
+/* The mount-relative path a CREATE actually resolved to: the follow shim's
+ * rewrite when it followed one or more symbolic links, otherwise `name`
+ * resolved against the request's parent handle.  This is the path an fh must
+ * intern -- see chimera_smb_op_state::followed_path. */
+static int
+smb_resolved_full_path(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *name,
+    int                             namelen,
+    char                           *out,
+    int                             out_max)
+{
+    struct chimera_smb_op_state *state = request->plugin_data;
+
+    if (state->followed_pathlen > 0) {
+        if (state->followed_pathlen >= out_max) {
+            return -1;
+        }
+        memcpy(out, state->followed_path, state->followed_pathlen);
+        out[state->followed_pathlen] = '\0';
+        return state->followed_pathlen;
+    }
+
+    return smb_at_full_path(conn, request, name, namelen, out, out_max);
+} /* smb_resolved_full_path */
 
 /* Build an RqLs (lease request v1) create context into `buf` (>= 56 bytes);
  * returns its length.  Header(16) + name "RqLs"(4) + pad(4) + data(32). */
@@ -1513,10 +1593,10 @@ chimera_smb_lookup_create_reply(
      * the old path-only shortcut -- made them all ESTALE.  open_fh re-CREATEs
      * the interned path, exactly as for an open_at handle. */
     char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
-    int      fullpath_len = smb_at_full_path(conn, request,
-                                             request->lookup_at.component,
-                                             request->lookup_at.component_len,
-                                             fullpath, sizeof(fullpath));
+    int      fullpath_len = smb_resolved_full_path(conn, request,
+                                                   request->lookup_at.component,
+                                                   request->lookup_at.component_len,
+                                                   fullpath, sizeof(fullpath));
     uint64_t path_id;
 
     if (fullpath_len < 0) {
@@ -1656,10 +1736,10 @@ chimera_smb_open_at_reply(
      * handle) so open_fh can re-CREATE this object after its handle is evicted;
      * the path id is the handle's fh identity. */
     char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
-    int      fullpath_len = smb_at_full_path(conn, request,
-                                             request->open_at.name,
-                                             request->open_at.namelen,
-                                             fullpath, sizeof(fullpath));
+    int      fullpath_len = smb_resolved_full_path(conn, request,
+                                                   request->open_at.name,
+                                                   request->open_at.namelen,
+                                                   fullpath, sizeof(fullpath));
     uint64_t path_id;
 
     if (fullpath_len < 0) {

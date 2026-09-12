@@ -1415,17 +1415,23 @@ nfs4_cb_resend_recalls_on_rebind(
     }
     pthread_mutex_unlock(&client->lock);
 
-    if (count == 0) {
-        free(pending);
-        return;
-    }
-
     /* The stale callback channel still references the destroyed session (whose
      * backchannel_conn is now NULL), so it cannot carry a recall.  Tear it down
      * and rebuild against the new session: nfs4_client_set_cb_path already reset
      * the path to NFS4_CB_UNINIT, so ensure_probe binds the new backchannel and
      * (4.1) marks it UP without a CB_NULL round trip.  Done outside client->lock
-     * to avoid a client->lock -> cb_recall_lock ordering. */
+     * to avoid a client->lock -> cb_recall_lock ordering.
+     *
+     * Rebuilt whether or not a recall is outstanding.  The rebuild used to be
+     * left to the lazy probe, but the only thing that drives that probe is an
+     * OPEN that wants a delegation -- so a client that re-runs CREATE_SESSION
+     * and then asks for nothing new keeps every delegation it already holds
+     * with no channel to recall them over.  The next conflicting OPEN finds
+     * cb_client NULL and REVOKES the delegation instead of recalling it: the
+     * holder silently loses state it was never asked to return, and the
+     * opener is told NFS4ERR_DELAY for a recall that was never sent.  Binding
+     * a 4.1 backchannel is synchronous and costs no round trip (RFC 8881
+     * 2.10.3.1), so there is nothing to defer. */
     if (client->cb_path.cb_client) {
         nfs4_cb_path_teardown(&client->cb_path, false);
     }
@@ -1438,7 +1444,7 @@ nfs4_cb_resend_recalls_on_rebind(
     atomic_store_explicit(&client->cb_path.cb_state, NFS4_CB_UNINIT,
                           memory_order_release);
 
-    if (nfs4_cb_ensure_probe(thread, client, req)) {
+    if (nfs4_cb_ensure_probe(thread, client, req) && count > 0) {
         /* Re-drive each outstanding recall over the freshly-bound channel.  Use
          * the CAS-free enqueue (not nfs4_cb_recall) and stamp RECALLING
          * directly: the deleg may legitimately already be RECALLING here (the

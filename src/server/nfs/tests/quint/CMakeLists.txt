@@ -11,23 +11,26 @@ set(CHIMERA_TEST_TIER quick)
 # only the C replay harnesses that drive that corpus against the live chimera
 # server.  Four suites:
 #
-#   nfs3_mbt_replay.c     NFSv3           (specs corpus nfs3/)
-#   nfs4_mbt_replay.c     NFSv4.0/4.1/4.2 (specs corpus nfs4/)
+#   nfs3_mbt_replay.c     NFSv3           (model family nfs3, 1 config)
+#   nfs4_mbt_replay.c     NFSv4.0/4.1/4.2 (model family nfs4, 7 configs: the
+#                         three minor versions, the two delegation-serving
+#                         variants, the two pNFS metadata-server profiles)
 #   nfs_aux_mbt_replay.c  the four protocols around NFSv3 -- portmap/rpcbind,
-#                         MOUNT, NLM and NSM (specs corpus nfsaux/)
+#                         MOUNT, NLM and NSM (model family nfsaux, 1 config)
 #   nfs_drc_mbt_replay.c  the duplicate-request caches of NFSv3 and NFSv4.0
-#                         (specs corpus nfsdrc/)
+#                         (model family nfsdrc, 2 configs)
 #
 # Each embeds the chimera server (memfs backend) in the test process and replays
 # every trace over libevpl's inproc transport, failing on any divergence.  No
 # test binds a port, needs a network namespace or resource lock, or spawns a
 # daemon -- every trace runs fully parallel on any host.
 #
-# The trace corpus is resolved once, at the top level, by cmake/SpecsBundle.cmake
-# into SPECS_BUNDLE_DIR (a fetched prebuilt bundle when the submodule is clean,
-# else an in-tree build of ext/specs).  The replay ctests point --trace-dir at
-# ${SPECS_BUNDLE_DIR}/nfs3 and /nfs4; the pure-C deviation/delegation probes need
-# no corpus and always run.
+# The trace corpus is GENERATED, per cell, from the configs in configs/ and the
+# models in ext/specs (cmake/Specs.cmake -> specs_corpus()).  A config is the
+# unit: it binds every constant its model family declares and carries the batch
+# list, so one config fully determines one corpus and the ctest pointed at that
+# corpus replays ALL of it.  The pure-C deviation/delegation probes need no
+# corpus and always run.
 
 # chimera_metrics is linked by every target here because nfs3_mbt_common.h can
 # stand up the Prometheus scrape endpoint on request (mbt_env_opts.metrics_port),
@@ -292,10 +295,38 @@ foreach(sec krb5 krb5i krb5p)
         TIMEOUT 150)
 endforeach()
 
-if(NOT SPECS_BUNDLE_AVAILABLE)
+if(NOT CHIMERA_MBT_AVAILABLE)
     message(STATUS "nfs MBT replay ctests skipped (no specs trace corpus)")
     return()
 endif()
+
+# One corpus for NFSv3.  The model declares no feature or policy knobs -- an
+# NFSv3 server has no optional surface to advertise and no minor version to
+# pick -- so besides the batch list the config carries the KNOWN DEVIATIONS
+# chimera still has and the places RFC 1813 permits more than one answer.
+# Every cell below replays the whole of it.
+#
+# There is no deviation registry in nfs3_mbt_replay.c any more, and as of the
+# #1771 fix (the missing search check on CREATE's existing-entry path, now
+# enforced by memfs/diskfs/cairn before the directory is examined) the cell
+# carries no deviations at all: the model states RFC 1813 and chimera meets it.
+# Any divergence that does turn up gets a branch in ext/specs/quint/nfs/nfs3.qnt
+# gated on the DEVS set, declared with its citation in that family's
+# corpus.schema.json and named by the config here -- so the expectation in a
+# trace already IS what chimera does and replay is an exact match.  The two
+# places the STANDARD permits several answers are separate: those are
+# TOLERANCES, and the model emits a `statusAccept` set beside the status it
+# predicts.
+#
+# STRICT_OUT_DIR registers the strict twin: the same batches with every
+# deviation off.  Its failures are the conformance debt, re-measured on every
+# run rather than remembered in C -- which is what stops a deviation outliving
+# its fix.  The liveness gate below closes the same loop from the other side.
+specs_corpus(NAME           nfs3/ref
+             FAMILY         nfs3
+             CONFIG         ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs3_ref.json
+             OUT_DIR        NFS3_TRACES
+             STRICT_OUT_DIR NFS3_STRICT_TRACES)
 
 # One batched replay per suite: a single replayer process opens the server +
 # rpc2 client once and replays every trace in the corpus back-to-back, standing
@@ -306,7 +337,7 @@ endif()
 # trace.  --trace-dir consumes every *.itf.json the specs build/bundle produced
 # for the suite.
 add_test(NAME chimera/server/nfs/mbt/batch_memfs
-    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3)
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES})
 set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_memfs"
     LABELS "quint;nfs3_mbt;memfs"
@@ -330,7 +361,7 @@ set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
 # carried under a sealed payload.  A fixed-identity profile on the specs side
 # would widen it; see DEVIATIONS-NFS.md.
 add_test(NAME chimera/server/nfs/mbt/batch_memfs_krb5p
-    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
             --sec krb5p)
 set_tests_properties(chimera/server/nfs/mbt/batch_memfs_krb5p PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_memfs_krb5p"
@@ -339,7 +370,7 @@ set_tests_properties(chimera/server/nfs/mbt/batch_memfs_krb5p PROPERTIES
     TIMEOUT 300)
 
 add_test(NAME chimera/server/nfs/mbt/batch_diskfs
-    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
             --backend diskfs)
 set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_diskfs"
@@ -348,7 +379,7 @@ set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
 
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt/batch_cairn
-        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
                 --backend cairn)
     set_tests_properties(chimera/server/nfs/mbt/batch_cairn PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_cairn"
@@ -365,7 +396,7 @@ endif()
 # of the corpus may go unchecked before the replay is judged vacuous.
 if(CHIMERA_LINUX)
     add_test(NAME chimera/server/nfs/mbt/batch_linux
-        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
                 --backend linux --max-attr-skip-rate 0.5)
     set_tests_properties(chimera/server/nfs/mbt/batch_linux PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_linux"
@@ -376,7 +407,7 @@ endif()
 
 if(CHIMERA_VFS_IO_URING)
     add_test(NAME chimera/server/nfs/mbt/batch_io_uring
-        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
                 --backend io_uring --max-attr-skip-rate 0.5)
     set_tests_properties(chimera/server/nfs/mbt/batch_io_uring PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_io_uring"
@@ -413,7 +444,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
         set(rextra --max-attr-skip-rate 0.5)
     endif()
     add_test(NAME chimera/server/nfs/mbt/batch_rdma_${rback}
-        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
                 --backend ${rback} --rdma ${rextra})
     set_tests_properties(chimera/server/nfs/mbt/batch_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_rdma_${rback}"
@@ -421,6 +452,45 @@ foreach(rback memfs diskfs cairn linux io_uring)
         SKIP_RETURN_CODE 77
         TIMEOUT 300)
 endforeach()
+
+# ---- the NFSv3 deviation machinery ----------------------------------------
+
+set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
+
+# The strict twin of nfs3/ref: the same batches regenerated with DEVS = Set(),
+# so every expectation is the RFC-correct one.  With the cell's deviation list
+# empty it should now PASS, and it keeps running so that the day a deviation is
+# added the debt it stands for is re-measured on every run -- which is what a
+# deviation registry could never do: a registry entry keeps forgiving after the
+# bug is fixed, and forgives the same divergence somewhere it was never meant
+# to.
+# Reporting, not gating, so it goes in the extended tier.
+set(CHIMERA_TEST_TIER extended)
+
+add_test(NAME chimera/server/nfs/mbt/strict_memfs
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_STRICT_TRACES})
+set_tests_properties(chimera/server/nfs/mbt/strict_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_strict_memfs"
+    LABELS "quint;nfs3_mbt;memfs;strict"
+    TIMEOUT 300)
+
+set(CHIMERA_TEST_TIER quick)
+
+# The liveness gate: a cell may not enable a deviation its own corpus never
+# exercises.  Either the deviation is dead (retire it from the config and
+# delete its branch in the model) or the generator quietly lost the coverage
+# that used to reach it.  Both need a human, so both fail here -- in the quick
+# tier, because a stale claim is a blindfold from the moment it goes stale.
+if(Python3_FOUND)
+    add_test(NAME chimera/server/nfs/mbt/devliveness_nfs3
+        COMMAND ${Python3_EXECUTABLE} ${SPECS_DEVLIVENESS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs3_ref.json
+                ${NFS3_TRACES})
+    set_tests_properties(chimera/server/nfs/mbt/devliveness_nfs3 PROPERTIES
+        LABELS "quint;nfs3_mbt;devliveness" TIMEOUT 120)
+else()
+    message(STATUS "nfs3 MBT deviation-liveness gate skipped (no python3)")
+endif()
 
 # The auxiliary protocols (portmap/rpcbind, MOUNT, NLM, NSM) replayed from the
 # nfsaux corpus.  One batch: the four protocols share one model because they
@@ -449,9 +519,14 @@ endforeach()
 # unlike the NFS3 corpus every trace in it runs.  MOUNT travels under a context
 # of its own; portmap, NLM and NSM stay on AUTH_SYS, which is what a real
 # deployment does with them.
+specs_corpus(NAME    nfsaux/ref
+             FAMILY  nfsaux
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfsaux_ref.json
+             OUT_DIR NFSAUX_TRACES)
+
 add_test(NAME chimera/server/nfs/mbtaux/batch_memfs_krb5p
     COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
-            --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux --sec krb5p)
+            --trace-dir ${NFSAUX_TRACES} --sec krb5p)
 set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs_krb5p PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_memfs_krb5p"
     LABELS "quint;nfsaux_mbt;memfs;gss"
@@ -470,7 +545,7 @@ foreach(aback memfs diskfs cairn linux io_uring)
     endif()
     add_test(NAME chimera/server/nfs/mbtaux/batch_${aback}
         COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
-                --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux
+                --trace-dir ${NFSAUX_TRACES}
                 --backend ${aback})
     set_tests_properties(chimera/server/nfs/mbtaux/batch_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_${aback}"
@@ -484,7 +559,7 @@ foreach(aback memfs diskfs cairn linux io_uring)
     # the auxiliary protocols' behavior beside it, not the chunk paths.
     add_test(NAME chimera/server/nfs/mbtaux/batch_rdma_${aback}
         COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
-                --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux
+                --trace-dir ${NFSAUX_TRACES}
                 --backend ${aback} --rdma)
     set_tests_properties(chimera/server/nfs/mbtaux/batch_rdma_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_rdma_${aback}"
@@ -513,6 +588,20 @@ endforeach()
 # the only one that sets a size on a symlink, and NFS3 SETATTR answered
 # NFS3ERR_SERVERFAULT there instead of NFS3ERR_INVAL (see
 # chimera_nfs3_setattr_open_callback).
+#
+# Two configs, two corpora, two directories.  Every cell below replays ALL of
+# the directory it is pointed at: the two servers used to share one corpus that
+# each cell carved by filename (--exclude-prefix nfsdrcNoV3 / nfsdrcRef), which
+# meant every cell read traces it then discarded.
+specs_corpus(NAME    nfsdrc/ref
+             FAMILY  nfsdrc
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/drc_ref.json
+             OUT_DIR DRC_REF_TRACES)
+specs_corpus(NAME    nfsdrc/nov3
+             FAMILY  nfsdrc
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/drc_nov3.json
+             OUT_DIR DRC_NOV3_TRACES)
+
 foreach(rback memfs diskfs cairn linux io_uring)
     if(rback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
         continue()
@@ -529,8 +618,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     if(rback STREQUAL "memfs")
         add_test(NAME chimera/server/nfs/mbtdrc/batch_memfs_krb5p
             COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
-                    --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-                    --exclude-prefix nfsdrcNoV3
+                    --trace-dir ${DRC_REF_TRACES}
                     --backend memfs --sec krb5p)
         set_tests_properties(chimera/server/nfs/mbtdrc/batch_memfs_krb5p
             PROPERTIES
@@ -542,8 +630,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_${rback}
         COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
-                --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-                --exclude-prefix nfsdrcNoV3
+                --trace-dir ${DRC_REF_TRACES}
                 --backend ${rback})
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_${rback}"
@@ -552,8 +639,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_${rback}
         COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid --no-nfs3-drc
-                --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-                --exclude-prefix nfsdrcRef
+                --trace-dir ${DRC_NOV3_TRACES}
                 --backend ${rback})
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_${rback}"
@@ -568,8 +654,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     # and serve RDMA like any other transport; these cells are what says so.
     add_test(NAME chimera/server/nfs/mbtdrc/batch_rdma_${rback}
         COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
-                --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-                --exclude-prefix nfsdrcNoV3
+                --trace-dir ${DRC_REF_TRACES}
                 --backend ${rback} --rdma)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_rdma_${rback}"
@@ -578,8 +663,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_rdma_${rback}
         COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid --no-nfs3-drc
-                --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-                --exclude-prefix nfsdrcRef
+                --trace-dir ${DRC_NOV3_TRACES}
                 --backend ${rback} --rdma)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_rdma_${rback}"
@@ -596,8 +680,107 @@ endforeach()
 # reframes the payload meet.  That combination was broken until the cache was
 # taught to keep the results rather than the wire message; this is the cell
 # that would have caught it.
+# Eight configs, eight corpora.  Three minor versions of the same server
+# (4.2 with every RFC 7862/8276 data operation required, 4.1 and 4.0 with none
+# of them), the delegation-serving variants of 4.2 and 4.1, and the two pNFS
+# metadata-server profiles.  They were one directory each ctest read whole and
+# then skipped most of at replay time -- the plain batches skipped every Deleg
+# trace, the delegation batch skipped everything else, and the pNFS profiles
+# needed a suite of their own because they require the opposite advertisement
+# from the same server.  Now each ctest is pointed at exactly the corpora it
+# can replay.
+specs_corpus(NAME    nfs4/memfs42
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_memfs42.json
+             OUT_DIR NFS4_MEMFS42_TRACES
+             STRICT_OUT_DIR NFS4_MEMFS42_STRICT)
+specs_corpus(NAME    nfs4/memfs41
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_memfs41.json
+             OUT_DIR NFS4_MEMFS41_TRACES
+             STRICT_OUT_DIR NFS4_MEMFS41_STRICT)
+specs_corpus(NAME    nfs4/memfs40
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_memfs40.json
+             OUT_DIR NFS4_MEMFS40_TRACES
+             STRICT_OUT_DIR NFS4_MEMFS40_STRICT)
+# The 4.1 cell again, exported as "/" rather than under a name.  Same protocol,
+# different place in the server's NFSv4 namespace -- and the two shapes give
+# LOOKUPP at the exported root different, both conformant, answers (RFC 7530
+# 16.14.4): parent-less here, a walk onto the pseudo-root in memfs41.  chimera
+# answers them from different arms of chimera_nfs4_lookupp_continue, so one
+# cell could only ever cover one of them.  Deliberately narrow -- the flavors
+# that walk the tree -- because the rest of the surface is memfs41's already.
+specs_corpus(NAME    nfs4/memfs41_root
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_memfs41_root.json
+             OUT_DIR NFS4_MEMFS41_ROOT_TRACES
+             STRICT_OUT_DIR NFS4_MEMFS41_ROOT_STRICT)
+specs_corpus(NAME    nfs4/memfs42_deleg
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_memfs42_deleg.json
+             OUT_DIR NFS4_MEMFS42_DELEG_TRACES
+             STRICT_OUT_DIR NFS4_MEMFS42_DELEG_STRICT)
+specs_corpus(NAME    nfs4/memfs41_deleg
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_memfs41_deleg.json
+             OUT_DIR NFS4_MEMFS41_DELEG_TRACES
+             STRICT_OUT_DIR NFS4_MEMFS41_DELEG_STRICT)
+specs_corpus(NAME    nfs4/pnfs42
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_pnfs42.json
+             OUT_DIR NFS4_PNFS42_TRACES
+             STRICT_OUT_DIR NFS4_PNFS42_STRICT)
+specs_corpus(NAME    nfs4/pnfs41
+             FAMILY  nfs4
+             CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_pnfs41.json
+             OUT_DIR NFS4_PNFS41_TRACES
+             STRICT_OUT_DIR NFS4_PNFS41_STRICT)
+
+# The argument groups the ctests below use.  A replayer accepts --trace-dir
+# more than once (mbt_trace_dir.h), so a cell stays one corpus even where a
+# ctest replays several of them.
+#
+# ORDER IS ASCENDING BY MINOR VERSION, AND THAT IS NOT COSMETIC.  These traces
+# used to share one directory, where they sorted alphabetically -- nfs4Memfs40,
+# then 41, then 42 -- and the split reproduces that order exactly, because the
+# suite does not survive the other one.  Handing the replayer 4.2 first and 4.0
+# last fails in nfs4Memfs40_step_80_0x7_7 at step 64: a READ against a
+# write-only open answers NFS4ERR_BAD_STATEID (10025) where the model, and a
+# 4.0-first run, get NFS4ERR_OPENMODE (10038).  The trace bytes are identical
+# either way (verified), and memfs40 on its own passes, so what carries between
+# the groups is state -- a stateid or clientid the previous minor version's
+# session left behind.
+#
+# That is a real defect and a good find; it was invisible while alphabetical
+# order happened to put 4.0 first.  It is NOT this change's to fix: pinning the
+# order here keeps the migration a faithful refactor, and the bug is filed
+# separately.  Do not "tidy" this into descending order.
+set(NFS4_TRACE_ARGS
+    --trace-dir ${NFS4_MEMFS40_TRACES}
+    --trace-dir ${NFS4_MEMFS41_TRACES}
+    --trace-dir ${NFS4_MEMFS42_TRACES})
+set(NFS4_DELEG_TRACE_ARGS
+    --trace-dir ${NFS4_MEMFS41_DELEG_TRACES}
+    --trace-dir ${NFS4_MEMFS42_DELEG_TRACES})
+set(NFS4_PNFS_TRACE_ARGS
+    --trace-dir ${NFS4_PNFS41_TRACES}
+    --trace-dir ${NFS4_PNFS42_TRACES})
+
+# The root-export cell replays in a process of its own: it is the one cell whose
+# server-side namespace differs, and a separate ctest keeps that difference from
+# interleaving with the minor-version ordering pinned above.
+add_test(NAME chimera/server/nfs/mbt4/batch_memfs41_root
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay>
+            --trace-dir ${NFS4_MEMFS41_ROOT_TRACES})
+set_tests_properties(chimera/server/nfs/mbt4/batch_memfs41_root PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_memfs41_root"
+    LABELS "quint;nfs4_mbt;memfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+
 add_test(NAME chimera/server/nfs/mbt4/batch_memfs_krb5p
-    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
             --sec krb5p)
 set_tests_properties(chimera/server/nfs/mbt4/batch_memfs_krb5p PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_memfs_krb5p"
@@ -606,7 +789,7 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_memfs_krb5p PROPERTIES
     TIMEOUT 600)
 
 add_test(NAME chimera/server/nfs/mbt4/batch_memfs
-    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4)
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS})
 set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_memfs"
     LABELS "quint;nfs4_mbt;memfs"
@@ -622,7 +805,7 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
 # reprocessing its own split piece) and the D4-17 real-holes seek refinement
 # the hole-tracking backends need.
 add_test(NAME chimera/server/nfs/mbt4/batch_diskfs
-    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
             --backend diskfs)
 set_tests_properties(chimera/server/nfs/mbt4/batch_diskfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_diskfs"
@@ -632,7 +815,7 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_diskfs PROPERTIES
 
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt4/batch_cairn
-        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
                 --backend cairn)
     set_tests_properties(chimera/server/nfs/mbt4/batch_cairn PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_cairn"
@@ -649,7 +832,7 @@ endif()
 # verifier -- so the native backends above keep exact enforcement.
 if(CHIMERA_LINUX)
     add_test(NAME chimera/server/nfs/mbt4/batch_linux
-        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
                 --backend linux)
     set_tests_properties(chimera/server/nfs/mbt4/batch_linux PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_linux"
@@ -660,7 +843,7 @@ endif()
 
 if(CHIMERA_VFS_IO_URING)
     add_test(NAME chimera/server/nfs/mbt4/batch_io_uring
-        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
                 --backend io_uring)
     set_tests_properties(chimera/server/nfs/mbt4/batch_io_uring PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_io_uring"
@@ -689,7 +872,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
         continue()
     endif()
     add_test(NAME chimera/server/nfs/mbt4/batch_rdma_${rback}
-        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
                 --backend ${rback} --rdma)
     set_tests_properties(chimera/server/nfs/mbt4/batch_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_rdma_${rback}"
@@ -698,14 +881,15 @@ foreach(rback memfs diskfs cairn linux io_uring)
         TIMEOUT 600)
 endforeach()
 
-# The same corpus with delegations SERVED.  The corpus's Deleg instances
-# assume grants and skip against the default (delegations-off) server above;
-# the delegation-free instances assume none and skip here when the server
-# grants on their opens -- the capability reconciliation self-selects each
-# trace into whichever batch matches, and between the two every instance
-# replays.  Until this batch existed the Deleg instances had no consumer at
-# all: they were generated, skipped silently in the default batch, and the
-# delegation wire paths were covered only by the deterministic deleg_probe.
+# The delegation corpora, replayed against a server that SERVES delegations.
+# Their own configs and so their own directories: a trace that assumes a grant
+# and a trace that assumes none describe different servers, and the two used to
+# share one directory that each batch read whole and then discarded most of --
+# the plain batches above skipped every Deleg trace, this one skipped
+# everything else.  Until this batch existed the Deleg instances had no
+# consumer at all: they were generated, skipped silently in the default batch,
+# and the delegation wire paths were covered only by the deterministic
+# deleg_probe.
 #
 # The passthrough backends are in this list for the same reason they are in the
 # plain nfs4 list above: a delegation is recalled on a conflicting open, and
@@ -724,7 +908,7 @@ foreach(dback memfs diskfs cairn linux io_uring)
         continue()
     endif()
     add_test(NAME chimera/server/nfs/mbt4/batch_deleg_${dback}
-        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_DELEG_TRACE_ARGS}
                 --backend ${dback} --delegations)
     set_tests_properties(chimera/server/nfs/mbt4/batch_deleg_${dback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_deleg_${dback}"
@@ -743,11 +927,11 @@ endforeach()
 # servers, so round-robin steering and both arms of the flex-files device
 # encoder (an NFSv3 DS and an NFSv4.1 one) are covered.
 #
-# The corpus is its own suite (specs traces/nfs4pnfs): its profiles require the
-# server to advertise itself as a metadata server, which the plain nfs4 batches
-# above require it not to.
+# The two pNFS configs are corpora of their own: they require the server to
+# advertise itself as a metadata server, which the plain nfs4 configs above
+# require it not to.
 add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_memfs
-    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_PNFS_TRACE_ARGS}
             --pnfs 2)
 set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_memfs PROPERTIES
     LABELS "quint;nfs4_mbt;pnfs;memfs"
@@ -766,7 +950,7 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_memfs PROPERTIES
 # effect of leaving the layout record untested on every platform without
 # libaio -- macOS among them, where it runs green.
 add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_diskfs
-    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_PNFS_TRACE_ARGS}
             --pnfs 2 --backend diskfs)
 set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_diskfs PROPERTIES
     LABELS "quint;nfs4_mbt;pnfs;diskfs"
@@ -780,10 +964,86 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_diskfs PROPERTIES
 # same as "registered and passing" in a ctest summary.
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_cairn
-        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_PNFS_TRACE_ARGS}
                 --pnfs 2 --backend cairn)
     set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_cairn PROPERTIES
         LABELS "quint;nfs4_mbt;pnfs;cairn"
         SKIP_RETURN_CODE 77
         TIMEOUT 300)
+endif()
+
+# ---- the NFSv4 deviation machinery ----------------------------------------
+#
+# The strict twins: each cell's config regenerated with DEVS = Set(), so every
+# expectation is the RFC-correct answer rather than chimera's.  These are
+# EXPECTED to fail, and their output is the conformance debt -- re-measured on
+# every run instead of remembered in a registry.  That is the whole point: a
+# registry entry keeps forgiving after the bug behind it is fixed, and keeps
+# forgiving the same divergence somewhere it was never meant to.  Reporting,
+# not gating, so they live in the extended tier.
+#
+# One test per cell rather than one over all of them, and deliberately so: the
+# order dependence documented above NFS4_TRACE_ARGS only bites when several
+# minor versions share a replayer process, and a per-cell test cannot hit it.
+set(CHIMERA_TEST_TIER extended)
+
+foreach(scell memfs40 memfs41 memfs41_root memfs42)
+    string(TOUPPER ${scell} SCELL)
+    add_test(NAME chimera/server/nfs/mbt4/strict_${scell}
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${NFS4_${SCELL}_STRICT})
+    set_tests_properties(chimera/server/nfs/mbt4/strict_${scell} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_strict_${scell}"
+        LABELS "quint;nfs4_mbt;memfs;strict"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endforeach()
+
+foreach(scell memfs41_deleg memfs42_deleg)
+    string(TOUPPER ${scell} SCELL)
+    add_test(NAME chimera/server/nfs/mbt4/strict_${scell}
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${NFS4_${SCELL}_STRICT}
+                --delegations)
+    set_tests_properties(chimera/server/nfs/mbt4/strict_${scell} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_strict_${scell}"
+        LABELS "quint;nfs4_mbt;memfs;strict"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endforeach()
+
+foreach(scell pnfs41 pnfs42)
+    string(TOUPPER ${scell} SCELL)
+    add_test(NAME chimera/server/nfs/mbt4/strict_${scell}
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${NFS4_${SCELL}_STRICT}
+                --pnfs 2)
+    set_tests_properties(chimera/server/nfs/mbt4/strict_${scell} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_strict_${scell}"
+        LABELS "quint;nfs4_mbt;pnfs;strict"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endforeach()
+
+set(CHIMERA_TEST_TIER quick)
+
+# The liveness gate, one per cell: a cell may not enable a deviation its own
+# corpus never exercises.  Either the deviation is dead -- retire it from the
+# config and delete its branch in the model -- or the generator quietly lost
+# the coverage that used to reach it.  Both need a human, so both fail here,
+# and in the QUICK tier, because a stale claim is a blindfold from the moment
+# it goes stale.  This is also what keeps the seven configs honest about which
+# divergences each flavor actually reaches: the delegation cells turn all six
+# of the parent's deviations off because stepDeleg touches none of them.
+if(Python3_FOUND)
+    foreach(dcell memfs40 memfs41 memfs42 memfs41_deleg memfs42_deleg
+                  pnfs41 pnfs42)
+        string(TOUPPER ${dcell} DCELL)
+        add_test(NAME chimera/server/nfs/mbt4/devliveness_${dcell}
+            COMMAND ${Python3_EXECUTABLE} ${SPECS_DEVLIVENESS}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs4_${dcell}.json
+                    ${NFS4_${DCELL}_TRACES})
+        set_tests_properties(chimera/server/nfs/mbt4/devliveness_${dcell}
+            PROPERTIES
+            LABELS "quint;nfs4_mbt;devliveness" TIMEOUT 120)
+    endforeach()
+else()
+    message(STATUS "nfs4 MBT deviation-liveness gates skipped (no python3)")
 endif()

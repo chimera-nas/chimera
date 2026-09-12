@@ -52,18 +52,29 @@ chimera_posix_fstatat(
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
     struct chimera_client_request   req;
     struct chimera_posix_completion comp;
+    struct chimera_posix_fd_entry  *dir_entry = NULL;
     int                             path_len;
-
-    // For now, only support AT_FDCWD
-    if (dirfd != AT_FDCWD) {
-        errno = ENOSYS;
-        return -1;
-    }
 
     chimera_posix_completion_init(&comp, &req);
 
-    // Build path
-    if (pathname[0] == '/') {
+    /*
+     * An absolute path ignores dirfd entirely (POSIX); a relative one walks
+     * from the descriptor's open directory handle, the way openat/mkdirat
+     * already do.  AT_FDCWD keeps the historical behaviour of rooting a
+     * relative path at the export root.
+     */
+    if (dirfd != AT_FDCWD && pathname[0] != '/') {
+        dir_entry = chimera_posix_fd_acquire(posix, dirfd, 0);
+
+        if (!dir_entry) {
+            errno = EBADF;
+            chimera_posix_completion_destroy(&comp);
+            return -1;
+        }
+
+        path_len = strlen(pathname);
+        memcpy(req.stat.path, pathname, path_len);
+    } else if (pathname[0] == '/') {
         path_len = strlen(pathname);
         memcpy(req.stat.path, pathname, path_len);
     } else {
@@ -73,6 +84,7 @@ chimera_posix_fstatat(
         path_len++;
     }
 
+    req.stat.handle       = dir_entry ? dir_entry->handle : NULL;
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_fstatat_callback;
     req.stat.private_data = &comp;
@@ -85,6 +97,10 @@ chimera_posix_fstatat(
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_fstatat_exec);
 
     int err = chimera_posix_wait(&comp);
+
+    if (dir_entry) {
+        chimera_posix_fd_release(dir_entry, 0);
+    }
 
     chimera_posix_completion_destroy(&comp);
 

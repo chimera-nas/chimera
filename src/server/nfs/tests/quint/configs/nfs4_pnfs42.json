@@ -1,0 +1,15 @@
+{
+  "extends": "./nfs4_memfs42.json",
+  "description": "the 4.2 server standing as a pNFS METADATA server: LAYOUTGET, LAYOUTCOMMIT, LAYOUTRETURN and GETDEVICEINFO are required rather than explored, so failing to advertise EXCHGID4_FLAG_USE_PNFS_MDS is a failure and not a skip. Its own corpus because the plain profiles above require the opposite of the same server; delegations stay off for the same back-channel reason.",
+  "traceStem": "nfs4Pnfs42",
+
+  "features": {
+    "pnfs": "supported"
+  },
+
+
+  "batches": [
+    { "flavor": "stepPnfs", "steps": 80, "traces": 6, "seed": "0x7" },
+    { "flavor": "stepData", "steps": 80, "traces": 6, "seed": "0x7" }
+  ]
+}

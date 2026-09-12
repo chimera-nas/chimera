@@ -373,6 +373,20 @@ chimera_vfs_remove_at_gate_complete(
 } /* chimera_vfs_remove_at_gate_complete */
 
 static void
+chimera_vfs_remove_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx  *ctx      = private_data;
+    chimera_vfs_remove_at_callback_t callback = ctx->callback;
+    void                            *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, arg);
+} /* chimera_vfs_remove_at_toolong */
+
+static void
 chimera_vfs_remove_at_common(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
@@ -391,8 +405,13 @@ chimera_vfs_remove_at_common(
 {
     struct chimera_vfs_remove_at_gate *gate;
 
+    /* An over-long name is bounded before dispatch, but the VERDICT is not
+     * unconditionally ENAMETOOLONG: search permission on the directory that
+     * would hold it is owed first (chimera_vfs_name_too_long_handle). */
     if (namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, private_data);
+        chimera_vfs_name_too_long_handle(thread, cred, handle,
+                                         chimera_vfs_remove_at_toolong,
+                                         callback, private_data);
         return;
     }
 

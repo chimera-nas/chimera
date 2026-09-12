@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <sys/stat.h>
 #include "nfs_internal.h"
 #include "vfs/sdk/vfs_error.h"
 
@@ -116,6 +117,21 @@ chimera_nfs4_lookup_callback(
             chimera_nfs4_unmarshall_fattr(&getattr_res->opgetattr.resok4.obj_attributes,
                                           &request->lookup_at.r_attr);
         }
+    }
+
+    /* "." names the object itself, but only a DIRECTORY has a "." to name:
+     * POSIX pathname resolution reaches a component only through directories,
+     * so "fifo/." is ENOTDIR, not the fifo.  The traversal op that would have
+     * said so was dropped above -- NFSv4 LOOKUP rejects "." with BADNAME -- so
+     * the check has to happen here, against the attributes the same compound
+     * already fetched.  ".." needs no such test: LOOKUPP is a real op and the
+     * server answers NOTDIR for it itself. */
+    if (ctx->op_type == LOOKUP_OP_DOT &&
+        (request->lookup_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(request->lookup_at.r_attr.va_mode)) {
+        request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
     }
 
     request->status = CHIMERA_VFS_OK;

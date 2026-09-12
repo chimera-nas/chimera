@@ -933,10 +933,11 @@ jobs:
           # full crypt(5) $-scheme verification.
           brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
                        xxhash libxcrypt uthash openssl@3 libnghttp2
-          # oras, not quint: this job has never had a model-based-test trace
-          # corpus, so every MBT replay ctest disabled itself here.  A CI
-          # checkout never has local edits to ext/specs, so the bundle the specs
-          # CI published for the pinned commit always applies.
+          # oras: the pinned ccache below and the mirrored quint payload in
+          # the step further down are plain OCI artifacts on GHCR, and oras is
+          # what pulls them.  quint is a requirement, not a nicety -- the MBT
+          # corpus is generated here from ext/specs' models plus this repo's
+          # configs, and without quint every MBT replay ctest disables itself.
           brew install oras
 
           # Same pinned upstream ccache the Linux images get, from the same
@@ -1006,7 +1007,6 @@ jobs:
           # below describe this run alone.
           ccache -z > /dev/null
           cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                -DSPECS_BUNDLE=ON \
                 -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
           ninja -C "${{ runner.temp }}/build"
           ccache --show-stats || true

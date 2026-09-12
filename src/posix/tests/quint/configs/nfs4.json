@@ -1,0 +1,57 @@
+// The NFS4-loopback profile, measured the same day and again identical across the
+// backends behind the server.  NFS4.2 SEEK backs SEEK_DATA/SEEK_HOLE; atime is
+// not strictly observed.  unlink(dir) yields EISDIR like every other profile:
+// the generic remove path enforces the rmdir/unlink type assertion for every
+// backend (vfs_proc_remove.c), so the nfs4 client's type-agnostic bare REMOVE no
+// longer removes a directory.
+{
+  "extends": "./posix_base.json",
+  "description": "chimera's POSIX surface reached over NFSv4.1: SEEK_HOLE/SEEK_DATA via the NFS4.2 SEEK operation, no copy or clone offload.",
+  "traceStem": "posixNfs4",
+
+  "features": {
+    "copyRange": "unsupported",
+    "cloneRange": "unsupported",
+    "seekHole": "supported"
+  },
+
+  "policies": {
+    "strictAtime": "unsupported",
+    "chownSuppGroup": "supported"
+  },
+
+  // As for the disk cell: this corpus is replayed over memfs AND over the
+  // linux/io_uring passthroughs (batch_nfs3_linux and friends), and a removal
+  // denied by the sticky-bit rule may answer EACCES or EPERM -- unlink() names
+  // both and POSIX orders neither.  memfs answers what policies names, the
+  // host kernel under a passthrough answers EPERM.  No boolean pins that per
+  // call, so the model emits both as an acceptance set and the harness
+  // membership-tests it.
+  "tolerances": {
+    "stickyRemovalEperm": true
+  },
+
+  // Deviations from POSIX.1-2024 that this profile's stack still carries.
+  // The model takes chimera's branch for each, so the corpus expects what
+  // chimera does and replay is an exact match; the cell's strict twin
+  // regenerates the same batches with all of them off and its failures are
+  // the live conformance debt.  Every id is declared, with its citation, root
+  // cause and candidate fix, in the posix corpus.schema.json; tools/
+  // devliveness.py fails the build if one listed here is never exercised.
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },
+    { "flavor": "step",            "steps": 128, "traces": 6,  "seed": "0x2" },
+    { "flavor": "step",            "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "stepNamespace",   "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDescriptors", "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepMetadata",    "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDirs",        "steps": 128, "traces": 3,  "seed": "0x1" },
+    { "flavor": "stepData",        "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepPerms",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepLinks",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFds",         "steps": 128, "traces": 5,  "seed": "0x1" }
+  ]
+}

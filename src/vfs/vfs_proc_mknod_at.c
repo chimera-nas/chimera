@@ -266,6 +266,20 @@ chimera_vfs_mknod_at_gate_complete(
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_mknod_at_gate_complete */
 
+static void
+chimera_vfs_mknod_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx      = private_data;
+    chimera_vfs_mknod_at_callback_t callback = ctx->callback;
+    void                           *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, NULL, NULL, arg);
+} /* chimera_vfs_mknod_at_toolong */
+
 SYMBOL_EXPORT void
 chimera_vfs_mknod_at(
     struct chimera_vfs_thread      *thread,
@@ -282,8 +296,13 @@ chimera_vfs_mknod_at(
 {
     struct chimera_vfs_mknod_at_gate *gate;
 
+    /* An over-long name is bounded before dispatch, but the VERDICT is not
+     * unconditionally ENAMETOOLONG: search permission on the directory that
+     * would hold it is owed first (chimera_vfs_name_too_long_handle). */
     if (namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, private_data);
+        chimera_vfs_name_too_long_handle(thread, cred, handle,
+                                         chimera_vfs_mknod_at_toolong,
+                                         callback, private_data);
         return;
     }
 
@@ -295,7 +314,8 @@ chimera_vfs_mknod_at(
      * deliver that EACCES for an operation we would actually send.  Run the
      * engine's own create gate for exactly this case so the denials come
      * out in the right order. */
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred) ||
+    if (chimera_vfs_gate_needed_create(handle->vfs_module->capabilities,
+                                       cred) ||
         (chimera_vfs_open_gate_needed(handle->vfs_module->capabilities,
                                       cred) &&
          (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
@@ -316,11 +336,13 @@ chimera_vfs_mknod_at(
         /* _always: on a remote-DAC proxy gate_fh would defer to a backend
          * that will never see this op (the engine denies it below); the
          * engine must evaluate the parent access itself. */
-        chimera_vfs_gate_fh_always(&gate->gate_ctx, thread, cred,
-                                   handle->fh, handle->fh_len,
-                                   CHIMERA_ACE_WRITE_DATA |
-                                   CHIMERA_ACE_EXECUTE,
-                                   chimera_vfs_mknod_at_gate_complete, gate);
+        chimera_vfs_gate_fh_always_create(&gate->gate_ctx, thread, cred,
+                                          handle->fh, handle->fh_len,
+                                          CHIMERA_ACE_WRITE_DATA |
+                                          CHIMERA_ACE_EXECUTE,
+                                          attr,
+                                          chimera_vfs_mknod_at_gate_complete,
+                                          gate);
         return;
     }
 

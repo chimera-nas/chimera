@@ -323,10 +323,24 @@ chimera_nfs3_remove_at(
     chimera_vfs_open_cache_release(request->thread, cache, handle, 0);
 
     if (rc == -1) {
-        /* Already silly renamed - this shouldn't happen normally, but just succeed */
-        chimera_nfsclient_debug("Remove: file already silly renamed");
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
+        /*
+         * The open state is per-INODE, and an inode can carry several names.
+         * Already silly-renamed therefore does not mean "this name is already
+         * gone" -- it means some OTHER link to the same file was unlinked
+         * while open and now survives under a .nfs* name.  This one is an
+         * ordinary extra link: removing it cannot destroy the open file,
+         * because the silly name still holds it.  So remove it for real.
+         *
+         * Reporting success without removing anything (what this did) left
+         * the name in place while the caller, and the VFS name cache, were
+         * told it was gone -- so a later create of that name failed EEXIST
+         * against a directory entry nothing admitted to having.  Reached by
+         * link("c","d"); unlink("d"); unlink("c") with the file held open.
+         */
+        chimera_nfsclient_debug(
+            "Remove: file already silly renamed under another name; "
+            "removing this link outright");
+        chimera_nfs3_remove_do_remove(request, ctx);
         return;
     }
 

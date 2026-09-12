@@ -1,0 +1,30 @@
+{
+  "family": "smb2",
+  "description": "the exactly-once corpus (ROADMAP-SMB.md B4). Identical server capabilities to durable.json, and deliberately so: a replay is only answerable from a CreateGuid the server bothered to record, and chimera records one only when persistent_handles is on. What distinguishes this cell is the FLAVOR (stepReplay), which stamps ChannelSequence and SMB2_FLAGS_REPLAY_OPERATION on ordinary requests.",
+  "traceStem": "smb2Replay",
+
+  "features": {
+    "oplocks": "supported",
+    "leases": "supported",
+    "dirLeases": "unsupported",
+    "durable": "supported"
+  },
+
+  "policies": {
+    // 0x0300
+    "dialect": 768,
+    "leaseOpenBreak": true,
+    "forceLevel2": false
+  },
+
+  // Known chimera divergences the model is told to predict for this cell, so
+  // the trace's expectation is already what chimera does and replay is an
+  // exact match.  Declared with citations in
+  // ext/specs/quint/smb2/corpus.schema.json.
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "stepReplay", "steps": 300, "traces": 8, "seed": "0x51" }
+  ]
+}

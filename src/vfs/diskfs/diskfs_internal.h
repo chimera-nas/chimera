@@ -5475,7 +5475,12 @@ diskfs_apply_attrs(
     clock_gettime(CLOCK_REALTIME, &now);
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
+    /* A symbolic link's permission bits are fixed at 0777 and cannot be
+     * changed: Linux has no lchmod(), so a server over a real filesystem
+     * cannot honour this either, and honouring it here would make an ACCESS
+     * or GETATTR of the same link answer differently per backend.  The mask
+     * is not echoed back, so the caller sees that nothing was applied. */
+    if ((set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISLNK(inode->mode)) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }

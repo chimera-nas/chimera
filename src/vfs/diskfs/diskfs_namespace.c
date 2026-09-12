@@ -2031,23 +2031,38 @@ diskfs_open_at_check_cb(
 
     diskfs_bt_op_free(thread, op);
 
+    /* POSIX path resolution (XBD 4.13): search (EXECUTE) permission on the
+     * parent is what allows a name to be RESOLVED at all, so it is owed before
+     * anything about the directory's contents is disclosed -- otherwise an
+     * existing entry's presence and type leak to a caller who may not search
+     * the directory (chimera #1771).  The create branch below adds WRITE_DATA
+     * on top for a fresh name.  AUTH_ATTR (SMB/Windows) callers are authorized
+     * by the engine and bypass traverse checking by default. */
+    if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+        request->cred->uid != 0 &&
+        !diskfs_inode_access(thread, p->inode_stash[0], request->cred,
+                             CHIMERA_ACE_EXECUTE)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
+        return;
+    }
+
     if (result < 0) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
             return;
         }
 
-        /* Creating a new file requires add-file (WRITE_DATA) + search (EXECUTE)
-         * permission on the parent directory.  On the NFSv4/Windows ACL model
-         * WRITE_DATA == ADD_FILE and APPEND_DATA == ADD_SUBDIRECTORY, so a plain
-         * file create is gated by WRITE_DATA (mkdir is gated by APPEND_DATA in
-         * the VFS-core mkdir_at path).  Enforce POSIX semantics for AUTH_UNIX
-         * callers (root is exempt); SMB/ACL (AUTH_ATTR) callers are authorized
-         * by the engine. */
+        /* Creating a new file requires add-file (WRITE_DATA) permission on the
+        * parent directory, on top of the search permission already required
+        * above.  On the NFSv4/Windows ACL model WRITE_DATA == ADD_FILE and
+        * APPEND_DATA == ADD_SUBDIRECTORY, so a plain file create is gated by
+        * WRITE_DATA (mkdir is gated by APPEND_DATA in the VFS-core mkdir_at
+        * path).  Enforce POSIX semantics for AUTH_UNIX callers (root is
+        * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             request->cred->uid != 0 &&
             !diskfs_inode_access(thread, p->inode_stash[0], request->cred,
-                                 CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE)) {
+                                 CHIMERA_ACE_WRITE_DATA)) {
             diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
             return;
         }
@@ -2380,8 +2395,15 @@ diskfs_symlink_at_alloc_cb(
     /* POSIX: a set-group-ID parent directory forces the new node's group. */
     inode->gid = (parent->mode & S_ISGID) ?
         parent->gid : request->cred->gid;
-    inode->nlink      = 1;
-    inode->mode       = S_IFLNK | 0755;
+    inode->nlink = 1;
+    /* A symbolic link's permission bits are not a portable observable.  POSIX
+    * leaves them unspecified, and Linux fixes every symlink at 0777 and
+    * silently discards whatever mode a creator asks for -- so a passthrough
+    * backend CANNOT honour one.  Honouring it here only split the in-engine
+    * backends from the passthrough ones and made the model describe half of
+    * them (an NFSv4 ACCESS then granted EXECUTE on one backend and not the
+    * other for the same link).  Match Linux: always 0777, request ignored. */
+    inode->mode       = S_IFLNK | 0777;
     inode->atime_sec  = now.tv_sec;
     inode->atime_nsec = now.tv_nsec;
     inode->mtime_sec  = now.tv_sec;

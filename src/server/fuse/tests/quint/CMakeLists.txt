@@ -27,7 +27,7 @@ add_executable(fuse_quint_driver fuse_quint_driver.c)
 target_link_libraries(fuse_quint_driver
     chimera_server chimera_vfs chimera_common chimera_metrics jansson)
 
-if(NOT SPECS_BUNDLE_AVAILABLE)
+if(NOT CHIMERA_MBT_AVAILABLE)
     message(STATUS "fuse MBT replay ctest skipped (no specs trace corpus)")
     return()
 endif()
@@ -44,15 +44,50 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # Needs no /dev/fuse, no mount and no privileges -- the harness stands a
 # socketpair in for the device -- so it runs everywhere the build does, ahead
 # of the mount-backed tests behind the fuse_probe gate.
+# The corpus is the posix family's `posix/fuse` cell, generated from
+# src/posix/tests/quint/configs/fuse.json.  That cell is REGISTERED there, with
+# the other five posix profiles, rather than here: this directory is configured
+# only on Linux (and, being under src/server, before src/posix), and the corpus
+# must depend on neither -- the same six cells are generated on every platform.
+# specs_corpus() derives a cell's directory as ${SPECS_CORPUS_ROOT}/<cell name>
+# and nothing else, so naming it here needs no ordering between the two.
+set(posix_fuse_traces ${SPECS_CORPUS_ROOT}/posix/fuse)
+set(posix_fuse_strict ${SPECS_CORPUS_ROOT}/posix/fuse-strict)
+
 add_test(NAME chimera/fuse/mbt/batch_memfs
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/src/posix/tests/quint/posix_replay.py
             --backend fuse_memfs
             --driver $<TARGET_FILE:fuse_quint_driver>
-            --trace-dir ${SPECS_BUNDLE_DIR}/posix
-            --include-prefix fuse_)
+            --trace-dir ${posix_fuse_traces})
 set_tests_properties(chimera/fuse/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_batch_memfs"
     LABELS "quint;fuse;posix_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
+
+# The strict twin of the same cell: the identical batches regenerated with every
+# deviation forced off, so its failures ARE the FUSE server's conformance debt,
+# re-measured on every run rather than remembered in a registry.  Reporting, not
+# a gate, so it belongs in the extended tier -- the tier is decided by
+# CHIMERA_TEST_TIER at the point of add_test() (see the wrapper in the top-level
+# CMakeLists.txt).
+#
+# The fuse config enables no deviations today, which makes this corpus identical
+# to the one above: the four the direct and loopback profiles carry are all
+# demonstrably absent on this path (see configs/fuse.json for why).  The cell is
+# still registered strict, so the day a FUSE deviation is found and named in the
+# config, the twin that measures it already exists.
+set(CHIMERA_TEST_TIER extended)
+add_test(NAME chimera/fuse/mbt/strict_memfs
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/src/posix/tests/quint/posix_replay.py
+            --backend fuse_memfs
+            --driver $<TARGET_FILE:fuse_quint_driver>
+            --trace-dir ${posix_fuse_strict})
+set_tests_properties(chimera/fuse/mbt/strict_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_strict_memfs"
+    LABELS "quint;fuse;posix_mbt;memfs;strict"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 900)
+set(CHIMERA_TEST_TIER quick)

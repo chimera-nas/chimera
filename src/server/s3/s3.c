@@ -225,7 +225,10 @@ s3_server_respond(
 
     if (request->status == CHIMERA_S3_STATUS_OK) {
 
-        if (request->file_offset != 0 || request->file_length != request->file_real_length) {
+        /* Every satisfiable Range is a 206, including one that covers the
+         * whole object (RFC 7233 4.1) -- has_range, not the resolved extent,
+         * because a whole-object range resolves to the no-range pair. */
+        if (request->has_range) {
 
             snprintf(range_header, sizeof(range_header),
                      "bytes %" PRId64 "-%" PRId64 "/%" PRId64,
@@ -1105,6 +1108,8 @@ s3_server_dispatch(
     }
 
     range_str = evpl_http_request_header(request, "Range");
+
+    s3_request->has_range = (range_str != NULL);
 
     if (range_str) {
         chimera_s3_parse_range(range_str, &s3_request->file_offset, &s3_request->file_length);

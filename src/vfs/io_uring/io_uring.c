@@ -598,6 +598,20 @@ chimera_io_uring_reap(
                             sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
                             io_uring_prep_openat(sqe, parent_fd, name,
                                                  O_PATH | O_NOFOLLOW, 0);
+                        } else if (chimera_linux_leaf_is_symlink(
+                                       parent_fd, name,
+                                       request->open_at.flags)) {
+                            /* A symbolic link this open follows: hand the
+                             * link back rather than letting the host kernel
+                             * follow it, which resolves an absolute body from
+                             * the HOST's root and so answers for something
+                             * outside the export.  See
+                             * chimera_linux_leaf_is_symlink(); the statx
+                             * below already reports the link's own attrs, so
+                             * the engine takes it from here. */
+                            sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                            io_uring_prep_openat(sqe, parent_fd, name,
+                                                 O_PATH | O_NOFOLLOW, 0);
                         } else {
                             /* Re-open without O_CREAT|O_EXCL (the base flags
                              * still carry O_TRUNC for OVERWRITE_IF/SUPERSEDE).

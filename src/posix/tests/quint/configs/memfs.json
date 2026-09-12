@@ -1,0 +1,57 @@
+// The in-memory-backend profile: the behavior measured against a live memfs
+// mount on 2026-08-10.  Every offload the VFS defines is
+// present, so this is the corpus that holds a chimera-native backend to the
+// model with nothing excused.  Replayed by memfs AND by diskfs: diskfs is
+// equally chimera-native (model-conformant DAC, no host-kernel deviations) and
+// does implement clone, so holding it here is what exercises that path.
+//
+// lockEagain is unobservable while memfs lacks record locks (deviation PD1,
+// declared in the posix corpus.schema.json); it is pinned to the
+// Linux-style EAGAIN reading.
+{
+  "extends": "./posix_base.json",
+  "description": "chimera's in-memory backend behind the direct POSIX client: copy_file_range, reflink and SEEK_HOLE/SEEK_DATA all present, relatime rather than strict atime.",
+  "traceStem": "posixMemfs",
+
+  "features": {
+    "copyRange": "supported",
+    "cloneRange": "supported",
+    "seekHole": "supported"
+  },
+
+  "policies": {
+    "strictAtime": "unsupported",
+    "chownSuppGroup": "supported"
+  },
+
+  // Deviations from POSIX.1-2024 that this profile's stack still carries.
+  // The model takes chimera's branch for each, so the corpus expects what
+  // chimera does and replay is an exact match; the cell's strict twin
+  // regenerates the same batches with all of them off and its failures are
+  // the live conformance debt.  Every id is declared, with its citation, root
+  // cause and candidate fix, in the posix corpus.schema.json; tools/
+  // devliveness.py fails the build if one listed here is never exercised.
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },
+    { "flavor": "step",            "steps": 128, "traces": 6,  "seed": "0x2" },
+    { "flavor": "step",            "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "step",            "steps": 512, "traces": 2,  "seed": "0x5" },
+    { "flavor": "stepNamespace",   "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepNamespace",   "steps": 256, "traces": 2,  "seed": "0x9" },
+    { "flavor": "stepDescriptors", "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepMetadata",    "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDirs",        "steps": 128, "traces": 3,  "seed": "0x1" },
+    { "flavor": "stepData",        "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepLocks",       "steps": 128, "traces": 6,  "seed": "0x1" },
+    { "flavor": "stepLocks",       "steps": 256, "traces": 3,  "seed": "0x7" },
+    { "flavor": "stepPerms",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepLinks",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFds",         "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepTooLong",     "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepPrefix",      "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFallocate",   "steps": 128, "traces": 4,  "seed": "0x1" }
+  ]
+}

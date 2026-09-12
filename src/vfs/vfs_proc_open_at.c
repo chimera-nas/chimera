@@ -295,8 +295,169 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     chimera_vfs_open_finish(request);
 } /* chimera_vfs_open_complete */
 
+static void
+chimera_vfs_open_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx *ctx      = private_data;
+    chimera_vfs_open_at_callback_t  callback = ctx->callback;
+    void                           *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, NULL, NULL, NULL, arg);
+} /* chimera_vfs_open_at_toolong */
+
+/*
+ * Creating-open pre-step for a backend that cannot derive the new file's group
+ * from its parent directory (CHIMERA_VFS_CAP_CREATE_GID_ENGINE): resolve the
+ * parent and name the group from it.  See chimera_vfs_create_inherit_gid.
+ *
+ * The parent is not `handle` on a path-only backend -- `name` is a whole
+ * in-mount path there, so the directory that will hold the new file is the
+ * prefix before its last '/' and only a lookup can name it.  The lookup does
+ * NOT follow a final symlink: a symlinked prefix is followed by the create
+ * itself, and all this pre-step wants is the mode and gid of whatever the
+ * name denotes.  A failed lookup is not this pre-step's business to report --
+ * the create produces the right error for an unreachable prefix -- so it just
+ * proceeds without inheriting.
+ *
+ * The resume context is malloc'd rather than taken from the request gate
+ * scratch.  The scratch is for the gate helpers' own async chain; holding it
+ * across a chimera_vfs_lookup() is not something it supports, and doing so
+ * makes an unrelated later op in the same trace answer EINVAL where it owes
+ * ELOOP.  That interaction is not understood, so this stays out of it.
+ */
+struct chimera_vfs_open_at_gid_ctx {
+    struct chimera_vfs_thread       *thread;
+    const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_open_handle  *handle;
+    const char                      *name;
+    int                              namelen;
+    unsigned int                     flags;
+    struct chimera_vfs_attrs        *set_attr;
+    uint64_t                         attr_mask;
+    uint64_t                         pre_attr_mask;
+    uint64_t                         post_attr_mask;
+    struct chimera_vfs_handle_state *handle_state;
+    chimera_vfs_open_at_callback_t   callback;
+    void                            *private_data;
+};
+
+static void chimera_vfs_open_at_hs_dispatch(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    unsigned int                     flags,
+    struct chimera_vfs_attrs        *set_attr,
+    uint64_t                         attr_mask,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    struct chimera_vfs_handle_state *handle_state,
+    chimera_vfs_open_at_callback_t   callback,
+    void                            *private_data);
+
+static void
+chimera_vfs_open_at_gid_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_open_at_gid_ctx *ctx = private_data;
+    struct chimera_vfs_open_at_gid_ctx  c   = *ctx;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        chimera_vfs_create_inherit_gid(c.set_attr, attr);
+    }
+
+    free(ctx);
+
+    chimera_vfs_open_at_hs_dispatch(c.thread, c.cred, c.handle, c.name,
+                                    c.namelen, c.flags, c.set_attr,
+                                    c.attr_mask, c.pre_attr_mask,
+                                    c.post_attr_mask, c.handle_state,
+                                    c.callback, c.private_data);
+} /* chimera_vfs_open_at_gid_complete */
+
+/* The parent IS `handle` (an FH-relative backend, or a single-component name
+ * on a path-only one): its attrs are one getattr away, no lookup needed. */
+static void
+chimera_vfs_open_at_gid_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    chimera_vfs_open_at_gid_complete(error_code, attr, private_data);
+} /* chimera_vfs_open_at_gid_getattr_complete */
+
 SYMBOL_EXPORT void
 chimera_vfs_open_at_hs(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    unsigned int                     flags,
+    struct chimera_vfs_attrs        *set_attr,
+    uint64_t                         attr_mask,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    struct chimera_vfs_handle_state *handle_state,
+    chimera_vfs_open_at_callback_t   callback,
+    void                            *private_data)
+{
+    if ((flags & CHIMERA_VFS_OPEN_CREATE) && set_attr &&
+        !(set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
+        (handle->vfs_module->capabilities &
+         CHIMERA_VFS_CAP_CREATE_GID_ENGINE)) {
+        struct chimera_vfs_open_at_gid_ctx *ctx;
+        int                                 plen = namelen;
+
+        while (plen > 0 && name[plen - 1] != '/') {
+            plen--;
+        }
+        while (plen > 0 && name[plen - 1] == '/') {
+            plen--;
+        }
+
+        ctx                 = calloc(1, sizeof(*ctx));
+        ctx->thread         = thread;
+        ctx->cred           = cred;
+        ctx->handle         = handle;
+        ctx->name           = name;
+        ctx->namelen        = namelen;
+        ctx->flags          = flags;
+        ctx->set_attr       = set_attr;
+        ctx->attr_mask      = attr_mask;
+        ctx->pre_attr_mask  = pre_attr_mask;
+        ctx->post_attr_mask = post_attr_mask;
+        ctx->handle_state   = handle_state;
+        ctx->callback       = callback;
+        ctx->private_data   = private_data;
+
+        if (plen > 0) {
+            chimera_vfs_lookup(thread, cred, handle->fh, handle->fh_len,
+                               name, plen, CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                               chimera_vfs_open_at_gid_complete, ctx);
+        } else {
+            chimera_vfs_getattr(thread, cred, handle,
+                                CHIMERA_VFS_ATTR_MASK_STAT,
+                                chimera_vfs_open_at_gid_getattr_complete, ctx);
+        }
+        return;
+    }
+
+    chimera_vfs_open_at_hs_dispatch(thread, cred, handle, name, namelen, flags,
+                                    set_attr, attr_mask, pre_attr_mask,
+                                    post_attr_mask, handle_state, callback,
+                                    private_data);
+} /* chimera_vfs_open_at_hs */
+
+static void
+chimera_vfs_open_at_hs_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
     struct chimera_vfs_open_handle  *handle,
@@ -316,20 +477,26 @@ chimera_vfs_open_at_hs(
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
 
     /* On a creating open the trailing component is a new name; reject one longer
-     * than {NAME_MAX} with ENAMETOOLONG.  FS_PATH_OP backends receive the whole
-     * path as `name` and let the kernel enforce this. */
+     * than {NAME_MAX} -- but search permission on the directory that would hold
+     * it is owed first (chimera_vfs_name_too_long_handle).  FS_PATH_OP backends
+     * receive the whole path as `name` and let the kernel enforce this. */
     if ((flags & CHIMERA_VFS_OPEN_CREATE) &&
         !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
         namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL, private_data);
+        chimera_vfs_name_too_long_handle(thread, cred, handle,
+                                         chimera_vfs_open_at_toolong,
+                                         callback, private_data);
         return;
     }
 
     /* An FS_PATH_OP backend receives the whole path as `name` and answers a
      * too-long name with ENOENT, not ENAMETOOLONG (the server cannot distinguish
-     * the two from a wire CREATE).  Enforce the POSIX limits here, per component,
-     * exactly as chimera_vfs_lookup does -- so chmod/chown/utimens/open by an
-     * over-long path report ENAMETOOLONG rather than ENOENT. */
+     * the two from a wire CREATE).  Enforce the POSIX limits here, per component
+     * -- so chmod/chown/utimens/open by an over-long path report ENAMETOOLONG
+     * rather than ENOENT.  Unlike the handle-relative case above this cannot
+     * defer to a search check: `name` is a whole path, and the directory that
+     * holds an over-long component past the first is not resolved here.  The
+     * path-only backend resolves the prefix itself and answers the denial. */
     if (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         int complen = 0, i;
 
@@ -383,7 +550,7 @@ chimera_vfs_open_at_hs(
     request->proto_private_data                  = private_data;
 
     chimera_vfs_dispatch(request);
-} /* chimera_vfs_open_at_hs */
+} /* chimera_vfs_open_at_hs_dispatch */
 
 SYMBOL_EXPORT void
 chimera_vfs_open_at(

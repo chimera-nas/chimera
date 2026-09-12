@@ -1,0 +1,30 @@
+{
+  "family": "smb2",
+  "description": "chimera with legacy oplocks AND SMB2 leases advertised and mandatory, so a server that fails to advertise them fails the suite instead of passing vacuously. This is the corpus that exercises the grant -> break -> acknowledge lifecycle, including every acknowledgment arm (conformant, drop-further, keep-too-much, ack-with-no-break-outstanding).",
+  "traceStem": "smb2Leases",
+
+  "features": {
+    "oplocks": "supported",
+    "leases": "supported",
+    "dirLeases": "unsupported",
+    "durable": "unsupported"
+  },
+
+  "policies": {
+    // 0x0300
+    "dialect": 768,
+    "leaseOpenBreak": true,
+    "forceLevel2": false
+  },
+
+  // Known chimera divergences the model is told to predict for this cell, so
+  // the trace's expectation is already what chimera does and replay is an
+  // exact match.  Declared with citations in
+  // ext/specs/quint/smb2/corpus.schema.json.
+  "deviations": [
+  ],
+
+  "batches": [
+    { "flavor": "stepLease", "steps": 300, "traces": 8, "seed": "0x21" }
+  ]
+}

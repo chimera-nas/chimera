@@ -1349,6 +1349,42 @@ mbt_env_fs_setup(
     mbt_env_fs_setup_as(env, fsname, fsname);
 } /* mbt_env_fs_setup */
 
+/* The same filesystem, exported as "/" instead of under a name.
+ *
+ * The NFSv4 namespace has two shapes a server can be deployed in, and they
+ * give different (both conformant) answers at the top: with a "/" export the
+ * exported root IS the root of the namespace served, so a LOOKUPP there has no
+ * parent; with a named export it is one entry in the server's pseudo-
+ * filesystem, and a LOOKUPP there walks onto the pseudo-root.  A cell picks
+ * one via P_ROOT_EXPORT and the replayer mounts accordingly, so both arms of
+ * chimera_nfs4_lookupp_continue are covered by a corpus.
+ *
+ * The MOUNT keeps its per-trace name -- only the export name changes -- so the
+ * stuck-mount isolation mbt_env_fs_setup_as() describes still holds: a trace
+ * that leaves its filesystem busy keeps it under its own mount name, and the
+ * next trace's "/" export is created over a fresh one. */
+static inline void
+mbt_env_fs_setup_root_export(
+    struct mbt_env *env,
+    const char     *fsname)
+{
+    char path[80];
+
+    mbt_env_fs_setup_as(env, fsname, fsname);
+
+    snprintf(path, sizeof(path), "/%s", fsname);
+
+    /* Drop the name the common setup exported it under: a cell tests one
+     * namespace shape, and leaving both names would let a trace reach the
+     * export by a path the model does not know about. */
+    chimera_server_remove_export(env->server, path);
+
+    if (chimera_server_create_export(env->server, "/", path, 0, NULL) != 0) {
+        fprintf(stderr, "failed to create root export over %s\n", path);
+        exit(1);
+    }
+} /* mbt_env_fs_setup_root_export */
+
 /* Tear the per-trace filesystem back down.  Order matters: rmfs is EBUSY while
  * the fs still has a mount, so unmount (and drop the export) first. */
 static inline void
@@ -1365,6 +1401,10 @@ mbt_env_fs_teardown_as(
     snprintf(path, sizeof(path), "/%s", mntname);
 
     chimera_server_remove_export(env->server, path);
+    /* A root-export cell (mbt_env_fs_setup_root_export) exported this same
+     * mount as "/" instead; dropping a name that is not there is a no-op, so
+     * one teardown serves both shapes. */
+    chimera_server_remove_export(env->server, "/");
 
     /* The unmount status was previously discarded, and that is what made a
      * batch run nondeterministic.  Every trace mounts its filesystem under the

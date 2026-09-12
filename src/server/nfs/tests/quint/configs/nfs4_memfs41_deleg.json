@@ -1,0 +1,15 @@
+{
+  "extends": "./nfs4_memfs41.json",
+  "description": "the 4.1 server with delegations served. The 4.1 arm matters on its own because a delegation is recalled over the back channel a session owns, which is machinery 4.0 and 4.2 do not share.",
+  "traceStem": "nfs4Memfs41Deleg",
+
+  "features": {
+    "readDelegation": "supported",
+    "writeDelegation": "supported"
+  },
+
+
+  "batches": [
+    { "flavor": "stepDeleg", "steps": 80, "traces": 10, "seed": "0x7" }
+  ]
+}

@@ -156,7 +156,69 @@ struct chimera_vfs_gate_ctx {
      * chimera_vfs_gate_fh_obj() clears that assertion for callers gating an
      * object of any type, such as an open(2) access-mode check. */
     int                             any_type;
+    /* Set by the create gates (chimera_vfs_gate_handle_create): the attrs a
+     * create is to carry, so the parent's set-group-ID bit -- which the gate
+     * has just read in order to authorize the create -- can name the new
+     * object's group before the op is dispatched.  NULL for every other
+     * gate. */
+    struct chimera_vfs_attrs       *create_attr;
 };
+
+/*
+ * Does a create in this directory need the engine to fetch the parent's
+ * attrs?  True when DAC gating applies (chimera_vfs_gate_needed), and also
+ * when the backend cannot derive the new object's group for itself
+ * (CHIMERA_VFS_CAP_CREATE_GID_ENGINE) -- which is independent of the
+ * credential, since a root create inherits a set-group-ID parent's group just
+ * as an unprivileged one does.  The create wrappers gate on this instead of
+ * chimera_vfs_gate_needed(); running the gate for a DAC-exempt credential
+ * costs the fetch and decides nothing.
+ */
+int chimera_vfs_gate_needed_create(
+    uint64_t                       module_capabilities,
+    const struct chimera_vfs_cred *cred);
+
+/*
+ * POSIX gives a new object the parent directory's group when the parent is
+ * set-group-ID, and the creator's effective group otherwise (open(2)/mkdir(2),
+ * "Group ID of the new file").  An engine backend applies that itself from the
+ * parent inode; a proxy that authenticates as one identity cannot -- it stamps
+ * the POSIX owner after the create and would stamp the creator's group over
+ * the inheritance -- so the engine names the group for it, from the parent
+ * attrs it has already fetched.  No-op unless the parent is set-group-ID, and
+ * never overrides a group the caller named itself (an NFSv4 createattrs
+ * owner_group), which outranks the default.
+ */
+void chimera_vfs_create_inherit_gid(
+    struct chimera_vfs_attrs       *create_attr,
+    const struct chimera_vfs_attrs *parent_attr);
+
+/*
+ * Like chimera_vfs_gate_handle() / chimera_vfs_gate_fh_always(), for a gate
+ * that authorizes a CREATE in that directory, with `attr` the attributes the
+ * new object is to carry: the gate applies chimera_vfs_create_inherit_gid()
+ * to them from the parent attrs it fetches.
+ */
+void chimera_vfs_gate_handle_create(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        required,
+    struct chimera_vfs_attrs       *attr,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data);
+
+void chimera_vfs_gate_fh_always_create(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    struct chimera_vfs_attrs      *attr,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
 
 /* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
 void chimera_vfs_gate_fh(
@@ -247,6 +309,50 @@ void chimera_vfs_gate_handle_dac(
     uint32_t                        required,
     chimera_vfs_gate_callback_t     callback,
     void                           *private_data);
+
+/*
+ * Resume state for the over-long-name search check (chimera_vfs_name_too_long_*
+ * in vfs_proc_gate.c).  The helper allocates it from the request gate scratch,
+ * runs a FORCED search gate on the directory that would have held the name, and
+ * calls `resume` with the verdict and this context; the wrapper's resume
+ * recovers its own typed callback, releases the context with
+ * chimera_vfs_toolong_free() and answers.
+ */
+struct chimera_vfs_toolong_ctx {
+    struct chimera_vfs_gate_ctx gate_ctx;
+    struct chimera_vfs_thread  *thread;
+    chimera_vfs_gate_callback_t resume;
+    void                       *callback;      /* the wrapper's typed callback */
+    void                       *private_data;  /* the wrapper's private data */
+};
+
+/*
+ * A component longer than {NAME_MAX} in `handle` (or `fh`): answer
+ * [EACCES] when the caller may not search that directory and [ENAMETOOLONG]
+ * when it may, which is the order POSIX pathname resolution requires.  See the
+ * commentary at chimera_vfs_name_too_long_complete().
+ */
+void chimera_vfs_name_too_long_handle(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_gate_callback_t     resume,
+    void                           *callback,
+    void                           *private_data);
+
+void chimera_vfs_name_too_long_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    chimera_vfs_gate_callback_t    resume,
+    void                          *callback,
+    void                          *private_data);
+
+/* Release an over-long-name context.  Read `callback` and `private_data` out
+ * of it FIRST: the scratch goes straight back on the thread's free list. */
+void chimera_vfs_toolong_free(
+    struct chimera_vfs_toolong_ctx *ctx);
 
 /* As chimera_vfs_gate_handle(), enforced additionally for remote-DAC proxies
  * (the lookup prefix search).  See chimera_vfs_gate_needed_prefix. */

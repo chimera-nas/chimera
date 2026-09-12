@@ -1,0 +1,54 @@
+{
+  "family": "nfs4",
+  "description": "chimera at NFSv4.2 against a named in-engine backend. Every RFC 7862/8276 data operation is pinned supported, not explored: memfs and its on-disk siblings advertise CAP_XATTR and CAP_COPY_RANGE and serve ALLOCATE/DEALLOCATE/SEEK with no server knob to turn them off, so a silent regression in advertisement has to fail rather than skip. pNFS is off (the server is not configured as a metadata server) and delegations are off, because the reference implementation only grants once a CB_NULL probe confirms the back channel and the synchronous replay harness never answers one.",
+  "traceStem": "nfs4Memfs42",
+
+  "features": {
+    "pnfs": "unsupported",
+    "readDelegation": "unsupported",
+    "writeDelegation": "unsupported",
+    "xattr": "supported",
+    "sparse": "supported",
+    "copy": "supported",
+    "readPlus": "supported",
+    "ioAdvise": "supported",
+    "writeSame": "supported",
+    "clone": "supported"
+  },
+
+  // As at 4.1: none.
+  "deviations": [
+  ],
+
+  // Not a deviation: RFC 7862 15.11 lets a hole-tracking backend answer SEEK
+  // more precisely than this model's byte-granular view of a file, and the
+  // cells that replay this corpus include diskfs, cairn and the host
+  // passthroughs.  SEEK's reply therefore carries the set of conformant
+  // answers and the harness membership-tests it.  4.2 only: SEEK does not
+  // exist below it.
+  "tolerances": {
+    "holeTracking": true,
+    // As at 4.1: READDIR on a symlink is SYMLINK or NOTDIR depending on the
+    // backend, and both are conformant.
+    // 4.2 only, because it is where RFC 8276 extended attributes exist: once
+    // one has been written to an object, whether its change attribute moved
+    // is up to the backend and RFC 8276 does not settle it.
+    "xattrChange": true
+  },
+
+  "policies": {
+    "minor": 2,
+    "conflictDelays": true,
+    "closeFreesLocks": true,
+    "layoutWholeFile": true
+  },
+
+  "batches": [
+    { "flavor": "step",          "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepState",     "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepNamespace", "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepData",      "steps": 80, "traces": 8, "seed": "0x7" },
+    { "flavor": "stepTypes",     "steps": 80, "traces": 6, "seed": "0x7" },
+    { "flavor": "stepData42",    "steps": 80, "traces": 8, "seed": "0x7" }
+  ]
+}

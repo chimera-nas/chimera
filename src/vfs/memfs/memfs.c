@@ -1867,7 +1867,12 @@ memfs_apply_attrs(
 
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
 
-    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
+    /* A symbolic link's permission bits are fixed at 0777 and cannot be
+     * changed: Linux has no lchmod(), so a server over a real filesystem
+     * cannot honour this either, and honouring it here would make an ACCESS
+     * or GETATTR of the same link answer differently per backend.  The mask
+     * is not echoed back, so the caller sees that nothing was applied. */
+    if ((set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISLNK(inode->mode)) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         inode->mode        = (inode->mode & S_IFMT) | (attr->va_mode & ~S_IFMT);
     }
@@ -2007,7 +2012,7 @@ memfs_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
         chimera_vfs_resolve_set_time(&attr->va_ctime, &now, &inode->ctime);
-    } else if (!layout_only) {
+    } else if (!layout_only && set_mask != 0) {
         inode->ctime = now;
     }
 
@@ -2018,10 +2023,16 @@ memfs_apply_attrs(
      * client-visible attribute, and the LAYOUTGET that stores it does not
      * modify the file (RFC 8881 18.43) -- bumping change (and ctime, above)
      * made the first LAYOUTGET on a file invalidate every client's cached
-     * attributes for a write nobody asked for.  The test is for the layout
-     * bit ALONE: memfs_setattr() masks SIZE off before calling here, so an
-     * empty mask still means a real metadata change. */
-    if (!layout_only) {
+     * attributes for a write nobody asked for.
+     *
+     * An EMPTY mask is the other exception: a setattr that sets nothing
+     * changes nothing, ctime included.  utimensat(UTIME_OMIT, UTIME_OMIT) is
+     * exactly that -- POSIX updates no timestamp for it and does not even
+     * require write access -- and it reaches a backend as a setattr with no
+     * bits set.  memfs_setattr() masks SIZE off before calling here, so a
+     * size-only change also arrives empty; it stamps ctime and change itself
+     * rather than relying on this path. */
+    if (!layout_only && set_mask != 0) {
         inode->change++;
     }
 
@@ -2307,7 +2318,22 @@ memfs_setattr(
          * like the write path does. */
         inode->mode        = chimera_vfs_killpriv_mode(request->cred, inode->mode);
         attr->va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
-        memfs_apply_attrs(inode, attr);
+
+        {
+            uint64_t rest = attr->va_set_mask;
+
+            memfs_apply_attrs(inode, attr);
+
+            /* SIZE was masked off above, so a size-only setattr reaches
+             * memfs_apply_attrs with an empty mask and is treated as the
+             * no-op it looks like.  The truncate is a real metadata change:
+             * stamp ctime and the change counter here. */
+            if (rest == 0) {
+                chimera_vfs_realtime(&inode->ctime);
+                inode->change++;
+            }
+        }
+
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
     } else {
         memfs_apply_attrs(inode, attr);
@@ -3594,6 +3620,25 @@ memfs_open_at(
         return;
     }
 
+    /* POSIX path resolution (XBD 4.13): search (EXECUTE) permission on the
+     * parent is what allows a name to be RESOLVED at all, so it is owed before
+     * the directory is examined -- otherwise an existing entry's presence and
+     * type leak to a caller who may not search the directory (EISDIR over a
+     * directory, EEXIST over another object, or the file's handle for an
+     * unchecked create; chimera #1771).  The create branch below adds
+     * WRITE_DATA on top for a fresh name.  AUTH_ATTR (SMB/Windows) is exempt:
+     * traverse checking is bypassed by default there
+     * (SeChangeNotifyPrivilege), which is why the existing create gate asks
+     * for EXECUTE only on the AUTH_UNIX arm. */
+    if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+        request->cred->uid != 0 &&
+        !memfs_inode_access(parent_inode, request->cred, CHIMERA_ACE_EXECUTE)) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EACCES;
+        request->complete(request);
+        return;
+    }
+
     memfs_map_pre_attr(fs, &request->open_at.r_dir_pre_attr, parent_inode, request->fh);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
@@ -3630,7 +3675,9 @@ memfs_open_at(
 
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             request->cred->uid != 0) {
-            create_access = CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE;
+            /* EXECUTE was already required above, for every caller that gets
+             * this far; WRITE_DATA is what a fresh name adds. */
+            create_access = CHIMERA_ACE_WRITE_DATA;
         } else if (request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
             create_access = CHIMERA_ACE_WRITE_DATA;
         }
@@ -5760,10 +5807,17 @@ memfs_symlink_at(
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 1;
-    inode->mode       = S_IFLNK | 0755;
-    inode->atime      = now;
-    inode->mtime      = now;
-    inode->ctime      = now;
+    /* A symbolic link's permission bits are not a portable observable.  POSIX
+    * leaves them unspecified, and Linux fixes every symlink at 0777 and
+    * silently discards whatever mode a creator asks for -- so a passthrough
+    * backend CANNOT honour one.  Honouring it here only split the in-engine
+    * backends from the passthrough ones and made the model describe half of
+    * them (an NFSv4 ACCESS then granted EXECUTE on one backend and not the
+    * other for the same link).  Match Linux: always 0777, request ignored. */
+    inode->mode  = S_IFLNK | 0777;
+    inode->atime = now;
+    inode->mtime = now;
+    inode->ctime = now;
     inode->change++;
     inode->btime = now;
 

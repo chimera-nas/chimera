@@ -1,0 +1,69 @@
+// The chimera FUSE profile, measured against fuse_quint_driver (the
+// in-process FUSE harness) on 2026-08-26.  It differs
+// from the memfs profile it is served by in three ways, all of them properties
+// of the FUSE transport rather than of the backend:
+//
+//   * no reflink.  FICLONERANGE is an ioctl; there is no FUSE request for it
+//     and fuse_file_operations has no ->remap_file_range, so the kernel answers
+//     EOPNOTSUPP without the server ever seeing the call.
+//   * strict atime.  Every read reaches the server (no page cache to satisfy
+//     it), so memfs's relatime update is observed rather than hidden behind a
+//     stale cached attribute the way the direct POSIX client hides it.
+//   * no chgrp to a supplementary group.  fuse_in_header carries a single gid,
+//     so the server cannot tell that the caller belongs to the target group and
+//     refuses with EPERM.  Measured on a live mount: as uid 200 gid 20 with
+//     groups 20,30, `chgrp 30` fails EPERM where `chgrp 20` succeeds.
+{
+  "extends": "./posix_base.json",
+  "description": "chimera's FUSE server over memfs: the memfs profile as the FUSE transport forces it -- no reflink ioctl, strict atime, and no chgrp to a supplementary group.",
+  "traceStem": "posixFuse",
+
+  "features": {
+    "copyRange": "supported",
+    "cloneRange": "unsupported",
+    "seekHole": "supported"
+  },
+
+  "policies": {
+    // relatime, not strict: this cell sits on memfs, whose read path bumps
+    // atime only when mtime/ctime have caught up with it or it is a day
+    // stale (chimera_vfs_relatime_needs_update, mirroring the Linux kernel).
+    // The memfs cell -- the same backend -- has always said so; this one
+    // claimed strict atime and the model duly predicted a bump on every
+    // read, so a read that relatime skipped read back as a timestamp moving
+    // on its own three steps later.
+    "strictAtime": "unsupported",
+    "chownSuppGroup": "unsupported"
+  },
+
+  // No deviations -- and no longer a distinction: every POSIX cell now runs
+  // deviation-free, so this profile's list matching the others is the point
+  // rather than the exception.  This path got there first because its kernel
+  // stand-in already ordered resolution correctly: fsim_walk resolves dirfds
+  // itself (where the src/posix client once accepted only AT_FDCWD), checks
+  // ENOTDIR, then MAY_EXEC, and only then the component's length, and it
+  // resolves the whole path -- search permission on the final directory
+  // included -- answering EEXIST itself before any FUSE request reaches the
+  // server.  Any divergence found replaying this corpus is the FUSE server's.
+  "deviations": [],
+
+  "batches": [
+    { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },
+    { "flavor": "step",            "steps": 128, "traces": 6,  "seed": "0x2" },
+    { "flavor": "step",            "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "step",            "steps": 512, "traces": 2,  "seed": "0x5" },
+    { "flavor": "stepNamespace",   "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepNamespace",   "steps": 256, "traces": 2,  "seed": "0x9" },
+    { "flavor": "stepDescriptors", "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepMetadata",    "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDirs",        "steps": 128, "traces": 3,  "seed": "0x1" },
+    { "flavor": "stepData",        "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepLocks",       "steps": 128, "traces": 2,  "seed": "0x1" },
+    { "flavor": "stepPerms",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepLinks",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFds",         "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepTooLong",     "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepPrefix",      "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFallocate",   "steps": 128, "traces": 4,  "seed": "0x1" }
+  ]
+}

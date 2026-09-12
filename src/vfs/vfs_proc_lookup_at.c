@@ -220,6 +220,20 @@ chimera_vfs_lookup_at_gate_complete(
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_lookup_at_gate_complete */
 
+static void
+chimera_vfs_lookup_at_toolong(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_toolong_ctx  *ctx      = private_data;
+    chimera_vfs_lookup_at_callback_t callback = ctx->callback;
+    void                            *arg      = ctx->private_data;
+
+    chimera_vfs_toolong_free(ctx);
+
+    callback(status, NULL, NULL, arg);
+} /* chimera_vfs_lookup_at_toolong */
+
 SYMBOL_EXPORT void
 chimera_vfs_lookup_at(
     struct chimera_vfs_thread       *thread,
@@ -239,9 +253,13 @@ chimera_vfs_lookup_at(
      * was the sole gap, letting an attacker-sized NFSv3 LOOKUP component (bounded
      * only by the ~4 MB RPC limit) reach a passthrough backend that copies it
      * into a fixed CHIMERA_VFS_PLUGIN_DATA_SIZE (8 KB) request buffer and overrun
-     * the heap.  Bound it before dispatch. */
+     * the heap.  It is still bounded before dispatch -- but the VERDICT is not
+     * unconditionally ENAMETOOLONG: search permission on the directory that
+     * holds the name is owed first (see chimera_vfs_name_too_long_handle). */
     if (namelen >= CHIMERA_VFS_NAME_MAX) {
-        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, private_data);
+        chimera_vfs_name_too_long_handle(thread, cred, handle,
+                                         chimera_vfs_lookup_at_toolong,
+                                         callback, private_data);
         return;
     }
 
