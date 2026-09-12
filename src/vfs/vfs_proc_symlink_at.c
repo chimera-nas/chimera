@@ -204,7 +204,8 @@ chimera_vfs_symlink_at(
         return;
     }
 
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    if (chimera_vfs_gate_needed_create(handle->vfs_module->capabilities,
+                                       cred)) {
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
@@ -220,10 +221,13 @@ chimera_vfs_symlink_at(
         gate->callback       = callback;
         gate->private_data   = private_data;
 
-        chimera_vfs_gate_handle(&gate->gate_ctx, thread, cred,
-                                handle,
-                                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
-                                chimera_vfs_symlink_at_gate_complete, gate);
+        chimera_vfs_gate_handle_create(&gate->gate_ctx, thread, cred,
+                                       handle,
+                                       CHIMERA_ACE_WRITE_DATA |
+                                       CHIMERA_ACE_EXECUTE,
+                                       set_attr,
+                                       chimera_vfs_symlink_at_gate_complete,
+                                       gate);
         return;
     }
 

@@ -325,6 +325,19 @@ struct chimera_vfs_handle_state {
 * via chimera_vfs_write_same.  Modules that leave this unset surface ENOTSUP. */
 #define CHIMERA_VFS_CAP_WRITE_SAME            (1U << 28)
 
+/* If set, the module cannot derive a new object's POSIX group from its parent
+ * directory, so the engine must name it.  Every create on such a backend
+ * arrives as one authenticated identity (the mount session) and the caller's
+ * owner is stamped on afterwards, which loses the set-group-ID inheritance
+ * POSIX gives a file created in a set-group-ID directory -- the backend never
+ * sees the parent's mode, and the server it talks to sees only the mount
+ * identity.  The create wrappers fetch the parent's attrs for such a module
+ * even when DAC gating would be skipped, and fill the group in (see
+ * chimera_vfs_create_inherit_gid).  An engine backend, a passthrough whose
+ * kernel applies the rule, and a proxy whose server applies it all leave this
+ * unset. */
+#define CHIMERA_VFS_CAP_CREATE_GID_ENGINE     (1U << 30)
+
 struct chimera_vfs_module {
     /* Required
      * Set to CHIMERA_VFS_SDK_VERSION.  Checked at registration so a module
