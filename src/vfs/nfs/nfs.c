@@ -423,7 +423,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
      * conflict with another client of that server visible to the claim core.
      * CAP_CLAIM_AGGREGATE is deliberately absent: nothing here holds a
      * revocable per-node cache token upstream. */
-    .capabilities   = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
+    .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_CLAIM_RANGE | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS | CHIMERA_VFS_CAP_DELEGATES_DAC |
         CHIMERA_VFS_CAP_REMOTE_DAC,
     .init           = chimera_nfs_init,
