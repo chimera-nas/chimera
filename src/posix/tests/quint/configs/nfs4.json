@@ -20,6 +20,17 @@
     "chownSuppGroup": "supported"
   },
 
+  // As for the disk cell: this corpus is replayed over memfs AND over the
+  // linux/io_uring passthroughs (batch_nfs3_linux and friends), and a removal
+  // denied by the sticky-bit rule may answer EACCES or EPERM -- unlink() names
+  // both and POSIX orders neither.  memfs answers what policies names, the
+  // host kernel under a passthrough answers EPERM.  No boolean pins that per
+  // call, so the model emits both as an acceptance set and the harness
+  // membership-tests it.
+  "tolerances": {
+    "stickyRemovalEperm": true
+  },
+
   // Deviations from POSIX.1-2024 that this profile's stack still carries.
   // The model takes chimera's branch for each, so the corpus expects what
   // chimera does and replay is an exact match; the cell's strict twin
