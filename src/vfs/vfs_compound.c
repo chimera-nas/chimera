@@ -538,6 +538,179 @@ chimera_vfs_compound_add_seek(
     return index;
 } /* chimera_vfs_compound_add_seek */
 
+static int
+chimera_vfs_compound_add_range(
+    struct chimera_vfs_compound    *compound,
+    uint8_t                         type,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    /* Both objects are the caller's: a sequence has one current object and
+    * these need two, so there is nothing sensible to default either to. */
+    if (!src_handle || !dst_handle) {
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound, type, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->src_handle = src_handle;
+    op->src_offset = src_offset;
+    op->in_handle  = dst_handle;
+    op->offset     = dst_offset;
+    op->length     = length;
+
+    return index;
+} /* chimera_vfs_compound_add_range */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_copy_range(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    uint32_t                        flags,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask)
+{
+    int index = chimera_vfs_compound_add_range(
+        compound, CHIMERA_VFS_COMPOUND_OP_COPY_RANGE,
+        src_handle, src_offset, dst_handle, dst_offset, length);
+
+    if (index >= 0) {
+        compound->ops[index].copy_flags     = flags;
+        compound->ops[index].attr_mask      = pre_attr_mask;
+        compound->ops[index].post_attr_mask = post_attr_mask;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_copy_range */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_clone_range(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask)
+{
+    int index = chimera_vfs_compound_add_range(
+        compound, CHIMERA_VFS_COMPOUND_OP_CLONE_RANGE,
+        src_handle, src_offset, dst_handle, dst_offset, length);
+
+    if (index >= 0) {
+        compound->ops[index].attr_mask      = pre_attr_mask;
+        compound->ops[index].post_attr_mask = post_attr_mask;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_clone_range */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_move_range(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    uint64_t                        src_post_attr_mask,
+    uint64_t                        dst_pre_attr_mask,
+    uint64_t                        dst_post_attr_mask)
+{
+    int index = chimera_vfs_compound_add_range(
+        compound, CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE,
+        src_handle, src_offset, dst_handle, dst_offset, length);
+
+    if (index >= 0) {
+        /* The source's own post-change attributes ride in `requested`, which
+         * only ACCESS uses and which no range op has any other need for. */
+        compound->ops[index].requested      = (uint32_t) src_post_attr_mask;
+        compound->ops[index].attr_mask      = dst_pre_attr_mask;
+        compound->ops[index].post_attr_mask = dst_post_attr_mask;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_move_range */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_write_same(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        block_size,
+    uint64_t                        block_count,
+    const void                     *pattern,
+    uint32_t                        pattern_len,
+    uint32_t                        reloff_pattern,
+    uint32_t                        sync,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_WRITE_SAME,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle      = handle;
+    op->offset         = offset;
+    op->block_size     = block_size;
+    op->block_count    = block_count;
+    op->pattern        = pattern;
+    op->pattern_len    = pattern_len;
+    op->reloff_pattern = reloff_pattern;
+    op->sync           = sync;
+    op->attr_mask      = pre_attr_mask;
+    op->post_attr_mask = post_attr_mask;
+
+    return index;
+} /* chimera_vfs_compound_add_write_same */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_read_plus(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_READ_PLUS,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle = handle;
+    op->offset    = offset;
+    op->length    = length;
+
+    return index;
+} /* chimera_vfs_compound_add_read_plus */
+
 SYMBOL_EXPORT int
 chimera_vfs_compound_add_readdir(
     struct chimera_vfs_compound *compound,
@@ -1833,6 +2006,126 @@ chimera_vfs_compound_seek_callback(
     chimera_vfs_compound_op_done(compound, error_code);
 } /* chimera_vfs_compound_seek_callback */
 
+static void
+chimera_vfs_compound_copy_range_callback(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  length,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        op->written = (uint32_t) length;
+        if (pre_attr) {
+            op->dir_pre_attr = *pre_attr;
+        }
+        if (post_attr) {
+            chimera_vfs_compound_store_attr(op, post_attr);
+        }
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_copy_range_callback */
+
+static void
+chimera_vfs_compound_clone_range_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        if (pre_attr) {
+            op->dir_pre_attr = *pre_attr;
+        }
+        if (post_attr) {
+            chimera_vfs_compound_store_attr(op, post_attr);
+        }
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_clone_range_callback */
+
+static void
+chimera_vfs_compound_move_range_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *src_post_attr,
+    struct chimera_vfs_attrs *dst_pre_attr,
+    struct chimera_vfs_attrs *dst_post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* The source's post-change attributes go where a name op keeps the
+         * directory's, which a range op has no use for otherwise. */
+        if (src_post_attr) {
+            op->dir_post_attr = *src_post_attr;
+        }
+        if (dst_pre_attr) {
+            op->dir_pre_attr = *dst_pre_attr;
+        }
+        if (dst_post_attr) {
+            chimera_vfs_compound_store_attr(op, dst_post_attr);
+        }
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_move_range_callback */
+
+static void
+chimera_vfs_compound_write_same_callback(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  count,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        op->written   = (uint32_t) count;
+        op->committed = sync;
+        if (pre_attr) {
+            op->dir_pre_attr = *pre_attr;
+        }
+        if (post_attr) {
+            chimera_vfs_compound_store_attr(op, post_attr);
+        }
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_write_same_callback */
+
+static void
+chimera_vfs_compound_read_plus_callback(
+    enum chimera_vfs_error error_code,
+    uint32_t               is_data,
+    uint64_t               length,
+    uint32_t               eof,
+    void                  *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        op->is_data  = is_data;
+        op->read_len = (uint32_t) length;
+        op->eof_read = eof;
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_read_plus_callback */
+
 /*
  * The flags this op needs the current object opened with, or 0 if it addresses
  * the current object without a handle at all.
@@ -1898,7 +2191,16 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
         case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:
         case CHIMERA_VFS_COMPOUND_OP_SEEK:
+        case CHIMERA_VFS_COMPOUND_OP_WRITE_SAME:
+        case CHIMERA_VFS_COMPOUND_OP_READ_PLUS:
             return CHIMERA_VFS_OPEN_INFERRED;
+        /* The range ops bring both of their objects; there is no current one
+         * for them to want opened.  in_handle already makes this 0, so this
+         * arm only says so out loud. */
+        case CHIMERA_VFS_COMPOUND_OP_COPY_RANGE:
+        case CHIMERA_VFS_COMPOUND_OP_CLONE_RANGE:
+        case CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE:
+            return 0;
         /* The xattr ops are metadata: they never touch the object's data, and
          * a PATH open is the one that works on every type.  A data open of a
          * FIFO blocks until a peer arrives, and of a directory is refused
@@ -2289,6 +2591,57 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                op->attr_mask, 0,
                                chimera_vfs_compound_commit_callback,
                                compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_COPY_RANGE:
+            chimera_vfs_copy_range(compound->thread, compound->cred,
+                                   op->src_handle, op->src_offset,
+                                   op->in_handle, op->offset,
+                                   op->length, op->copy_flags,
+                                   op->attr_mask, op->post_attr_mask,
+                                   chimera_vfs_compound_copy_range_callback,
+                                   compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_CLONE_RANGE:
+            chimera_vfs_clone_range(compound->thread, compound->cred,
+                                    op->src_handle, op->src_offset,
+                                    op->in_handle, op->offset,
+                                    op->length,
+                                    op->attr_mask, op->post_attr_mask,
+                                    chimera_vfs_compound_clone_range_callback,
+                                    compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE:
+            chimera_vfs_move_range(compound->thread, compound->cred,
+                                   op->src_handle, op->src_offset,
+                                   op->in_handle, op->offset,
+                                   op->length,
+                                   op->requested,
+                                   op->attr_mask, op->post_attr_mask,
+                                   chimera_vfs_compound_move_range_callback,
+                                   compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_WRITE_SAME:
+            chimera_vfs_write_same(compound->thread, compound->cred,
+                                   target,
+                                   op->offset,
+                                   op->block_size, op->block_count,
+                                   op->pattern, op->pattern_len,
+                                   op->reloff_pattern, op->sync,
+                                   op->attr_mask, op->post_attr_mask,
+                                   chimera_vfs_compound_write_same_callback,
+                                   compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_READ_PLUS:
+            chimera_vfs_read_plus(compound->thread, compound->cred,
+                                  target,
+                                  op->offset, op->length,
+                                  chimera_vfs_compound_read_plus_callback,
+                                  compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:

@@ -55,13 +55,10 @@ chimera_nfs4_verify_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request      *req = private_data;
+    struct nfs_request *req = private_data;
     /* VERIFY4res and NVERIFY4res are layout-identical (status only). */
-    struct VERIFY4res       *res        = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4           *args       = verify_args_fattr4(req);
-    bool                     is_nverify = verify_is_nverify(req);
-    struct chimera_vfs_attrs marshall_attr;
-    nfsstat4                 status;
+    struct VERIFY4res  *res = &req->res_compound.resarray[req->index].opverify;
+    nfsstat4            status;
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -71,19 +68,51 @@ chimera_nfs4_verify_complete(
         return;
     }
 
+    status = chimera_nfs4_verify_status(req, req->index, attr,
+                                        req->fh, req->fhlen);
+    res->status = status;
+    chimera_nfs4_compound_complete(req, status);
+} /* chimera_nfs4_verify_complete */
+
+/*
+ * Does the object's current state match the attributes the client sent?
+ *
+ * Marshal what the object has into the same on-wire form the request carries,
+ * restricted to the bits it asked about, and compare the bytes -- which is the
+ * only comparison that is guaranteed to mean the same thing to both ends.
+ *
+ * Takes `index` rather than reading req->index because a sequence answers this
+ * while the request's cursor is still somewhere else.  Reads nothing but the
+ * arguments and the attributes handed in, so a sequence may ask it again.
+ */
+SYMBOL_EXPORT nfsstat4
+chimera_nfs4_verify_status(
+    struct nfs_request             *req,
+    uint32_t                        index,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen)
+{
+    struct fattr4           *args = (req->args_compound->argarray[index].argop == OP_NVERIFY) ?
+        &req->args_compound->argarray[index].opnverify.obj_attributes :
+        &req->args_compound->argarray[index].opverify.obj_attributes;
+    bool                     is_nverify = req->args_compound->argarray[index].argop == OP_NVERIFY;
+    struct chimera_vfs_attrs marshall_attr;
+    nfsstat4                 status;
+
     /* Marshal current attrs into the same on-wire format the client sent
      * us, restricted to the bits in the request mask. */
-    uint32_t out_mask[3] = { 0, 0, 0 };
-    uint32_t num_out_mask;
-    uint8_t  out_buf[4096];
-    uint32_t out_len = 0;
+    uint32_t                 out_mask[3] = { 0, 0, 0 };
+    uint32_t                 num_out_mask;
+    uint8_t                  out_buf[4096];
+    uint32_t                 out_len = 0;
 
     marshall_attr = *attr;
     chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
                                        args->num_attrmask,
                                        args->attrmask,
-                                       req->fh,
-                                       req->fhlen);
+                                       fh,
+                                       fhlen);
 
     chimera_nfs4_marshall_attrs(&marshall_attr,
                                 args->num_attrmask,
@@ -97,9 +126,9 @@ chimera_nfs4_verify_complete(
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen),
+                                                              fh, fhlen),
                                 chimera_nfs4_xattr_supported(req->thread->vfs_thread,
-                                                             req->fh, req->fhlen),
+                                                             fh, fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
@@ -120,9 +149,8 @@ chimera_nfs4_verify_complete(
         status = match ? NFS4_OK : NFS4ERR_NOT_SAME;
     }
 
-    res->status = status;
-    chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_verify_complete */
+    return status;
+} /* chimera_nfs4_verify_status */
 
 static void
 chimera_nfs4_verify_open_callback(

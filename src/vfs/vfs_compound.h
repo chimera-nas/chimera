@@ -197,6 +197,11 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR,
     CHIMERA_VFS_COMPOUND_OP_ALLOCATE,
     CHIMERA_VFS_COMPOUND_OP_SEEK,
+    CHIMERA_VFS_COMPOUND_OP_COPY_RANGE,
+    CHIMERA_VFS_COMPOUND_OP_CLONE_RANGE,
+    CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE,
+    CHIMERA_VFS_COMPOUND_OP_WRITE_SAME,
+    CHIMERA_VFS_COMPOUND_OP_READ_PLUS,
 };
 
 #define CHIMERA_VFS_COMPOUND_MAX_OPS             32
@@ -360,6 +365,21 @@ struct chimera_vfs_compound_op {
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
      * name has been resolved. */
     struct chimera_vfs_attrs              set_attr;
+    /* The range ops (COPY_RANGE, CLONE_RANGE, MOVE_RANGE) address TWO objects,
+     * and both are caller-supplied: `in_handle` is the destination, the object
+     * being written, and this is the source.  Neither ever addresses the
+     * current object -- a sequence cannot hold two of those, and every caller
+     * of these already holds both handles (two open files for FUSE, two
+     * stateids for NFSv4).  Both are BORROWED on the usual terms. */
+    struct chimera_vfs_open_handle       *src_handle;
+    uint64_t                              src_offset;
+    uint32_t                              copy_flags; /* COPY_RANGE                        */
+    /* WRITE_SAME: the pattern is BORROWED, like a WRITE's payload. */
+    uint32_t                              block_size;
+    uint64_t                              block_count;
+    const void                           *pattern;
+    uint32_t                              pattern_len;
+    uint32_t                              reloff_pattern;
     uint32_t                              allocate_flags; /* ALLOCATE: CHIMERA_VFS_ALLOCATE_* */
     uint64_t                              length; /* ALLOCATE                           */
     /* ALLOCATE: the attributes to fetch after the change.  `attr_mask` is the
@@ -406,6 +426,9 @@ struct chimera_vfs_compound_op {
     uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                              fh_len;
     uint32_t                              granted; /* ACCESS                            */
+    /* READ_PLUS: whether the range it reported is data rather than a hole.
+     * Its length and eof land in read_len and eof_read, as a READ's do. */
+    uint32_t                              is_data;
     /* SEEK: where the next data or hole begins, and whether the search ran off
      * the end of the file without finding one. */
     uint64_t                              seek_offset;
@@ -589,6 +612,79 @@ chimera_vfs_compound_add_allocate(
     uint32_t                        flags,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask);
+
+/* The three range operations.  Each takes BOTH objects from the caller and
+ * never addresses the current one -- see the note on src_handle.
+ *
+ * COPY_RANGE reads from the source and writes to the destination; its result
+ * is how many bytes moved (op->written), which may be short.  CLONE_RANGE
+ * shares the range instead of copying it, so there is no length to report --
+ * a clone is all-or-nothing.  MOVE_RANGE transfers the blocks and leaves the
+ * source range a hole.
+ */
+int
+chimera_vfs_compound_add_copy_range(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    uint32_t                        flags,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask);
+
+int
+chimera_vfs_compound_add_clone_range(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask);
+
+int
+chimera_vfs_compound_add_move_range(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *src_handle,
+    uint64_t                        src_offset,
+    struct chimera_vfs_open_handle *dst_handle,
+    uint64_t                        dst_offset,
+    uint64_t                        length,
+    uint64_t                        src_post_attr_mask,
+    uint64_t                        dst_pre_attr_mask,
+    uint64_t                        dst_post_attr_mask);
+
+/* Write `block_count` copies of `pattern` from `offset` in the current object,
+ * or -- when `handle` is non-NULL -- in that handle, which is BORROWED.  So is
+ * `pattern`, on the same terms as a WRITE's payload: the caller holds it for
+ * as long as the sequence runs. */
+int
+chimera_vfs_compound_add_write_same(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        block_size,
+    uint64_t                        block_count,
+    const void                     *pattern,
+    uint32_t                        pattern_len,
+    uint32_t                        reloff_pattern,
+    uint32_t                        sync,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask);
+
+/* Describe the next extent at `offset`: whether it is data or a hole, how long
+ * it runs, and whether it reaches the end of the file.  This reads no data --
+ * it is the map query NFSv4.2's READ_PLUS needs to decide what to encode, and
+ * the caller issues an ordinary READ for the bytes themselves. */
+int
+chimera_vfs_compound_add_read_plus(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length);
 
 /* Where the next data (`what` 0) or hole (`what` 1) begins at or after
  * `offset` in the current object, or -- when `handle` is non-NULL -- in that

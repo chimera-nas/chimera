@@ -115,6 +115,9 @@ nfs4_vfs_readdir_max_entries(
 } /* nfs4_vfs_readdir_max_entries */
 
 struct nfs4_vfs_op {
+    /* VERIFY/NVERIFY: the status the gate decided, which no errno encodes. */
+    nfsstat4                        verify_status;
+
     /* READDIR, which marshals its page entry by entry as the sequence produces
      * it: the entry list being built, and the reply-buffer mark it started
      * from so a retried sequence can put the buffer back. */
@@ -199,6 +202,9 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_ALLOCATE:
         case OP_DEALLOCATE:
         case OP_SEEK:
+        case OP_WRITE_SAME:
+        case OP_VERIFY:
+        case OP_NVERIFY:
             return 1;
         default:
             return 0;
@@ -959,6 +965,23 @@ nfs4_vfs_op_fill(
             resop->opcommit.status = status;
             return status;
 
+        case OP_VERIFY:
+        case OP_NVERIFY:
+            /* A mismatch failed the op in the gate; reaching here is a match. */
+            resop->opverify.status = NFS4_OK;
+            return NFS4_OK;
+
+        case OP_WRITE_SAME:
+            resop->opwrite_same.resok4.num_wr_callback_id = 0;
+            resop->opwrite_same.resok4.wr_callback_id     = NULL;
+            resop->opwrite_same.resok4.wr_count           = vop->written;
+            resop->opwrite_same.resok4.wr_committed       = vop->committed;
+            memcpy(resop->opwrite_same.resok4.wr_writeverf,
+                   &req->thread->shared->nfs_verifier,
+                   sizeof(resop->opwrite_same.resok4.wr_writeverf));
+            resop->opwrite_same.wsr_status = NFS4_OK;
+            return NFS4_OK;
+
         case OP_ALLOCATE:
             resop->opallocate.ar_status = NFS4_OK;
             return NFS4_OK;
@@ -1177,6 +1200,23 @@ nfs4_vfs_compound_gate(
                 }
                 break;
 
+            case OP_VERIFY:
+            case OP_NVERIFY:
+            {
+                nfsstat4 vs = chimera_nfs4_verify_status(req, map->res_index,
+                                                         &aux->attr,
+                                                         aux->fh,
+                                                         (int) aux->fh_len);
+
+                if (vs != NFS4_OK) {
+                    /* Carried out of band: the answer is an NFSv4 status with
+                     * no errno that means it, and the fill reads it back. */
+                    map->verify_status = vs;
+                    *status            = CHIMERA_VFS_EINVAL;
+                }
+                break;
+            }
+
             case OP_COMMIT:
             /* RFC 7530 §16.4 for COMMIT, RFC 7862 §15.1/15.4/15.11 for the
              * three v4.2 ops: all four apply to a regular file only. */
@@ -1252,7 +1292,11 @@ nfs4_vfs_compound_complete(
                                  "NFSv4 compound: VFS op %d never ran", j);
 
             if (vop->status != CHIMERA_VFS_OK) {
-                status                  = nfs4_vfs_op_errno(argop, vop, req);
+                /* VERIFY and NVERIFY answer with NFS4ERR_NOT_SAME or
+                 * NFS4ERR_SAME, which no errno encodes; the gate recorded the
+                 * real answer when it failed the op. */
+                status = map->verify_status ? map->verify_status :
+                    nfs4_vfs_op_errno(argop, vop, req);
                 resop->opillegal.status = status;
                 fail_res                = map->res_index;
                 failed                  = 1;
@@ -2314,15 +2358,40 @@ chimera_nfs4_compound_try_vfs(
             case OP_ALLOCATE:
             case OP_DEALLOCATE:
             case OP_SEEK:
+            case OP_WRITE_SAME:
             {
                 const struct stateid4 *sid =
                     (argop->argop == OP_ALLOCATE) ? &argop->opallocate.aa_stateid :
                     (argop->argop == OP_DEALLOCATE) ? &argop->opdeallocate.da_stateid :
+                    (argop->argop == OP_WRITE_SAME) ? &argop->opwrite_same.wsa_stateid :
                     &argop->opseek.sa_stateid;
 
                 /* The per-op path answers each of these itself, with a status
                  * that belongs to the operation rather than to any VFS
                  * result. */
+                if (argop->argop == OP_WRITE_SAME) {
+                    const struct app_data_block4 *adb =
+                        &argop->opwrite_same.wsa_adb;
+
+                    /* Per-block-number stamping is the unsupported arm of the
+                     * union, the ADB geometry has to be sane, and the total
+                     * must not overflow -- three answers the operation owes
+                     * that no VFS result carries. */
+                    if (adb->adb_reloff_blocknum != NFS4_UINT64_MAX ||
+                        adb->adb_block_size == 0 ||
+                        adb->adb_block_size > UINT32_MAX ||
+                        adb->adb_reloff_pattern > adb->adb_block_size ||
+                        adb->adb_reloff_pattern + adb->adb_pattern.len >
+                        adb->adb_block_size ||
+                        (adb->adb_block_count != 0 &&
+                         adb->adb_block_size >
+                         NFS4_UINT64_MAX / adb->adb_block_count)) {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
+                }
+
                 if (argop->argop == OP_SEEK &&
                     argop->opseek.sa_what != NFS4_CONTENT_DATA &&
                     argop->opseek.sa_what != NFS4_CONTENT_HOLE) {
@@ -2885,9 +2954,10 @@ chimera_nfs4_compound_try_vfs(
 
         argop = &req->args_compound->argarray[i];
 
-        map->res_index = i;
-        map->vfs_lo    = next;
-        map->vfs_aux   = -1;
+        map->res_index     = i;
+        map->vfs_lo        = next;
+        map->vfs_aux       = -1;
+        map->verify_status = 0;
 
         switch (argop->argop) {
             case OP_PUTFH:
@@ -3172,9 +3242,25 @@ chimera_nfs4_compound_try_vfs(
                 map->vfs_res = idx;
                 break;
 
+            case OP_VERIFY:
+            case OP_NVERIFY:
+                /* The whole of VERIFY is a comparison against attributes the
+                 * client sent; the VFS work is the stat it compares.  The
+                 * comparison itself runs in the gate, so a mismatch stops the
+                 * ops behind it -- which is what VERIFY exists to do. */
+                idx = chimera_vfs_compound_add_getattr(
+                    compound,
+                    chimera_nfs4_attr2mask(
+                        argop->opverify.obj_attributes.attrmask,
+                        argop->opverify.obj_attributes.num_attrmask));
+                map->vfs_aux = idx;
+                map->vfs_res = idx;
+                break;
+
             case OP_ALLOCATE:
             case OP_DEALLOCATE:
             case OP_SEEK:
+            case OP_WRITE_SAME:
             {
                 /* All three name their object with a stateid and act on the
                 * current filehandle, exactly as READ and WRITE do -- so they
@@ -3214,12 +3300,23 @@ chimera_nfs4_compound_try_vfs(
                             argop->opallocate.aa_offset,
                             argop->opallocate.aa_length,
                             0, 0, 0);
-                    } else {
+                    } else if (argop->argop == OP_DEALLOCATE) {
                         idx = chimera_vfs_compound_add_allocate(
                             compound, map->io_handle,
                             argop->opdeallocate.da_offset,
                             argop->opdeallocate.da_length,
                             CHIMERA_VFS_ALLOCATE_DEALLOCATE, 0, 0);
+                    } else {
+                        idx = chimera_vfs_compound_add_write_same(
+                            compound, map->io_handle,
+                            argop->opwrite_same.wsa_adb.adb_offset,
+                            argop->opwrite_same.wsa_adb.adb_block_size,
+                            argop->opwrite_same.wsa_adb.adb_block_count,
+                            argop->opwrite_same.wsa_adb.adb_pattern.data,
+                            argop->opwrite_same.wsa_adb.adb_pattern.len,
+                            argop->opwrite_same.wsa_adb.adb_reloff_pattern,
+                            argop->opwrite_same.wsa_stable,
+                            0, 0);
                     }
                 }
 
