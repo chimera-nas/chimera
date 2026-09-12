@@ -804,6 +804,15 @@ smb_build_create_owner_attrs(
         out->va_gid       = request->cred->gid;
         out->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
     }
+    /* A group the engine named outranks the creator's: it carries either the
+     * caller's own request or the set-group-ID inheritance from the parent
+     * directory, neither of which this backend can work out for itself (the
+     * mount authenticates as one identity, so the server assigns nothing
+     * useful and the owner is stamped afterwards). */
+    if (set_attr && (set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID)) {
+        out->va_gid       = set_attr->va_gid;
+        out->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+    }
     if (set_attr && (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
         out->va_mode      = set_attr->va_mode;
         out->va_set_mask |= CHIMERA_VFS_ATTR_MODE;

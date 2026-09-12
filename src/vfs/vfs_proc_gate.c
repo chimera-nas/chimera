@@ -57,6 +57,12 @@ chimera_vfs_gate_fh_getattr(
         status = chimera_vfs_gate(attr, ctx->cred, ctx->required);
     }
 
+    /* This gate fetched the parent to authorize a create; name the new
+     * object's group from it while the attrs are in hand. */
+    if (status == CHIMERA_VFS_OK && ctx->create_attr) {
+        chimera_vfs_create_inherit_gid(ctx->create_attr, attr);
+    }
+
     /* ctx->handle is NULL when the caller lent us an already-open handle
      * (chimera_vfs_gate_handle): it owns that handle, so we must not release
      * it here. */
@@ -96,6 +102,7 @@ chimera_vfs_gate_fh_impl(
     int                            fhlen,
     uint32_t                       required,
     int                            needed,
+    struct chimera_vfs_attrs      *create_attr,
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data)
 {
@@ -104,6 +111,9 @@ chimera_vfs_gate_fh_impl(
         return;
     }
 
+    /* Always assigned, never left to the caller: the context is recycled
+     * request scratch, so a stale pointer here is a wild write. */
+    ctx->create_attr  = create_attr;
     ctx->thread       = thread;
     ctx->cred         = cred;
     ctx->required     = required;
@@ -140,7 +150,7 @@ chimera_vfs_gate_fh_obj(
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
                              chimera_vfs_gate_needed(module->capabilities, cred),
-                             callback, private_data);
+                             NULL, callback, private_data);
 } /* chimera_vfs_gate_fh_obj */
 
 SYMBOL_EXPORT void
@@ -169,7 +179,7 @@ chimera_vfs_gate_fh(
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
                              chimera_vfs_gate_needed(module->capabilities, cred),
-                             callback, private_data);
+                             NULL, callback, private_data);
 } /* chimera_vfs_gate_fh */
 
 /*
@@ -203,7 +213,7 @@ chimera_vfs_gate_fh_always(
     ctx->any_type = 0;
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required, 1,
-                             callback, private_data);
+                             NULL, callback, private_data);
 } /* chimera_vfs_gate_fh_always */
 
 /*
@@ -235,7 +245,7 @@ chimera_vfs_gate_fh_dac(
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
                              chimera_vfs_gate_needed_dac(module->capabilities, cred),
-                             callback, private_data);
+                             NULL, callback, private_data);
 } /* chimera_vfs_gate_fh_dac */
 
 /* ------------------------------------------------------------------------- *
@@ -257,6 +267,7 @@ chimera_vfs_gate_handle_impl(
     struct chimera_vfs_open_handle *handle,
     uint32_t                        required,
     int                             needed,
+    struct chimera_vfs_attrs       *create_attr,
     chimera_vfs_gate_callback_t     callback,
     void                           *private_data)
 {
@@ -265,6 +276,9 @@ chimera_vfs_gate_handle_impl(
         return;
     }
 
+    /* Always assigned, never left to the caller: the context is recycled
+     * request scratch, so a stale pointer here is a wild write. */
+    ctx->create_attr  = create_attr;
     ctx->thread       = thread;
     ctx->cred         = cred;
     ctx->required     = required;
@@ -290,8 +304,96 @@ chimera_vfs_gate_handle(
 
     chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
                                  chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred),
-                                 callback, private_data);
+                                 NULL, callback, private_data);
 } /* chimera_vfs_gate_handle */
+
+/*
+ * Does a create on this backend need the parent's attrs fetched?  Either
+ * because the engine is enforcing DAC for it, or because the engine owes it
+ * the new object's group (CHIMERA_VFS_CAP_CREATE_GID_ENGINE) -- which is
+ * independent of the credential, since a root create inherits a set-group-ID
+ * parent's group just as an unprivileged one does.  Running the gate for a
+ * DAC-exempt credential costs the fetch and decides nothing: the engine
+ * grants such a caller unconditionally either way.
+ */
+SYMBOL_EXPORT int
+chimera_vfs_gate_needed_create(
+    uint64_t                       module_capabilities,
+    const struct chimera_vfs_cred *cred)
+{
+    return chimera_vfs_gate_needed(module_capabilities, cred) ||
+           !!(module_capabilities & CHIMERA_VFS_CAP_CREATE_GID_ENGINE);
+} /* chimera_vfs_gate_needed_create */
+
+SYMBOL_EXPORT void
+chimera_vfs_create_inherit_gid(
+    struct chimera_vfs_attrs       *create_attr,
+    const struct chimera_vfs_attrs *parent_attr)
+{
+    if (!create_attr || !parent_attr) {
+        return;
+    }
+    if (create_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) {
+        return;                 /* the caller named a group of its own */
+    }
+    if ((parent_attr->va_set_mask &
+         (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_GID)) !=
+        (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_GID)) {
+        return;
+    }
+    if (!(parent_attr->va_mode & S_ISGID)) {
+        return;
+    }
+
+    create_attr->va_gid       = parent_attr->va_gid;
+    create_attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+} /* chimera_vfs_create_inherit_gid */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_handle_create(
+    struct chimera_vfs_gate_ctx    *ctx,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        required,
+    struct chimera_vfs_attrs       *attr,
+    chimera_vfs_gate_callback_t     callback,
+    void                           *private_data)
+{
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
+                                 chimera_vfs_gate_needed_create(
+                                     handle->vfs_module->capabilities, cred),
+                                 attr, callback, private_data);
+} /* chimera_vfs_gate_handle_create */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_fh_always_create(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    struct chimera_vfs_attrs      *attr,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_module *module;
+
+    module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (!module) {
+        callback(CHIMERA_VFS_ESTALE, private_data);
+        return;
+    }
+
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required, 1,
+                             attr, callback, private_data);
+} /* chimera_vfs_gate_fh_always_create */
 
 SYMBOL_EXPORT void
 chimera_vfs_gate_handle_dac(
@@ -307,7 +409,7 @@ chimera_vfs_gate_handle_dac(
 
     chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
                                  chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred),
-                                 callback, private_data);
+                                 NULL, callback, private_data);
 } /* chimera_vfs_gate_handle_dac */
 
 SYMBOL_EXPORT void
@@ -324,7 +426,7 @@ chimera_vfs_gate_handle_prefix(
 
     chimera_vfs_gate_handle_impl(ctx, thread, cred, handle, required,
                                  chimera_vfs_gate_needed_prefix(handle->vfs_module->capabilities, cred),
-                                 callback, private_data);
+                                 NULL, callback, private_data);
 } /* chimera_vfs_gate_handle_prefix */
 
 /*
@@ -356,7 +458,7 @@ chimera_vfs_gate_fh_prefix(
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
                              chimera_vfs_gate_needed_prefix(module->capabilities, cred),
-                             callback, private_data);
+                             NULL, callback, private_data);
 } /* chimera_vfs_gate_fh_prefix */
 
 /* ----------------------------------------------------------------------------
@@ -681,7 +783,7 @@ chimera_vfs_name_too_long_handle(
     ctx->gate_ctx.any_type = 0;
 
     chimera_vfs_gate_handle_impl(&ctx->gate_ctx, thread, cred, handle,
-                                 CHIMERA_ACE_EXECUTE, 1,
+                                 CHIMERA_ACE_EXECUTE, 1, NULL,
                                  chimera_vfs_name_too_long_complete, ctx);
 } /* chimera_vfs_name_too_long_handle */
 
@@ -712,7 +814,7 @@ chimera_vfs_name_too_long_fh(
     ctx->gate_ctx.any_type = 0;
 
     chimera_vfs_gate_fh_impl(&ctx->gate_ctx, thread, cred, fh, fhlen,
-                             CHIMERA_ACE_EXECUTE, 1,
+                             CHIMERA_ACE_EXECUTE, 1, NULL,
                              chimera_vfs_name_too_long_complete, ctx);
 } /* chimera_vfs_name_too_long_fh */
 

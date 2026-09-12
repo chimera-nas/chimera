@@ -1343,7 +1343,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_smb = {
      * to fall back on, a synthesized path handle names nothing a later
      * operation can re-derive a path from. */
     .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_PATH_OP |
-        CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED,
+        CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED |
+        CHIMERA_VFS_CAP_CREATE_GID_ENGINE,
     .init           = chimera_smb_client_init,
     .destroy        = chimera_smb_client_destroy,
     .thread_init    = chimera_smb_client_thread_init,
