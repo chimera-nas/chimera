@@ -3630,18 +3630,30 @@ now_seconds(void)
     return tv.tv_sec + tv.tv_usec / 1e6;
 } /* now_seconds */
 
+/* Fires only to break evpl_continue() out of its blocking wait; the loop that
+ * armed it re-checks its own deadline. */
+static void
+await_tick(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    (void) evpl;
+    (void) timer;
+} /* await_tick */
+
 static void
 await_recalls(
     struct oracle *o,
     json_t        *sids,
     struct mism   *m)
 {
-    uint8_t want[16][12];
-    int     nwant = 0;
-    size_t  i;
-    json_t *js;
-    double  deadline = now_seconds() + 3.0;
-    int     j, k, missing;
+    uint8_t           want[16][12];
+    int               nwant = 0;
+    size_t            i;
+    json_t           *js;
+    double            deadline = now_seconds() + 3.0;
+    int               j, k, missing;
+    struct evpl_timer tick;
 
     json_array_foreach(itf_seq(sids), i, js)
     {
@@ -3652,6 +3664,15 @@ await_recalls(
             memcpy(want[nwant++], o->sid_other[sid], 12);
         }
     }
+
+    /* evpl_continue() blocks until an event arrives, and when the recall is
+     * never sent no event ever does -- the deadline below is then never
+     * reached again and the replay hangs until the watchdog kills it, naming
+     * the compound rather than the missing CB_RECALL.  A PERIODIC timer is
+     * what bounds it: a one-shot is popped from the heap before its callback
+     * runs, so the very evpl_continue() that fired it goes on to wait with no
+     * timer left and blocks anyway. */
+    evpl_add_timer(o->env->evpl, &tick, await_tick, 50000);
 
     for (;;) {
         missing = 0;
@@ -3673,6 +3694,8 @@ await_recalls(
         }
         evpl_continue(o->env->evpl);
     }
+
+    evpl_remove_timer(o->env->evpl, &tick);
     if (missing) {
         mism_add(m, "CB_RECALL not observed for %d delegation stateid(s)",
                  missing);
