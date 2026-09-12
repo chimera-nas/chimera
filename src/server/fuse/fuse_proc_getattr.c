@@ -378,6 +378,22 @@ chimera_fuse_access_complete(
         requested |= CHIMERA_ACE_EXECUTE;
     }
 
+    /* access(X_OK) on a non-directory with no execute bit anywhere is EACCES
+     * even for a privileged caller: POSIX makes root's implicit execute
+     * permission conditional on at least one of S_IXUSR/S_IXGRP/S_IXOTH being
+     * set, and the DAC override in chimera_vfs_access_check() grants
+     * ACE_EXECUTE unconditionally.  Withhold that ONE bit here rather than
+     * weakening the override, exactly as the NFSv4 ACCESS handler does (RFC
+     * 8881 18.1.4, chimera_nfs4_access_complete).  Directories are exempt on
+     * purpose: search permission on a directory is not gated this way. */
+    if ((requested & CHIMERA_ACE_EXECUTE) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode) &&
+        !(attr->va_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        chimera_fuse_reply(req, EACCES, NULL, 0);
+        return;
+    }
+
     if (requested &&
         !chimera_vfs_access_allowed(attr, &req->cred, requested)) {
         chimera_fuse_reply(req, EACCES, NULL, 0);
