@@ -950,6 +950,9 @@ struct diskfs_block_cache {
  * default is 2x the journal (comfortable per-shard headroom over the variance),
  * and a configured size is floored at 1.5x.
  */
+/* Bump-reservation roles a worker can hold at once (metadata + file data). */
+#define DISKFS_SPACE_RESERVE_ROLES 2
+
 #define DISKFS_INTENT_LOG_BLOCKS(sz)          ((sz) / SM_BLOCK_SIZE)
 
 #define DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS(sz) (2 * DISKFS_INTENT_LOG_BLOCKS(sz))
@@ -5288,6 +5291,45 @@ diskfs_txn_commit(
 } /* diskfs_txn_commit */
 
 
+
+/*
+ * Internal space reserve.
+ *
+ * The allocator hands space out through per-thread bump reservations, and a
+ * reservation is released only when one request outgrows its remainder -- so at
+ * any moment each worker can be sitting on up to SM_RESERVATION_CHUNK per role
+ * that is claimed but undrawn, and a claim released mid-transaction keeps
+ * blocking its region until that transaction reaches the applied watermark.
+ * The free-extent sum is therefore an honest count of free space but an
+ * optimistic count of *allocatable* space, and a writer asked to fill the
+ * filesystem exactly hits ENOSPC a few megabytes early.
+ *
+ * Hold that slop back rather than accounting for it byte-exactly, which is what
+ * ext4 and XFS both do for the same reason:
+ *
+ *   ext4  min(2%, 4096 clusters)   "situations where we can not afford to run
+ *                                   out of space ... punch hole, or converting
+ *                                   unwritten extents in delalloc path"
+ *   XFS   min(5%, 8192 FSBs)       "intended to cover concurrent allocation
+ *                                   transactions when we initially hit ENOSPC"
+ *
+ * Both size it as concurrency x per-transaction reservation and then cap it, so
+ * the percentage governs only small filesystems and the cap governs real ones.
+ * Ours is the same shape, with the cap derived from what this allocator can
+ * actually have in flight: one chunk per role per worker.
+ */
+static inline uint64_t
+diskfs_space_reserve_bytes(const struct diskfs_shared *shared)
+{
+    uint64_t usable = space_map_usable_capacity(shared->space_map);
+    uint64_t pct    = usable / 20;                 /* 5%, as XFS */
+    uint64_t cap    = (uint64_t) (shared->num_active_threads > 0
+                                  ? shared->num_active_threads : 1) *
+        DISKFS_SPACE_RESERVE_ROLES * SM_RESERVATION_CHUNK;
+
+    return pct < cap ? pct : cap;
+} /* diskfs_space_reserve_bytes */
+
 static inline void
 diskfs_map_attrs(
     struct diskfs_thread     *thread,
@@ -5399,8 +5441,17 @@ diskfs_map_attrs(
         if (attr->va_fs_space_free > attr->va_fs_space_total) {
             attr->va_fs_space_free = attr->va_fs_space_total;
         }
-        attr->va_fs_space_used  = attr->va_fs_space_total - attr->va_fs_space_free;
-        attr->va_fs_space_avail = attr->va_fs_space_free;
+        attr->va_fs_space_used = attr->va_fs_space_total - attr->va_fs_space_free;
+        /* space_free stays the honest free-extent sum; space_avail is what a
+         * writer can actually place, i.e. free less the internal reserve.
+         * (POSIX f_bfree vs f_bavail; ext4 subtracts its reserve from bavail
+         * the same way.) */
+        {
+            uint64_t reserve = diskfs_space_reserve_bytes(shared);
+
+            attr->va_fs_space_avail = attr->va_fs_space_free > reserve
+                ? attr->va_fs_space_free - reserve : 0;
+        }
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;

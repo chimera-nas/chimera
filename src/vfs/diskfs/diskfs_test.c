@@ -160,6 +160,7 @@ diskfs_test_snapshot(
     out->total_capacity  = sm->total_capacity;
     out->usable_capacity = sm->usable_capacity;
     out->num_devices     = sm->num_devices;
+    out->reserve_bytes   = diskfs_space_reserve_bytes(shared);
 
     diskfs_test_lock_all_ags(sm, 1);
 

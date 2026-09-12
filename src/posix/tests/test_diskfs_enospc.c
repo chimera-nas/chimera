@@ -47,7 +47,9 @@ free_bytes(struct posix_test_env *env)
         fprintf(stderr, "statfs failed: %s\n", strerror(errno));
         posix_test_fail(env);
     }
-    return (uint64_t) sf.f_bfree * (uint64_t) sf.f_bsize;
+    /* f_bavail, not f_bfree: what a writer can actually place, i.e. free less
+     * the filesystem's internal reserve (POSIX's bfree/bavail split). */
+    return (uint64_t) sf.f_bavail * (uint64_t) sf.f_bsize;
 } /* free_bytes */
 
 int
