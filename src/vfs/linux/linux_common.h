@@ -386,9 +386,40 @@ linux_mount_table_destroy(struct chimera_linux_mount_table *mount_table)
         HASH_DEL(mount_table->mounts, mount);
         free(mount);
     }
+
 #endif /* ifndef __clang_analyzer__ */
 
+
 } /* linux_mount_table_destroy */
+
+/*
+ * Does `name` under `parent_fd` denote a symbolic link that an open carrying
+ * `open_flags` would follow?
+ *
+ * The passthrough backends must answer this BEFORE handing such an open to
+ * the host kernel.  A link body stored in the export is a path in the
+ * EXPORT's namespace; an absolute one resolves from the HOST's root instead,
+ * so the kernel answers for a file outside the export -- or ENOENT where
+ * resolution inside it would have found the target or looped.  Both backends
+ * hand the link itself back (O_PATH | O_NOFOLLOW) and let the engine resolve
+ * it, which is what the in-engine backends do and what the POSIX model
+ * predicts.
+ */
+static inline int
+chimera_linux_leaf_is_symlink(
+    int          parent_fd,
+    const char  *name,
+    unsigned int open_flags)
+{
+    struct stat lst;
+
+    if (open_flags & (CHIMERA_VFS_OPEN_NOFOLLOW | CHIMERA_VFS_OPEN_PATH)) {
+        return 0;
+    }
+
+    return fstatat(parent_fd, name, &lst, AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISLNK(lst.st_mode);
+} /* chimera_linux_leaf_is_symlink */
 
 /* Identity of a chimera mount's backing (root) directory, allocated at MOUNT
  * and handed back as mount_private, so per-op code can recognize the mount
