@@ -903,6 +903,32 @@ chimera_smb_client_mount(
 
     snprintf(server->hostname, sizeof(server->hostname), "%s", host);
     snprintf(server->share, sizeof(server->share), "%s", share);
+
+    /* Remember where the share sits in the VFS namespace, with any leading and
+     * trailing '/' trimmed, so an absolute symlink target ("/test/c" for a
+     * share mounted at "/test") can be reduced to the share-relative path the
+     * wire takes ("c").  See smb_splice_symlink_target(). */
+    {
+        const char *mp  = request->mount.mount_path;
+        int         len = mp ? (int) request->mount.mount_pathlen : 0;
+
+        while (len > 0 && *mp == '/') {
+            mp++;
+            len--;
+        }
+        while (len > 0 && mp[len - 1] == '/') {
+            len--;
+        }
+        if (len > (int) sizeof(server->mount_path) - 1) {
+            len = 0;
+        }
+        if (len > 0) {
+            memcpy(server->mount_path, mp, len);
+        }
+        server->mount_path[len] = '\0';
+        server->mount_pathlen   = len;
+    }
+
     snprintf(server->user, sizeof(server->user), "%s", user);
     snprintf(server->domain, sizeof(server->domain), "%s",
              domain ? domain : CHIMERA_SMB_CLIENT_DEFAULT_DOMAIN);
