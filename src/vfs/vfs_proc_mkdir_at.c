@@ -252,7 +252,8 @@ chimera_vfs_mkdir_at(
         return;
     }
 
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    if (chimera_vfs_gate_needed_create(handle->vfs_module->capabilities,
+                                       cred)) {
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
@@ -268,10 +269,13 @@ chimera_vfs_mkdir_at(
 
         /* Creating an entry in a directory requires both the right to add a
          * subdirectory (APPEND_DATA) and search permission (EXECUTE) on it. */
-        chimera_vfs_gate_handle(&gate->gate_ctx, thread, cred,
-                                handle,
-                                CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE,
-                                chimera_vfs_mkdir_at_gate_complete, gate);
+        chimera_vfs_gate_handle_create(&gate->gate_ctx, thread, cred,
+                                       handle,
+                                       CHIMERA_ACE_APPEND_DATA |
+                                       CHIMERA_ACE_EXECUTE,
+                                       attr,
+                                       chimera_vfs_mkdir_at_gate_complete,
+                                       gate);
         return;
     }
 

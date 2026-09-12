@@ -314,7 +314,8 @@ chimera_vfs_mknod_at(
      * deliver that EACCES for an operation we would actually send.  Run the
      * engine's own create gate for exactly this case so the denials come
      * out in the right order. */
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred) ||
+    if (chimera_vfs_gate_needed_create(handle->vfs_module->capabilities,
+                                       cred) ||
         (chimera_vfs_open_gate_needed(handle->vfs_module->capabilities,
                                       cred) &&
          (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
@@ -335,11 +336,13 @@ chimera_vfs_mknod_at(
         /* _always: on a remote-DAC proxy gate_fh would defer to a backend
          * that will never see this op (the engine denies it below); the
          * engine must evaluate the parent access itself. */
-        chimera_vfs_gate_fh_always(&gate->gate_ctx, thread, cred,
-                                   handle->fh, handle->fh_len,
-                                   CHIMERA_ACE_WRITE_DATA |
-                                   CHIMERA_ACE_EXECUTE,
-                                   chimera_vfs_mknod_at_gate_complete, gate);
+        chimera_vfs_gate_fh_always_create(&gate->gate_ctx, thread, cred,
+                                          handle->fh, handle->fh_len,
+                                          CHIMERA_ACE_WRITE_DATA |
+                                          CHIMERA_ACE_EXECUTE,
+                                          attr,
+                                          chimera_vfs_mknod_at_gate_complete,
+                                          gate);
         return;
     }
 

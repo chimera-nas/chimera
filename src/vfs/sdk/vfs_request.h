@@ -470,7 +470,7 @@ struct chimera_vfs_request_handle {
  * resume struct against this; raise it if one legitimately outgrows it.  It is
  * a union member, so it costs nothing until it is the largest arm -- and the
  * request union is already an order of magnitude bigger than this. */
-#define CHIMERA_VFS_GATE_SCRATCH_SIZE   384
+#define CHIMERA_VFS_GATE_SCRATCH_SIZE   400
 
 /* One enumerated named stream, packed back-to-back in the list_streams reply
  * buffer.  `name_len` bytes of (un-terminated) stream name follow this header,
