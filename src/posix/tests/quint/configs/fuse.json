@@ -25,7 +25,14 @@
   },
 
   "policies": {
-    "strictAtime": "supported",
+    // relatime, not strict: this cell sits on memfs, whose read path bumps
+    // atime only when mtime/ctime have caught up with it or it is a day
+    // stale (chimera_vfs_relatime_needs_update, mirroring the Linux kernel).
+    // The memfs cell -- the same backend -- has always said so; this one
+    // claimed strict atime and the model duly predicted a bump on every
+    // read, so a read that relatime skipped read back as a timestamp moving
+    // on its own three steps later.
+    "strictAtime": "unsupported",
     "chownSuppGroup": "unsupported"
   },
 
