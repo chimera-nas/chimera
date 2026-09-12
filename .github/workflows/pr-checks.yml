@@ -370,7 +370,30 @@ jobs:
         env:
           CCACHE_REF: ghcr.io/chimera-nas/ccache:4.14-darwin
         run: |
-          brew update
+          # Pin homebrew-core rather than installing whatever was published
+          # overnight.  userspace-rcu 0.15.7 (2026-09-11) is bottled from
+          # arm64_sequoia onward only -- no arm64_sonoma -- and these jobs run
+          # on macos-14, so the install fails outright with "no bottle
+          # available!".  The revision below is the last with a Sonoma bottle
+          # (a 0.15.6 rebottle, 2026-09-10); old bottles are content-addressed
+          # in GHCR and stay pullable, so this installs a binary, not a source
+          # build.
+          #
+          # This pins the whole index, which is the point: every formula here
+          # gets a no-Sonoma bottle set at its next version bump, so without a
+          # pin this breaks again on someone else's schedule.  Bumping it is
+          # then a reviewed change.  HOMEBREW_NO_INSTALL_FROM_API makes brew
+          # resolve from the tap instead of the live API; the fetch is depth-1
+          # at that commit rather than a full 1.4 GB tap clone.
+          export HOMEBREW_NO_INSTALL_FROM_API=1
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          CORE="$(brew --repo)/Library/Taps/homebrew/homebrew-core"
+          rm -rf "$CORE" && mkdir -p "$CORE"
+          git -C "$CORE" init -q
+          git -C "$CORE" remote add origin \
+            https://github.com/Homebrew/homebrew-core.git
+          git -C "$CORE" fetch -q --depth 1 origin 6d80bc690123b975991058ef769b80a925199c7b
+          git -C "$CORE" checkout -q FETCH_HEAD
           # No llvm: it was only ever here to supply the scan-build driver, and
           # driving `clang --analyze` directly does not need it.  Dropping it
           # also keeps this job on Apple's clang -- the compiler ccc-analyzer
