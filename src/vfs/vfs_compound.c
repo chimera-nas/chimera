@@ -485,6 +485,60 @@ chimera_vfs_compound_add_commit(
 } /* chimera_vfs_compound_add_commit */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_allocate(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length,
+    uint32_t                        flags,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_ALLOCATE, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle      = handle;
+    op->offset         = offset;
+    op->length         = length;
+    op->allocate_flags = flags;
+    op->attr_mask      = pre_attr_mask;
+    op->post_attr_mask = post_attr_mask;
+
+    return index;
+} /* chimera_vfs_compound_add_allocate */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_seek(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        what)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_SEEK, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle = handle;
+    op->offset    = offset;
+    op->seek_what = what;
+
+    return index;
+} /* chimera_vfs_compound_add_seek */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_readdir(
     struct chimera_vfs_compound *compound,
     uint64_t                     cookie,
@@ -1739,6 +1793,46 @@ chimera_vfs_compound_link_callback(
     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
 } /* chimera_vfs_compound_link_callback */
 
+static void
+chimera_vfs_compound_allocate_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        if (pre_attr) {
+            op->dir_pre_attr = *pre_attr;
+        }
+        if (post_attr) {
+            chimera_vfs_compound_store_attr(op, post_attr);
+        }
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_allocate_callback */
+
+static void
+chimera_vfs_compound_seek_callback(
+    enum chimera_vfs_error error_code,
+    int                    sr_eof,
+    uint64_t               sr_offset,
+    void                  *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        op->seek_offset = sr_offset;
+        op->seek_eof    = (uint32_t) sr_eof;
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_seek_callback */
+
 /*
  * The flags this op needs the current object opened with, or 0 if it addresses
  * the current object without a handle at all.
@@ -1799,8 +1893,11 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_RENAME:
         case CHIMERA_VFS_COMPOUND_OP_LINK:
             return 0;
-        /* COMMIT flushes file data, so it wants the data open. */
+        /* COMMIT flushes file data; ALLOCATE changes it; SEEK reads the map
+         * that describes it.  All three want the data open. */
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
+        case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:
+        case CHIMERA_VFS_COMPOUND_OP_SEEK:
             return CHIMERA_VFS_OPEN_INFERRED;
         /* The xattr ops are metadata: they never touch the object's data, and
          * a PATH open is the one that works on every type.  A data open of a
@@ -2192,6 +2289,24 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                op->attr_mask, 0,
                                chimera_vfs_compound_commit_callback,
                                compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:
+            chimera_vfs_allocate(compound->thread, compound->cred,
+                                 target,
+                                 op->offset, op->length,
+                                 op->allocate_flags,
+                                 op->attr_mask, op->post_attr_mask,
+                                 chimera_vfs_compound_allocate_callback,
+                                 compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_SEEK:
+            chimera_vfs_seek(compound->thread, compound->cred,
+                             target,
+                             op->offset, op->seek_what,
+                             chimera_vfs_compound_seek_callback,
+                             compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_READDIR:

@@ -196,6 +196,9 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_WRITE:
         case OP_LOCKT:
         case OP_SECINFO:
+        case OP_ALLOCATE:
+        case OP_DEALLOCATE:
+        case OP_SEEK:
             return 1;
         default:
             return 0;
@@ -956,6 +959,20 @@ nfs4_vfs_op_fill(
             resop->opcommit.status = status;
             return status;
 
+        case OP_ALLOCATE:
+            resop->opallocate.ar_status = NFS4_OK;
+            return NFS4_OK;
+
+        case OP_DEALLOCATE:
+            resop->opdeallocate.dr_status = NFS4_OK;
+            return NFS4_OK;
+
+        case OP_SEEK:
+            resop->opseek.resok4.sr_eof    = vop->seek_eof;
+            resop->opseek.resok4.sr_offset = vop->seek_offset;
+            resop->opseek.sa_status        = NFS4_OK;
+            return NFS4_OK;
+
         case OP_READDIR:
             nfs4_vfs_readdir_fill(&resop->opreaddir, vop, map);
             status                  = NFS4_OK;
@@ -1161,7 +1178,11 @@ nfs4_vfs_compound_gate(
                 break;
 
             case OP_COMMIT:
-                /* RFC 7530 §16.4: COMMIT applies to a regular file. */
+            /* RFC 7530 §16.4 for COMMIT, RFC 7862 §15.1/15.4/15.11 for the
+             * three v4.2 ops: all four apply to a regular file only. */
+            case OP_ALLOCATE:
+            case OP_DEALLOCATE:
+            case OP_SEEK:
                 if ((aux->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
                     !S_ISREG(aux->attr.va_mode)) {
                     *status = chimera_vfs_nonreg_error(aux->attr.va_mode);
@@ -1965,18 +1986,17 @@ chimera_nfs4_compound_try_vfs(
             break;
         }
 
-        /* Ops that can still fail once the whole sequence has run: the three
-         * with an NFSv4-side precheck (PUTFH's staleness rule, READLINK's and
-         * COMMIT's type gates) and READDIR, whose page can come back too small
-         * to carry an entry.  Nothing that mutates may follow one -- see the
-         * MUTATION note at the top. */
-        /* Nothing fails late any more.  Every NFSv4-side check runs in the
-         * gate as its op finishes, so it stops what is behind it instead of
-         * reporting after the fact -- see nfs4_vfs_compound_gate.  READDIR was
-         * the last exception, because its page was judged while being
-         * marshalled and that happened after the sequence; now the page is
-         * marshalled inside the enumeration and the judgement moves into the
-         * gate with everything else. */
+        /* Ops that can still fail once the whole sequence has run, which
+         * nothing that mutates may follow -- see the MUTATION note at the top.
+         *
+         * LOCKT alone, now.  Every other NFSv4-side check runs in the gate as
+         * its op finishes, so it stops what is behind it instead of reporting
+         * after the fact.  READDIR was the other one, because its page was
+         * judged while being marshalled and that happened after the sequence;
+         * the page is marshalled inside the enumeration now, so its judgement
+         * moved into the gate too.  LOCKT's cannot follow: what it reports is
+         * live claim state read at fill time, and there is no earlier moment
+         * at which that answer exists. */
 
         switch (argop->argop) {
             case OP_PUTFH:
@@ -2288,6 +2308,65 @@ chimera_nfs4_compound_try_vfs(
                  * decided when the result is filled, so nothing that mutates
                  * may sit behind it. */
                 may_fail_late = 1;
+                break;
+            }
+
+            case OP_ALLOCATE:
+            case OP_DEALLOCATE:
+            case OP_SEEK:
+            {
+                const struct stateid4 *sid =
+                    (argop->argop == OP_ALLOCATE) ? &argop->opallocate.aa_stateid :
+                    (argop->argop == OP_DEALLOCATE) ? &argop->opdeallocate.da_stateid :
+                    &argop->opseek.sa_stateid;
+
+                /* The per-op path answers each of these itself, with a status
+                 * that belongs to the operation rather than to any VFS
+                 * result. */
+                if (argop->argop == OP_SEEK &&
+                    argop->opseek.sa_what != NFS4_CONTENT_DATA &&
+                    argop->opseek.sa_what != NFS4_CONTENT_HOLE) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* RFC 7862: the range is [offset, offset + length); one whose
+                 * end does not fit in a uint64 names no such interval. */
+                if (argop->argop == OP_ALLOCATE &&
+                    argop->opallocate.aa_length &&
+                    argop->opallocate.aa_offset >
+                    UINT64_MAX - argop->opallocate.aa_length) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                if (argop->argop == OP_DEALLOCATE &&
+                    argop->opdeallocate.da_length &&
+                    argop->opdeallocate.da_offset >
+                    UINT64_MAX - argop->opdeallocate.da_length) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The same two stateid rules READ and WRITE have, and for the
+                 * same reasons: a current stateid is what the op before this
+                 * one left, and a special stateid is authorized against the
+                 * object the sequence starts from. */
+                if (chimera_nfs4_stateid_is_current(sid)) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                if (nfs4_stateid_is_special(sid) && cur_moved) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
                 break;
             }
 
@@ -3092,6 +3171,61 @@ chimera_nfs4_compound_try_vfs(
                     ctx);
                 map->vfs_res = idx;
                 break;
+
+            case OP_ALLOCATE:
+            case OP_DEALLOCATE:
+            case OP_SEEK:
+            {
+                /* All three name their object with a stateid and act on the
+                * current filehandle, exactly as READ and WRITE do -- so they
+                * authorize the same way, and a special stateid leaves
+                * io_handle NULL and the op addresses the current object. */
+                const struct stateid4     *sid =
+                    (argop->argop == OP_ALLOCATE) ? &argop->opallocate.aa_stateid :
+                    (argop->argop == OP_DEALLOCATE) ? &argop->opdeallocate.da_stateid :
+                    &argop->opseek.sa_stateid;
+                uint32_t                   want = (argop->argop == OP_SEEK) ?
+                    OPEN4_SHARE_ACCESS_READ : OPEN4_SHARE_ACCESS_WRITE;
+                struct chimera_claim_actor io_owner;
+                int                        have_owner = 0;
+
+                if (nfs4_vfs_io_authorize(thread, req, sid, want,
+                                          cur_fh, cur_fhlen,
+                                          &map->io_handle,
+                                          &io_owner, &have_owner) != NFS4_OK) {
+                    goto refuse;
+                }
+
+                /* The regular-file gate, from a stat of the current object --
+                 * the same shape COMMIT uses. */
+                idx = chimera_vfs_compound_add_getattr(
+                    compound, CHIMERA_VFS_ATTR_MODE);
+                map->vfs_aux = idx;
+
+                if (idx >= 0) {
+                    if (argop->argop == OP_SEEK) {
+                        idx = chimera_vfs_compound_add_seek(
+                            compound, map->io_handle,
+                            argop->opseek.sa_offset,
+                            argop->opseek.sa_what == NFS4_CONTENT_HOLE ? 1 : 0);
+                    } else if (argop->argop == OP_ALLOCATE) {
+                        idx = chimera_vfs_compound_add_allocate(
+                            compound, map->io_handle,
+                            argop->opallocate.aa_offset,
+                            argop->opallocate.aa_length,
+                            0, 0, 0);
+                    } else {
+                        idx = chimera_vfs_compound_add_allocate(
+                            compound, map->io_handle,
+                            argop->opdeallocate.da_offset,
+                            argop->opdeallocate.da_length,
+                            CHIMERA_VFS_ALLOCATE_DEALLOCATE, 0, 0);
+                    }
+                }
+
+                map->vfs_res = idx;
+                break;
+            }
 
             case OP_GETXATTR:
                 idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
