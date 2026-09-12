@@ -18,6 +18,7 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "common/logging.h"
 
@@ -88,6 +89,13 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
      * back to thread->client->cred, so existing callers are unaffected. */
     int                                has_cred;
     struct chimera_vfs_cred            req_cred;
+
+    /* The sequence this request submitted, if any.
+     *
+     * Freed by the operation's own completion, NOT with the request: a request
+     * is declared on the stack in much of src/posix and never zeroed, so this
+     * field is only meaningful to the operations that set it. */
+    struct chimera_vfs_compound       *compound;
 
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;

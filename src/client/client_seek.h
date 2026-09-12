@@ -26,17 +26,47 @@ chimera_seek_complete(
     callback(client_thread, error_code, eof, offset, callback_arg);
 } /* chimera_seek_complete */
 
+static void
+chimera_seek_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              offset = 0;
+    int                                   eof    = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        offset = op->seek_offset;
+        eof    = (int) op->seek_eof;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_seek_complete(status, eof, offset, private_data);
+} /* chimera_seek_sequence_complete */
+
 static inline void
 chimera_dispatch_seek(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_seek(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->seek.handle,
-        request->seek.offset,
-        request->seek.what,
-        chimera_seek_complete,
-        request);
+    int idx;
+
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* The caller holds the handle; the sequence borrows it, so it has no
+     * current object of its own. */
+    idx = chimera_vfs_compound_add_seek(request->compound, NULL,
+                                        request->seek.offset, request->seek.what);
+    chimera_vfs_compound_op_set_handle(request->compound, (uint32_t) idx,
+                                       request->seek.handle);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_seek_sequence_complete, request);
 } /* chimera_dispatch_seek */

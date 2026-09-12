@@ -29,22 +29,46 @@ chimera_copy_range_complete(
     callback(client_thread, error_code, length, callback_arg);
 } /* chimera_copy_range_complete */
 
+static void
+chimera_copy_range_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint32_t                              written = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        written = op->written;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_copy_range_complete(status, written, NULL, NULL, private_data);
+} /* chimera_copy_range_sequence_complete */
+
 static inline void
 chimera_dispatch_copy_range(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_copy_range(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->copy_range.src_handle,
-        request->copy_range.src_offset,
-        request->copy_range.dst_handle,
-        request->copy_range.dst_offset,
-        request->copy_range.length,
-        request->copy_range.flags,
-        0,
-        0,
-        chimera_copy_range_complete,
-        request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* Two objects, both the caller's -- see the clone_range note. */
+    chimera_vfs_compound_add_copy_range(request->compound,
+                                        request->copy_range.src_handle,
+                                        request->copy_range.src_offset,
+                                        request->copy_range.dst_handle,
+                                        request->copy_range.dst_offset,
+                                        request->copy_range.length,
+                                        request->copy_range.flags,
+                                        0, 0);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_copy_range_sequence_complete, request);
 } /* chimera_dispatch_copy_range */
