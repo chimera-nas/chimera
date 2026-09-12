@@ -2012,7 +2012,7 @@ memfs_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
         chimera_vfs_resolve_set_time(&attr->va_ctime, &now, &inode->ctime);
-    } else if (!layout_only) {
+    } else if (!layout_only && set_mask != 0) {
         inode->ctime = now;
     }
 
@@ -2023,10 +2023,16 @@ memfs_apply_attrs(
      * client-visible attribute, and the LAYOUTGET that stores it does not
      * modify the file (RFC 8881 18.43) -- bumping change (and ctime, above)
      * made the first LAYOUTGET on a file invalidate every client's cached
-     * attributes for a write nobody asked for.  The test is for the layout
-     * bit ALONE: memfs_setattr() masks SIZE off before calling here, so an
-     * empty mask still means a real metadata change. */
-    if (!layout_only) {
+     * attributes for a write nobody asked for.
+     *
+     * An EMPTY mask is the other exception: a setattr that sets nothing
+     * changes nothing, ctime included.  utimensat(UTIME_OMIT, UTIME_OMIT) is
+     * exactly that -- POSIX updates no timestamp for it and does not even
+     * require write access -- and it reaches a backend as a setattr with no
+     * bits set.  memfs_setattr() masks SIZE off before calling here, so a
+     * size-only change also arrives empty; it stamps ctime and change itself
+     * rather than relying on this path. */
+    if (!layout_only && set_mask != 0) {
         inode->change++;
     }
 
@@ -2312,7 +2318,22 @@ memfs_setattr(
          * like the write path does. */
         inode->mode        = chimera_vfs_killpriv_mode(request->cred, inode->mode);
         attr->va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
-        memfs_apply_attrs(inode, attr);
+
+        {
+            uint64_t rest = attr->va_set_mask;
+
+            memfs_apply_attrs(inode, attr);
+
+            /* SIZE was masked off above, so a size-only setattr reaches
+             * memfs_apply_attrs with an empty mask and is treated as the
+             * no-op it looks like.  The truncate is a real metadata change:
+             * stamp ctime and the change counter here. */
+            if (rest == 0) {
+                chimera_vfs_realtime(&inode->ctime);
+                inode->change++;
+            }
+        }
+
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
     } else {
         memfs_apply_attrs(inode, attr);
