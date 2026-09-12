@@ -74,12 +74,15 @@ main(
     /* alloc06 step 2: everything still reported free, less 256 KiB. */
     r = diskfs_test_space(dh.vfs, &sp);
     assert(r == 0);
-    free_before = sp.ag_free_sum;
+    /* What a writer can actually place: the free-extent sum less the internal
+     * reserve, which is what statfs reports as available (va_fs_space_avail). */
+    free_before = sp.ag_free_sum > sp.reserve_bytes
+        ? sp.ag_free_sum - sp.reserve_bytes : 0;
     printf("free before boundary allocate: %" PRIu64 "\n", free_before);
-    printf("  total=%" PRIu64 " usable=%" PRIu64 " largest_extent=%" PRIu64
-           " fragments=%" PRIu64 " claims=%" PRIu64 " devs=%u ags=%u\n",
-           sp.total_capacity, sp.usable_capacity, sp.largest_free_extent,
-           sp.total_free_extents, sp.claim_bytes, sp.num_devices, sp.num_ags);
+    printf("  usable=%" PRIu64 " free=%" PRIu64 " reserve=%" PRIu64
+           " largest_extent=%" PRIu64 " claims=%" PRIu64 " ags=%u\n",
+           sp.usable_capacity, sp.ag_free_sum, sp.reserve_bytes,
+           sp.largest_free_extent, sp.claim_bytes, sp.num_ags);
     assert(free_before > ENOSPC_SMALL);
     ask = free_before - ENOSPC_SMALL;
 
