@@ -2941,10 +2941,14 @@ chimera_nfs4_compound_try_vfs(
             }
 
             case OP_REMOVE:
+                /* No type assertion and no recall request: NFS4's REMOVE is
+                 * type-agnostic, and the recall decision is made on the
+                 * protocol side before the sequence is built. */
                 idx = chimera_vfs_compound_add_remove(
                     compound,
                     (const char *) argop->opremove.target.data,
-                    (int) argop->opremove.target.len);
+                    (int) argop->opremove.target.len,
+                    0);
                 map->vfs_res = idx;
                 break;
 
@@ -2957,15 +2961,19 @@ chimera_nfs4_compound_try_vfs(
                     (const char *) argop->oprename.oldname.data,
                     (int) argop->oprename.oldname.len,
                     (const char *) argop->oprename.newname.data,
-                    (int) argop->oprename.newname.len);
+                    (int) argop->oprename.newname.len,
+                    0);
                 map->vfs_res = idx;
                 break;
 
             case OP_LINK:
+                /* NFS4's LINK reply is a change_info for the directory; the
+                 * linked object's own attributes have no reader. */
                 idx = chimera_vfs_compound_add_link(
                     compound,
                     (const char *) argop->oplink.newname.data,
-                    (int) argop->oplink.newname.len);
+                    (int) argop->oplink.newname.len,
+                    0);
                 map->vfs_res = idx;
                 break;
 

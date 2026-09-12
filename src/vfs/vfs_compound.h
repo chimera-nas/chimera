@@ -305,6 +305,9 @@ struct chimera_vfs_compound_op {
     char                                new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
     uint32_t                            new_name_len;
     unsigned int                        open_flags; /* OPEN: CHIMERA_VFS_OPEN_*           */
+    /* REMOVE, RENAME: CHIMERA_VFS_REMOVE_* -- the type assertion and the
+     * lease-recall request, which are the caller's to make. */
+    unsigned int                        remove_flags;
     uint32_t                            open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
     /* OPEN and CREATE: attributes to apply to a created object.  Read by the
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
@@ -662,21 +665,31 @@ chimera_vfs_compound_add_rename(
     const char                  *name,
     int                          namelen,
     const char                  *new_name,
-    int                          new_namelen);
+    int                          new_namelen,
+    unsigned int                 flags);
 
-/* Link the saved object into the current object as `name`. */
+/* Link the saved object into the current object as `name`.  `attr_mask` is
+ * fetched against the newly linked object, for a caller whose reply describes
+ * it; a protocol that reports only the directory change passes 0. */
 int
 chimera_vfs_compound_add_link(
     struct chimera_vfs_compound *compound,
     const char                  *name,
-    int                          namelen);
+    int                          namelen,
+    uint64_t                     attr_mask);
 
-/* Unlink `name` from the current object, which stays current. */
+/* Unlink `name` from the current object, which stays current.
+ *
+ * `flags` is the CHIMERA_VFS_REMOVE_* set the per-op API takes, and means the
+ * same here: the type assertion a protocol owes (ISDIR for rmdir, ISNOTDIR for
+ * unlink) and whether the VFS should resolve the doomed object to recall
+ * leases on it.  A protocol that makes those decisions itself passes 0. */
 int
 chimera_vfs_compound_add_remove(
     struct chimera_vfs_compound *compound,
     const char                  *name,
-    int                          namelen);
+    int                          namelen,
+    unsigned int                 flags);
 
 /* Read `count` bytes from `offset` of the current object, or -- when `handle` is
  * non-NULL -- of that handle, which is BORROWED.

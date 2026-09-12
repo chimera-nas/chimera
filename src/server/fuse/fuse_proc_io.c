@@ -97,25 +97,60 @@ chimera_fuse_open_callback(
     }
 } /* chimera_fuse_open_callback */
 
+/*
+ * POSIX binds I/O rights when a file is opened, and opening by file handle
+ * checks nothing -- see the note in chimera_fuse_op_open.  The sequence asks
+ * for the rights and then opens; this veto is what turns a refusal into one.
+ * It reads only the ACCESS result already in the sequence.
+ */
 static void
-chimera_fuse_open_gated(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+chimera_fuse_open_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    if (*status != CHIMERA_VFS_OK) {
         return;
     }
 
-    /* O_TRUNC arrives as a separate SETATTR(size=0) because we do not
-     * advertise FUSE_ATOMIC_O_TRUNC. */
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        req->u.open.vfs_flags,
-                        chimera_fuse_open_callback, req);
-} /* chimera_fuse_open_gated */
+    op = chimera_vfs_compound_op(compound, index);
+
+    if (op->type != CHIMERA_VFS_COMPOUND_OP_ACCESS) {
+        return;
+    }
+
+    if ((op->granted & req->u.open.granted) != req->u.open.granted) {
+        *status = CHIMERA_VFS_EACCES;
+    }
+} /* chimera_fuse_open_gate */
+
+static void
+chimera_fuse_open_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request    *req = private_data;
+    struct chimera_vfs_open_handle *oh;
+    enum chimera_vfs_error          status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    /* The handle is what the kernel's fh will name, so it outlives the
+     * sequence and has to be taken from the compound. */
+    oh = chimera_vfs_compound_take_handle(
+        compound, chimera_vfs_compound_num_ops(compound) - 1);
+
+    chimera_fuse_open_callback(CHIMERA_VFS_OK, oh, req);
+} /* chimera_fuse_open_sequence_complete */
 
 void
 chimera_fuse_op_open(
@@ -162,14 +197,26 @@ chimera_fuse_op_open(
 
     req->u.open.granted = required;
 
-    if (required == 0) {
-        chimera_fuse_open_gated(CHIMERA_VFS_OK, req);
-        return;
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+
+    /* Nothing to authorize for an O_PATH-ish open, and asking anyway would
+     * make the sequence refuse opens POSIX permits. */
+    if (required) {
+        chimera_vfs_compound_set_gate(req->compound, chimera_fuse_open_gate,
+                                      req);
+        chimera_vfs_compound_add_access(req->compound, required);
     }
 
-    chimera_vfs_gate_fh_obj(&req->u.open.gate, req->thread->vfs_thread,
-                            &req->cred, req->fh, req->fh_len, required,
-                            chimera_fuse_open_gated, req);
+    /* O_TRUNC arrives as a separate SETATTR(size=0) because we do not
+     * advertise FUSE_ATOMIC_O_TRUNC.  A NULL name opens the current object. */
+    chimera_vfs_compound_add_open(req->compound, NULL, 0,
+                                  req->u.open.vfs_flags, 0, NULL, 0);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_open_sequence_complete, req);
 } /* chimera_fuse_op_open */
 
 /* --- CREATE --- */
@@ -216,46 +263,31 @@ chimera_fuse_create_callback(
 } /* chimera_fuse_create_callback */
 
 static void
-chimera_fuse_create_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_fuse_create_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
-    const struct fuse_create_in *in   = (const struct fuse_create_in *) (hdr + 1);
-    const char                  *name = (const char *) (in + 1);
-    unsigned int                 flags;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_open_handle       *oh;
+    enum chimera_vfs_error                status;
+    uint32_t                              last;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
-    req->handle = oh;
+    last = chimera_vfs_compound_num_ops(compound) - 1;
+    op   = chimera_vfs_compound_op(compound, last);
+    oh   = chimera_vfs_compound_take_handle(compound, last);
 
-    flags = CHIMERA_VFS_OPEN_CREATE | chimera_fuse_open_flags(in->flags);
-
-    if (in->flags & O_EXCL) {
-        flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
-    }
-
-    if (in->flags & O_TRUNC) {
-        flags |= CHIMERA_VFS_OPEN_TRUNCATE;
-    }
-
-    memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
-    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-    req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
-
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, oh,
-                        name, strlen(name),
-                        flags,
-                        &req->u.create.set_attr,
-                        CHIMERA_FUSE_ATTR_MASK,
-                        0, 0,
-                        chimera_fuse_create_callback, req);
-} /* chimera_fuse_create_open_callback */
+    chimera_fuse_create_callback(CHIMERA_VFS_OK, oh, NULL,
+                                 (struct chimera_vfs_attrs *) &op->attr,
+                                 NULL, NULL, req);
+} /* chimera_fuse_create_sequence_complete */
 
 void
 chimera_fuse_op_create(
@@ -264,7 +296,11 @@ chimera_fuse_op_create(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    if (arglen < sizeof(struct fuse_create_in)) {
+    const struct fuse_create_in *in   = arg;
+    const char                  *name = (const char *) (in + 1);
+    unsigned int                 flags;
+
+    if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
         return;
     }
@@ -280,30 +316,64 @@ chimera_fuse_op_create(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_create_open_callback, req);
+    flags = CHIMERA_VFS_OPEN_CREATE | chimera_fuse_open_flags(in->flags);
+
+    if (in->flags & O_EXCL) {
+        flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+    }
+
+    if (in->flags & O_TRUNC) {
+        flags |= CHIMERA_VFS_OPEN_TRUNCATE;
+    }
+
+    memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
+    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
+
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_open(req->compound, name, (int) strlen(name),
+                                  flags, 0, &req->u.create.set_attr,
+                                  CHIMERA_FUSE_ATTR_MASK);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_create_sequence_complete, req);
 } /* chimera_fuse_op_create */
 
 /* --- READ --- */
 
 static void
-chimera_fuse_read_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_fuse_read_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct evpl_iovec                    *iov;
+    enum chimera_vfs_error                status;
+    uint32_t                              count;
+    int                                   niov;
+    uint32_t                              last;
 
-    chimera_fuse_reply_read(req, chimera_fuse_errno(error_code),
-                            iov, niov, count);
-} /* chimera_fuse_read_complete */
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply_read(req, chimera_fuse_errno(status), NULL, 0, 0);
+        return;
+    }
+
+    last  = chimera_vfs_compound_num_ops(compound) - 1;
+    op    = chimera_vfs_compound_op(compound, last);
+    count = op->read_len;
+
+    /* chimera_fuse_reply_read releases the buffers, so they have to leave the
+     * compound's ownership first -- otherwise both would release them. */
+    chimera_vfs_compound_take_iov(compound, last, &iov, &niov);
+
+    chimera_fuse_reply_read(req, 0, iov, niov, count);
+} /* chimera_fuse_read_sequence_complete */
 
 void
 chimera_fuse_op_read(
@@ -342,13 +412,20 @@ chimera_fuse_op_read(
     chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
-    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
-                           file->handle,
-                           in->offset, in->size,
-                           req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
-                           0,
-                           &actor,
-                           chimera_fuse_read_complete, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* The kernel named an open file, so the sequence addresses that handle
+     * and has no current object.  The descriptor array is the request's and
+     * stays the request's -- an evpl_iovec records its owner's address, so it
+     * cannot live in the compound and be copied out. */
+    chimera_vfs_compound_add_read(req->compound, file->handle,
+                                  in->offset, in->size,
+                                  req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
+                                  &actor);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_read_sequence_complete, req);
 } /* chimera_fuse_op_read */
 
 /* --- WRITE --- */
@@ -378,6 +455,29 @@ chimera_fuse_write_complete(
     chimera_fuse_reply(req, 0, &out, sizeof(out));
 } /* chimera_fuse_write_complete */
 
+static void
+chimera_fuse_write_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_write_complete(status, 0, 0, NULL, NULL, req);
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    chimera_fuse_write_complete(status, op->written, op->committed,
+                                NULL, NULL, req);
+} /* chimera_fuse_write_sequence_complete */
+
 void
 chimera_fuse_op_write(
     struct chimera_fuse_request *req,
@@ -385,9 +485,11 @@ chimera_fuse_op_write(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_write_in *in   = arg;
-    uint32_t                    sync = 0;
-    size_t                      data_off;
+    const struct fuse_write_in    *in   = arg;
+    uint32_t                       sync = 0;
+    size_t                         data_off;
+    struct chimera_fuse_open_file *file;
+    struct chimera_claim_actor     actor;
 
     if (arglen < sizeof(*in) || arglen - sizeof(*in) < in->size) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -410,8 +512,7 @@ chimera_fuse_op_write(
      * not recycled until the request completes. */
     evpl_iovec_clone_segment(&req->u.write.iov, &req->buf, data_off, in->size);
 
-    struct chimera_fuse_open_file *file = chimera_fuse_file(in->fh);
-    struct chimera_claim_actor     actor;
+    file = chimera_fuse_file(in->fh);
 
     /* coherence=sync: the kernel retains the written pages in its cache, so
      * they need grant coverage exactly like read-seeded pages. */
@@ -430,28 +531,50 @@ chimera_fuse_op_write(
     chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
-    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
-                            file->handle,
-                            in->offset, in->size, sync,
-                            0, 0,
-                            &req->u.write.iov, 1,
-                            &actor,
-                            chimera_fuse_write_complete, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* Handle and payload are both borrowed for the length of the sequence;
+     * the payload is released by chimera_fuse_write_complete. */
+    chimera_vfs_compound_add_write(req->compound, file->handle,
+                                   in->offset, in->size, sync,
+                                   &req->u.write.iov, 1, &actor);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_write_sequence_complete, req);
 } /* chimera_fuse_op_write */
 
 /* --- FLUSH / FSYNC --- */
 
 static void
-chimera_fuse_commit_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_fuse_commit_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_fuse_request *req = private_data;
 
-    chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-} /* chimera_fuse_commit_complete */
+    chimera_fuse_reply(req,
+                       chimera_fuse_errno(chimera_vfs_compound_status(compound)),
+                       NULL, 0);
+} /* chimera_fuse_commit_sequence_complete */
+
+/* FLUSH and FSYNC are the same sequence against an already-open file. */
+static void
+chimera_fuse_commit_submit(
+    struct chimera_fuse_request    *req,
+    struct chimera_vfs_open_handle *oh)
+{
+    int idx;
+
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    idx = chimera_vfs_compound_add_commit(req->compound, 0, 0, 0);
+    chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx, oh);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_commit_sequence_complete, req);
+} /* chimera_fuse_commit_submit */
 
 void
 chimera_fuse_op_flush(
@@ -476,10 +599,7 @@ chimera_fuse_op_flush(
                                      file->handle->fh_hash, in->lock_owner);
 
     /* close(2) must surface write errors, so flush commits. */
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
-                       file->handle,
-                       0, 0, 0, 0,
-                       chimera_fuse_commit_complete, req);
+    chimera_fuse_commit_submit(req, file->handle);
 } /* chimera_fuse_op_flush */
 
 void
@@ -496,10 +616,7 @@ chimera_fuse_op_fsync(
         return;
     }
 
-    chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
-                       chimera_fuse_file(in->fh)->handle,
-                       0, 0, 0, 0,
-                       chimera_fuse_commit_complete, req);
+    chimera_fuse_commit_submit(req, chimera_fuse_file(in->fh)->handle);
 } /* chimera_fuse_op_fsync */
 
 /* --- RELEASE --- */

@@ -9,56 +9,64 @@
 #include "fuse_attr.h"
 #include "vfs/vfs_procs.h"
 
+
+/*
+ * Every creating operation here ends the same way: reply with the new object's
+ * attributes, which the sequence's last op carries.  The kernel is told about
+ * the object, never about the directory, so the directory attributes the
+ * per-op API returned had no reader.
+ */
+static void
+chimera_fuse_entry_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    chimera_fuse_reply_entry(req, (struct chimera_vfs_attrs *) &op->attr,
+                             NULL, 0);
+} /* chimera_fuse_entry_sequence_complete */
+
+/*
+ * The shape every creating operation in this file shares: start at the parent
+ * the kernel named, create in it, reply with what was created.  The parent is
+ * no longer opened by the request -- the sequence opens it, once, as part of
+ * running the create.
+ */
+static void
+chimera_fuse_create_submit(
+    struct chimera_fuse_request    *req,
+    uint8_t                         create_type,
+    const char                     *name,
+    const char                     *target,
+    const struct chimera_vfs_attrs *set_attr)
+{
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_create(req->compound, create_type,
+                                    name, (int) strlen(name),
+                                    target, target ? (int) strlen(target) : 0,
+                                    set_attr, CHIMERA_FUSE_ATTR_MASK);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_entry_sequence_complete, req);
+} /* chimera_fuse_create_submit */
+
 /* --- MKDIR / MKNOD --- */
-
-static void
-chimera_fuse_mkdir_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    chimera_fuse_reply_entry(req, attr, NULL, 0);
-} /* chimera_fuse_mkdir_complete */
-
-static void
-chimera_fuse_mkdir_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
-    const struct fuse_mkdir_in  *in   = (const struct fuse_mkdir_in *) (hdr + 1);
-    const char                  *name = (const char *) (in + 1);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
-    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-    req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
-
-    chimera_vfs_mkdir_at(req->thread->vfs_thread, &req->cred, oh,
-                         name, strlen(name),
-                         &req->u.create.set_attr,
-                         CHIMERA_FUSE_ATTR_MASK,
-                         0, 0,
-                         chimera_fuse_mkdir_complete, req);
-} /* chimera_fuse_mkdir_open_callback */
 
 void
 chimera_fuse_op_mkdir(
@@ -67,7 +75,10 @@ chimera_fuse_op_mkdir(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    if (arglen < sizeof(struct fuse_mkdir_in)) {
+    const struct fuse_mkdir_in *in   = arg;
+    const char                 *name = (const char *) (in + 1);
+
+    if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
         return;
     }
@@ -83,64 +94,13 @@ chimera_fuse_op_mkdir(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_mkdir_open_callback, req);
-} /* chimera_fuse_op_mkdir */
-
-static void
-chimera_fuse_mknod_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    chimera_fuse_reply_entry(req, attr, NULL, 0);
-} /* chimera_fuse_mknod_complete */
-
-static void
-chimera_fuse_mknod_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
-    const struct fuse_mknod_in  *in   = (const struct fuse_mknod_in *) (hdr + 1);
-    const char                  *name = (const char *) (in + 1);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
     memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
-    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
-        CHIMERA_VFS_ATTR_RDEV;
-    req->u.create.set_attr.va_mode = (in->mode & S_IFMT) |
-        ((in->mode & 07777) & ~in->umask);
-    req->u.create.set_attr.va_rdev = in->rdev;
+    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
 
-    chimera_vfs_mknod_at(req->thread->vfs_thread, &req->cred, oh,
-                         name, strlen(name),
-                         &req->u.create.set_attr,
-                         CHIMERA_FUSE_ATTR_MASK,
-                         0, 0,
-                         chimera_fuse_mknod_complete, req);
-} /* chimera_fuse_mknod_open_callback */
+    chimera_fuse_create_submit(req, CHIMERA_VFS_COMPOUND_CREATE_DIR,
+                               name, NULL, &req->u.create.set_attr);
+} /* chimera_fuse_op_mkdir */
 
 void
 chimera_fuse_op_mknod(
@@ -149,7 +109,10 @@ chimera_fuse_op_mknod(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    if (arglen < sizeof(struct fuse_mknod_in)) {
+    const struct fuse_mknod_in *in   = arg;
+    const char                 *name = (const char *) (in + 1);
+
+    if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
         return;
     }
@@ -165,63 +128,18 @@ chimera_fuse_op_mknod(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_mknod_open_callback, req);
+    memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
+    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_RDEV;
+    req->u.create.set_attr.va_mode = (in->mode & S_IFMT) |
+        ((in->mode & 07777) & ~in->umask);
+    req->u.create.set_attr.va_rdev = in->rdev;
+
+    chimera_fuse_create_submit(req, CHIMERA_VFS_COMPOUND_CREATE_NODE,
+                               name, NULL, &req->u.create.set_attr);
 } /* chimera_fuse_op_mknod */
 
 /* --- SYMLINK --- */
-
-static void
-chimera_fuse_symlink_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    chimera_fuse_reply_entry(req, attr, NULL, 0);
-} /* chimera_fuse_symlink_complete */
-
-static void
-chimera_fuse_symlink_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req    = private_data;
-    const struct fuse_in_header *hdr    = chimera_fuse_request_hdr(req);
-    const char                  *name   = (const char *) (hdr + 1);
-    const char                  *target = name + strlen(name) + 1;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
-    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-    req->u.create.set_attr.va_mode     = 0777;
-
-    chimera_vfs_symlink_at(req->thread->vfs_thread, &req->cred, oh,
-                           name, strlen(name),
-                           target, strlen(target),
-                           &req->u.create.set_attr,
-                           CHIMERA_FUSE_ATTR_MASK,
-                           0, 0,
-                           chimera_fuse_symlink_complete, req);
-} /* chimera_fuse_symlink_open_callback */
 
 void
 chimera_fuse_op_symlink(
@@ -230,6 +148,9 @@ chimera_fuse_op_symlink(
     const void                  *arg,
     uint32_t                     arglen)
 {
+    const char *name   = (const char *) (hdr + 1);
+    const char *target = name + strlen(name) + 1;
+
     if (chimera_fuse_resolve_nodeid(req) != 0) {
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
@@ -241,27 +162,29 @@ chimera_fuse_op_symlink(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_symlink_open_callback, req);
+    memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
+    req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    req->u.create.set_attr.va_mode     = 0777;
+
+    chimera_fuse_create_submit(req, CHIMERA_VFS_COMPOUND_CREATE_SYMLINK,
+                               name, target, &req->u.create.set_attr);
 } /* chimera_fuse_op_symlink */
 
 /* --- LINK --- */
 
 static void
-chimera_fuse_link_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_pre_attr,
-    struct chimera_vfs_attrs *r_dir_post_attr,
-    void                     *private_data)
+chimera_fuse_link_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        int err = chimera_fuse_errno(error_code);
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        int err = chimera_fuse_errno(status);
 
         /* link(2) reports a directory source as EPERM.  The VFS deliberately
          * surfaces the physical condition as EISDIR instead, for NFS4
@@ -277,8 +200,12 @@ chimera_fuse_link_complete(
         return;
     }
 
-    chimera_fuse_reply_entry(req, r_attr, NULL, 0);
-} /* chimera_fuse_link_complete */
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    chimera_fuse_reply_entry(req, (struct chimera_vfs_attrs *) &op->attr,
+                             NULL, 0);
+} /* chimera_fuse_link_sequence_complete */
 
 void
 chimera_fuse_op_link(
@@ -308,74 +235,62 @@ chimera_fuse_op_link(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_link_at(req->thread->vfs_thread, &req->cred,
-                        req->fh2, req->fh2_len,
-                        req->fh, req->fh_len,
-                        name, strlen(name),
-                        0,
-                        CHIMERA_FUSE_ATTR_MASK,
-                        0, 0,
-                        NULL, NULL,
-                        chimera_fuse_link_complete, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* LINK takes its source from the saved slot and its target directory from
+     * the current object, so the file is put first and saved, and the parent
+     * selected after it. */
+    chimera_vfs_compound_add_putfh(req->compound, req->fh2, (int) req->fh2_len);
+    chimera_vfs_compound_add_savefh(req->compound);
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_link(req->compound, name, (int) strlen(name),
+                                  CHIMERA_FUSE_ATTR_MASK);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_link_sequence_complete, req);
 } /* chimera_fuse_op_link */
 
 /* --- UNLINK / RMDIR --- */
 
 static void
-chimera_fuse_remove_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_fuse_status_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_fuse_request *req = private_data;
 
-    chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-} /* chimera_fuse_remove_complete */
-
-static void
-chimera_fuse_remove_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
-    const char                  *name = (const char *) (hdr + 1);
-    unsigned int                 flags;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    flags = (req->opcode == FUSE_RMDIR) ?
-        CHIMERA_VFS_REMOVE_ISDIR : CHIMERA_VFS_REMOVE_ISNOTDIR;
-
-    chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred, oh,
-                          name, strlen(name),
-                          NULL, 0,
-                          flags,
-                          0, 0,
-                          NULL,
-                          chimera_fuse_remove_complete, req);
-} /* chimera_fuse_remove_open_callback */
+    chimera_fuse_reply(req,
+                       chimera_fuse_errno(chimera_vfs_compound_status(compound)),
+                       NULL, 0);
+} /* chimera_fuse_status_sequence_complete */
 
 static void
 chimera_fuse_remove_common(struct chimera_fuse_request *req)
 {
+    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
+    const char                  *name = (const char *) (hdr + 1);
+    unsigned int                 flags;
+
     if (chimera_fuse_resolve_nodeid(req) != 0) {
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_remove_open_callback, req);
+    /* rmdir(2) and unlink(2) each assert what the target must be, and the VFS
+     * is what enforces it -- FUSE never resolves the target itself. */
+    flags = (req->opcode == FUSE_RMDIR) ?
+        CHIMERA_VFS_REMOVE_ISDIR : CHIMERA_VFS_REMOVE_ISNOTDIR;
+
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_remove(req->compound, name, (int) strlen(name),
+                                    flags);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_remove_common */
 
 void
@@ -400,20 +315,6 @@ chimera_fuse_op_rmdir(
 
 /* --- RENAME / RENAME2 --- */
 
-static void
-chimera_fuse_rename_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *fromdir_pre_attr,
-    struct chimera_vfs_attrs *fromdir_post_attr,
-    struct chimera_vfs_attrs *todir_pre_attr,
-    struct chimera_vfs_attrs *todir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-} /* chimera_fuse_rename_complete */
-
 void
 chimera_fuse_op_rename(
     struct chimera_fuse_request *req,
@@ -423,6 +324,7 @@ chimera_fuse_op_rename(
 {
     uint64_t    newdir;
     const char *oldname;
+    const char *newname;
 
     if (req->opcode == FUSE_RENAME2) {
         const struct fuse_rename2_in *in = arg;
@@ -453,13 +355,23 @@ chimera_fuse_op_rename(
         oldname = (const char *) (in + 1);
     }
 
-    const char *newname = oldname + strlen(oldname) + 1;
+    newname = oldname + strlen(oldname) + 1;
 
     if (chimera_fuse_resolve_nodeid(req) != 0 ||
         chimera_fuse_resolve_nodeid2(req, newdir) != 0) {
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
     }
+
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* RENAME renames within the saved object into the current one, so the
+     * source directory is put first and saved and the destination selected
+     * after it. */
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_savefh(req->compound);
+    chimera_vfs_compound_add_putfh(req->compound, req->fh2, (int) req->fh2_len);
 
     /*
      * CHIMERA_VFS_REMOVE_RECALL: a rename that replaces an existing
@@ -472,14 +384,11 @@ chimera_fuse_op_rename(
      * GETATTR through the surviving open handle is answered from the attr
      * cache and still reports the pre-rename nlink.
      */
-    chimera_vfs_rename_at(req->thread->vfs_thread, &req->cred,
-                          req->fh, req->fh_len,
-                          oldname, strlen(oldname),
-                          req->fh2, req->fh2_len,
-                          newname, strlen(newname),
-                          NULL, 0,
-                          CHIMERA_VFS_REMOVE_RECALL,
-                          0, 0,
-                          NULL, NULL,
-                          chimera_fuse_rename_complete, req);
+    chimera_vfs_compound_add_rename(req->compound,
+                                    oldname, (int) strlen(oldname),
+                                    newname, (int) strlen(newname),
+                                    CHIMERA_VFS_REMOVE_RECALL);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_op_rename */
