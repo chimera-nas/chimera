@@ -223,6 +223,7 @@ chimera_vfs_identity_worker(void *arg)
 {
     struct chimera_vfs_identity         *identity = arg;
     struct chimera_vfs_identity_request *req;
+    struct chimera_vfs_thread           *origin;
 
     /* Pure writer: this worker only runs miss handlers and populates the cache
      * (call_rcu + rcu_assign), never taking an RCU read lock -- the read-side
@@ -271,12 +272,22 @@ chimera_vfs_identity_worker(void *arg)
             req->found = 0;
         }
 
-        /* Hand the completed job back to the originating evpl thread. */
-        pthread_mutex_lock(&req->origin->lock);
-        DL_APPEND(req->origin->pending_identity, req);
-        pthread_mutex_unlock(&req->origin->lock);
+        /* Hand the completed job back to the originating evpl thread.
+         *
+         * Read the origin out of the job FIRST.  Appending it publishes it:
+         * from the moment the origin's lock is dropped that thread may drain
+         * the list, run the callback and free the job, so any later reach
+         * through `req` -- including for the doorbell to wake it with -- is a
+         * use-after-free.  The window is one instruction wide and the
+         * identity path is a cache miss, so it takes an unlucky Debug run to
+         * catch it, which is how it survived. */
+        origin = req->origin;
 
-        evpl_ring_doorbell(&req->origin->doorbell);
+        pthread_mutex_lock(&origin->lock);
+        DL_APPEND(origin->pending_identity, req);
+        pthread_mutex_unlock(&origin->lock);
+
+        evpl_ring_doorbell(&origin->doorbell);
 
         pthread_mutex_lock(&identity->lock);
     }
