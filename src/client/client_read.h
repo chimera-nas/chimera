@@ -30,19 +30,56 @@ chimera_read_complete(
     callback(client_thread, error_code, iov, niov, callback_arg);
 } /* chimera_read_complete */
 
+static void
+chimera_read_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    struct evpl_iovec                    *iov  = NULL;
+    int                                   niov = 0;
+    enum chimera_vfs_error                status;
+    uint32_t                              last, count = 0, eof = 0;
+
+    status = chimera_vfs_compound_status(compound);
+    last   = chimera_vfs_compound_num_ops(compound) - 1;
+
+    if (status == CHIMERA_VFS_OK) {
+        op    = chimera_vfs_compound_op(compound, last);
+        count = op->read_len;
+        eof   = op->eof_read;
+
+        /* The buffers go to the caller, who releases them, so they leave the
+         * sequence's ownership before it is torn down. */
+        chimera_vfs_compound_take_iov(compound, last, &iov, &niov);
+    }
+
+    /* Everything needed is out of the sequence now, on every path; the request
+     * does not own it (see the note on ->compound). */
+    chimera_vfs_compound_free(compound);
+
+    chimera_read_complete(status, count, eof, iov, niov, NULL, private_data);
+} /* chimera_read_sequence_complete */
+
 static inline void
 chimera_dispatch_read(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_read(thread->vfs_thread,
-                     chimera_client_req_cred(request),
-                     request->read.handle,
-                     request->read.offset,
-                     request->read.length,
-                     request->read.iov,
-                     CHIMERA_CLIENT_IOV_MAX,
-                     0,
-                     chimera_read_complete,
-                     request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* The descriptor array is the request's and stays the request's: an
+     * evpl_iovec records its owner's address, so it cannot be written into the
+     * sequence and copied out afterwards. */
+    chimera_vfs_compound_add_read(request->compound,
+                                  request->read.handle,
+                                  request->read.offset,
+                                  request->read.length,
+                                  request->read.iov,
+                                  CHIMERA_CLIENT_IOV_MAX,
+                                  NULL);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_read_sequence_complete, request);
 } /* chimera_dispatch_read */
