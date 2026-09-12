@@ -167,6 +167,14 @@ struct chimera_smb_client_server {
     struct smb_path_ent  *path_buckets[CHIMERA_SMB_PATH_BUCKETS];
     char                  hostname[256];
     char                  share[256];
+
+    /* Where this share is mounted in the VFS namespace, from the MOUNT
+     * request.  An absolute symbolic-link target read back from the server is
+     * a path in THAT namespace (the client stored it that way), so resolving
+     * one inside the share means stripping this prefix first -- the share root
+     * is this path, not "/".  Empty when the mount is at the namespace root. */
+    char                  mount_path[CHIMERA_SMB_PATH_MAX + 1];
+    int                   mount_pathlen;
     char                  user[256];
     char                  domain[256];
     char                  password[256];
@@ -286,6 +294,15 @@ struct chimera_smb_op_state {
     void                              (*enrich_done)(
         struct chimera_smb_client_conn *conn,
         struct chimera_vfs_request     *request);
+
+    /* Set by the symbolic-link follow shim when a CREATE resolved to a path
+     * other than the one asked for.  The fh minted for the result must intern
+     * THAT path: open_fh re-CREATEs an interned path with a plain CREATE, no
+     * follow wrapper, so re-walking the original would stop on the same
+     * intermediate link and answer ELOOP for an object that resolved fine.
+     * Length 0 means no link was followed and the requested path stands. */
+    int                               followed_pathlen;
+    char                              followed_path[CHIMERA_SMB_PATH_MAX + 1];
 };
 
 /* The continuation invoked when the reply for a specific message_id arrives.
