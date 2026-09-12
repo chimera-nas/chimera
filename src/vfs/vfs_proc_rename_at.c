@@ -434,6 +434,7 @@ struct chimera_vfs_rename_at_gate {
     uint64_t                         post_attr_mask;
     uint8_t                          parent_lease_skip[16];
     uint8_t                          parent_lease_skip_valid;
+    uint8_t                          src_is_dir;
     struct chimera_vfs_open_handle  *op_handle;
     chimera_vfs_rename_at_callback_t callback;
     void                            *private_data;
@@ -471,7 +472,53 @@ chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_rename_at_gate_dispatch */
 
-/* Step 3 complete: replaced-target delete authorized -> dispatch. */
+/*
+ * Step 4: moving a DIRECTORY to a different parent rewrites its ".." entry, so
+ * it needs write permission on the directory BEING MOVED -- not merely on the
+ * two parents, which steps 1-3 covered.  POSIX rename() names it: "write
+ * permission is required and is denied for a directory pointed to by the old
+ * or new arguments".  Within a single parent ".." does not change and nothing
+ * is asked of the subject.
+ *
+ * Verified against ext4: a 0000 directory moved out of its parent by its own
+ * owner is EACCES, and the same move at 0700 succeeds.  The engine backends
+ * did not enforce it, so a host passthrough and an in-engine backend gave
+ * different answers for the same corpus.
+ *
+ * Skipped when the source FH never resolved -- the same best-effort fallback
+ * the sticky checks above take, for the callers that do not resolve the name.
+ */
+static void
+chimera_vfs_rename_at_gate_dotdot_done(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_vfs_rename_at_gate *gate = private_data;
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_vfs_rename_at_gate_fail(gate, status);
+        return;
+    }
+    chimera_vfs_rename_at_gate_dispatch(gate);
+} /* chimera_vfs_rename_at_gate_dotdot_done */
+
+static void
+chimera_vfs_rename_at_gate_dotdot(struct chimera_vfs_rename_at_gate *gate)
+{
+    if (!gate->src_is_dir || gate->src_child_fh_len == 0 ||
+        (gate->fhlen == gate->new_fhlen &&
+         memcmp(gate->fh, gate->new_fh, (size_t) gate->fhlen) == 0)) {
+        chimera_vfs_rename_at_gate_dispatch(gate);
+        return;
+    }
+
+    chimera_vfs_gate_fh_always(&gate->gate_ctx, gate->thread, gate->cred,
+                               gate->src_child_fh, gate->src_child_fh_len,
+                               CHIMERA_ACE_WRITE_DATA,
+                               chimera_vfs_rename_at_gate_dotdot_done, gate);
+} /* chimera_vfs_rename_at_gate_dotdot */
+
+/* Step 3 complete: replaced-target delete authorized -> step 4. */
 static void
 chimera_vfs_rename_at_gate_target(
     enum chimera_vfs_error status,
@@ -483,7 +530,7 @@ chimera_vfs_rename_at_gate_target(
         chimera_vfs_rename_at_gate_fail(gate, status);
         return;
     }
-    chimera_vfs_rename_at_gate_dispatch(gate);
+    chimera_vfs_rename_at_gate_dotdot(gate);
 } /* chimera_vfs_rename_at_gate_target */
 
 /* Destination name resolved -> if it names an existing object, authorize its
@@ -499,7 +546,7 @@ chimera_vfs_rename_at_gate_dst_lookup(
 
     /* No existing destination object -> nothing to replace, proceed. */
     if (status == CHIMERA_VFS_ENOENT) {
-        chimera_vfs_rename_at_gate_dispatch(gate);
+        chimera_vfs_rename_at_gate_dotdot(gate);
         return;
     }
 
@@ -522,7 +569,7 @@ chimera_vfs_rename_at_gate_dst_lookup(
 
     /* Existing object but no FH resolved: the sticky owner check needs the
      * object's attrs, so fall back to permitting the replace (best effort). */
-    chimera_vfs_rename_at_gate_dispatch(gate);
+    chimera_vfs_rename_at_gate_dotdot(gate);
 } /* chimera_vfs_rename_at_gate_dst_lookup */
 
 /* Step 2 complete: destination ADD authorized -> check replaced target. */
@@ -589,6 +636,9 @@ chimera_vfs_rename_at_gate_lookup(
         chimera_vfs_rename_at_gate_fail(gate, status);
         return;
     }
+
+    gate->src_is_dir = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        S_ISDIR(attr->va_mode);
 
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_FH) &&
         attr->va_fh_len > 0 && attr->va_fh_len <= CHIMERA_VFS_FH_SIZE) {
@@ -729,7 +779,7 @@ chimera_vfs_rename_at(
          * the source directory can be evaluated (no-follow: rename operates on
          * the name itself). */
         chimera_vfs_lookup(thread, cred, fh, fhlen, name, namelen,
-                           CHIMERA_VFS_ATTR_FH, 0,
+                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE, 0,
                            chimera_vfs_rename_at_gate_lookup, gate);
         return;
     }
