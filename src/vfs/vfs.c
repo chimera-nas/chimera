@@ -17,6 +17,7 @@
 #include "common/common_config.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_open_cache.h"
 #include "vfs/root/vfs_root.h"
 #include "vfs/vfs_dump.h"
@@ -1298,6 +1299,8 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
         free(request->plugin_data);
         free(request);
     }
+
+    chimera_vfs_compound_thread_destroy(thread);
 
     if (thread->metrics.op_latency_series) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {

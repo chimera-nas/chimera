@@ -150,6 +150,7 @@ struct chimera_vfs_close_thread {
 
 struct chimera_vfs_mount_table;
 
+struct chimera_vfs_compound;
 struct chimera_vfs_notify;
 struct chimera_vfs_state;
 struct chimera_vfs_pnfs;
@@ -200,6 +201,11 @@ struct chimera_vfs_thread {
     struct chimera_vfs_request          *active_requests;
     uint64_t                             num_active_requests;
     struct chimera_vfs_open_handle      *free_synth_handles;
+    /* Spent compounds, kept to be handed out again: a compound is large
+     * enough that allocating one per request is a real cost on a local
+     * protocol.  Bounded -- see CHIMERA_VFS_COMPOUND_FREE_MAX. */
+    struct chimera_vfs_compound         *free_compounds;
+    uint32_t                             num_free_compounds;
 
     struct chimera_vfs_request          *pending_complete_requests;
     struct chimera_vfs_request          *unblocked_requests;
