@@ -768,35 +768,31 @@ chimera_fuse_op_lseek(
 /* --- COPY_FILE_RANGE --- */
 
 static void
-chimera_fuse_copy_range_complete(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  length,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_fuse_copy_range_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
-    struct fuse_write_out        out;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct fuse_write_out                 out;
+    enum chimera_vfs_error                status;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
     memset(&out, 0, sizeof(out));
-    out.size = (uint32_t) length;
+    out.size = op->written;
 
     chimera_fuse_reply(req, 0, &out, sizeof(out));
-} /* chimera_fuse_copy_range_complete */
+} /* chimera_fuse_copy_range_sequence_complete */
 
-/*
- * Server-side copy between two already-open descriptors.  Answering ENOSYS
- * is safe -- the kernel falls back to read+write and the copy still happens
- * -- but it moves every byte through the kernel and back, which is exactly
- * what the operation exists to avoid on a backend that can copy internally.
- * A backend without the capability still reports ENOTSUP from the VFS, so
- * the fallback remains available where it is genuinely needed.
- */
 void
 chimera_fuse_op_copy_file_range(
     struct chimera_fuse_request *req,
@@ -820,14 +816,23 @@ chimera_fuse_op_copy_file_range(
         return;
     }
 
-    /* The destination's pages change underneath any kernel that has them
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* Both objects come from the kernel's open files, which is why this op
+     * never addresses the sequence's current one -- there is no single current
+     * object that could stand for two.
+     *
+     * The destination's pages change underneath any kernel that has them
      * cached, including this one; the write triggers the usual claim break,
      * and this mount is exempt from its own invalidation through the
      * credential's origin stamp. */
-    chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred,
-                           src->handle, in->off_in,
-                           dst->handle, in->off_out,
-                           in->len, 0,
-                           0, 0,
-                           chimera_fuse_copy_range_complete, req);
+    chimera_vfs_compound_add_copy_range(req->compound,
+                                        src->handle, in->off_in,
+                                        dst->handle, in->off_out,
+                                        in->len, 0, 0, 0);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_copy_range_sequence_complete,
+                                req);
 } /* chimera_fuse_op_copy_file_range */

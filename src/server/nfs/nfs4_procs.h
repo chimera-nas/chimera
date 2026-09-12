@@ -319,6 +319,17 @@ void
 chimera_nfs4_restorefh_apply(
     struct nfs_request *req);
 
+/* VERIFY/NVERIFY's whole answer: does the object's state match what the client
+ * sent?  Shared with the sequence path, which asks it as the op finishes so a
+ * mismatch stops what is behind it -- which is what VERIFY is for. */
+nfsstat4
+chimera_nfs4_verify_status(
+    struct nfs_request             *req,
+    uint32_t                        index,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen);
+
 nfsstat4
 chimera_nfs4_commit_fill(
     struct nfs_request             *req,
