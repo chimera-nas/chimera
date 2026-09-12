@@ -33,24 +33,50 @@ chimera_write_same_complete(
     callback(client_thread, error_code, count, callback_arg);
 } /* chimera_write_same_complete */
 
+static void
+chimera_write_same_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint32_t                              written = 0, committed = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        written   = op->written;
+        committed = op->committed;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_write_same_complete(status, written, committed, NULL, NULL,
+                                private_data);
+} /* chimera_write_same_sequence_complete */
+
 static inline void
 chimera_dispatch_write_same(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_write_same(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->write_same.handle,
-        request->write_same.offset,
-        request->write_same.block_size,
-        request->write_same.block_count,
-        request->write_same.pattern,
-        request->write_same.pattern_len,
-        request->write_same.reloff_pattern,
-        CHIMERA_VFS_WRITE_FILESYNC,
-        0,
-        0,
-        chimera_write_same_complete,
-        request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* Handle and pattern are both the caller's, borrowed for the sequence. */
+    chimera_vfs_compound_add_write_same(request->compound,
+                                        request->write_same.handle,
+                                        request->write_same.offset,
+                                        request->write_same.block_size,
+                                        request->write_same.block_count,
+                                        request->write_same.pattern,
+                                        request->write_same.pattern_len,
+                                        request->write_same.reloff_pattern,
+                                        CHIMERA_VFS_WRITE_FILESYNC,
+                                        0, 0);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_write_same_sequence_complete, request);
 } /* chimera_dispatch_write_same */

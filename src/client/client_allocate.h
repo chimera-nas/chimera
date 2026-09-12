@@ -26,20 +26,37 @@ chimera_allocate_complete(
     callback(client_thread, error_code, callback_arg);
 } /* chimera_allocate_complete */
 
+static void
+chimera_allocate_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    enum chimera_vfs_error status = chimera_vfs_compound_status(compound);
+
+    /* Read the status BEFORE the free: a freed sequence is recycled and reset,
+     * so asking it afterwards reports success whatever happened.  The request
+     * does not own it -- see the note on ->compound. */
+    chimera_vfs_compound_free(compound);
+
+    chimera_allocate_complete(status, NULL, NULL, private_data);
+} /* chimera_allocate_sequence_complete */
+
 static inline void
 chimera_dispatch_allocate(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_allocate(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->allocate.handle,
-        request->allocate.offset,
-        request->allocate.length,
-        request->allocate.flags,
-        0,  /* pre_attr_mask */
-        0,  /* post_attr_mask */
-        chimera_allocate_complete,
-        request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* The caller holds the handle; the sequence borrows it. */
+    chimera_vfs_compound_add_allocate(request->compound,
+                                      request->allocate.handle,
+                                      request->allocate.offset,
+                                      request->allocate.length,
+                                      request->allocate.flags,
+                                      0, 0);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_allocate_sequence_complete, request);
 } /* chimera_dispatch_allocate */

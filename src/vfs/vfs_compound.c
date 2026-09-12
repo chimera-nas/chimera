@@ -1813,7 +1813,12 @@ chimera_vfs_compound_read_callback(
         return;
     }
 
-    /* iov is the array the adder allocated, filled in place. */
+    /* Usually the array the adder supplied, filled in place -- but a backend
+     * that declares CAP_READ_PROVIDES_BUFFERS answers with buffers of its own
+     * and an array of its own to describe them, and an evpl_iovec records the
+     * address of the struct that owns it, so the descriptors cannot be copied
+     * into the caller's array.  Keep whichever array the read actually used. */
+    op->iov      = iov;
     op->niov     = niov;
     op->read_len = count;
     op->eof_read = eof;

@@ -31,16 +31,47 @@ chimera_fstatfs_getattr_complete(
     callback(client_thread, CHIMERA_VFS_OK, &st, callback_arg);
 } /* chimera_fstatfs_getattr_complete */
 
+static void
+chimera_fstatfs_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    memset(&attr, 0, sizeof(attr));
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        attr = op->attr;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_fstatfs_getattr_complete(status, &attr, private_data);
+} /* chimera_fstatfs_sequence_complete */
+
 static inline void
 chimera_dispatch_fstatfs(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_getattr(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->fstatfs.handle,
-        CHIMERA_VFS_ATTR_MASK_STATFS,
-        chimera_fstatfs_getattr_complete,
-        request);
+    int idx;
+
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* The caller holds the handle; the sequence borrows it, so it has no
+     * current object of its own. */
+    idx = chimera_vfs_compound_add_getattr(request->compound,
+                                           CHIMERA_VFS_ATTR_MASK_STATFS);
+    chimera_vfs_compound_op_set_handle(request->compound, (uint32_t) idx,
+                                       request->fstatfs.handle);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_fstatfs_sequence_complete, request);
 } /* chimera_dispatch_fstatfs */

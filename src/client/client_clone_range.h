@@ -26,21 +26,39 @@ chimera_clone_range_complete(
     callback(client_thread, error_code, callback_arg);
 } /* chimera_clone_range_complete */
 
+static void
+chimera_clone_range_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    enum chimera_vfs_error status = chimera_vfs_compound_status(compound);
+
+    /* Read the status BEFORE the free: a freed sequence is recycled and reset,
+     * so asking it afterwards reports success whatever happened.  The request
+     * does not own it -- see the note on ->compound. */
+    chimera_vfs_compound_free(compound);
+
+    chimera_clone_range_complete(status, NULL, NULL, private_data);
+} /* chimera_clone_range_sequence_complete */
+
 static inline void
 chimera_dispatch_clone_range(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_clone_range(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->clone_range.src_handle,
-        request->clone_range.src_offset,
-        request->clone_range.dst_handle,
-        request->clone_range.dst_offset,
-        request->clone_range.length,
-        0,
-        0,
-        chimera_clone_range_complete,
-        request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* Two objects, both the caller's: a range op never addresses the
+     * sequence's current object, because there is only one of those. */
+    chimera_vfs_compound_add_clone_range(request->compound,
+                                         request->clone_range.src_handle,
+                                         request->clone_range.src_offset,
+                                         request->clone_range.dst_handle,
+                                         request->clone_range.dst_offset,
+                                         request->clone_range.length,
+                                         0, 0);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_clone_range_sequence_complete, request);
 } /* chimera_dispatch_clone_range */
