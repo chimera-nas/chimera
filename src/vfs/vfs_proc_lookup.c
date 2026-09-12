@@ -520,7 +520,21 @@ chimera_vfs_lookup_pathonly_readlink_complete(
         suffix_len = olen - comp_end;
 
         if (target[0] == '/') {
-            /* Absolute target: from the mount root (skip leading slashes). */
+            /* Absolute target: a path in the VFS NAMESPACE, not in whatever
+             * the caller happened to resolve against -- so the retry restarts
+             * at the namespace root rather than at lp_request->fh, which is
+             * only the same thing when the lookup began there.  A lookup based
+             * on a mount root (every *at call, and any path-only mount reached
+             * through one) would otherwise re-resolve "/test/d" INSIDE the
+             * share as "test/d" and answer ENOENT for a target that resolves
+             * perfectly well one level up.
+             *
+             * The rebase sticks: once the path is namespace-absolute, the
+             * relative splices that follow it are lexical on that path and
+             * must keep resolving from the same root. */
+            lp_request->fh_len = sizeof(lp_request->fh);
+            chimera_vfs_get_root_fh(lp_request->fh, &lp_request->fh_len);
+
             while (*target == '/') {
                 target++;
                 target_length--;
