@@ -322,6 +322,29 @@ is_nfs_silly_name(const char *name)
     return 1;
 } /* is_nfs_silly_name */
 
+/* The model-side spelling of a path: "/a/b/c" from its component list.  This
+ * is the key the ND5 exemption list is held in, and it is NOT the same string
+ * as the harness's on-disk path (which carries the mount prefix). */
+static size_t
+model_path(
+    json_t *pth,
+    char   *mp,
+    size_t  sz)
+{
+    json_t *comps = json_object_get(pth, "comps");
+    size_t  len   = 0, k;
+
+    for (k = 0; comps && k < json_array_size(comps); k++) {
+        const char *c = json_string_value(json_array_get(comps, k));
+
+        len += (size_t) snprintf(mp + len, sz - len, "/%s", c ? c : "");
+    }
+    if (len == 0) {
+        mp[0] = '\0';
+    }
+    return len;
+} /* model_path */
+
 static void
 exempt_add(const char *path)
 {
@@ -882,14 +905,8 @@ residue_preclear(
 {
     json_t *comps = json_object_get(pth, "comps");
     char    mp[4096];
-    size_t  len = 0, k;
 
-    for (k = 0; comps && k < json_array_size(comps); k++) {
-        const char *c = json_string_value(json_array_get(comps, k));
-        len += (size_t) snprintf(mp + len, sizeof(mp) - len, "/%s",
-                                 c ? c : "");
-    }
-    if (len == 0 || !is_exempt(mp)) {
+    if (model_path(pth, mp, sizeof(mp)) == 0 || !is_exempt(mp)) {
         return;
     }
 
@@ -929,6 +946,38 @@ residue_preclear(
         }
     }
 } /* residue_preclear */
+
+/* ND5's leftover outlives the rmdir that could not remove it, so a LATER op
+ * naming that path still finds a node the model has forgotten: the exemption
+ * recorded at the rmdir covers the final audit, not the ops in between.  An
+ * unlink or rmdir of the residue answers EISDIR/ENOTEMPTY/success where the
+ * model, whose namespace lost the name, owes ENOENT.
+ *
+ * Sweep it here on the same terms residue_preclear uses for creates -- remove
+ * it as root if the descriptors that pinned it have since closed, quarantine
+ * it aside if they have not -- so the namespaces re-converge at the first op
+ * that notices, and count this one as matched.  Returns 1 when it handled the
+ * op; the caller must not then check_status() it. */
+static int
+nd5_residue_op(
+    const char *path,
+    json_t     *pth,
+    int64_t     model_e,
+    int         e)
+{
+    char mp[4096];
+
+    if (!g_nfs_version || model_e != 2 || e == 2) {
+        return 0;
+    }
+    if (model_path(pth, mp, sizeof(mp)) == 0 || !is_exempt(mp)) {
+        return 0;
+    }
+
+    record_dev("ND5");
+    residue_preclear(path, pth);
+    return 1;
+} /* nd5_residue_op */
 
 /* The model and the deviation registry encode Linux errno numbers; the host
  * libc's errno is identical on Linux but diverges on macOS/BSD for the higher
@@ -1529,15 +1578,20 @@ open_flags(json_t *fl)
 
 /*
  * A call the model expected to FAIL that chimera let through leaves us holding
- * a descriptor the model never learned about (PD24's EMFILE with chimera's
- * larger fd table; over the NFS loopback also expected-EACCES opens the
- * server's DAC reading permits).  The model's fd is not set, so the descriptor
- * never reaches g_fdmap and close_live_handles() cannot reach it either -- and
- * one descriptor still open on the mount wedges the newfs() recycle between
- * traces, whose unmount then returns EBUSY for as long as the harness is
- * willing to retry.  Drop it at the op that minted it, for every
- * expected-failure flavor.  (op_open does its own, because it must also exempt
- * any node O_CREAT minted from the final audit.)
+ * a descriptor the model never learned about (over the NFS loopback, an
+ * expected-EACCES open the server's DAC reading permits).  The model's fd is
+ * not set, so the descriptor never reaches g_fdmap and close_live_handles()
+ * cannot reach it either -- and one descriptor still open on the mount wedges
+ * the newfs() recycle between traces, whose unmount then returns EBUSY for as
+ * long as the harness is willing to retry.  Drop it at the op that minted it,
+ * for every expected-failure flavor.  (op_open does its own, because it must
+ * also exempt any node O_CREAT minted from the final audit.)
+ *
+ * Closing it is not free: POSIX close() drops every byte-range lock the
+ * process holds on that file, so a stray close silently deletes lock state
+ * the model still believes in.  That is why the model's descriptor-minting
+ * generators never ask for a descriptor its table cannot supply -- EMFILE
+ * used to arrive here and take the locks with it.
  */
 static void
 drop_stray_fd(
@@ -1611,21 +1665,17 @@ op_open(
         }
     } else if (tf_field(res_v, "e") != 0 && e == 0 && rc >= 0) {
         /* The model expected this open to fail but chimera minted a
-         * descriptor (PD24's EMFILE; over the NFS loopback also opens whose
-         * expected EACCES the server's DAC reading does not share).  Close
-         * the stray descriptor -- the model never learned of it, so nothing
-         * downstream ever would. */
+         * descriptor (over the NFS loopback, opens whose expected EACCES the
+         * server's DAC reading does not share).  Close the stray descriptor
+         * -- the model never learned of it, so nothing downstream ever
+         * would.  See drop_stray_fd on what the close costs. */
         chimera_posix_close(rc);
         if (tf_bool(fl, "creat")) {
             json_t *comps = json_object_get(json_object_get(rv, "pth"),
                                             "comps");
             char    mp[4096];
-            size_t  len = 0, k;
-            for (k = 0; comps && k < json_array_size(comps); k++) {
-                const char *c = json_string_value(json_array_get(comps, k));
-                len += (size_t) snprintf(mp + len, sizeof(mp) - len, "/%s",
-                                         c ? c : "");
-            }
+            size_t  len = model_path(json_object_get(rv, "pth"), mp,
+                                     sizeof(mp));
             if (len == 0) {
                 snprintf(mp, sizeof(mp), "/");
             }
@@ -2200,6 +2250,10 @@ op_unlink(
     rc = dfd == -1 ? chimera_posix_unlink(path)
                    : chimera_posix_unlinkat(rfd(pid, dfd), path, 0);
     e = ERRV(rc);
+    if (nd5_residue_op(path, json_object_get(rv, "pth"),
+                       tf_field(res_v, "e"), e)) {
+        return;
+    }
     if (!check_status(tf_field(res_v, "e"), e) &&
         nd3_redo_wanted(res_v, rc)) {
         /* Redo as root (see nd3_redo_wanted). */
@@ -2233,19 +2287,16 @@ op_rmdir(
          * close -- exempt the path so the audit tolerates the leftover. */
         record_dev("ND5");
         {
-            json_t *comps = json_object_get(json_object_get(rv, "pth"),
-                                            "comps");
-            char    mp[4096];
-            size_t  len = 0, k;
-            for (k = 0; comps && k < json_array_size(comps); k++) {
-                const char *c = json_string_value(json_array_get(comps, k));
-                len += (size_t) snprintf(mp + len, sizeof(mp) - len, "/%s",
-                                         c ? c : "");
-            }
-            if (len > 0) {
+            char mp[4096];
+
+            if (model_path(json_object_get(rv, "pth"), mp, sizeof(mp)) > 0) {
                 exempt_add(mp);
             }
         }
+        return;
+    }
+    if (nd5_residue_op(path, json_object_get(rv, "pth"),
+                       tf_field(res_v, "e"), e)) {
         return;
     }
     if (!check_status(tf_field(res_v, "e"), e) &&
