@@ -519,6 +519,40 @@ chimera_vfs_compound_add_readdir(
 } /* chimera_vfs_compound_add_readdir */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_readdir_stream(
+    struct chimera_vfs_compound          *compound,
+    uint64_t                              cookie,
+    uint64_t                              verifier,
+    uint64_t                              attr_mask,
+    chimera_vfs_compound_readdir_reset_t  reset,
+    chimera_vfs_compound_readdir_append_t append,
+    void                                 *private_data)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (!reset || !append) {
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_READDIR, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->cookie          = cookie;
+    op->verifier        = verifier;
+    op->attr_mask       = attr_mask;
+    op->readdir_reset   = reset;
+    op->readdir_append  = append;
+    op->readdir_private = private_data;
+
+    return index;
+} /* chimera_vfs_compound_add_readdir_stream */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_getxattr(
     struct chimera_vfs_compound *compound,
     const char                  *name,
@@ -1150,6 +1184,14 @@ chimera_vfs_compound_readdir_entry(
     struct chimera_vfs_compound        *compound = arg;
     struct chimera_vfs_compound_op     *op       = &compound->ops[compound->index];
     struct chimera_vfs_compound_dirent *dirent;
+
+    /* Streaming: the caller marshals this entry now and says whether it fits.
+     * Nothing is staged, so there is nothing here to bound. */
+    if (op->readdir_append) {
+        return op->readdir_append(compound, compound->index,
+                                  inum, cookie, name, namelen, attrs,
+                                  op->readdir_private);
+    }
 
     if (op->num_entries >= op->max_entries) {
         return -1;
@@ -2153,8 +2195,23 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_READDIR:
-            if (!op->entries && op->max_entries) {
-                op->entries = calloc(op->max_entries, sizeof(*op->entries));
+            if (op->readdir_reset) {
+                /* The directory being listed, recorded before the enumeration
+                 * rather than after it: the append callback has to know which
+                 * directory an entry came from, and a READDIR cannot move the
+                 * current object, so there is nothing here to invalidate. */
+                memcpy(op->fh, compound->fh, compound->fh_len);
+                op->fh_len = compound->fh_len;
+
+                /* Before EVERY execution, so a retry is a first run from the
+                 * caller's side and it never has to ask which it is in. */
+                op->readdir_reset(compound, compound->index,
+                                  op->readdir_private);
+            } else {
+                if (!op->entries && op->max_entries) {
+                    op->entries = calloc(op->max_entries,
+                                         sizeof(*op->entries));
+                }
             }
             op->num_entries = 0;
             chimera_vfs_readdir(compound->thread, compound->cred,
