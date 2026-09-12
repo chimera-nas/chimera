@@ -141,6 +141,36 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
                 &inval);
         }
 
+        /* The renamed object's OWN attributes moved too: POSIX marks its
+         * status-change time, and a cross-directory move of a directory also
+         * re-homes its "..".  Its file handle is stable across the rename, so
+         * an attr-cache entry keyed by it now holds a stale ctime and a
+         * getattr served from the cache reports the pre-rename value.  Evict
+         * it the same way the replaced destination is evicted just above.
+         *
+         * Caught by the FUSE model cell, whose kernel stand-in caches nothing:
+         * a stat three steps after the rename still reported the old ctime,
+         * and the next stat past the eviction reported the new one, so a
+         * timestamp the model holds constant appeared to move.
+         *
+         * Best-effort in the same sense as the destination: source_fh is
+         * resolved only when the lease subsystem is active (see
+         * chimera_vfs_rename_at_recall_source).  Without it there is no handle
+         * to key the eviction on. */
+        if (request->rename_at.source_fh_len > 0) {
+            struct chimera_vfs_attrs sinval;
+
+            sinval.va_req_mask = 0;
+            sinval.va_set_mask = 0;
+            chimera_vfs_attr_cache_insert(
+                thread, attr_cache,
+                chimera_vfs_hash(request->rename_at.source_fh,
+                                 request->rename_at.source_fh_len),
+                request->rename_at.source_fh,
+                request->rename_at.source_fh_len,
+                &sinval);
+        }
+
         /* A cross-directory move of a directory re-homes its ".." entry to the
          * new parent.  The name cache keys ".." under the moved directory's own
          * FH (unchanged by the rename), so a ".." lookup cached before the move
