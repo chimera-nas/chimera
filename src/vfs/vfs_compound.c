@@ -96,9 +96,9 @@ struct chimera_vfs_compound {
     void                           *gate_private;
 
     /* Last: see the note on ->next.  This array is the whole reason a compound
-     * is recycled rather than malloc'd per request -- it is by far the largest
-     * thing in the struct, and only the ops a sequence actually used are ever
-     * touched, so resetting is proportional to the sequence, not to the cap. */
+    * is recycled rather than malloc'd per request -- it is by far the largest
+    * thing in the struct, and only the ops a sequence actually used are ever
+    * touched, so resetting is proportional to the sequence, not to the cap. */
     struct chimera_vfs_compound_op  ops[CHIMERA_VFS_COMPOUND_MAX_OPS];
 };
 
@@ -690,7 +690,8 @@ SYMBOL_EXPORT int
 chimera_vfs_compound_add_remove(
     struct chimera_vfs_compound *compound,
     const char                  *name,
-    int                          namelen)
+    int                          namelen,
+    unsigned int                 flags)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -709,6 +710,7 @@ chimera_vfs_compound_add_remove(
     memcpy(op->name, name, namelen);
     op->name[namelen] = '\0';
     op->name_len      = (uint32_t) namelen;
+    op->remove_flags  = flags;
 
     return index;
 } /* chimera_vfs_compound_add_remove */
@@ -719,7 +721,8 @@ chimera_vfs_compound_add_rename(
     const char                  *name,
     int                          namelen,
     const char                  *new_name,
-    int                          new_namelen)
+    int                          new_namelen,
+    unsigned int                 flags)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -740,6 +743,8 @@ chimera_vfs_compound_add_rename(
     op->name[namelen] = '\0';
     op->name_len      = (uint32_t) namelen;
 
+    op->remove_flags = flags;
+
     memcpy(op->new_name, new_name, new_namelen);
     op->new_name[new_namelen] = '\0';
     op->new_name_len          = (uint32_t) new_namelen;
@@ -751,7 +756,8 @@ SYMBOL_EXPORT int
 chimera_vfs_compound_add_link(
     struct chimera_vfs_compound *compound,
     const char                  *name,
-    int                          namelen)
+    int                          namelen,
+    uint64_t                     attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -770,6 +776,7 @@ chimera_vfs_compound_add_link(
     memcpy(op->name, name, namelen);
     op->name[namelen] = '\0';
     op->name_len      = (uint32_t) namelen;
+    op->attr_mask     = attr_mask;
 
     return index;
 } /* chimera_vfs_compound_add_link */
@@ -1750,12 +1757,20 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_RENAME:
         case CHIMERA_VFS_COMPOUND_OP_LINK:
             return 0;
+        /* COMMIT flushes file data, so it wants the data open. */
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
+            return CHIMERA_VFS_OPEN_INFERRED;
+        /* The xattr ops are metadata: they never touch the object's data, and
+         * a PATH open is the one that works on every type.  A data open of a
+         * FIFO blocks until a peer arrives, and of a directory is refused
+         * outright on some backends -- both are objects that can carry
+         * xattrs, so asking for data here would make setting an attribute on
+         * one hang or fail for no reason connected to the attribute. */
         case CHIMERA_VFS_COMPOUND_OP_GETXATTR:
         case CHIMERA_VFS_COMPOUND_OP_SETXATTR:
         case CHIMERA_VFS_COMPOUND_OP_LISTXATTRS:
         case CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR:
-            return CHIMERA_VFS_OPEN_INFERRED;
+            return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
         default:
             return 0;
     } /* switch */
@@ -2049,7 +2064,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             chimera_vfs_remove_at(compound->thread, compound->cred,
                                   compound->handle,
                                   op->name, op->name_len,
-                                  NULL, 0, 0,
+                                  NULL, 0, op->remove_flags,
                                   CHIMERA_VFS_ATTR_CHANGE |
                                   CHIMERA_VFS_ATTR_CTIME,
                                   CHIMERA_VFS_ATTR_CHANGE |
@@ -2076,7 +2091,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   op->name, op->name_len,
                                   compound->fh, compound->fh_len,
                                   op->new_name, op->new_name_len,
-                                  NULL, 0, 0,
+                                  NULL, 0, op->remove_flags,
                                   CHIMERA_VFS_ATTR_CHANGE |
                                   CHIMERA_VFS_ATTR_CTIME,
                                   CHIMERA_VFS_ATTR_CHANGE |
@@ -2130,7 +2145,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
 
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
             chimera_vfs_commit(compound->thread, compound->cred,
-                               compound->handle,
+                               target,
                                op->offset, op->count,
                                op->attr_mask, 0,
                                chimera_vfs_compound_commit_callback,
@@ -2143,7 +2158,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             }
             op->num_entries = 0;
             chimera_vfs_readdir(compound->thread, compound->cred,
-                                compound->handle,
+                                target,
                                 op->attr_mask,
                                 0,
                                 op->cookie,
@@ -2160,7 +2175,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 op->buffer = calloc(1, op->buffer_max);
             }
             chimera_vfs_get_xattr(compound->thread, compound->cred,
-                                  compound->handle,
+                                  target,
                                   op->name, op->name_len,
                                   op->buffer, op->buffer_max,
                                   chimera_vfs_compound_get_xattr_callback,
@@ -2169,7 +2184,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
 
         case CHIMERA_VFS_COMPOUND_OP_SETXATTR:
             chimera_vfs_set_xattr(compound->thread, compound->cred,
-                                  compound->handle,
+                                  target,
                                   op->xattr_option,
                                   op->name, op->name_len,
                                   op->xattr_value, op->xattr_value_len,
@@ -2182,7 +2197,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 op->buffer = calloc(1, op->buffer_max);
             }
             chimera_vfs_list_xattrs(compound->thread, compound->cred,
-                                    compound->handle,
+                                    target,
                                     op->cookie,
                                     op->buffer, op->buffer_max,
                                     chimera_vfs_compound_list_xattrs_callback,
@@ -2210,7 +2225,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 op->target = calloc(1, CHIMERA_VFS_COMPOUND_TARGET_MAX + 1);
             }
             chimera_vfs_readlink(compound->thread, compound->cred,
-                                 compound->handle,
+                                 target,
                                  op->target, CHIMERA_VFS_COMPOUND_TARGET_MAX,
                                  0,
                                  chimera_vfs_compound_readlink_callback,

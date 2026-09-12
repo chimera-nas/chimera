@@ -12,7 +12,6 @@ static void
 chimera_fuse_lookup_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
     struct chimera_fuse_request *req   = private_data;
@@ -47,27 +46,19 @@ chimera_fuse_lookup_complete(
 } /* chimera_fuse_lookup_complete */
 
 static void
-chimera_fuse_lookup_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_fuse_lookup_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
-    const char                  *name = (const char *) (hdr + 1);
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
 
-    req->handle = oh;
-
-    chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, oh,
-                          name, strlen(name),
-                          CHIMERA_FUSE_ATTR_MASK, 0,
-                          chimera_fuse_lookup_complete, req);
-} /* chimera_fuse_lookup_open_callback */
+    chimera_fuse_lookup_complete(chimera_vfs_compound_status(compound),
+                                 (struct chimera_vfs_attrs *) &op->attr, req);
+} /* chimera_fuse_lookup_sequence_complete */
 
 void
 chimera_fuse_op_lookup(
@@ -76,6 +67,8 @@ chimera_fuse_op_lookup(
     const void                  *arg,
     uint32_t                     arglen)
 {
+    const char *name = (const char *) (hdr + 1);
+
     if (chimera_fuse_resolve_nodeid(req) != 0) {
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
@@ -88,11 +81,15 @@ chimera_fuse_op_lookup(
                                               req->nodeid,
                                               req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_lookup_open_callback, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    chimera_vfs_compound_add_lookup(req->compound, name, (int) strlen(name),
+                                    CHIMERA_FUSE_ATTR_MASK);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_lookup_sequence_complete, req);
 } /* chimera_fuse_op_lookup */
 
 void

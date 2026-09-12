@@ -960,7 +960,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2);
+        i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2, 0);
         /* Still the parent: a LOOKUP after the REMOVE resolves through it. */
         i_look = chimera_vfs_compound_add_lookup(cp, "nd", 2, 0);
 
@@ -985,7 +985,7 @@ main(
          * sequence swallowing it. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2);
+        i_rm = chimera_vfs_compound_add_remove(cp, "sl", 2, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -1272,7 +1272,7 @@ main(
         chimera_vfs_compound_add_savefh(cp);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "rndst", 5, 0);
-        i_ren = chimera_vfs_compound_add_rename(cp, "f", 1, "g", 1);
+        i_ren = chimera_vfs_compound_add_rename(cp, "f", 1, "g", 1, 0);
         /* The current object is still the TARGET directory afterwards, so a
          * lookup behind the rename finds the name it just put there. */
         i_look = chimera_vfs_compound_add_lookup(cp, "g", 1,
@@ -1305,7 +1305,7 @@ main(
         chimera_vfs_compound_add_savefh(cp);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "rnsrc", 5, 0);
-        i_link = chimera_vfs_compound_add_link(cp, "h", 1);
+        i_link = chimera_vfs_compound_add_link(cp, "h", 1, 0);
         i_ga   = chimera_vfs_compound_add_lookup(cp, "h", 1,
                                                  CHIMERA_VFS_ATTR_MASK_STAT);
 
@@ -1332,7 +1332,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_bad         = chimera_vfs_compound_add_rename(cp, "a", 1, "b", 1);
+        i_bad         = chimera_vfs_compound_add_rename(cp, "a", 1, "b", 1, 0);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
