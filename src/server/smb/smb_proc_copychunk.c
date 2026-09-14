@@ -9,6 +9,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * Server-side copy: FSCTL_SRV_REQUEST_RESUME_KEY + FSCTL_SRV_COPYCHUNK.
@@ -91,6 +92,51 @@ chimera_smb_copychunk_done(
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_copychunk_done */
 
+static void chimera_smb_copychunk_cb(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  length,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
+
+static void
+chimera_smb_copychunk_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              length = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        length = op->written;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_copychunk_cb(status, length, NULL, NULL, request);
+} /* chimera_smb_copychunk_sequence_complete */
+
+/*
+ * PUTHANDLE(src), SAVEHANDLE, PUTHANDLE(dst), COPY_RANGE.
+ *
+ * The one shape in the tree that needs TWO open handles live at once, and the
+ * reason the sequence has a saved OPEN slot beside its saved file handle: the
+ * range ops read their source from the saved slot and their destination from
+ * the current one, the way RENAME and LINK read two file handles.  SAVEHANDLE
+ * MOVES, so exactly one slot refers to each handle; both are the caller's, and
+ * the sequence releases neither.
+ *
+ * This saves no round trip -- COPYCHUNK copies chunk by chunk and each chunk
+ * is still one backend call.  It is here because it is the only exercise the
+ * saved open slot has.
+ */
 static void
 chimera_smb_copychunk_cb(
     enum chimera_vfs_error    error_code,
@@ -230,19 +276,31 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_vfs_copy_range(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.cc_src_open_file->handle,
-        request->ioctl.cc_chunks[i].src_offset,
-        request->ioctl.cc_dst_open_file->handle,
-        request->ioctl.cc_chunks[i].dst_offset,
-        request->ioctl.cc_chunks[i].length,
-        0,                     /* flags: copychunk materializes holes */
-        0,
-        0,
-        chimera_smb_copychunk_cb,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->ioctl.cc_src_open_file->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED |
+                                       CHIMERA_VFS_OPEN_READ_ONLY);
+    chimera_vfs_compound_add_savehandle(request->vfs_compound);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->ioctl.cc_dst_open_file->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+
+    chimera_vfs_compound_add_copy_range(request->vfs_compound,
+                                        NULL,
+                                        request->ioctl.cc_chunks[i].src_offset,
+                                        NULL,
+                                        request->ioctl.cc_chunks[i].dst_offset,
+                                        request->ioctl.cc_chunks[i].length,
+                                        0, /* copychunk materializes holes */
+                                        0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_copychunk_sequence_complete,
+                                request);
 } /* chimera_smb_copychunk_next */
 
 /* Source size resolved: kick off the per-chunk copy (each chunk's read range is
