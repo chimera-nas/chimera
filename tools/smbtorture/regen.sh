@@ -243,14 +243,29 @@ LOG=$(mktemp "$SMBT_OUTDIR/smbt.XXXXXX.log")
 chmod 644 "$LOG"
 cd "$SMBT_REPO"
 # Most cells finish in seconds.  smb2.maxfid opens 65520 files and then closes
-# them all, which cairn takes about 341s to do -- inside the budget on every
-# other backend, and just over it on that one, so it flapped as a regression
-# while smbtorture itself reported success.  Give that one subtest room rather
-# than raising the default: four subtests (hold-oplock, hold-sharemode,
-# lease.breaking4, aio_delay.aio_cancel) block on purpose and time out on every
-# backend by design, and a larger default would only make them wait longer.
+# them all -- 131k namespace operations, each one an intent-log transaction on
+# the journalling backends -- so its cost tracks how fast the backend can commit
+# metadata, not anything the test does differently.
+#
+# 600 was sized for cairn, which took about 341s.  Cairn passes at that budget
+# and both diskfs backends now do not: in the 2026-09-14 nightly they were still
+# making progress when the kill landed (the daemon's intent-log sequence numbers
+# were climbing throughout, and the run logged only a handful of the ~3s "IL
+# pipeline STALLED" notices), so this is the budget being too small for the
+# slowest backend, not a hang.  Sizing it for diskfs the way 600 was sized for
+# cairn means 1200, which is also what the heavier entries in
+# src/server/smb/tests/CMakeLists.txt already use.
+#
+# Give that one subtest room rather than raising the default: four subtests
+# (hold-oplock, hold-sharemode, lease.breaking4, aio_delay.aio_cancel) block on
+# purpose and time out on every backend by design, and a larger default would
+# only make them wait longer.
+#
+# This sizes the budget, it does not make diskfs faster.  If maxfid starts
+# flapping again the answer is to look at diskfs's per-create commit cost, not
+# to raise this a third time.
 case "$SUITE" in
-    smb2.maxfid) CELL_TIMEOUT=600;;
+    smb2.maxfid) CELL_TIMEOUT=1200;;
     *)           CELL_TIMEOUT=300;;
 esac
 
