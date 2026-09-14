@@ -1177,6 +1177,9 @@ chimera_vfs_compound_add_readdir_stream(
     uint64_t                              cookie,
     uint64_t                              verifier,
     uint64_t                              attr_mask,
+    uint32_t                              flags,
+    const char                           *pattern,
+    uint32_t                              pattern_len,
     chimera_vfs_compound_readdir_reset_t  reset,
     chimera_vfs_compound_readdir_append_t append,
     void                                 *private_data)
@@ -1196,12 +1199,15 @@ chimera_vfs_compound_add_readdir_stream(
         return -1;
     }
 
-    op->cookie          = cookie;
-    op->verifier        = verifier;
-    op->attr_mask       = attr_mask;
-    op->readdir_reset   = reset;
-    op->readdir_append  = append;
-    op->readdir_private = private_data;
+    op->cookie              = cookie;
+    op->verifier            = verifier;
+    op->attr_mask           = attr_mask;
+    op->readdir_flags       = flags;
+    op->readdir_pattern     = pattern;
+    op->readdir_pattern_len = pattern_len;
+    op->readdir_reset       = reset;
+    op->readdir_append      = append;
+    op->readdir_private     = private_data;
 
     return index;
 } /* chimera_vfs_compound_add_readdir_stream */
@@ -1525,6 +1531,8 @@ chimera_vfs_compound_add_write(
     uint32_t                          sync,
     struct evpl_iovec                *iov,
     int                               niov,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
     const struct chimera_claim_actor *io_owner)
 {
     struct chimera_vfs_compound_op *op;
@@ -1537,12 +1545,14 @@ chimera_vfs_compound_add_write(
         return -1;
     }
 
-    op->in_handle = handle;
-    op->offset    = offset;
-    op->count     = count;
-    op->sync      = sync;
-    op->w_iov     = iov;
-    op->w_niov    = niov;
+    op->in_handle     = handle;
+    op->offset        = offset;
+    op->count         = count;
+    op->sync          = sync;
+    op->w_iov         = iov;
+    op->w_niov        = niov;
+    op->pre_attr_mask = pre_attr_mask;
+    op->attr_mask     = post_attr_mask;
 
     if (io_owner) {
         op->io_owner      = *io_owner;
@@ -1724,15 +1734,23 @@ chimera_vfs_compound_open_callback(
  * that needs one issues the getattr itself.  Anything computed FROM the ACL
  * while it was live -- ACCESS's granted mask -- is unaffected. */
 static void
+chimera_vfs_compound_store_attr_to(
+    struct chimera_vfs_attrs       *dst,
+    const struct chimera_vfs_attrs *attr)
+{
+    *dst = *attr;
+
+    dst->va_acl       = NULL;
+    dst->va_req_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    dst->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+} /* chimera_vfs_compound_store_attr_to */
+
+static void
 chimera_vfs_compound_store_attr(
     struct chimera_vfs_compound_op *op,
     const struct chimera_vfs_attrs *attr)
 {
-    op->attr = *attr;
-
-    op->attr.va_acl       = NULL;
-    op->attr.va_req_mask &= ~CHIMERA_VFS_ATTR_ACL;
-    op->attr.va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    chimera_vfs_compound_store_attr_to(&op->attr, attr);
 } /* chimera_vfs_compound_store_attr */
 
 static void
@@ -2272,12 +2290,19 @@ chimera_vfs_compound_write_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    (void) pre_attr;
-    (void) post_attr;
-
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_compound_op_done(compound, error_code);
         return;
+    }
+
+    /* Both readings are taken by the backend around the write itself, so a
+     * caller comparing them sees this write's effect and no other's. */
+    if (pre_attr) {
+        chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
+    }
+
+    if (post_attr) {
+        chimera_vfs_compound_store_attr(op, post_attr);
     }
 
     op->written   = length;
@@ -2788,12 +2813,27 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
  * handle is not being given "more than it asked for", it is being given the
  * wrong handle -- and by the subset rule alone it would take it, because a data
  * open's flags are a subset of a path open's.
+ *
+ * The converse is not true, and treating it as though it were is what made the
+ * rule too strong.  A real descriptor does everything an O_PATH one does and
+ * more: fstat, fgetxattr, fdopendir all work on it.  PATH in `want` is a
+ * statement about what is CHEAPEST to open, not about what is REQUIRED -- so an
+ * op that would have opened a path handle is served by a data handle already in
+ * hand.  SMB2 is where this bites: it opens a directory for enumeration with
+ * FILE_LIST_DIRECTORY, which is a data open, and then lends that handle to a
+ * QUERY_DIRECTORY whose READDIR would have preferred O_PATH.  Refusing it left
+ * the caller nothing it could legally do -- it may not substitute a different
+ * handle for a lent one -- so every enumeration failed.
  */
 static int
 chimera_vfs_compound_handle_serves(
     unsigned int have,
     unsigned int want)
 {
+    if (!(have & CHIMERA_VFS_OPEN_PATH)) {
+        want &= ~CHIMERA_VFS_OPEN_PATH;
+    }
+
     if (want & ~have) {
         return 0;
     }
@@ -3044,7 +3084,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 chimera_vfs_write_owned(compound->thread, compound->cred,
                                         target,
                                         op->offset, op->count, op->sync,
-                                        0, 0,
+                                        op->pre_attr_mask, op->attr_mask,
                                         op->w_iov, op->w_niov,
                                         &op->io_owner,
                                         chimera_vfs_compound_write_callback,
@@ -3053,7 +3093,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 chimera_vfs_write(compound->thread, compound->cred,
                                   target,
                                   op->offset, op->count, op->sync,
-                                  0, 0,
+                                  op->pre_attr_mask, op->attr_mask,
                                   op->w_iov, op->w_niov,
                                   chimera_vfs_compound_write_callback,
                                   compound);
@@ -3471,8 +3511,9 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                 0,
                                 op->cookie,
                                 op->verifier,
-                                0,
-                                NULL, 0,
+                                op->readdir_flags,
+                                op->readdir_pattern,
+                                op->readdir_pattern_len,
                                 chimera_vfs_compound_readdir_entry,
                                 chimera_vfs_compound_readdir_callback,
                                 compound);

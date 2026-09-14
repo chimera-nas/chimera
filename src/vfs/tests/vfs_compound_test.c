@@ -1199,7 +1199,9 @@ main(
         memcpy(evpl_iovec_data(&wiov), payload, 8);
 
         cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
-        i_wr = chimera_vfs_compound_add_write(cp, oh, 0, 8, 2, &wiov, 1, NULL);
+        i_wr = chimera_vfs_compound_add_write(cp, oh, 0, 8, 2, &wiov, 1,
+                                              CHIMERA_VFS_ATTR_SIZE,
+                                              CHIMERA_VFS_ATTR_SIZE, NULL);
         i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 8, rdiov, 16, NULL);
 
         ctx.callbacks = 0;
@@ -1212,6 +1214,14 @@ main(
         op = chimera_vfs_compound_op(cp, i_wr);
         assert(op->status == CHIMERA_VFS_OK);
         assert(op->written == 8);
+
+        /* The write's own two readings bracket the write: a caller reporting
+         * the change -- NFSv3 wcc_data, SMB2's sticky write time -- reads them
+         * instead of racing a GETATTR against another writer. */
+        assert(op->pre_attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->pre_attr.va_size == 0);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->attr.va_size == 8);
 
         /* The READ in the same sequence saw what the WRITE in front of it
          * put there. */

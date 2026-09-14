@@ -3304,6 +3304,7 @@ chimera_nfs4_compound_try_vfs(
                         argop->opwrite.stable,
                         argop->opwrite.data.iov,
                         argop->opwrite.data.niov,
+                        0, 0,
                         have_owner ? &io_owner : NULL);
                 }
 
@@ -3460,6 +3461,7 @@ chimera_nfs4_compound_try_vfs(
                     nfs4_vfs_readdir_verifier(&argop->opreaddir),
                     chimera_nfs4_attr2mask(argop->opreaddir.attr_request,
                                            argop->opreaddir.num_attr_request),
+                    0, NULL, 0,
                     nfs4_vfs_readdir_reset,
                     nfs4_vfs_readdir_append,
                     ctx);
