@@ -87,31 +87,30 @@ mbt_add_krb5(ctl_mbt_replay)
 # Trace corpus
 # ---------------------------------------------------------------------------
 #
-# --backend=rust, quint's default, pinned explicitly so a future change of that
-# default cannot move the corpus silently.
+# --backend=typescript, pinned explicitly so a future change of quint's default
+# cannot move the corpus silently.
 #
-# This was typescript, for two reasons that have both since expired.  The first
-# was that the rust backend downloads its evaluator from GitHub on first use --
-# rate-limited, and quint aborts rather than falling back, which killed a macOS
-# merge-queue run 176 build steps in.  Nothing downloads it now: the CI images
-# take the pre-warmed evaluator from the mirrored ghcr.io/chimera-nas/quint
-# image, and the macOS jobs place it from that image's darwin payload.  The
-# second was that typescript measured faster at this size (self-test 8.6s
-# against 12.4s).  Re-measured on this model today, the two are level on the
-# self-test (1.03s each) and rust is ahead on generation (4.06s against 4.41s).
+# This was rust, and the argument for it rested on two claims that were true
+# when it was written and are not now.  "Every image that carries quint carries
+# the evaluator" is the one that matters: ubuntu 22.04 and rocky 9 ship quint
+# deliberately WITHOUT it, because it is published only against glibc 2.39 and
+# those images have 2.35 and 2.34.  They used to carry no quint at all, so this
+# suite disabled itself there and the question never came up; generating the
+# corpus at build time gave them one.  quint aborts rather than falling back,
+# so naming rust there fails the BUILD.  The other claim -- that ext/specs and
+# libevpl both generate with rust -- has also expired: SpecsCorpus.cmake now
+# defaults to typescript for this same reason, and libevpl pinned it fleet-wide
+# in chimera-nas/libevpl#172.
 #
-# Which way it should go from here is not close.  These models grow, and the
-# gap widens with them -- on libevpl's larger models rust is 2.4x faster -- and
-# both ext/specs and libevpl generate their corpora with rust, so this is also
-# the consistent answer.
+# Rust is genuinely faster and the gap widens with model size (2.4x on
+# libevpl's larger models; on this one, level on the self-test and 4.06s
+# against 4.41s on generation).  That is the cost, and it is worth paying: a
+# backend that cannot run somewhere costs that platform its suites outright.
 #
 # Switching backends changes the corpus: the same seed walks differently under
 # each.  That is safe here because the traces are generated and consumed within
 # one build, and it was checked rather than assumed -- the coverage gate below
 # reports 39/39 buckets over 32 traces under either backend.
-#
-# It does mean the evaluator has to be present.  Every image that carries quint
-# carries it; a developer box without it will fetch it once on the first build.
 #
 # Generated at build time by quint.  When quint is not installed the probes
 # above still build and run -- they need no corpus -- and only the replay
@@ -161,7 +160,7 @@ set(CTL_QNT
 # at its source instead of producing traces that assert the wrong thing.
 set(CTL_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/ctlTest.stamp)
 add_custom_command(OUTPUT ${CTL_SELFTEST}
-    COMMAND ${QUINT_BIN} test --backend=rust
+    COMMAND ${QUINT_BIN} test --backend=typescript
             --main=ctlTestRef ${CTL_Q}/ctlTest.qnt > /dev/null
     COMMAND ${CMAKE_COMMAND} -E touch ${CTL_SELFTEST}
     DEPENDS ${CTL_QNT} ${CTL_Q}/ctlTest.qnt
@@ -203,7 +202,7 @@ foreach(b ${CTL_BATCHES})
 
     add_custom_command(OUTPUT ${batch}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CTL_T}
-        COMMAND ${QUINT_BIN} run --backend=rust
+        COMMAND ${QUINT_BIN} run --backend=typescript
                 ${CTL_Q}/ctl_run.qnt --main=${prof}
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
