@@ -516,6 +516,33 @@ chimera_client_req_cred(const struct chimera_client_request *request)
     return request->has_cred ? &request->req_cred : &request->thread->client->cred;
 } /* chimera_client_req_cred */
 
+/*
+ * Start a sequence at the export root.
+ *
+ * Every path-addressed operation in the SDK resolves from there, so the shape
+ * is always the same: select the root, then one op carrying the whole path.
+ * The client has no other starting point -- only the root file handle is
+ * re-openable on a path-only mount, which is the reason these operations are
+ * path-addressed at all.
+ */
+static inline struct chimera_vfs_compound *
+chimera_client_compound_at_root(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          chimera_client_req_cred(request));
+
+    chimera_vfs_compound_add_putfh(compound, thread->client->root_fh,
+                                   thread->client->root_fh_len);
+
+    request->compound = compound;
+
+    return compound;
+} /* chimera_client_compound_at_root */
+
 static inline struct chimera_client_request *
 chimera_client_request_alloc(struct chimera_client_thread *thread)
 {

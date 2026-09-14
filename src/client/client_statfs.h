@@ -105,21 +105,66 @@ chimera_statfs_open_complete(
  * path-only mounts that return no re-openable child fh from lookup), then read
  * the statfs attributes from the resulting handle.
  */
+static void
+chimera_statfs_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_client_request        *request = private_data;
+    struct chimera_client_thread         *thread  = request->thread;
+    const struct chimera_vfs_compound_op *op;
+    chimera_statfs_callback_t             callback       = request->statfs.callback;
+    void                                 *callback_arg   = request->statfs.private_data;
+    int                                   heap_allocated = request->heap_allocated;
+    struct chimera_statvfs                st;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        chimera_attrs_to_statvfs((struct chimera_vfs_attrs *) &op->attr, &st);
+    }
+
+    /* Written out rather than routed through chimera_statfs_getattr_complete,
+    * which releases the handle the per-op path opened: the sequence owns that
+    * one and frees it below, and chimera_vfs_release does not take a NULL. */
+    if (heap_allocated) {
+        chimera_client_request_free(thread, request);
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    callback(thread, status, status == CHIMERA_VFS_OK ? &st : NULL,
+             callback_arg);
+} /* chimera_statfs_sequence_complete */
+
 static inline void
 chimera_dispatch_statfs(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_open(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->statfs.path,
-        request->statfs.path_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
-        NULL, /* set_attr */
-        0,    /* attr_mask */
-        chimera_statfs_open_complete,
-        request);
+    struct chimera_vfs_compound *compound;
+    int                          open_idx, stat_idx;
+
+    compound = chimera_client_compound_at_root(thread, request);
+
+    open_idx = chimera_vfs_compound_add_open_path(
+        compound, request->statfs.path, request->statfs.path_len,
+        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED, NULL, 0);
+
+    stat_idx = chimera_vfs_compound_add_getattr(compound,
+                                                CHIMERA_VFS_ATTR_MASK_STATFS);
+
+    /* Address the handle the open produced rather than the current object:
+     * on a path-only mount that handle is the only usable reference to what
+     * the path resolved. */
+    if (open_idx >= 0 && stat_idx >= 0) {
+        chimera_vfs_compound_op_use_handle(compound, (uint32_t) stat_idx,
+                                           (uint32_t) open_idx);
+    }
+
+    chimera_vfs_compound_submit(compound, chimera_statfs_sequence_complete,
+                                request);
 } /* chimera_dispatch_statfs */

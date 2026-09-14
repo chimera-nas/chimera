@@ -76,12 +76,41 @@ chimera_setattr_open_complete(
  * strategy.  This avoids relying on a re-openable child fh from lookup, which
  * path-only mounts do not return.
  */
+static void
+chimera_setattr_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_client_request *request        = private_data;
+    struct chimera_client_thread  *thread         = request->thread;
+    chimera_setattr_callback_t     callback       = request->setattr.callback;
+    void                          *callback_arg   = request->setattr.private_data;
+    int                            heap_allocated = request->heap_allocated;
+    enum chimera_vfs_error         status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    /* The tail is written out rather than routed through
+     * chimera_setattr_vfs_complete, which releases the handle the per-op path
+     * opened: here the sequence owns that handle and frees it below, and
+     * chimera_vfs_release does not take a NULL. */
+    if (heap_allocated) {
+        chimera_client_request_free(thread, request);
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    callback(thread, status, callback_arg);
+} /* chimera_setattr_sequence_complete */
+
 static inline void
 chimera_dispatch_setattr(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    unsigned int open_flags;
+    struct chimera_vfs_compound *compound;
+    unsigned int                 open_flags;
+    int                          open_idx, set_idx;
 
     /*
      * Use a real file handle instead of OPEN_PATH when setting size, because
@@ -99,18 +128,26 @@ chimera_dispatch_setattr(
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
     }
 
-    chimera_vfs_open(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->setattr.path,
-        request->setattr.path_len,
-        open_flags,
-        NULL, /* set_attr */
-        0,    /* attr_mask */
-        chimera_setattr_open_complete,
-        request);
+    compound = chimera_client_compound_at_root(thread, request);
+
+    open_idx = chimera_vfs_compound_add_open_path(
+        compound, request->setattr.path, request->setattr.path_len,
+        open_flags, NULL, 0);
+
+    /* Addressing the open's handle rather than handing it in keeps this a
+     * setattr rather than an fsetattr -- the object's own mode is rechecked,
+     * which is what truncate(2) by path means, and what the per-operation
+     * path did. */
+    set_idx = chimera_vfs_compound_add_setattr(compound, NULL,
+                                               &request->setattr.set_attr, 0);
+
+    if (open_idx >= 0 && set_idx >= 0) {
+        chimera_vfs_compound_op_use_handle(compound, (uint32_t) set_idx,
+                                           (uint32_t) open_idx);
+    }
+
+    chimera_vfs_compound_submit(compound, chimera_setattr_sequence_complete,
+                                request);
 } /* chimera_dispatch_setattr */
 
 /* Variant that does NOT follow a final symlink (for lchown(2) and friends): the

@@ -59,20 +59,49 @@ chimera_stat_lookup_complete(
     callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
 } /* chimera_stat_lookup_complete */
 
+static void
+chimera_stat_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    memset(&attr, 0, sizeof(attr));
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        attr = op->attr;
+    }
+
+    /* Taken out before the free: a freed sequence is recycled and reset. */
+    chimera_vfs_compound_free(compound);
+
+    chimera_stat_lookup_complete(status, &attr, private_data);
+} /* chimera_stat_sequence_complete */
+
 static inline void
 chimera_dispatch_stat(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_lookup(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->stat.path,
-        request->stat.path_len,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        request->stat.flags,
-        chimera_stat_lookup_complete,
-        request);
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_client_compound_at_root(thread, request);
+
+    /* One op for the whole path: the lookup returns the attributes with it, so
+    * there is no open and no getattr -- which is also what makes this work on
+    * a path-only mount, where the resolved child has no re-openable handle. */
+    chimera_vfs_compound_add_lookup_path(compound,
+                                         request->stat.path,
+                                         request->stat.path_len,
+                                         CHIMERA_VFS_ATTR_MASK_STAT,
+                                         request->stat.flags);
+
+    chimera_vfs_compound_submit(compound, chimera_stat_sequence_complete,
+                                request);
 } /* chimera_dispatch_stat */
