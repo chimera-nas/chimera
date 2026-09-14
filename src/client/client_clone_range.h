@@ -49,8 +49,16 @@ chimera_dispatch_clone_range(
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* Two objects, both the caller's: a range op never addresses the
-     * sequence's current object, because there is only one of those. */
+    /* Source into the saved open slot, destination into the current one --
+     * the shape the range ops read in the cursor model.  The handles stay on
+     * the op until the dispatch reads the cursors instead. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->clone_range.src_handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+    chimera_vfs_compound_add_savehandle(request->compound);
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->clone_range.dst_handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
     chimera_vfs_compound_add_clone_range(request->compound,
                                          request->clone_range.src_handle,
                                          request->clone_range.src_offset,

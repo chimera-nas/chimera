@@ -148,6 +148,10 @@ chimera_dispatch_write(
 
     /* Handle and payload are both the request's, borrowed for the sequence;
      * the payload is released by chimera_write_complete. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->write.handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+    /* The handle stays on the op too -- see chimera_dispatch_read. */
     chimera_vfs_compound_add_write(request->compound,
                                    request->write.handle,
                                    request->write.offset,

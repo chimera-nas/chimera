@@ -85,6 +85,12 @@ chimera_fuse_op_lookup(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY,
+                                          0);
+
     chimera_vfs_compound_add_lookup(req->compound, name, (int) strlen(name),
                                     CHIMERA_FUSE_ATTR_MASK);
 

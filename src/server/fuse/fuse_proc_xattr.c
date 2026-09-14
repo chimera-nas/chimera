@@ -99,6 +99,11 @@ chimera_fuse_op_getxattr(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_getxattr(req->compound, name, (int) strlen(name),
                                       CHIMERA_FUSE_XATTR_MAX);
 
@@ -167,6 +172,11 @@ chimera_fuse_op_setxattr(
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
     /* The value is borrowed: it points into the request buffer, which outlives
      * the sequence. */
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_setxattr(req->compound, option,
                                       name, (int) strlen(name),
                                       value, size);
@@ -265,6 +275,11 @@ chimera_fuse_op_listxattr(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_listxattrs(req->compound, 0,
                                         CHIMERA_FUSE_XATTR_MAX);
 
@@ -292,6 +307,11 @@ chimera_fuse_op_removexattr(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_removexattr(req->compound, name,
                                          (int) strlen(name));
 

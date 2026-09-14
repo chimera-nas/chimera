@@ -551,13 +551,11 @@ chimera_client_compound_at_root(
 {
     struct chimera_vfs_compound *compound;
 
-    chimera_client_refresh_root(thread);
-
     compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                           chimera_client_req_cred(request));
 
-    chimera_vfs_compound_add_putfh(compound, thread->root_fh,
-                                   thread->root_fh_len);
+    /* Resolve the current namespace root when the sequence executes. */
+    chimera_vfs_compound_add_putroot(compound);
 
     request->compound = compound;
 

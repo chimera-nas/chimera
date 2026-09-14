@@ -60,17 +60,18 @@ chimera_dispatch_fstat(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    int idx;
-
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* The caller holds the handle; the sequence borrows it and has no current
-     * object of its own. */
-    idx = chimera_vfs_compound_add_getattr(request->compound,
-                                           CHIMERA_VFS_ATTR_MASK_STAT);
-    chimera_vfs_compound_op_set_handle(request->compound, (uint32_t) idx,
-                                       request->fstat.handle);
+    /* The caller's handle becomes the current open handle; GETATTR reads it.
+     * The flags say what the following op needs rather than what the handle
+     * is, so the sequence accepts it instead of opening one of its own. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->fstat.handle,
+                                       CHIMERA_VFS_OPEN_INFERRED |
+                                       CHIMERA_VFS_OPEN_PATH);
+    chimera_vfs_compound_add_getattr(request->compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT);
 
     chimera_vfs_compound_submit(request->compound,
                                 chimera_fstat_sequence_complete, request);

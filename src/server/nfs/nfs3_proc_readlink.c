@@ -6,6 +6,7 @@
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
@@ -48,44 +49,62 @@ chimera_nfs3_readlink_complete(
     rc = shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, NULL, res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_readlink_complete */
 
 
+
+/*
+ * PUTFH, OPEN, GETATTR, READLINK -- four ops, ONE open.  READLINK itself
+ * fetches no attributes, and NFS3 needs them twice over: for the post-op
+ * symlink attributes, and for the S_ISLNK check RFC 1813 3.3.5 requires.  A
+ * GETATTR ahead of it on the same current object costs nothing but a slot,
+ * because the open is already there.
+ */
 static void
-chimera_nfs3_readlink_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs3_readlink_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct READLINK3res              *res    = &req->res_readlink;
-    int                               rc;
+    struct nfs_request                   *req = private_data;
+    struct READLINK3res                  *res = &req->res_readlink;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                status;
+    uint32_t                              last;
+    int                                   targetlen = 0;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
-        chimera_vfs_readlink(thread->vfs_thread, &req->cred,
-                             handle,
-                             res->resok.data.str,
-                             res->resok.data.len,
-                             CHIMERA_NFS3_ATTR_MASK,
-                             chimera_nfs3_readlink_complete,
-                             req);
+    status = chimera_vfs_compound_status(compound);
 
-    } else {
-        res->status                                     = chimera_vfs_error_to_nfsstat3(error_code);
-        res->resok.symlink_attributes.attributes_follow = 0;
-        rc                                              = shared->nfs_v3.send_reply_NFSPROC3_READLINK(evpl, NULL, res,
-                                                                                                      req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    memset(&attr, 0, sizeof(attr));
+
+    /* Everything out of the sequence before it is freed and recycled. */
+    if (status == CHIMERA_VFS_OK) {
+        last = chimera_vfs_compound_num_ops(compound) - 1;
+
+        attr = chimera_vfs_compound_op(compound, last - 1)->attr;
+
+        op = chimera_vfs_compound_op(compound, last);
+
+        targetlen = (int) op->target_len;
+
+        if (targetlen > (int) res->resok.data.len) {
+            targetlen = (int) res->resok.data.len;
+        }
+
+        if (targetlen > 0 && op->target) {
+            memcpy(res->resok.data.str, op->target, targetlen);
+        }
     }
-} /* chimera_nfs3_readlink_open_callback */
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_readlink_complete(status, targetlen,
+                                   status == CHIMERA_VFS_OK ? &attr : NULL,
+                                   req);
+} /* chimera_nfs3_readlink_sequence_complete */
+
 
 void
 chimera_nfs3_readlink(
@@ -99,6 +118,7 @@ chimera_nfs3_readlink(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
     struct READLINK3res              *res;
     int                               rc;
 
@@ -125,11 +145,15 @@ chimera_nfs3_readlink(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs3_readlink_open_callback,
-                        req);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+    chimera_vfs_compound_add_getattr(compound, CHIMERA_NFS3_ATTR_MASK);
+    chimera_vfs_compound_add_readlink(compound);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_readlink_sequence_complete, req);
 
 } /* chimera_nfs3_readlink */
