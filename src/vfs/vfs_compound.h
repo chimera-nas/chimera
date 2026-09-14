@@ -28,6 +28,51 @@
  * retrying the sequence after a conflict -- is invisible, and the caller
  * cannot have acted on an answer that a retry would invalidate.
  *
+ * ADDRESSING: FOUR CURSORS.  A sequence carries four pieces of state, and every
+ * op reads whichever ones its underlying VFS call takes.  No op is handed a file
+ * handle or an open handle as an argument -- that is what the cursors are for,
+ * and four different ways of saying "act on this object" is what this design
+ * replaced.
+ *
+ *   CURRENT FH     a file handle: a NAME.  Set by PUTFH/PUTROOT, and by the ops
+ *                  that resolve an object (LOOKUP, and the path ops).
+ *   SAVED FH       a parked copy of it.  SAVEFH COPIES -- a name may exist in
+ *                  two places, and NFSv4's wire SAVEFH leaves the current
+ *                  filehandle in place, so the sequence must too.
+ *   CURRENT OPEN   an open handle: a REFERENCE.  Set by OPEN (which opens the
+ *                  current FH) and by PUTHANDLE (which lends the caller's).
+ *   SAVED OPEN     a parked one.  SAVEHANDLE MOVES -- a reference has exactly
+ *                  one owner, so parking it takes it out of the current slot.
+ *                  (A copy would mean two owners; see the SAVED SLOT note in
+ *                  vfs_compound.c for why that was avoided.)
+ *
+ * So the two two-operand families fall out symmetrically: RENAME and LINK name
+ * two objects and read (SAVED FH, CURRENT FH); COPY_RANGE, CLONE_RANGE and
+ * MOVE_RANGE act on two open files and read (SAVED OPEN, CURRENT OPEN).
+ *
+ * OPENING IS EXPLICIT.  The sequence never opens anything by itself.  A caller
+ * that wants to GETATTR an object says PUTFH, OPEN, GETATTR -- which is what it
+ * already wrote by hand before sequences existed, and it is the caller, not the
+ * VFS, that knows what the open is for.  The alternative (the executor choosing
+ * open flags from a per-op-type table) is what produced an O_PATH descriptor
+ * handed to fgetxattr, and a data open of a FIFO that blocked.
+ *
+ * It also buys what an implicit open cannot: three lookups in one directory are
+ * OPEN once and LOOKUP three times, where an implicitly-opened sequence must
+ * re-PUTFH the parent between them and re-open it each time.
+ *
+ * HANDLE OWNERSHIP, in three rules:
+ *
+ *   1. The sequence owns what OPEN opened, and releases it when the slot is
+ *      overwritten or the sequence ends.
+ *   2. GETHANDLE transfers that ownership to the caller, which collects the
+ *      handle from the op's result and releases it itself.  PUTHANDLE's handle
+ *      is the caller's already and is never released by the sequence.
+ *   3. CLOSE ends the handle whatever its provenance -- that is the point of
+ *      it, and it is what an SMB2 CLOSE or an NFSv4 CLOSE means.  After a CLOSE
+ *      the caller must NOT release that handle itself, including one it lent
+ *      with PUTHANDLE.
+ *
  * WHAT THIS IS NOT.  The sequence is not handed to a backend as a batch and it
  * is not atomic.  The VFS executes the ops one at a time through the ordinary
  * per-op path, so every backend, every cache and every claim behaves exactly
@@ -210,6 +255,13 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_RENAME_PATH,
     CHIMERA_VFS_COMPOUND_OP_LINK_PATH,
     CHIMERA_VFS_COMPOUND_OP_PUTHANDLE,
+    /* The cursor operations of the four-cursor model.  See ADDRESSING. */
+    CHIMERA_VFS_COMPOUND_OP_PUTROOT,
+    CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT,
+    CHIMERA_VFS_COMPOUND_OP_GETHANDLE,
+    CHIMERA_VFS_COMPOUND_OP_CLOSE,
+    CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE,
+    CHIMERA_VFS_COMPOUND_OP_RESTOREHANDLE,
 };
 
 #define CHIMERA_VFS_COMPOUND_MAX_OPS             32
@@ -829,6 +881,58 @@ chimera_vfs_compound_add_open(
  * `path` is copied.  The flags are the CHIMERA_VFS_* words the path-based VFS
  * calls take, and mean exactly what they mean there.
  */
+/* ---- the cursor operations ---- */
+
+/* The export root becomes the current FILE HANDLE.  Every path-addressed
+ * sequence starts here, and on a path-only mount it is the only file handle
+ * that means anything. */
+int
+chimera_vfs_compound_add_putroot(
+    struct chimera_vfs_compound *compound);
+
+/* Open the current FILE HANDLE; the result becomes the current OPEN HANDLE.
+ *
+ * `flags` is an ordinary CHIMERA_VFS_OPEN_* word and means what it means to
+ * chimera_vfs_open_fh.  The caller chooses it because the caller is what knows
+ * why it is opening -- to read data, to resolve names in a directory, to read
+ * an attribute off an object of unknown type.
+ *
+ * The handle belongs to the sequence unless GETHANDLE takes it.  Opening again
+ * releases whatever the slot held (unless that was borrowed or taken). */
+int
+chimera_vfs_compound_add_open_current(
+    struct chimera_vfs_compound *compound,
+    unsigned int                 flags,
+    uint64_t                     attr_mask);
+
+/* Take the current OPEN HANDLE for the caller: the sequence stops owning it,
+ * and it is readable as this op's out_handle once the sequence has finished.
+ * The current open slot keeps addressing it -- taking is about who releases it,
+ * not about where it is. */
+int
+chimera_vfs_compound_add_gethandle(
+    struct chimera_vfs_compound *compound);
+
+/* End the current OPEN HANDLE and empty the slot.
+ *
+ * Provenance does not matter: a handle lent with PUTHANDLE is closed too, which
+ * is exactly what an SMB2 or NFSv4 CLOSE of a client's open means.  The caller
+ * must not release that handle afterwards. */
+int
+chimera_vfs_compound_add_close(
+    struct chimera_vfs_compound *compound);
+
+/* Park the current OPEN HANDLE in the saved slot, and take it back.  Both MOVE:
+ * the source slot is empty afterwards.  Anything the destination slot held is
+ * released first, on the ordinary ownership rules. */
+int
+chimera_vfs_compound_add_savehandle(
+    struct chimera_vfs_compound *compound);
+
+int
+chimera_vfs_compound_add_restorehandle(
+    struct chimera_vfs_compound *compound);
+
 /* Make the caller's OPEN HANDLE the current object.
  *
  * PUTFH names the current object by file handle and leaves the sequence to
