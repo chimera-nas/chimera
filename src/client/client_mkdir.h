@@ -23,11 +23,37 @@ chimera_mkdir_vfs_complete(
     callback(thread, error_code, callback_arg);
 } /* chimera_mkdir_vfs_complete */
 
+static void
+chimera_mkdir_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    memset(&attr, 0, sizeof(attr));
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        attr = op->attr;
+    }
+
+    /* Taken out before the free: a freed sequence is recycled and reset. */
+    chimera_vfs_compound_free(compound);
+
+    chimera_mkdir_vfs_complete(status, &attr, private_data);
+} /* chimera_mkdir_sequence_complete */
+
 static inline void
 chimera_dispatch_mkdir(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    struct chimera_vfs_compound *compound;
 
     if (unlikely(request->mkdir.name_offset == -1)) {
         /* Caller is trying to mkdir the root directory, which always exists already */
@@ -35,18 +61,18 @@ chimera_dispatch_mkdir(
         return;
     }
 
+    compound = chimera_client_compound_at_root(thread, request);
+
     /* set_attr (creation mode) is initialized by the caller. */
-    chimera_vfs_mkdir(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->mkdir.path,
-        request->mkdir.path_len,
-        &request->mkdir.set_attr,
-        0,
-        chimera_mkdir_vfs_complete,
-        request);
+    chimera_vfs_compound_add_create_path(compound,
+                                         CHIMERA_VFS_COMPOUND_CREATE_DIR,
+                                         request->mkdir.path,
+                                         request->mkdir.path_len,
+                                         NULL, 0,
+                                         &request->mkdir.set_attr, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_mkdir_sequence_complete,
+                                request);
 } /* chimera_dispatch_mkdir */
 
 static void

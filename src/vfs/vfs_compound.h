@@ -202,6 +202,13 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE,
     CHIMERA_VFS_COMPOUND_OP_WRITE_SAME,
     CHIMERA_VFS_COMPOUND_OP_READ_PLUS,
+    /* Path-addressed.  See the note on ->path. */
+    CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH,
+    CHIMERA_VFS_COMPOUND_OP_OPEN_PATH,
+    CHIMERA_VFS_COMPOUND_OP_CREATE_PATH,
+    CHIMERA_VFS_COMPOUND_OP_REMOVE_PATH,
+    CHIMERA_VFS_COMPOUND_OP_RENAME_PATH,
+    CHIMERA_VFS_COMPOUND_OP_LINK_PATH,
 };
 
 #define CHIMERA_VFS_COMPOUND_MAX_OPS             32
@@ -365,6 +372,25 @@ struct chimera_vfs_compound_op {
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
      * name has been resolved. */
     struct chimera_vfs_attrs              set_attr;
+    /* A PATH-ADDRESSED op resolves this, relative to the sequence's current
+     * file handle, instead of addressing the current object.  Owned by the
+     * compound and copied by the adder.
+     *
+     * This is the only way to reach an object on a path-only mount, where a
+     * child's handle is an opaque per-open token that open_fh cannot reopen --
+     * so the current object there can only ever be the mount root, and every
+     * operation has to name its target by path from it.  It is also one call
+     * where chaining would be several, on every backend. */
+    char                                 *path;
+    uint32_t                              path_len;
+    /* RENAME and LINK name two paths; this is the destination. */
+    char                                 *new_path;
+    uint32_t                              new_path_len;
+    /* Address the handle that op `handle_from` produced, rather than the
+     * current object -- for the op after a path OPEN, whose result is the only
+     * usable reference to an object a path-only mount will not reopen.  -1
+     * when unused, which the adders leave it as. */
+    int                                   handle_from;
     /* The range ops (COPY_RANGE, CLONE_RANGE, MOVE_RANGE) address TWO objects,
      * and both are caller-supplied: `in_handle` is the destination, the object
      * being written, and this is the source.  Neither ever addresses the
@@ -789,6 +815,82 @@ chimera_vfs_compound_add_open(
     uint32_t                        opts,
     const struct chimera_vfs_attrs *set_attr,
     uint64_t                        attr_mask);
+
+/* ---- path-addressed operations ----
+ *
+ * Each resolves a whole path against the sequence's CURRENT FILE HANDLE -- not
+ * the current open handle, which is the point: these need nothing opened, and
+ * on a path-only mount there is nothing openable to reach.  The object a path
+ * op resolves becomes current, so a LOOKUP_PATH can be followed by an op that
+ * addresses it; on a path-only mount, though, only what the op itself returns
+ * is usable, so ask for the attributes you need on the op that resolves them.
+ *
+ * `path` is copied.  The flags are the CHIMERA_VFS_* words the path-based VFS
+ * calls take, and mean exactly what they mean there.
+ */
+int
+chimera_vfs_compound_add_lookup_path(
+    struct chimera_vfs_compound *compound,
+    const char                  *path,
+    int                          pathlen,
+    uint64_t                     attr_mask,
+    uint32_t                     flags);
+
+int
+chimera_vfs_compound_add_open_path(
+    struct chimera_vfs_compound    *compound,
+    const char                     *path,
+    int                             pathlen,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+/* `create_type` is a CHIMERA_VFS_COMPOUND_CREATE_*, as for the name-based
+ * CREATE; `target` is the symlink target and read only for a symlink. */
+int
+chimera_vfs_compound_add_create_path(
+    struct chimera_vfs_compound    *compound,
+    uint8_t                         create_type,
+    const char                     *path,
+    int                             pathlen,
+    const char                     *target,
+    int                             targetlen,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+int
+chimera_vfs_compound_add_remove_path(
+    struct chimera_vfs_compound *compound,
+    const char                  *path,
+    int                          pathlen,
+    unsigned int                 flags);
+
+int
+chimera_vfs_compound_add_rename_path(
+    struct chimera_vfs_compound *compound,
+    const char                  *old_path,
+    int                          old_pathlen,
+    const char                  *new_path,
+    int                          new_pathlen);
+
+int
+chimera_vfs_compound_add_link_path(
+    struct chimera_vfs_compound *compound,
+    const char                  *old_path,
+    int                          old_pathlen,
+    unsigned int                 source_lookup_flags,
+    const char                  *new_path,
+    int                          new_pathlen,
+    uint64_t                     attr_mask);
+
+/* Make op `index` address the handle op `from` produced, instead of the
+* current object.  For the operation after a path OPEN: on a path-only mount
+* that handle is the only usable reference to what the open resolved. */
+void
+chimera_vfs_compound_op_use_handle(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    uint32_t                     from);
 
 /* Register a veto consulted as each op finishes -- see
  * chimera_vfs_compound_gate_t.  Optional; without one the sequence is governed
