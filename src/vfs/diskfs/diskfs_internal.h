@@ -5441,17 +5441,41 @@ diskfs_map_attrs(
         if (attr->va_fs_space_free > attr->va_fs_space_total) {
             attr->va_fs_space_free = attr->va_fs_space_total;
         }
-        attr->va_fs_space_used = attr->va_fs_space_total - attr->va_fs_space_free;
-        /* space_free stays the honest free-extent sum; space_avail is what a
-         * writer can actually place, i.e. free less the internal reserve.
-         * (POSIX f_bfree vs f_bavail; ext4 subtracts its reserve from bavail
-         * the same way.) */
+        /*
+         * Hold the reserve back from BOTH free and avail.
+         *
+         * The ext4/XFS analogy that shaped the first cut of this only goes so
+         * far.  Their reserved blocks are a *privilege* reserve: root may spend
+         * them, so counting them in f_bfree is true, and root's
+         * fallocate(f_bfree) legitimately succeeds.  Ours is metadata slop --
+         * the extent records for a large allocation have to be written
+         * somewhere -- and no caller, root included, can turn it into file
+         * data.  Reporting it in f_bfree therefore overstates what is
+         * obtainable, and a root-privileged caller that believes f_bfree (as
+         * nfstest_alloc's get_freebytes() does) asks for space that cannot
+         * exist and gets ENOSPC.
+         *
+         * So space_free is the free-extent sum less the reserve: what a writer
+         * can actually place.  space_avail is the same figure -- there is no
+         * second, lower class of caller to distinguish, because the reserve is
+         * not spendable by anyone.  space_total stays the honest capacity, so
+         * space_used absorbs the reserve, which is accurate: the filesystem
+         * really is holding it.
+         *
+         * This is only safe to report because the allocator can now reach
+         * essentially all of what it advertises -- claim recall
+         * (sm_ag_recall_claims_locked) hands back the bump reservations that
+         * used to strand whole megabytes inside idle threads' claims.  Without
+         * that, subtracting a reserve here would just move the cliff.
+         */
         {
             uint64_t reserve = diskfs_space_reserve_bytes(shared);
 
-            attr->va_fs_space_avail = attr->va_fs_space_free > reserve
+            attr->va_fs_space_free = attr->va_fs_space_free > reserve
                 ? attr->va_fs_space_free - reserve : 0;
         }
+        attr->va_fs_space_used  = attr->va_fs_space_total - attr->va_fs_space_free;
+        attr->va_fs_space_avail = attr->va_fs_space_free;
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
