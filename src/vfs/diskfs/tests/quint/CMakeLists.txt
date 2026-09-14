@@ -60,10 +60,23 @@ set(DFS_Q ${CMAKE_CURRENT_SOURCE_DIR})
 set(DFS_T ${CMAKE_CURRENT_BINARY_DIR}/traces)
 set(DFS_QNT ${DFS_Q}/diskfs.qnt ${DFS_Q}/diskfs_run.qnt)
 
+# Which simulator backend drives this suite.  TypeScript, for the reason
+# SpecsCorpus.cmake gives at length: the Rust evaluator is published only
+# against glibc 2.39 and cannot execute on the ubuntu 22.04 (2.35) or rocky 9
+# (2.34) CI images.  Those images used to carry no quint at all, so this suite
+# disabled itself there and the question never arose; they have one now, so the
+# suite activates and the rust evaluator aborts the BUILD -- attributed to
+# cmake, several minutes before any test runs.
+#
+# The generated traces are not the traces rust produced (the two backends walk
+# the same seed differently), but they are the same on every platform, which is
+# the property that matters.
+set(DFS_QUINT_BACKEND typescript)
+
 # Model self-tests gate generation.
 set(DFS_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/diskfsTest.stamp)
 add_custom_command(OUTPUT ${DFS_SELFTEST}
-    COMMAND ${QUINT_BIN} test --backend=rust
+    COMMAND ${QUINT_BIN} test --backend=${DFS_QUINT_BACKEND}
             --main=diskfsTestRef ${DFS_Q}/diskfsTest.qnt > /dev/null
     COMMAND ${CMAKE_COMMAND} -E touch ${DFS_SELFTEST}
     DEPENDS ${DFS_QNT} ${DFS_Q}/diskfsTest.qnt
@@ -107,7 +120,7 @@ foreach(b ${DFS_BATCHES})
 
     add_custom_command(OUTPUT ${batch}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${DFS_T}
-        COMMAND ${QUINT_BIN} run --backend=rust
+        COMMAND ${QUINT_BIN} run --backend=${DFS_QUINT_BACKEND}
                 ${DFS_Q}/diskfs_run.qnt --main=${prof}
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
