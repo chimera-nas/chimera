@@ -69,6 +69,16 @@ struct chimera_vfs_compound {
     uint32_t                        fh_len;
     struct chimera_vfs_open_handle *handle;
     unsigned int                    handle_flags;
+    /* GETHANDLE gave this handle to the caller: the sequence still addresses it
+     * but no longer releases it. */
+    uint8_t                         handle_taken;
+    /* The saved OPEN slot.  SAVEHANDLE moves into it and RESTOREHANDLE moves
+     * back, so exactly one slot refers to a handle at any moment and the
+     * ownership bits travel with it. */
+    struct chimera_vfs_open_handle *saved_handle;
+    unsigned int                    saved_handle_flags;
+    uint8_t                         saved_handle_borrowed;
+    uint8_t                         saved_handle_taken;
     /* The current handle is the CALLER'S, seeded by PUTHANDLE, and must not be
      * released with the sequence or when the current object moves.  Cleared
      * the moment the executor opens one of its own. */
@@ -169,13 +179,29 @@ chimera_vfs_compound_set_gate(
 static void
 chimera_vfs_compound_release_cursor(struct chimera_vfs_compound *compound)
 {
-    if (compound->handle && !compound->handle_borrowed) {
+    if (compound->handle &&
+        !compound->handle_borrowed && !compound->handle_taken) {
         chimera_vfs_release(compound->thread, compound->handle);
     }
 
     compound->handle          = NULL;
     compound->handle_borrowed = 0;
+    compound->handle_taken    = 0;
 } /* chimera_vfs_compound_release_cursor */
+
+/* The saved OPEN slot, on the same ownership rules as the current one. */
+static void
+chimera_vfs_compound_release_saved(struct chimera_vfs_compound *compound)
+{
+    if (compound->saved_handle &&
+        !compound->saved_handle_borrowed && !compound->saved_handle_taken) {
+        chimera_vfs_release(compound->thread, compound->saved_handle);
+    }
+
+    compound->saved_handle          = NULL;
+    compound->saved_handle_borrowed = 0;
+    compound->saved_handle_taken    = 0;
+} /* chimera_vfs_compound_release_saved */
 
 static void
 chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
@@ -184,6 +210,7 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
     uint32_t                   i;
 
     chimera_vfs_compound_release_cursor(compound);
+    chimera_vfs_compound_release_saved(compound);
 
     for (i = 0; i < compound->num_ops; i++) {
         /* An open handle the caller did not take: see OPEN HANDLE OWNERSHIP.
@@ -771,6 +798,75 @@ chimera_vfs_compound_set_path(
 
     return 0;
 } /* chimera_vfs_compound_set_path */
+
+/* The cursor ops that carry no arguments all build the same way. */
+static int
+chimera_vfs_compound_add_simple(
+    struct chimera_vfs_compound      *compound,
+    enum chimera_vfs_compound_op_type type)
+{
+    int index;
+
+    return chimera_vfs_compound_next_op(compound, type, &index) ? index : -1;
+} /* chimera_vfs_compound_add_simple */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_putroot(struct chimera_vfs_compound *compound)
+{
+    return chimera_vfs_compound_add_simple(
+        compound, CHIMERA_VFS_COMPOUND_OP_PUTROOT);
+} /* chimera_vfs_compound_add_putroot */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_gethandle(struct chimera_vfs_compound *compound)
+{
+    return chimera_vfs_compound_add_simple(
+        compound, CHIMERA_VFS_COMPOUND_OP_GETHANDLE);
+} /* chimera_vfs_compound_add_gethandle */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_close(struct chimera_vfs_compound *compound)
+{
+    return chimera_vfs_compound_add_simple(
+        compound, CHIMERA_VFS_COMPOUND_OP_CLOSE);
+} /* chimera_vfs_compound_add_close */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_savehandle(struct chimera_vfs_compound *compound)
+{
+    return chimera_vfs_compound_add_simple(
+        compound, CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE);
+} /* chimera_vfs_compound_add_savehandle */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_restorehandle(struct chimera_vfs_compound *compound)
+{
+    return chimera_vfs_compound_add_simple(
+        compound, CHIMERA_VFS_COMPOUND_OP_RESTOREHANDLE);
+} /* chimera_vfs_compound_add_restorehandle */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_open_current(
+    struct chimera_vfs_compound *compound,
+    unsigned int                 flags,
+    uint64_t                     attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->open_flags = flags;
+    op->attr_mask  = attr_mask;
+
+    return index;
+} /* chimera_vfs_compound_add_open_current */
 
 SYMBOL_EXPORT int
 chimera_vfs_compound_add_puthandle(
@@ -2540,6 +2636,33 @@ chimera_vfs_compound_path_status_callback(
     chimera_vfs_compound_op_done(compound, error_code);
 } /* chimera_vfs_compound_path_status_callback */
 
+static void
+chimera_vfs_compound_open_current_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    /* Whatever the slot held goes first, on the ordinary rules. */
+    chimera_vfs_compound_release_cursor(compound);
+
+    compound->handle       = handle;
+    compound->handle_flags = op->open_flags;
+
+    /* Recorded on the op too, so GETHANDLE has somewhere to hand it from and a
+     * caller can see what its OPEN produced. */
+    op->out_handle = handle;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_open_current_callback */
+
 /*
  * The flags this op needs the current object opened with, or 0 if it addresses
  * the current object without a handle at all.
@@ -3059,6 +3182,107 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   op->offset, op->length,
                                   chimera_vfs_compound_read_plus_callback,
                                   compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_PUTROOT:
+        {
+            uint8_t  root_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t root_fh_len = 0;
+
+            chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+
+            chimera_vfs_compound_set_current(compound, root_fh, root_fh_len);
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+            break;
+        }
+
+        case CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT:
+            if (compound->fh_len == 0) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
+
+            chimera_vfs_open_fh(compound->thread, compound->cred,
+                                compound->fh, (int) compound->fh_len,
+                                op->open_flags,
+                                chimera_vfs_compound_open_current_callback,
+                                compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_GETHANDLE:
+            if (!compound->handle) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
+
+            /* The caller collects it from out_handle; the slot goes on
+             * addressing it, but the sequence stops owning it. */
+            op->out_handle         = compound->handle;
+            compound->handle_taken = 1;
+
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_CLOSE:
+            if (!compound->handle) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
+
+            /* Provenance does not matter: CLOSE ends the handle, borrowed or
+             * not, which is what a protocol CLOSE of a client's open means. */
+            chimera_vfs_release(compound->thread, compound->handle);
+
+            compound->handle          = NULL;
+            compound->handle_borrowed = 0;
+            compound->handle_taken    = 0;
+            compound->handle_flags    = 0;
+
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE:
+            if (!compound->handle) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
+
+            /* A MOVE: the ownership bits travel with the handle and the
+             * current slot is left empty, so exactly one slot refers to it. */
+            chimera_vfs_compound_release_saved(compound);
+
+            compound->saved_handle          = compound->handle;
+            compound->saved_handle_flags    = compound->handle_flags;
+            compound->saved_handle_borrowed = compound->handle_borrowed;
+            compound->saved_handle_taken    = compound->handle_taken;
+
+            compound->handle          = NULL;
+            compound->handle_flags    = 0;
+            compound->handle_borrowed = 0;
+            compound->handle_taken    = 0;
+
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_RESTOREHANDLE:
+            if (!compound->saved_handle) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
+
+            chimera_vfs_compound_release_cursor(compound);
+
+            compound->handle          = compound->saved_handle;
+            compound->handle_flags    = compound->saved_handle_flags;
+            compound->handle_borrowed = compound->saved_handle_borrowed;
+            compound->handle_taken    = compound->saved_handle_taken;
+
+            compound->saved_handle          = NULL;
+            compound->saved_handle_flags    = 0;
+            compound->saved_handle_borrowed = 0;
+            compound->saved_handle_taken    = 0;
+
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_PUTHANDLE:
