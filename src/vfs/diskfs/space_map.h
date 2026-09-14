@@ -363,6 +363,12 @@ struct sm_extent {
     struct sm_extent *size_prev, *size_next;   /* free_by_size[class] list links */
 };
 
+/* A claim's bump state is one atomic word: the cursor in the high half, the
+ * limit in the low half, both offsets relative to claim->base. */
+#define SM_CLAIM_CUR(w)         ((uint32_t) ((w) >> 32))
+#define SM_CLAIM_END(w)         ((uint32_t) ((w) & 0xffffffffu))
+#define SM_CLAIM_PACK(cur, end) (((uint64_t) (uint32_t) (cur) << 32) | (uint32_t) (end))
+
 /* A reservation claim: a contiguous region of an AG handed to one worker thread
  * as a bump arena.  It is NOT removed from the AG free tree (the tree stays
  * == committed state, so condense never leaks the uncommitted tail); the claim
@@ -384,15 +390,22 @@ struct sm_claim {
      * find space can see how much of someone else's claim is actually spoken
      * for and hand the rest back (sm_ag_recall_claims_locked).
      *
-     * Single-writer each: only the owning thread advances `cursor`, only a
-     * recaller (holding ag->lock) lowers `end`.  That is what lets the owner's
-     * bump stay lock-free -- it needs no CAS, just a re-read of `end` after
-     * publishing the new cursor, and it backs out if a recall landed in
-     * between.  See space_map_bump_alloc and sm_ag_recall_claims_locked, whose
-     * comments carry the interleaving argument.
+     * Both live in ONE atomic word, as a pair of AG-relative 32-bit offsets
+     * (an AG is SM_AG_SIZE = 2 GiB, so each fits).  That is the whole point:
+     * the owner advancing the cursor and a recaller lowering the end are then
+     * compare-and-swaps on the same word, so exactly one of them wins and the
+     * loser simply re-reads.
+     *
+     * The first version of this kept them in two words -- owner stores cursor
+     * then loads end, recaller stores end then loads cursor -- which is
+     * Dekker's algorithm and needs sequential consistency to be correct.
+     * Written with release/acquire it permits the store-load reordering that
+     * x86 allows, both sides read stale, both believe they won, and the same
+     * region is handed out twice; the second file to release it then trips the
+     * "double-free or overlap" abort in sm_ag_free_locked.  One word removes
+     * the question rather than answering it.
      */
-    uint64_t         cursor;        /* atomic: next free offset; owner writes */
-    uint64_t         end;           /* atomic: claim limit; recaller lowers */
+    uint64_t bump;                  /* atomic: SM_CLAIM_PACK(cursor, end) */
 };
 
 /* Per-thread bump reservation (one for metadata, one for data).  Hands out
