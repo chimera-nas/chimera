@@ -1284,8 +1284,7 @@ sm_ag_add_claim_locked(
     c->len      = len;
     c->refcount = 0;
     c->retiring = 0;
-    c->cursor   = base;         /* nothing spoken for yet */
-    c->end      = base + len;
+    c->bump     = SM_CLAIM_PACK(0, len);   /* nothing spoken for yet */
     c->next     = ag->claims;
     ag->claims  = c;
     return c;
@@ -1327,29 +1326,31 @@ sm_ag_recall_claims_locked(struct sm_ag *ag)
     uint64_t         reclaimed = 0;
 
     for (c = ag->claims; c; c = c->next) {
-        uint64_t cur, cur2, old_end;
+        uint64_t w, nw;
+        uint32_t cur, lim;
 
-        old_end = c->base + c->len;
+        w = __atomic_load_n(&c->bump, __ATOMIC_ACQUIRE);
 
-        cur = __atomic_load_n(&c->cursor, __ATOMIC_ACQUIRE);
-        if (cur >= old_end) {
-            continue;           /* fully consumed; nothing to take back */
-        }
+        for (;;) {
+            cur = SM_CLAIM_CUR(w);
+            lim = SM_CLAIM_END(w);
 
-        __atomic_store_n(&c->end, cur, __ATOMIC_RELEASE);
+            if (cur >= lim) {
+                break;      /* fully consumed; nothing to take back */
+            }
 
-        cur2 = __atomic_load_n(&c->cursor, __ATOMIC_ACQUIRE);
-        if (cur2 > cur) {
-            /* The owner bumped while we were lowering `end`.  Give back what it
-             * took; its post-store re-read then sees an `end` above its cursor
-             * and the allocation stands. */
-            __atomic_store_n(&c->end, cur2, __ATOMIC_RELEASE);
-            cur = cur2;
-        }
+            /* Lower the limit to the cursor.  Same word the owner bumps, so
+             * this either wins outright or fails because the owner just
+             * allocated -- in which case we re-read and take back only what is
+             * left above its new cursor. */
+            nw = SM_CLAIM_PACK(cur, cur);
 
-        if (cur < old_end) {
-            c->len     = cur - c->base;
-            reclaimed += old_end - cur;
+            if (__atomic_compare_exchange_n(&c->bump, &w, nw, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                c->len     = cur;
+                reclaimed += lim - cur;
+                break;
+            }
         }
     }
     return reclaimed;
@@ -1694,7 +1695,8 @@ space_map_bump_alloc(
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
 {
-    uint64_t c, e;
+    uint64_t w, nw;
+    uint32_t cur, lim;
 
     need = SM_ALIGN_UP(need);
 
@@ -1703,41 +1705,37 @@ space_map_bump_alloc(
     }
 
     /*
-     * Bump against the claim's shared cursor/end rather than a thread-local
-     * one, so a recaller can take back whatever this claim has not spoken for.
-     * We are the only writer of `cursor`, so no CAS is needed; the ordering
-     * that matters is publishing the new cursor *before* re-reading `end`.
-     *
-     * Interleavings, where a recaller does (read cursor; lower end; re-read
-     * cursor; restore end if it moved):
-     *  - recall lands entirely before this bump: the first `end` read already
-     *    reflects it and we simply refill;
-     *  - recall lands between our `end` read and our cursor store: the recaller
-     *    either sees our new cursor (and restores `end` above it, so our
-     *    re-read passes and the allocation stands) or it does not (and our
-     *    re-read sees the lowered `end`, so we back out and refill).
-     * Either way the region we return is inside the claim and was handed to
-     * nobody else.  Backing out only costs a refill; it never loses space.
+     * Bump against the claim's shared bump word rather than a thread-local
+     * cursor, so a recaller can take back whatever this claim has not spoken
+     * for.  Cursor and limit share one word (see struct sm_claim), so this and
+     * sm_ag_recall_claims_locked contend on a single compare-and-swap: if a
+     * recall lands between our read and our CAS, the CAS fails, we re-read and
+     * see the lowered limit.  There is no window in which both sides believe
+     * they won, and so no way for the same region to be handed out twice.
      */
-    c = __atomic_load_n(&r->claim->cursor, __ATOMIC_ACQUIRE);
-    e = __atomic_load_n(&r->claim->end, __ATOMIC_ACQUIRE);
+    w = __atomic_load_n(&r->claim->bump, __ATOMIC_ACQUIRE);
 
-    if (c + need > e) {
-        return 1;       /* exhausted, or recalled out from under us */
-    }
+    for (;;) {
+        cur = SM_CLAIM_CUR(w);
+        lim = SM_CLAIM_END(w);
 
-    __atomic_store_n(&r->claim->cursor, c + need, __ATOMIC_RELEASE);
+        /* 64-bit math: `need` is caller-supplied and may exceed what is left
+         * (or even the AG), so the sum must not wrap the 32-bit halves. */
+        if ((uint64_t) cur + need > (uint64_t) lim) {
+            return 1;   /* exhausted, or recalled out from under us */
+        }
 
-    if (__atomic_load_n(&r->claim->end, __ATOMIC_ACQUIRE) < c + need) {
-        /* A recall lowered `end` past our bump; give the cursor back and let
-         * the caller refill.  Safe because we have published nothing else and
-         * the recaller frees only from the cursor it observed. */
-        __atomic_store_n(&r->claim->cursor, c, __ATOMIC_RELEASE);
-        return 1;
+        nw = SM_CLAIM_PACK((uint64_t) cur + need, lim);
+
+        if (__atomic_compare_exchange_n(&r->claim->bump, &w, nw, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            break;      /* the region [cur, cur+need) is ours alone */
+        }
+        /* CAS reloaded w with the current value; retry against it. */
     }
 
     *r_device_id     = r->device_id;
-    *r_device_offset = c;
+    *r_device_offset = r->claim->base + cur;
 
     /* Pin the claim: it must outlive this allocation's retire (when
     * space_map_alloc_apply decrements), so a re-grant of the region can't race
@@ -1750,7 +1748,7 @@ space_map_bump_alloc(
      * tree stays == committed state and condense can't leak the tail. */
     if (jnl && jnl->record_delta) {
         jnl->record_delta(jnl->user, r->device_id, r->ag_index,
-                          c, need, SM_AG_LOG_OP_ALLOC);
+                          r->claim->base + cur, need, SM_AG_LOG_OP_ALLOC);
     }
     return 0;
 } /* space_map_bump_alloc */
@@ -1809,10 +1807,12 @@ space_map_reservation_ensure(
     /* Consult the claim's live cursor/end, not the grant size: a recall may
      * have lowered `end` since, in which case this reservation can no longer
      * cover `want` and has to be re-grabbed. */
-    if (r->valid &&
-        __atomic_load_n(&r->claim->cursor, __ATOMIC_ACQUIRE) + want <=
-        __atomic_load_n(&r->claim->end, __ATOMIC_ACQUIRE)) {
-        return 0;
+    if (r->valid) {
+        uint64_t w = __atomic_load_n(&r->claim->bump, __ATOMIC_ACQUIRE);
+
+        if ((uint64_t) SM_CLAIM_CUR(w) + want <= (uint64_t) SM_CLAIM_END(w)) {
+            return 0;
+        }
     }
     space_map_release_reservation(sm, r);       /* retire the old claim (if any) */
     return space_map_reserve_chunk(sm, r, role, want, chunk, seed);
