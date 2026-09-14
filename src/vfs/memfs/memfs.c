@@ -1415,50 +1415,6 @@ memfs_fs_free_contents(struct memfs_fs *fs)
                         free(inode->file.blocks);
                     }
 
-                    /* Named-stream forks are freed the same way as the main
-                     * fork (direct release, not via the per-thread freelist,
-                     * which is gone by destroy time).  Both the live streams and
-                     * any unlinked-but-still-open ones parked on dead_streams are
-                     * reclaimed -- the latter belong to protocol-layer opens that
-                     * were never closed and would otherwise leak their node, fork
-                     * blocks and iovec references. */
-                    for (int slist = 0; slist < 2; slist++) {
-                        struct memfs_named_stream **head =
-                            slist == 0 ? &inode->streams : &inode->dead_streams;
-
-                        while (*head) {
-                            struct memfs_named_stream *stream = *head;
-                            unsigned int               sbi;
-
-                            *head = stream->next;
-
-                            for (sbi = 0; sbi < stream->fork.num_blocks; sbi++) {
-                                if (stream->fork.blocks[sbi]) {
-                                    for (iovi = 0;
-                                         iovi < stream->fork.blocks[sbi]->niov;
-                                         iovi++) {
-                                        evpl_iovec_release(NULL,
-                                                           &stream->fork.blocks[sbi]->iov[iovi]);
-                                    }
-                                    free(stream->fork.blocks[sbi]);
-                                }
-                            }
-                            if (stream->fork.blocks) {
-                                free(stream->fork.blocks);
-                            }
-                            free(stream->name);
-                            free(stream);
-                        }
-                    }
-
-                    /* Per-open descriptors of abandoned (never-closed) stream
-                     * opens whose stream nodes were just freed above. */
-                    while (inode->stream_opens) {
-                        struct memfs_stream_open *so = inode->stream_opens;
-                        inode->stream_opens = so->open_next;
-                        free(so);
-                    }
-
                     /* Stubs are always regular files; free the remote
                      * descriptor here so we never touch the uninitialized
                      * fields of never-allocated free-list inodes. */
@@ -1466,6 +1422,64 @@ memfs_fs_free_contents(struct memfs_fs *fs)
                         free(inode->remote);
                     }
                 }
+
+                /* Named streams hang off ANY inode type, not just regular
+                 * files: SMB opens the unnamed data stream through the same
+                 * path for a directory, and a stream on a directory removed
+                 * while still open leaves its node on dead_streams with a
+                 * live descriptor on stream_opens.  This cleanup used to sit
+                 * inside the S_ISREG arm above, so those were never freed --
+                 * leaking the stream node, its fork blocks, and the iovec
+                 * references those blocks hold.  One leaked iovec is fatal:
+                 * evpl_allocator_destroy aborts the process on a non-zero
+                 * refcount, which is the SIGABRT smbtorture reports as a
+                 * failed cell after the test itself passed.
+                 * memfs_inode_free already handles every inode type; only
+                 * this teardown path was narrower. */
+                /* Named-stream forks are freed the same way as the main
+                 * fork (direct release, not via the per-thread freelist,
+                 * which is gone by destroy time).  Both the live streams and
+                 * any unlinked-but-still-open ones parked on dead_streams are
+                 * reclaimed -- the latter belong to protocol-layer opens that
+                 * were never closed and would otherwise leak their node, fork
+                 * blocks and iovec references. */
+                for (int slist = 0; slist < 2; slist++) {
+                    struct memfs_named_stream **head =
+                        slist == 0 ? &inode->streams : &inode->dead_streams;
+
+                    while (*head) {
+                        struct memfs_named_stream *stream = *head;
+                        unsigned int               sbi;
+
+                        *head = stream->next;
+
+                        for (sbi = 0; sbi < stream->fork.num_blocks; sbi++) {
+                            if (stream->fork.blocks[sbi]) {
+                                for (iovi = 0;
+                                     iovi < stream->fork.blocks[sbi]->niov;
+                                     iovi++) {
+                                    evpl_iovec_release(NULL,
+                                                       &stream->fork.blocks[sbi]->iov[iovi]);
+                                }
+                                free(stream->fork.blocks[sbi]);
+                            }
+                        }
+                        if (stream->fork.blocks) {
+                            free(stream->fork.blocks);
+                        }
+                        free(stream->name);
+                        free(stream);
+                    }
+                }
+
+                /* Per-open descriptors of abandoned (never-closed) stream
+                 * opens whose stream nodes were just freed above. */
+                while (inode->stream_opens) {
+                    struct memfs_stream_open *so = inode->stream_opens;
+                    inode->stream_opens = so->open_next;
+                    free(so);
+                }
+
             }
             free(fs->inode_list[i].inode[j]);
         }
