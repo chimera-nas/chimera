@@ -7,6 +7,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 /* Map a VFS commit error to the SMB2 status a client expects at FLUSH time.
  * FLUSH is where a write-back backend surfaces a deferred-write failure, so the
@@ -28,19 +29,32 @@ chimera_smb_flush_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_flush_error_status */
 
+/*
+ * PUTHANDLE, COMMIT.
+ *
+ * The FileId's handle is LENT to the sequence: SMB bound granted_access to it
+ * at CREATE, so the sequence addresses that handle and no other, and does not
+ * release it -- the open file still owns it and chimera_smb_open_file_release
+ * is what lets go.
+ */
 static void
-chimera_smb_flush_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_flush_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    /* Read before the free: a freed sequence is recycled and reset. */
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     chimera_smb_open_file_release(request, request->flush.open_file);
 
-    chimera_smb_complete_request(request, chimera_smb_flush_error_status(error_code));
-} /* chimera_smb_flush_callback */
+    chimera_smb_complete_request(request, chimera_smb_flush_error_status(status));
+} /* chimera_smb_flush_sequence_complete */
 
 void
 chimera_smb_flush(struct chimera_smb_request *request)
@@ -74,16 +88,18 @@ chimera_smb_flush(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_vfs_commit(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->flush.open_file->handle,
-        0,
-        0xffffffffffffffffULL,
-        0,
-        0,
-        chimera_smb_flush_callback,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->flush.open_file->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+
+    chimera_vfs_compound_add_commit(request->vfs_compound, 0,
+                                    0xffffffffffffffffULL, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_flush_sequence_complete, request);
 } /* chimera_smb_ioctl */
 
 void

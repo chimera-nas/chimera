@@ -9,6 +9,7 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * Completion for one SMB2_CHANNEL_RDMA_V1 read transfer (RDMA Write to a client
@@ -43,6 +44,56 @@ chimera_smb_rdma_write_callback(
                                      SMB2_STATUS_SUCCESS);
     }
 } /* chimera_smb_rdma_write_callback */
+
+static void chimera_smb_read_callback(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  count,
+    uint32_t                  eof,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
+/*
+ * PUTHANDLE, READ.
+ *
+ * The FileId's handle is LENT: SMB bound granted_access to it at CREATE and
+ * the byte-range check above ran against that same handle, so the sequence
+ * must act on it and not on one of its own.  The descriptor array is the
+ * request's and stays the request's -- an evpl_iovec records the address of
+ * the struct that owns it, so it cannot be written into the sequence and
+ * copied out afterwards.
+ */
+static void
+chimera_smb_read_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct evpl_iovec                    *iov  = NULL;
+    int                                   niov = 0;
+    enum chimera_vfs_error                status;
+    uint32_t                              last, count = 0, eof = 0;
+
+    status = chimera_vfs_compound_status(compound);
+    last   = chimera_vfs_compound_num_ops(compound) - 1;
+
+    if (status == CHIMERA_VFS_OK) {
+        op    = chimera_vfs_compound_op(compound, last);
+        count = op->read_len;
+        eof   = op->eof_read;
+
+        /* The buffers go to the reply, which releases them, so they leave the
+         * sequence's ownership before it is torn down. */
+        chimera_vfs_compound_take_iov(compound, last, &iov, &niov);
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_read_callback(status, count, eof, iov, niov, NULL, request);
+} /* chimera_smb_read_sequence_complete */
 
 static void
 chimera_smb_read_callback(
@@ -314,18 +365,23 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     /* Attribute the read to this open's owner so it is mediated against
      * other holders without recalling the client's own oplock/lease. */
-    chimera_vfs_read_owned(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->read.open_file->handle,
-        request->read.offset,
-        request->read.length,
-        request->read.iov,
-        request->read.niov,
-        0,
-        &io_owner,
-        chimera_smb_read_callback,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->read.open_file->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED |
+                                       CHIMERA_VFS_OPEN_READ_ONLY);
+
+    chimera_vfs_compound_add_read(request->vfs_compound, NULL,
+                                  request->read.offset,
+                                  request->read.length,
+                                  request->read.iov,
+                                  request->read.niov,
+                                  &io_owner);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_read_sequence_complete, request);
 } /* chimera_smb_read */
 
 

@@ -37,6 +37,8 @@
 #include "smb_ntlm.h"
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
+
+struct chimera_vfs_compound;
 #include "smb_notify.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_claim.h"
@@ -446,6 +448,12 @@ struct chimera_smb_request {
     struct chimera_smb_session_handle *session_handle;
     struct chimera_smb_tree           *tree;
     struct chimera_smb_compound       *compound;
+    /* The VFS sequence this request submitted, if any.  Named apart from
+     * ->compound, which is the SMB2 chain: the two are unrelated, and an SMB2
+     * chain is emphatically not one VFS sequence.  Freed by the operation's
+     * own completion, never centrally -- see the note in client_internal.h for
+     * why a central free is the wrong owner. */
+    struct chimera_vfs_compound       *vfs_compound;
     struct chimera_smb_request        *next;
 
     /* Generic async-interim (STATUS_PENDING) state, managed by
