@@ -1835,17 +1835,45 @@ space_map_reservation_alloc(
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
 {
-    if (space_map_bump_alloc(r, jnl, need, r_device_id, r_device_offset) == 0) {
-        return 0;
+    int attempt;
+
+    /*
+     * Loop rather than "grab once, then it must satisfy".  That used to hold:
+     * a reservation was private to its thread, so a chunk grabbed for `need`
+     * could only be consumed by the caller about to consume it.  Recall breaks
+     * it -- a freshly grabbed claim has its cursor at its base, so every byte
+     * of it reads as unspoken-for, and a recall on another thread can take the
+     * whole thing back in the window between the grab and this thread's first
+     * bump.
+     *
+     * Returning -1 there would be a *spurious* ENOSPC, reported while the pool
+     * has room, and that is far worse than a retry: the caller fails the
+     * operation mid-flight, and an allocation failure part-way through (say a
+     * multi-extent fallocate) has to unwind b+tree state that the abort does
+     * not revert.  diskfs_enospc_test's comment spells out where that ends --
+     * "the file then references space the allocator believes is free, which the
+     * next allocation can hand to somebody else and which double-frees the pool
+     * when the file is deleted".
+     *
+     * So only a grab that genuinely finds no space (ensure != 0, after its own
+     * recall pass) is ENOSPC.  Losing the race is retried.  The bound keeps a
+     * pathological recall storm from spinning here forever; reaching it means
+     * every attempt was beaten, which is indistinguishable from out of space
+     * from the caller's point of view.
+     */
+    for (attempt = 0; attempt < SM_RESERVATION_GRAB_RETRIES; attempt++) {
+        if (space_map_bump_alloc(r, jnl, need, r_device_id, r_device_offset) == 0) {
+            return 0;
+        }
+
+        /* Exhausted, or recalled out from under us: retire the old claim and
+         * grab a fresh chunk. */
+        if (space_map_reservation_ensure(sm, r, role, need, chunk, seed) != 0) {
+            return -1;      /* genuinely out of space */
+        }
     }
-    /* Exhausted: retire the old claim, grab a fresh chunk, retry once. */
-    if (space_map_reservation_ensure(sm, r, role, need, chunk, seed) != 0) {
-        return -1;
-    }
-    if (space_map_bump_alloc(r, jnl, need, r_device_id, r_device_offset) != 0) {
-        return -1;      /* a freshly-grabbed chunk >= need must satisfy */
-    }
-    return 0;
+
+    return -1;
 } /* space_map_reservation_alloc */
 
 /*

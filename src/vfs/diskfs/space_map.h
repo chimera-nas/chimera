@@ -666,7 +666,7 @@ space_map_reservation_alloc(
 /* Default per-thread reservation chunk (configurable later via diskfs).  Small
  * enough for small test filesystems, large enough that the shared allocator is
  * touched only ~once per chunk consumed. */
-#define SM_RESERVATION_CHUNK (4ULL << 20)       /* 4 MiB */
+#define SM_RESERVATION_CHUNK        (4ULL << 20) /* 4 MiB */
 
 /*
  * A bump reservation is speculative: the thread claims a whole chunk so its
@@ -689,7 +689,13 @@ space_map_reservation_alloc(
  * reservation mechanism (the thread cache), where it is a binary "don't
  * speculate when free < 2*want"; this is the graduated form for bump claims.
  */
-#define SM_RESERVE_AG_SHIFT  3                  /* grant <= ag_free/8 */
+#define SM_RESERVE_AG_SHIFT         3           /* grant <= ag_free/8 */
+
+/* How many times space_map_reservation_alloc will re-grab after losing its
+ * claim to a recall before reporting ENOSPC.  Each attempt is a full grab
+ * (which itself recalls before failing), so this only has to outlast a burst of
+ * concurrent recalls, not a sustained shortage. */
+#define SM_RESERVATION_GRAB_RETRIES 8
 
 /* Apply a COMMITTED allocation to the in-memory free tree at retire/durability
  * (mirrors space_map_free_apply). */
