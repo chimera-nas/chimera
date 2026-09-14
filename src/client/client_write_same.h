@@ -66,8 +66,11 @@ chimera_dispatch_write_same(
                                                    chimera_client_req_cred(request));
 
     /* Handle and pattern are both the caller's, borrowed for the sequence. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->write_same.handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
     chimera_vfs_compound_add_write_same(request->compound,
-                                        request->write_same.handle,
+                                        NULL,
                                         request->write_same.offset,
                                         request->write_same.block_size,
                                         request->write_same.block_count,

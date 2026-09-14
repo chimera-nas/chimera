@@ -120,7 +120,6 @@ chimera_fuse_op_getattr(
     uint32_t                     arglen)
 {
     const struct fuse_getattr_in *in = arg;
-    int                           idx;
 
     if (arglen >= sizeof(*in) && (in->getattr_flags & FUSE_GETATTR_FH)) {
         struct chimera_vfs_open_handle *oh = chimera_fuse_file(in->fh)->handle;
@@ -141,9 +140,14 @@ chimera_fuse_op_getattr(
         req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                    &req->cred);
 
-        idx = chimera_vfs_compound_add_getattr(req->compound,
-                                               CHIMERA_VFS_ATTR_MASK_STAT);
-        chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx, oh);
+        /* The kernel named an open file; the sequence borrows that handle and
+         * has no current object of its own. */
+        chimera_vfs_compound_add_puthandle(req->compound, oh,
+                                           CHIMERA_VFS_OPEN_INFERRED |
+                                           CHIMERA_VFS_OPEN_PATH);
+
+        chimera_vfs_compound_add_getattr(req->compound,
+                                         CHIMERA_VFS_ATTR_MASK_STAT);
 
         chimera_vfs_compound_submit(req->compound,
                                     chimera_fuse_getattr_sequence_complete,
@@ -165,6 +169,11 @@ chimera_fuse_op_getattr(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_getattr(req->compound,
                                      CHIMERA_VFS_ATTR_MASK_STAT);
 
@@ -261,6 +270,11 @@ chimera_fuse_op_setattr(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_setattr(req->compound, NULL,
                                      &req->u.setattr.set_attr,
                                      CHIMERA_VFS_ATTR_MASK_STAT);
@@ -335,6 +349,11 @@ chimera_fuse_op_readlink(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_readlink(req->compound);
 
     chimera_vfs_compound_submit(req->compound,
@@ -395,6 +414,11 @@ chimera_fuse_op_statfs(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_getattr(req->compound,
                                      CHIMERA_VFS_ATTR_MASK_STATFS);
 
@@ -504,6 +528,11 @@ chimera_fuse_op_access(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
     chimera_vfs_compound_add_access(req->compound,
                                     chimera_fuse_access_requested(arg));
 

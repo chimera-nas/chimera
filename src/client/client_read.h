@@ -72,6 +72,13 @@ chimera_dispatch_read(
     /* The descriptor array is the request's and stays the request's: an
      * evpl_iovec records its owner's address, so it cannot be written into the
      * sequence and copied out afterwards. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->read.handle,
+                                       CHIMERA_VFS_OPEN_INFERRED |
+                                       CHIMERA_VFS_OPEN_READ_ONLY);
+    /* The handle stays on the op too: the two-step I/O type check is guarded
+     * on in_handle rather than on the cursor, so addressing the cursor alone
+     * would put a GETATTR in front of every read. */
     chimera_vfs_compound_add_read(request->compound,
                                   request->read.handle,
                                   request->read.offset,

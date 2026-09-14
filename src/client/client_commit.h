@@ -46,16 +46,14 @@ chimera_dispatch_commit(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    int idx;
-
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* The caller holds the handle; the sequence borrows it, so it has no
-     * current object of its own. */
-    idx = chimera_vfs_compound_add_commit(request->compound, 0, 0, 0);
-    chimera_vfs_compound_op_set_handle(request->compound, (uint32_t) idx,
-                                       request->commit.handle);
+    /* COMMIT flushes data, so it wants the data open the caller already has. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->commit.handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+    chimera_vfs_compound_add_commit(request->compound, 0, 0, 0);
 
     chimera_vfs_compound_submit(request->compound,
                                 chimera_commit_sequence_complete, request);
