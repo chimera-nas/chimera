@@ -2829,9 +2829,13 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         (op->handle_from >= 0 ? compound->ops[op->handle_from].out_handle :
          compound->handle);
 
-    /* op_open_flags cannot see the sequence, so tell it where the two-step I/O
-     * has got to. */
-    op->io_typechecked_flag = compound->io_typechecked;
+    /* op_open_flags cannot see the sequence, so tell it whether the two-step
+     * I/O type check still has to happen.  It does not when the caller opened
+     * or lent the handle: the caller established the type by opening it, and
+     * asking for a PATH open first would reject the very handle it supplied.
+     * The dispatch skips the check on the same condition. */
+    op->io_typechecked_flag = compound->io_typechecked ||
+        compound->handle_explicit;
 
     open_flags = chimera_vfs_compound_op_open_flags(op);
 
@@ -2843,14 +2847,21 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             return;
         }
 
-        /* handle_serves is not advisory: a path open and a data open come out
-         * of different caches and are different things to a backend, so a
-         * handle that does not serve must be re-opened even when the caller
-         * chose it.  What the caller chose it for was the op it chose it for,
-         * not this one. */
-        if (!compound->handle ||
-            !chimera_vfs_compound_handle_serves(compound->handle_flags,
-                                                open_flags)) {
+        /* A LENT handle is the one to act on, full stop.  Opening a different
+         * one because this does not serve would discard what the caller's own
+         * open bound to it -- an SMB2 FileId's granted_access, an NFSv4
+         * stateid's rights -- and hand the op a handle the caller never
+         * authorized.  So a mismatch here is the caller's bug and is reported,
+         * not papered over. */
+        if (compound->handle && compound->handle_borrowed) {
+            if (!chimera_vfs_compound_handle_serves(compound->handle_flags,
+                                                    open_flags)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                return;
+            }
+        } else if (!compound->handle ||
+                   !chimera_vfs_compound_handle_serves(compound->handle_flags,
+                                                       open_flags)) {
             /* Open the current object once; every op that follows on the same
              * object reuses this handle -- unless it needs flags the handle
              * was not opened with, in which case it is re-opened. */
