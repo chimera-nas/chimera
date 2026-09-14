@@ -111,13 +111,20 @@ chimera_fuse_op_opendir(
                                   req);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+
+    /* One open, and ACCESS shares it: a directory open carries everything a
+    * metadata op asks for and sits on the same side of OPEN_PATH, so the
+    * sequence does not open the object twice to ask two questions of it. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY,
+                                          0);
+
     chimera_vfs_compound_add_access(req->compound, CHIMERA_ACE_READ_DATA);
-    /* A NULL name opens the current object itself. */
-    chimera_vfs_compound_add_open(req->compound, NULL, 0,
-                                  CHIMERA_VFS_OPEN_INFERRED |
-                                  CHIMERA_VFS_OPEN_PATH |
-                                  CHIMERA_VFS_OPEN_DIRECTORY,
-                                  0, NULL, 0);
+
+    /* The handle outlives the sequence -- it is what the kernel's fh names. */
+    chimera_vfs_compound_add_gethandle(req->compound);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_opendir_sequence_complete, req);
@@ -337,7 +344,6 @@ chimera_fuse_op_readdir(
     const struct fuse_read_in     *in = arg;
     struct chimera_fuse_open_file *file;
     uint64_t                       attr_mask;
-    int                            idx;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -375,15 +381,20 @@ chimera_fuse_op_readdir(
     /* Streaming: entries are packed into the reply as the backend produces
     * them, so the page ends on the entry that does not fit rather than at an
     * entry count this would otherwise have to guess from a byte budget. */
-    idx = chimera_vfs_compound_add_readdir_stream(req->compound,
-                                                  in->offset,
-                                                  file->readdir_verifier,
-                                                  attr_mask,
-                                                  chimera_fuse_readdir_reset,
-                                                  chimera_fuse_readdir_entry,
-                                                  req);
-    chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx,
-                                       file->handle);
+    /* The kernel named an open directory; the sequence borrows it and never
+     * releases it. */
+    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED |
+                                       CHIMERA_VFS_OPEN_PATH |
+                                       CHIMERA_VFS_OPEN_DIRECTORY);
+
+    chimera_vfs_compound_add_readdir_stream(req->compound,
+                                            in->offset,
+                                            file->readdir_verifier,
+                                            attr_mask,
+                                            chimera_fuse_readdir_reset,
+                                            chimera_fuse_readdir_entry,
+                                            req);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_readdir_sequence_complete, req);
@@ -439,7 +450,6 @@ chimera_fuse_op_fsyncdir(
     uint32_t                     arglen)
 {
     const struct fuse_fsync_in *in = arg;
-    int                         idx;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -451,9 +461,11 @@ chimera_fuse_op_fsyncdir(
 
     /* The kernel named an open directory; the sequence acts on that handle,
      * which stays owned by the open, so there is no current object at all. */
-    idx = chimera_vfs_compound_add_commit(req->compound, 0, 0, 0);
-    chimera_vfs_compound_op_set_handle(req->compound, (uint32_t) idx,
-                                       chimera_fuse_file(in->fh)->handle);
+    chimera_vfs_compound_add_puthandle(req->compound,
+                                       chimera_fuse_file(in->fh)->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+
+    chimera_vfs_compound_add_commit(req->compound, 0, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_fsyncdir_sequence_complete, req);

@@ -49,9 +49,12 @@ chimera_dispatch_allocate(
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* The caller holds the handle; the sequence borrows it. */
+    /* ALLOCATE changes file data, so it wants the data open the caller has. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->allocate.handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
     chimera_vfs_compound_add_allocate(request->compound,
-                                      request->allocate.handle,
+                                      NULL,
                                       request->allocate.offset,
                                       request->allocate.length,
                                       request->allocate.flags,

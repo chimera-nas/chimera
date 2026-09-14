@@ -57,6 +57,12 @@ chimera_fuse_create_submit(
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY,
+                                          0);
+
     chimera_vfs_compound_add_create(req->compound, create_type,
                                     name, (int) strlen(name),
                                     target, target ? (int) strlen(target) : 0,
@@ -286,6 +292,12 @@ chimera_fuse_remove_common(struct chimera_fuse_request *req)
                                                &req->cred);
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY,
+                                          0);
+
     chimera_vfs_compound_add_remove(req->compound, name, (int) strlen(name),
                                     flags);
 

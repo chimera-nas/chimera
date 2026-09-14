@@ -74,8 +74,73 @@
 #include "vfs/vfs_claim.h"
 #include "vfs/vfs_compound.h"
 
-/* One NFSv4 op encodes to at most two VFS ops, so the NFSv4 op count is bounded
- * by the VFS compound's own limit. */
+/*
+ * The encoder opens the current object itself.
+ *
+ * A sequence's ops act on an OPEN handle, and something has to open it.  The
+ * executor used to decide, from a table keyed on op type; now the encoder says
+ * so, because the encoder is what knows why it is opening -- and the table is
+ * what handed an O_PATH descriptor to fgetxattr and made a data open of a FIFO
+ * block.
+ *
+ * `cur_flags` tracks what the sequence's current open handle was opened with as
+ * the sequence is BUILT, so consecutive ops on one object share a single OPEN:
+ * a LOOKUP and the GETATTR behind it, a READLINK and its type gate.  It is
+ * cleared wherever the current filehandle moves, because an open of the old
+ * object says nothing about the new one.
+ *
+ * The serve test mirrors chimera_vfs_compound_handle_serves exactly: a handle
+ * serves an op that asks for no flag it lacks and that wants the same side of
+ * CHIMERA_VFS_OPEN_PATH -- a path open and a data open are different handles
+ * from different caches, never interchangeable.
+ *
+ * Returns the OPEN's index, 0 when the open already in hand serves and no op
+ * was added, or -1 if the sequence is full.  Callers test only for -1; index 0
+ * is the seed PUTFH's and can never be an OPEN's.
+ */
+static int
+nfs4_vfs_open_for(
+    struct chimera_vfs_compound *compound,
+    unsigned int                *cur_flags,
+    unsigned int                 want)
+{
+    if (*cur_flags &&
+        !(want & ~*cur_flags) &&
+        (((*cur_flags ^ want) & CHIMERA_VFS_OPEN_PATH) == 0)) {
+        return 0;
+    }
+
+    *cur_flags = want;
+
+    return chimera_vfs_compound_add_open_current(compound, want, 0);
+} /* nfs4_vfs_open_for */
+
+/* A CLAIM_NULL OPEN names a file in the current directory; every other claim
+ * re-opens an object the client already has, and needs no directory. */
+static int
+nfs4_vfs_open_is_named(const struct nfs_argop4 *argop)
+{
+    return argop->opopen.claim.claim == CLAIM_NULL;
+} /* nfs4_vfs_open_is_named */
+
+/* The three intents an NFSv4 op has for the object it addresses. */
+#define NFS4_VFS_OPEN_DIR                                       \
+        (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |        \
+         CHIMERA_VFS_OPEN_DIRECTORY)
+#define NFS4_VFS_OPEN_META                                      \
+        (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH)
+/* REGULAR_ONLY is what carries the type rule when the caller opens
+ * explicitly: the open refuses a directory with EISDIR (NFS4ERR_ISDIR)
+ * atomically, rather than the data operation failing afterwards with whatever
+ * errno the backend gives a directory. */
+#define NFS4_VFS_OPEN_DATA                                      \
+        (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_REGULAR_ONLY)
+
+/* One NFSv4 op encodes to several VFS ops -- the operation, the open the
+ * encoder puts in front of it, and for the ops with a type gate a stat and a
+ * second open.  The NFSv4 op count is still bounded by the VFS compound's own
+ * limit, because every NFSv4 op costs at least one VFS op; the running total
+ * is what vfs_ops bounds, op by op. */
 #define NFS4_VFS_COMPOUND_MAX_OPS  CHIMERA_VFS_COMPOUND_MAX_OPS
 
 /*
@@ -1930,7 +1995,10 @@ chimera_nfs4_compound_try_vfs(
     int                             lead_putfh, have_lookup = 0, have_getattr = 0;
     int                             have_lookupp = 0, have_saved = 0;
     int                             cur_moved = 0, stages_early = 0;
-    int                             may_fail_late = 0;
+    /* What the sequence's current open handle carries, as it is built.  Zero
+     * means nothing is open on the current object -- see nfs4_vfs_open_for. */
+    unsigned int                    cur_open_flags = 0;
+    int                             may_fail_late  = 0;
     /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
      * always the last op of its run. */
     int                             open_at = -1;
@@ -2016,14 +2084,48 @@ chimera_nfs4_compound_try_vfs(
         reply_bound  += nfs4_vfs_op_reply_bound(argop);
         stages_early |= nfs4_vfs_op_stages_early(argop->argop);
 
-        /* The three ops with an injected helper getattr cost two VFS ops (a
-         * leading PUTFH costs one, because the seed below is its own).  Count
-         * them up front: a sequence discovered to be too long only once it was
-         * half built would have to be abandoned after staging xattr names into
-         * the reply buffer, which cannot be taken back. */
-        vfs_ops += (argop->argop == OP_READLINK ||
-                    argop->argop == OP_COMMIT ||
-                    (argop->argop == OP_PUTFH && i != first)) ? 2 : 1;
+        /* An upper bound on the VFS ops one NFSv4 op encodes to.  Counted up
+         * front: a sequence discovered to be too long only once it was half
+         * built would have to be abandoned after staging xattr names into the
+         * reply buffer, which cannot be taken back.
+         *
+         * The encoder opens the objects it addresses, so most ops now cost an
+         * OPEN as well as themselves, and the ops that take a type gate before
+         * touching data cost two opens -- a metadata one for the stat and a
+         * data one for the operation, which are different handles from
+         * different caches.  Over-counting only declines to sequence a long
+         * compound, which then takes the op-at-a-time path and is correct;
+         * under-counting would fail the build half way. */
+        switch (argop->argop) {
+            case OP_COMMIT:
+            case OP_ALLOCATE:
+            case OP_DEALLOCATE:
+            case OP_SEEK:
+            case OP_WRITE_SAME:
+                /* open(meta) + getattr + open(data) + the op */
+                vfs_ops += 4;
+                break;
+            case OP_READLINK:
+                /* open + getattr + readlink */
+                vfs_ops += 3;
+                break;
+            case OP_PUTFH:
+                /* The seed PUTFH below is the leading one's own op. */
+                vfs_ops += (i == first) ? 2 : 3;
+                break;
+            case OP_GETFH:
+            case OP_SAVEFH:
+            case OP_RESTOREFH:
+            case OP_RENAME:
+            case OP_LINK:
+                /* Cursor work, or two objects named by file handle: no open. */
+                vfs_ops += 1;
+                break;
+            default:
+                /* open + the op */
+                vfs_ops += 2;
+                break;
+        } /* switch */
 
         if (vfs_ops > NFS4_VFS_COMPOUND_MAX_OPS) {
             nenc = i;
@@ -2992,23 +3094,45 @@ chimera_nfs4_compound_try_vfs(
                     }
                 }
 
+                /* The PUTFH moved the current object; nothing is open on the
+                 * new one. */
+                cur_open_flags = 0;
+
                 /* Stat the handle so the zero-link staleness rule has something
                  * to test; the gate reads it as this op finishes. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_NLINK);
                 map->vfs_aux = idx;
                 break;
 
             case OP_LOOKUP:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_lookup(
                     compound,
                     (const char *) argop->oplookup.objname.data,
                     (int) argop->oplookup.objname.len,
                     0);
                 map->vfs_res = idx;
+
+                /* The child is the current object now. */
+                cur_open_flags = 0;
                 break;
 
             case OP_GETATTR:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_getattr(
                     compound,
                     chimera_nfs4_attr2mask(argop->opgetattr.attr_request,
@@ -3017,6 +3141,11 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_ACCESS:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_access(
                     compound,
                     chimera_nfs4_access4_to_mask(argop->opaccess.access));
@@ -3029,7 +3158,13 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_READLINK:
-                /* The type gate READLINK applies before it reads. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
+                /* The type gate READLINK applies before it reads.  It and the
+                 * READLINK act on the same object, so they share the open. */
                 idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_aux = idx;
@@ -3041,13 +3176,29 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_LOOKUPP:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 idx          = chimera_vfs_compound_add_lookupp(compound, 0);
                 map->vfs_res = idx;
+
+                /* The parent is the current object now. */
+                cur_open_flags = 0;
                 break;
 
             case OP_CREATE:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 idx          = nfs4_vfs_add_create_op(compound, argop);
                 map->vfs_res = idx;
+
+                /* The created object is the current one now. */
+                cur_open_flags = 0;
                 break;
 
             case OP_SECINFO:
@@ -3057,11 +3208,18 @@ chimera_nfs4_compound_try_vfs(
                  * two errors SECINFO is specified to return.  The flavors
                  * themselves come from the export, which the request already
                  * names. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_lookup(
                     compound,
                     (const char *) argop->opsecinfo.name.data,
                     (int) argop->opsecinfo.name.len, 0);
                 map->vfs_res = idx;
+
+                cur_open_flags = 0;
                 break;
 
             case OP_LOCKT:
@@ -3069,6 +3227,11 @@ chimera_nfs4_compound_try_vfs(
                  * else it needs -- the claim state on the file -- is memory the
                  * server already holds, and is read when the result is
                  * filled. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_res = idx;
@@ -3088,6 +3251,23 @@ chimera_nfs4_compound_try_vfs(
                                           cur_fh, cur_fhlen,
                                           &map->io_handle,
                                           &io_owner, &have_owner) != NFS4_OK) {
+                    goto refuse;
+                }
+
+                /* An anonymous stateid leaves no handle, so the I/O acts on
+                 * the current object and the encoder opens it -- for DATA, and
+                 * REGULAR_ONLY, because the object has to be a regular file
+                 * and the open is where that is settled.  A path open would
+                 * not settle it: opening a directory for a path succeeds, and
+                 * the data open behind it fails with whatever errno the
+                 * backend has for "you cannot read a directory" rather than
+                 * the NFS4ERR_ISDIR the client is owed. */
+                if (!map->io_handle &&
+                    nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      (argop->argop == OP_READ) ?
+                                      (NFS4_VFS_OPEN_DATA |
+                                       CHIMERA_VFS_OPEN_READ_ONLY) :
+                                      NFS4_VFS_OPEN_DATA) < 0) {
                     goto refuse;
                 }
 
@@ -3149,6 +3329,12 @@ chimera_nfs4_compound_try_vfs(
                     setattr_handle = NULL;
                 }
 
+                if (!map->io_handle &&
+                    nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_setattr(compound,
                                                        map->io_handle,
                                                        &sattr, 0);
@@ -3160,6 +3346,11 @@ chimera_nfs4_compound_try_vfs(
                 /* No type assertion and no recall request: NFS4's REMOVE is
                  * type-agnostic, and the recall decision is made on the
                  * protocol side before the sequence is built. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_remove(
                     compound,
                     (const char *) argop->opremove.target.data,
@@ -3194,11 +3385,23 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_OPEN:
+                /* A named OPEN resolves in the current directory; an unnamed
+                * one re-opens the current object and needs nothing first. */
+                if (nfs4_vfs_open_is_named(argop) &&
+                    nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 ctx->open_present   = 1;
                 ctx->open_res_index = i;
                 idx                 = nfs4_vfs_add_open_op(req, compound,
                                                            argop, map);
                 map->vfs_res = idx;
+
+                /* The opened object is the current one now, and the handle the
+                 * OPEN produced is its own -- not the sequence's cursor. */
+                cur_open_flags = 0;
                 break;
 
             case OP_SAVEFH:
@@ -3209,15 +3412,31 @@ chimera_nfs4_compound_try_vfs(
             case OP_RESTOREFH:
                 idx          = chimera_vfs_compound_add_restorefh(compound);
                 map->vfs_res = idx;
+
+                /* A different object is current; nothing is open on it. */
+                cur_open_flags = 0;
                 break;
 
             case OP_COMMIT:
                 /* The regular-file gate COMMIT applies before it flushes, from
                  * a stat of the object taken through a path open -- the same
                  * two-open shape the per-op path has. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_aux = idx;
+
+                /* The flush itself needs the data open, which is a different
+                 * handle from a different cache than the stat above. */
+                if (idx >= 0 &&
+                    nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DATA) < 0) {
+                    goto refuse;
+                }
 
                 if (idx >= 0) {
                     idx = chimera_vfs_compound_add_commit(
@@ -3230,6 +3449,11 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_READDIR:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DIR) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_readdir_stream(
                     compound,
                     argop->opreaddir.cookie,
@@ -3248,6 +3472,11 @@ chimera_nfs4_compound_try_vfs(
                  * client sent; the VFS work is the stat it compares.  The
                  * comparison itself runs in the gate, so a mismatch stops the
                  * ops behind it -- which is what VERIFY exists to do. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_getattr(
                     compound,
                     chimera_nfs4_attr2mask(
@@ -3284,9 +3513,22 @@ chimera_nfs4_compound_try_vfs(
 
                 /* The regular-file gate, from a stat of the current object --
                  * the same shape COMMIT uses. */
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
                 map->vfs_aux = idx;
+
+                /* A special stateid left io_handle NULL, so the op acts on the
+                 * current object and wants it open for data. */
+                if (idx >= 0 && !map->io_handle &&
+                    nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_DATA) < 0) {
+                    goto refuse;
+                }
 
                 if (idx >= 0) {
                     if (argop->argop == OP_SEEK) {
@@ -3325,16 +3567,31 @@ chimera_nfs4_compound_try_vfs(
             }
 
             case OP_GETXATTR:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
                 map->vfs_res = idx;
                 break;
 
             case OP_SETXATTR:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
                 map->vfs_res = idx;
                 break;
 
             case OP_LISTXATTRS:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx = chimera_vfs_compound_add_listxattrs(
                     compound,
                     argop->oplistxattrs.lxa_cookie,
@@ -3344,6 +3601,11 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_REMOVEXATTR:
+                if (nfs4_vfs_open_for(compound, &cur_open_flags,
+                                      NFS4_VFS_OPEN_META) < 0) {
+                    goto refuse;
+                }
+
                 idx          = nfs4_vfs_add_xattr_op(req, compound, argop);
                 map->vfs_res = idx;
                 break;

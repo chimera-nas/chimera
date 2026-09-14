@@ -535,8 +535,11 @@ chimera_client_compound_at_root(
     compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                           chimera_client_req_cred(request));
 
-    chimera_vfs_compound_add_putfh(compound, thread->client->root_fh,
-                                   thread->client->root_fh_len);
+    /* PUTROOT rather than PUTFH of thread->client->root_fh: the two resolve to
+     * the same bytes -- the client fills root_fh from chimera_vfs_get_root_fh()
+     * at mount, which is what PUTROOT's dispatch calls -- and naming it as the
+     * root says what the sequence means instead of carrying a copy of it. */
+    chimera_vfs_compound_add_putroot(compound);
 
     request->compound = compound;
 
