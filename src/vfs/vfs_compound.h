@@ -209,6 +209,7 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_REMOVE_PATH,
     CHIMERA_VFS_COMPOUND_OP_RENAME_PATH,
     CHIMERA_VFS_COMPOUND_OP_LINK_PATH,
+    CHIMERA_VFS_COMPOUND_OP_PUTHANDLE,
 };
 
 #define CHIMERA_VFS_COMPOUND_MAX_OPS             32
@@ -828,6 +829,26 @@ chimera_vfs_compound_add_open(
  * `path` is copied.  The flags are the CHIMERA_VFS_* words the path-based VFS
  * calls take, and mean exactly what they mean there.
  */
+/* Make the caller's OPEN HANDLE the current object.
+ *
+ * PUTFH names the current object by file handle and leaves the sequence to
+ * open it; this hands over a handle that is already open.  For a caller that
+ * holds one -- an *_at API, whose whole shape is "in this directory I have
+ * open" -- that is the difference between reusing a reference and taking a
+ * second one.
+ *
+ * The handle is BORROWED: the caller holds it for the life of the sequence and
+ * releases it afterwards, and the sequence will not release it when the
+ * current object moves.  `open_flags` is what the caller opened it with, so
+ * the sequence can tell whether it serves an op that needs more; when it does
+ * not, the sequence opens its own and leaves this one alone.
+ */
+int
+chimera_vfs_compound_add_puthandle(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    unsigned int                    open_flags);
+
 int
 chimera_vfs_compound_add_lookup_path(
     struct chimera_vfs_compound *compound,

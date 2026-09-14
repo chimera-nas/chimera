@@ -69,6 +69,10 @@ struct chimera_vfs_compound {
     uint32_t                        fh_len;
     struct chimera_vfs_open_handle *handle;
     unsigned int                    handle_flags;
+    /* The current handle is the CALLER'S, seeded by PUTHANDLE, and must not be
+     * released with the sequence or when the current object moves.  Cleared
+     * the moment the executor opens one of its own. */
+    uint8_t                         handle_borrowed;
 
     /* The saved slot (SAVEFH/RESTOREFH): a file handle, no open handle. */
     uint8_t                         saved_fh[CHIMERA_VFS_FH_SIZE];
@@ -155,15 +159,31 @@ chimera_vfs_compound_set_gate(
  * actually used are touched: a one-op FUSE request costs one op's worth of
  * clearing, not the whole CHIMERA_VFS_COMPOUND_MAX_OPS array.
  */
+/*
+ * Drop the current object's open handle, unless it is the caller's.
+ *
+ * Every site that lets go of compound->handle goes through here.  Having three
+ * of them spell the rule out separately is how one of them came to be missing
+ * the borrowed check, which released a handle PUTHANDLE had only borrowed.
+ */
+static void
+chimera_vfs_compound_release_cursor(struct chimera_vfs_compound *compound)
+{
+    if (compound->handle && !compound->handle_borrowed) {
+        chimera_vfs_release(compound->thread, compound->handle);
+    }
+
+    compound->handle          = NULL;
+    compound->handle_borrowed = 0;
+} /* chimera_vfs_compound_release_cursor */
+
 static void
 chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
 {
     struct chimera_vfs_thread *thread = compound->thread;
     uint32_t                   i;
 
-    if (compound->handle) {
-        chimera_vfs_release(compound->thread, compound->handle);
-    }
+    chimera_vfs_compound_release_cursor(compound);
 
     for (i = 0; i < compound->num_ops; i++) {
         /* An open handle the caller did not take: see OPEN HANDLE OWNERSHIP.
@@ -313,6 +333,7 @@ chimera_vfs_compound_add_putfh(
     int                             index;
 
     if (fhlen <= 0 || fhlen > CHIMERA_VFS_FH_SIZE) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -340,6 +361,7 @@ chimera_vfs_compound_add_lookup(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -561,6 +583,7 @@ chimera_vfs_compound_add_range(
     /* Both objects are the caller's: a sequence has one current object and
     * these need two, so there is nothing sensible to default either to. */
     if (!src_handle || !dst_handle) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -750,6 +773,34 @@ chimera_vfs_compound_set_path(
 } /* chimera_vfs_compound_set_path */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_puthandle(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    unsigned int                    open_flags)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (!handle) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_PUTHANDLE,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->in_handle  = handle;
+    op->open_flags = open_flags;
+
+    return index;
+} /* chimera_vfs_compound_add_puthandle */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_lookup_path(
     struct chimera_vfs_compound *compound,
     const char                  *path,
@@ -830,6 +881,15 @@ chimera_vfs_compound_add_create_path(
     struct chimera_vfs_compound_op *op;
     int                             index;
 
+    /* Before the slot is claimed: a rejection that leaves a half-built op
+     * behind is worse than no op at all -- a CREATE_PATH whose create_type was
+     * never assigned is a DIRECTORY create. */
+    if (create_type == CHIMERA_VFS_COMPOUND_CREATE_SYMLINK &&
+        (!target || targetlen <= 0)) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
     op = chimera_vfs_compound_next_op(compound,
                                       CHIMERA_VFS_COMPOUND_OP_CREATE_PATH,
                                       &index);
@@ -845,13 +905,11 @@ chimera_vfs_compound_add_create_path(
     }
 
     if (create_type == CHIMERA_VFS_COMPOUND_CREATE_SYMLINK) {
-        if (!target || targetlen <= 0) {
-            return -1;
-        }
 
         op->link_target = malloc(targetlen + 1);
 
         if (!op->link_target) {
+            compound->build_failed = 1;
             return -1;
         }
 
@@ -970,7 +1028,9 @@ chimera_vfs_compound_op_use_handle(
     uint32_t                     index,
     uint32_t                     from)
 {
-    if (index >= compound->num_ops || from >= compound->num_ops) {
+    /* `from` must be EARLIER: a later op has not run, so its out_handle is
+     * NULL and the addressing would silently resolve to nothing. */
+    if (index >= compound->num_ops || from >= index) {
         return;
     }
 
@@ -991,6 +1051,7 @@ chimera_vfs_compound_add_readdir(
     int                             index;
 
     if (max_entries > CHIMERA_VFS_COMPOUND_READDIR_MAX_ENTRIES) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1025,6 +1086,7 @@ chimera_vfs_compound_add_readdir_stream(
     int                             index;
 
     if (!reset || !append) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1056,6 +1118,7 @@ chimera_vfs_compound_add_getxattr(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1087,6 +1150,7 @@ chimera_vfs_compound_add_setxattr(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1140,6 +1204,7 @@ chimera_vfs_compound_add_removexattr(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1173,11 +1238,13 @@ chimera_vfs_compound_add_create(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
     if (create_type == CHIMERA_VFS_COMPOUND_CREATE_SYMLINK &&
         (!target || targetlen <= 0)) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1224,6 +1291,7 @@ chimera_vfs_compound_add_remove(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1256,6 +1324,7 @@ chimera_vfs_compound_add_rename(
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX ||
         new_namelen <= 0 || new_namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1290,6 +1359,7 @@ chimera_vfs_compound_add_link(
     int                             index;
 
     if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1322,6 +1392,7 @@ chimera_vfs_compound_add_read(
     int                             index;
 
     if (max_iov <= 0 || !iov) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1423,6 +1494,7 @@ chimera_vfs_compound_add_open(
     int                             index;
 
     if (namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
         return -1;
     }
 
@@ -1512,10 +1584,7 @@ chimera_vfs_compound_set_current(
     const void                  *fh,
     uint32_t                     fh_len)
 {
-    if (compound->handle) {
-        chimera_vfs_release(compound->thread, compound->handle);
-        compound->handle = NULL;
-    }
+    chimera_vfs_compound_release_cursor(compound);
 
     compound->handle_flags = 0;
 
@@ -2629,10 +2698,9 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             /* Open the current object once; every op that follows on the same
              * object reuses this handle -- unless it needs flags the handle
              * was not opened with, in which case it is re-opened. */
-            if (compound->handle) {
-                chimera_vfs_release(compound->thread, compound->handle);
-                compound->handle = NULL;
-            }
+            /* A borrowed handle that cannot serve this op is left alone -- it
+             * is the caller's -- and the sequence opens its own. */
+            chimera_vfs_compound_release_cursor(compound);
 
             compound->handle_flags = open_flags;
 
@@ -2991,6 +3059,20 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   op->offset, op->length,
                                   chimera_vfs_compound_read_plus_callback,
                                   compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_PUTHANDLE:
+            /* set_current first: it releases whatever the sequence was holding
+             * and clears the borrowed flag, so the assignments below are what
+             * survives. */
+            chimera_vfs_compound_set_current(compound, op->in_handle->fh,
+                                             op->in_handle->fh_len);
+
+            compound->handle          = op->in_handle;
+            compound->handle_flags    = op->open_flags;
+            compound->handle_borrowed = 1;
+
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH:
