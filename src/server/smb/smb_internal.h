@@ -1195,6 +1195,15 @@ struct chimera_smb_request {
         struct {
             uint8_t                       info_class;
             uint8_t                       flags;
+            /* `flags` as it arrived on the wire.  The entry callback clears
+             * SMB2_INDEX_SPECIFIED once it reaches the resume point, so a
+             * sequence retry -- which re-enumerates from the top -- has to put
+             * it back.  See chimera_smb_query_directory_reset. */
+            uint8_t                       wire_flags;
+            /* The open's enumeration cursor as it stood before this query ran.
+             * The entry callback advances it per entry, so a retry has to wind
+             * it back with everything else. */
+            uint64_t                      start_position;
             uint32_t                      file_index;
             uint8_t                       eof;
             uint16_t                      pattern_len;

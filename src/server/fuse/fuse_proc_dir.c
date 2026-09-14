@@ -395,6 +395,7 @@ chimera_fuse_op_readdir(
                                             in->offset,
                                             file->readdir_verifier,
                                             attr_mask,
+                                            0, NULL, 0,
                                             chimera_fuse_readdir_reset,
                                             chimera_fuse_readdir_entry,
                                             req);

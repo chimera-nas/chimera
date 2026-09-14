@@ -9,6 +9,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 #include "xxhash.h"
 
 static unsigned int
@@ -25,7 +26,7 @@ chimera_smb_query_directory_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_query_directory_status */
 
-void
+static void
 chimera_smb_query_directory_readdir_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
@@ -68,7 +69,7 @@ chimera_smb_query_directory_readdir_complete(
 
 } /* chimera_smb_query_directory_readdir_complete */
 
-int
+static int
 chimera_smb_query_directory_readdir_callback(
     uint64_t                        inum,
     uint64_t                        cookie,
@@ -347,6 +348,66 @@ chimera_smb_query_directory_readdir_callback(
     return 0;
 } /* chimera_smb_query_directory_readdir_callback */
 
+/* The reversibility half of the streaming contract.  Everything the entry
+ * callback advances is wound back here: the bytes already marshalled into the
+ * reply buffer (output_length, which is also what overwrites them), the
+ * back-pointer into it, the resume flag the callback consumes when it reaches
+ * the client's FileIndex, and the open's enumeration cursor.  Nothing has been
+ * emitted -- the reply goes out only once the sequence has finished -- so a
+ * retry is a first run. */
+static void
+chimera_smb_query_directory_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    request->query_directory.output_length       = 0;
+    request->query_directory.last_file_offset     = NULL;
+    request->query_directory.flags                = request->query_directory.wire_flags;
+    request->query_directory.open_file->position  = request->query_directory.start_position;
+} /* chimera_smb_query_directory_reset */
+
+static int
+chimera_smb_query_directory_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *private_data)
+{
+    return chimera_smb_query_directory_readdir_callback(inum, cookie, name,
+                                                        namelen, attrs,
+                                                        private_data);
+} /* chimera_smb_query_directory_append */
+
+static void
+chimera_smb_query_directory_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request     *request = private_data;
+    enum chimera_vfs_error          status;
+    struct chimera_vfs_open_handle *handle;
+
+    status = chimera_vfs_compound_status(compound);
+
+    /* The reference taken before the sequence, handed back so the completion
+     * below drops it on exactly the terms it always has.  The sequence borrowed
+     * the handle and never owned it. */
+    handle = request->query_directory.open_file->handle;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_query_directory_readdir_complete(status, handle, 0, 0, 0, NULL,
+                                                 request);
+} /* chimera_smb_query_directory_sequence_complete */
+
 void
 chimera_smb_query_directory(struct chimera_smb_request *request)
 {
@@ -501,23 +562,37 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         readdir_mask |= CHIMERA_VFS_ATTR_ACL;
     }
 
-    chimera_vfs_readdir(
+    /* Where the enumeration starts, so a retried sequence can wind back to it. */
+    request->query_directory.start_position = request->query_directory.open_file->position;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
         thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->query_directory.open_file->handle,
-        readdir_mask,
-        0, /* dir_attr_mask */
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->query_directory.open_file->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED |
+                                       CHIMERA_VFS_OPEN_DIRECTORY);
+
+    /* Streaming, because the reply buffer is the only place these entries are
+     * ever staged: the callback marshals straight into it and the sequence
+     * keeps no copy.  The pattern goes to the VFS core, which applies the
+     * MS-FSA wildcard match so the backend stays oblivious to it. */
+    chimera_vfs_compound_add_readdir_stream(
+        request->vfs_compound,
         request->query_directory.open_file->position,
         0, /* verifier */
+        readdir_mask,
         CHIMERA_VFS_READDIR_EMIT_DOT,
-        /* SMB search pattern: the VFS core applies the MS-FSA wildcard match so
-         * the backend stays oblivious; the callback below no longer filters. */
         request->query_directory.pattern,
         request->query_directory.pattern_length,
-        chimera_smb_query_directory_readdir_callback,
-        chimera_smb_query_directory_readdir_complete,
-        request
-        );
+        chimera_smb_query_directory_reset,
+        chimera_smb_query_directory_append,
+        request);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_query_directory_sequence_complete,
+                                request);
 } /* chimera_smb_query_directory */
 
 void
@@ -576,6 +651,7 @@ chimera_smb_parse_query_directory(
     request->query_directory.output_length    = 0;
     request->query_directory.eof              = 1;
     request->query_directory.last_file_offset = NULL;
+    request->query_directory.wire_flags       = request->query_directory.flags;
 
     if (request->query_directory.pattern_length > SMB_FILENAME_MAX * 2) {
         chimera_smb_error("Received SMB2 QUERY_DIRECTORY request with invalid name length (%u > %u)",
