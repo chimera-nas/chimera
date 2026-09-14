@@ -373,10 +373,26 @@ struct sm_extent {
  * region.  Protected by the owning AG's lock. */
 struct sm_claim {
     uint64_t         base;          /* absolute device offset of the claimed region */
-    uint64_t         len;
+    uint64_t         len;           /* == end - base; ag->lock-protected mirror of `end` */
     uint32_t         refcount;      /* in-flight txns that allocated from this claim */
     int              retiring;      /* owner released it; GC when refcount==0 */
     struct sm_claim *next;
+
+    /*
+     * Recall rendezvous.  `cursor` and `end` are the bump state, kept here
+     * rather than in the owner's struct sm_reservation so a thread that cannot
+     * find space can see how much of someone else's claim is actually spoken
+     * for and hand the rest back (sm_ag_recall_claims_locked).
+     *
+     * Single-writer each: only the owning thread advances `cursor`, only a
+     * recaller (holding ag->lock) lowers `end`.  That is what lets the owner's
+     * bump stay lock-free -- it needs no CAS, just a re-read of `end` after
+     * publishing the new cursor, and it backs out if a recall landed in
+     * between.  See space_map_bump_alloc and sm_ag_recall_claims_locked, whose
+     * comments carry the interleaving argument.
+     */
+    uint64_t         cursor;        /* atomic: next free offset; owner writes */
+    uint64_t         end;           /* atomic: claim limit; recaller lowers */
 };
 
 /* Per-thread bump reservation (one for metadata, one for data).  Hands out
@@ -386,9 +402,9 @@ struct sm_reservation {
     uint32_t         device_id;
     uint32_t         ag_index;
     uint64_t         base;
-    uint64_t         len;
-    uint64_t         cursor;        /* next free offset within [base, base+len) */
-    struct sm_claim *claim;         /* the AG claim backing this reservation */
+    uint64_t         len;           /* grant size at claim time; diagnostics only */
+    struct sm_claim *claim;         /* the AG claim backing this reservation;
+                                     * carries the live cursor/end (see above) */
     int              valid;
 };
 
@@ -638,6 +654,29 @@ space_map_reservation_alloc(
  * enough for small test filesystems, large enough that the shared allocator is
  * touched only ~once per chunk consumed. */
 #define SM_RESERVATION_CHUNK (4ULL << 20)       /* 4 MiB */
+
+/*
+ * A bump reservation is speculative: the thread claims a whole chunk so its
+ * next run of allocations draws thread-locally, and the unused tail sits inside
+ * a claim where no other thread can take it.  On a roomy pool that is free
+ * batching.  Near the end of an AG it is the difference between "the pool has
+ * space" and "the pool has space nobody can reach": with a fixed
+ * SM_RESERVATION_CHUNK, N workers can corner N*4 MiB of an AG that has only a
+ * few MiB left, and a request for one block fails while statfs still reports
+ * megabytes free.
+ *
+ * So grant no more than a fraction of what the AG has left, which makes the
+ * reservation size follow the AG down: 4 MiB while there is room, then 1 MiB,
+ * then 128 KiB, converging on the exact ask.  The surplus any one thread can
+ * hold is thus bounded by a share of what remains rather than by a constant, so
+ * the pool stays usable to its last extents.  The floor is always the caller's
+ * `want` -- capping below that would fail an allocation the AG can serve.
+ *
+ * space_map_reserve() already applies the same principle to the other
+ * reservation mechanism (the thread cache), where it is a binary "don't
+ * speculate when free < 2*want"; this is the graduated form for bump claims.
+ */
+#define SM_RESERVE_AG_SHIFT  3                  /* grant <= ag_free/8 */
 
 /* Apply a COMMITTED allocation to the in-memory free tree at retire/durability
  * (mirrors space_map_free_apply). */

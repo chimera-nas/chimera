@@ -131,19 +131,24 @@ main(
      * referenced extent would eventually produce. */
     assert(sp.ag_free_sum <= sp.usable_capacity);
 
-    /* The boundary allocation is *expected* to fall short today, and that is a
-     * second, separate defect: space that sits inside a live reservation claim
-     * is counted free by statfs but cannot be handed out, so a request for
-     * "everything free" hits ENOSPC with tens of megabytes still reported.  The
-     * claim_bytes line above is the evidence.  What this test gates is the
-     * failure *path*: hitting that ENOSPC must leave the allocator exactly as
-     * it found it.  When the accounting is fixed this becomes a hard assert.
+    /*
+     * The boundary allocation must succeed.  This used to be tolerated: space
+     * sitting inside another thread's live bump reservation was counted free by
+     * statfs but could not be handed out, so asking for "everything free" hit
+     * ENOSPC with tens of megabytes still reported -- the claim_bytes line above
+     * was the evidence, and at this geometry the allocator stopped roughly
+     * 58 MiB short.
+     *
+     * Two changes make it a hard assert.  Claim recall
+     * (sm_ag_recall_claims_locked) takes back the unallocated tail of a claim
+     * when an AG would otherwise report ENOSPC, so an idle worker's reservation
+     * no longer strands the pool; and statfs now nets the internal reserve out
+     * of space_free, so what it reports is what a writer can actually place.
+     * The reserve is what covers the extent records this allocation itself
+     * writes -- the residual the allocator cannot reach is a few blocks of
+     * metadata, far inside it.
      */
-    if (boundary != CHIMERA_VFS_OK) {
-        printf("KNOWN GAP: reported %" PRIu64 " free but could not allocate "
-               "%" PRIu64 " (status %d) -- free space inside live claims\n",
-               free_before, ask, boundary);
-    }
+    assert(boundary == CHIMERA_VFS_OK);
 
     dh_release(&dh, root);
     dh_fini(&dh);
