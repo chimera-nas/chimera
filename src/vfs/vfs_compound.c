@@ -613,12 +613,9 @@ chimera_vfs_compound_add_range(
     struct chimera_vfs_compound_op *op;
     int                             index;
 
-    /* Both objects are the caller's: a sequence has one current object and
-    * these need two, so there is nothing sensible to default either to. */
-    if (!src_handle || !dst_handle) {
-        compound->build_failed = 1;
-        return -1;
-    }
+    /* NULL means "read the cursor": the source comes from the SAVED open slot
+     * and the destination from the current one, which is how a caller names
+     * two objects now.  The arguments remain for callers not yet moved over. */
 
     op = chimera_vfs_compound_next_op(compound, type, &index);
 
