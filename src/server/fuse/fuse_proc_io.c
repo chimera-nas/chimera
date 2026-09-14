@@ -562,7 +562,7 @@ chimera_fuse_op_write(
      * the payload is released by chimera_fuse_write_complete. */
     chimera_vfs_compound_add_write(req->compound, file->handle,
                                    in->offset, in->size, sync,
-                                   &req->u.write.iov, 1, &actor);
+                                   &req->u.write.iov, 1, 0, 0, &actor);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_write_sequence_complete, req);

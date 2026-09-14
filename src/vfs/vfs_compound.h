@@ -390,6 +390,11 @@ struct chimera_vfs_compound_op {
     char                                  name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
     uint32_t                              name_len;
     uint64_t                              attr_mask;
+    /* Attributes to sample BEFORE the op runs, landing in `pre_attr`.  The
+     * pair (pre_attr_mask, attr_mask) is what a protocol needs to report a
+     * change atomically with the change itself: NFSv3's wcc_data, and SMB2's
+     * write-time-sticky handle, which restores the mtime a write advanced. */
+    uint64_t                              pre_attr_mask;
     uint32_t                              requested;
     uint64_t                              offset; /* COMMIT                             */
     uint64_t                              count; /* COMMIT                             */
@@ -403,6 +408,12 @@ struct chimera_vfs_compound_op {
     chimera_vfs_compound_readdir_reset_t  readdir_reset;
     chimera_vfs_compound_readdir_append_t readdir_append;
     void                                 *readdir_private;
+    /* READDIR: CHIMERA_VFS_READDIR_* and the caller's search pattern, which the
+     * VFS core matches on the caller's behalf.  The pattern is BORROWED and is
+     * re-matched on every execution, so it has to outlive a retry. */
+    uint32_t                              readdir_flags;
+    const char                           *readdir_pattern;
+    uint32_t                              readdir_pattern_len;
     /* Address this handle instead of the current object.  BORROWED from the
      * caller -- see ADDRESSING SOMETHING OTHER THAN CURRENT above.  NULL for
      * every op that addresses the current object, which is most of them. */
@@ -495,6 +506,12 @@ struct chimera_vfs_compound_op {
      * that needs an ACL issues that getattr itself.  ACCESS's `granted` is
      * computed while the ACL is still live, so it is unaffected. */
     struct chimera_vfs_attrs              attr;
+    /* The same object BEFORE this op ran, sampled under whatever lock makes
+     * it atomic with the change -- which is the whole reason it comes back
+     * from the op rather than from a GETATTR the caller issues first.  Only
+     * the attributes named in `pre_attr_mask` are filled; the ACL is dropped
+     * for the reason given above. */
+    struct chimera_vfs_attrs              pre_attr;
     /* The current object AFTER this op ran: what a LOOKUP resolved, what a
      * PUTFH selected, and for everything else the object the op addressed.
      * A streaming READDIR is the one op that fills this BEFORE it runs rather
@@ -805,13 +822,22 @@ chimera_vfs_compound_add_readdir(
  * caller's own bound is what stops the enumeration -- which is the point.
  *
  * The contract on the two callbacks is on their typedefs; the short version is
- * that reset must undo everything append did, and append must not emit. */
+ * that reset must undo everything append did, and append must not emit.
+ *
+ * `flags` is a CHIMERA_VFS_READDIR_* word and `pattern` the caller's search
+ * pattern, which the VFS core matches so the backend stays oblivious to it --
+ * SMB2's QUERY_DIRECTORY is the caller that needs both.  `pattern` is BORROWED
+ * and must outlive the sequence, which a retry makes load-bearing: it is
+ * matched again on every execution. */
 int
 chimera_vfs_compound_add_readdir_stream(
     struct chimera_vfs_compound          *compound,
     uint64_t                              cookie,
     uint64_t                              verifier,
     uint64_t                              attr_mask,
+    uint32_t                              flags,
+    const char                           *pattern,
+    uint32_t                              pattern_len,
     chimera_vfs_compound_readdir_reset_t  reset,
     chimera_vfs_compound_readdir_append_t append,
     void                                 *private_data);
@@ -1147,7 +1173,13 @@ chimera_vfs_compound_add_read(
 /* Write `count` bytes of `iov` at `offset` to the current object, or -- when
  * `handle` is non-NULL -- to that handle.  Both `handle` and `iov` are
  * BORROWED: the caller holds them for as long as the sequence runs and releases
- * them afterwards. */
+ * them afterwards.
+ *
+ * `pre_attr_mask` and `post_attr_mask` sample the file either side of the
+ * write, into the op's `pre_attr` and `attr`.  A protocol that reports the
+ * change -- NFSv3's wcc_data, SMB2 restoring the mtime a write advanced on a
+ * write-time-sticky handle -- needs those two readings to be atomic with the
+ * write, which a separate GETATTR in the same sequence would not be. */
 int
 chimera_vfs_compound_add_write(
     struct chimera_vfs_compound      *compound,
@@ -1157,6 +1189,8 @@ chimera_vfs_compound_add_write(
     uint32_t                          sync,
     struct evpl_iovec                *iov,
     int                               niov,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
     const struct chimera_claim_actor *io_owner);
 
 /* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to

@@ -158,6 +158,7 @@ chimera_dispatch_write(
                                    request->write.length,
                                    1,
                                    request->write.iov, niov,
+                                   0, 0,
                                    NULL);
 
     chimera_vfs_compound_submit(request->compound,
