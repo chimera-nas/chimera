@@ -1343,6 +1343,16 @@ sm_ag_try_claim_locked(
 {
     uint32_t want_class = sm_ag_size_class(want);
     uint32_t klass;
+    uint64_t ag_cap;
+
+    /* BISECT PROBE: see SM_RESERVE_AG_SHIFT. */
+    ag_cap = ag->free_bytes >> SM_RESERVE_AG_SHIFT;
+    if (ag_cap < want) {
+        ag_cap = want;
+    }
+    if (chunk > ag_cap) {
+        chunk = ag_cap;
+    }
 
     /*
      * Find a claim-free window via the by-size index instead of walking

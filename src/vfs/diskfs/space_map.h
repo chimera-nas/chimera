@@ -639,6 +639,13 @@ space_map_reservation_alloc(
  * touched only ~once per chunk consumed. */
 #define SM_RESERVATION_CHUNK (4ULL << 20)       /* 4 MiB */
 
+/* BISECT PROBE: cap a bump grant at a share of the AG's remaining free space,
+ * so reservation size follows the AG down instead of staying a constant.  This
+ * branch carries ONLY this half of PR #1689 -- no claim recall -- to find out
+ * whether the grant-sizing change alone reproduces the space_map double-free
+ * the merge queue keeps reporting. */
+#define SM_RESERVE_AG_SHIFT         3
+
 /* Apply a COMMITTED allocation to the in-memory free tree at retire/durability
  * (mirrors space_map_free_apply). */
 void
