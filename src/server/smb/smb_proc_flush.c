@@ -96,7 +96,7 @@ chimera_smb_flush(struct chimera_smb_request *request)
                                        CHIMERA_VFS_OPEN_INFERRED);
 
     chimera_vfs_compound_add_commit(request->vfs_compound, 0,
-                                    0xffffffffffffffffULL, 0);
+                                    0xffffffffffffffffULL, 0, 0);
 
     chimera_vfs_compound_submit(request->vfs_compound,
                                 chimera_smb_flush_sequence_complete, request);

@@ -3120,7 +3120,7 @@ chimera_nfs4_compound_try_vfs(
                     compound,
                     (const char *) argop->oplookup.objname.data,
                     (int) argop->oplookup.objname.len,
-                    0);
+                    0, 0);
                 map->vfs_res = idx;
 
                 /* The child is the current object now. */
@@ -3216,7 +3216,7 @@ chimera_nfs4_compound_try_vfs(
                 idx = chimera_vfs_compound_add_lookup(
                     compound,
                     (const char *) argop->opsecinfo.name.data,
-                    (int) argop->opsecinfo.name.len, 0);
+                    (int) argop->opsecinfo.name.len, 0, 0);
                 map->vfs_res = idx;
 
                 cur_open_flags = 0;
@@ -3287,6 +3287,7 @@ chimera_nfs4_compound_try_vfs(
                             compound, map->io_handle,
                             argop->opread.offset, argop->opread.count,
                             riov, NFS4_VFS_READ_MAX_IOV,
+                            0,
                             have_owner ? &io_owner : NULL);
                     }
                 } else {
@@ -3338,7 +3339,7 @@ chimera_nfs4_compound_try_vfs(
 
                 idx = chimera_vfs_compound_add_setattr(compound,
                                                        map->io_handle,
-                                                       &sattr, 0);
+                                                       &sattr, 0, 0);
                 map->vfs_res = idx;
                 break;
             }
@@ -3444,7 +3445,7 @@ chimera_nfs4_compound_try_vfs(
                         compound,
                         argop->opcommit.offset,
                         argop->opcommit.count,
-                        CHIMERA_VFS_ATTR_MODE);
+                        0, CHIMERA_VFS_ATTR_MODE);
                 }
                 map->vfs_res = idx;
                 break;
@@ -3461,6 +3462,7 @@ chimera_nfs4_compound_try_vfs(
                     nfs4_vfs_readdir_verifier(&argop->opreaddir),
                     chimera_nfs4_attr2mask(argop->opreaddir.attr_request,
                                            argop->opreaddir.num_attr_request),
+                    0,
                     0, NULL, 0,
                     nfs4_vfs_readdir_reset,
                     nfs4_vfs_readdir_append,

@@ -583,6 +583,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.open_file->position,
         0, /* verifier */
         readdir_mask,
+        0, /* dir_attr_mask */
         CHIMERA_VFS_READDIR_EMIT_DOT,
         request->query_directory.pattern,
         request->query_directory.pattern_length,

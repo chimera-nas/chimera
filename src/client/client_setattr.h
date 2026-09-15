@@ -139,7 +139,7 @@ chimera_dispatch_setattr(
      * which is what truncate(2) by path means, and what the per-operation
      * path did. */
     set_idx = chimera_vfs_compound_add_setattr(compound, NULL,
-                                               &request->setattr.set_attr, 0);
+                                               &request->setattr.set_attr, 0, 0);
 
     if (open_idx >= 0 && set_idx >= 0) {
         chimera_vfs_compound_op_use_handle(compound, (uint32_t) set_idx,

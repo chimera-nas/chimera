@@ -85,6 +85,7 @@ chimera_dispatch_read(
                                   request->read.length,
                                   request->read.iov,
                                   CHIMERA_CLIENT_IOV_MAX,
+                                  0,
                                   NULL);
 
     chimera_vfs_compound_submit(request->compound,
