@@ -65,7 +65,7 @@ chimera_dispatch_fsetattr(
     chimera_vfs_compound_add_setattr(request->compound,
                                      request->fsetattr.handle,
                                      &request->fsetattr.set_attr,
-                                     0);
+                                     0, 0);
 
     chimera_vfs_compound_submit(request->compound,
                                 chimera_fsetattr_sequence_complete, request);

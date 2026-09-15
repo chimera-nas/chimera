@@ -395,6 +395,11 @@ struct chimera_vfs_compound_op {
      * change atomically with the change itself: NFSv3's wcc_data, and SMB2's
      * write-time-sticky handle, which restores the mtime a write advanced. */
     uint64_t                              pre_attr_mask;
+    /* Attributes of the DIRECTORY an op names a child in, landing in
+     * `dir_post_attr`.  Separate from pre_attr_mask because these are a second
+     * object's attributes, not this one's at an earlier moment: NFSv3's
+     * LOOKUP3resok returns obj_attributes and dir_attributes side by side. */
+    uint64_t                              dir_attr_mask;
     uint32_t                              requested;
     uint64_t                              offset; /* COMMIT                             */
     uint64_t                              count; /* COMMIT                             */
@@ -644,12 +649,20 @@ chimera_vfs_compound_add_putfh(
     const void                  *fh,
     int                          fhlen);
 
+/* Resolve `name` in the current object, which becomes the resolved object.
+ *
+ * `attr_mask` describes the object found; `dir_attr_mask` describes the
+ * directory it was found in, landing in the op's dir_post_attr.  NFSv3's
+ * LOOKUP3resok carries both -- obj_attributes and dir_attributes -- and the
+ * second is only free to ask for here, alongside the resolve the backend is
+ * doing anyway. */
 int
 chimera_vfs_compound_add_lookup(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen,
-    uint64_t                     attr_mask);
+    uint64_t                     attr_mask,
+    uint64_t                     dir_attr_mask);
 
 int
 chimera_vfs_compound_add_getattr(
@@ -685,14 +698,17 @@ chimera_vfs_compound_add_lookupp(
     struct chimera_vfs_compound *compound,
     uint64_t                     attr_mask);
 
-/* `pre_attr_mask` is fetched against the object before the flush, so a caller
- * that must classify what it just committed does not need a separate getattr. */
+/* The two masks sample the object either side of the flush, into the op's
+ * pre_attr and attr, so a caller that must classify what it just committed does
+ * not need a separate getattr -- and, for NFSv3's COMMIT3resok.file_wcc, could
+ * not use one anyway: a getattr after the fact is not atomic with the flush. */
 int
 chimera_vfs_compound_add_commit(
     struct chimera_vfs_compound *compound,
     uint64_t                     offset,
     uint64_t                     count,
-    uint64_t                     pre_attr_mask);
+    uint64_t                     pre_attr_mask,
+    uint64_t                     post_attr_mask);
 
 /* Allocate (or, with CHIMERA_VFS_ALLOCATE_DEALLOCATE, punch) `length` bytes at
  * `offset` in the current object, or -- when `handle` is non-NULL -- in that
@@ -814,7 +830,8 @@ chimera_vfs_compound_add_readdir(
     uint32_t                     dircount,
     uint32_t                     maxcount,
     uint32_t                     max_entries,
-    uint64_t                     attr_mask);
+    uint64_t                     attr_mask,
+    uint64_t                     dir_attr_mask);
 
 /* READDIR that streams: no entry is staged, `append` is called with each one as
  * the backend produces it, and `reset` is called before the op runs (and so
@@ -835,6 +852,7 @@ chimera_vfs_compound_add_readdir_stream(
     uint64_t                              cookie,
     uint64_t                              verifier,
     uint64_t                              attr_mask,
+    uint64_t                              dir_attr_mask,
     uint32_t                              flags,
     const char                           *pattern,
     uint32_t                              pattern_len,
@@ -1168,6 +1186,7 @@ chimera_vfs_compound_add_read(
     uint32_t                          count,
     struct evpl_iovec                *iov,
     int                               max_iov,
+    uint64_t                          attr_mask,
     const struct chimera_claim_actor *io_owner);
 
 /* Write `count` bytes of `iov` at `offset` to the current object, or -- when
@@ -1196,12 +1215,18 @@ chimera_vfs_compound_add_write(
 /* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
  * that handle with descriptor rights.  `handle` is BORROWED: see ADDRESSING
  * SOMETHING OTHER THAN CURRENT.  On return the op's `set_attr` reports which
- * attributes were actually applied. */
+ * attributes were actually applied.
+ *
+ * `pre_attr_mask` and `attr_mask` sample the object either side of the change,
+ * into the op's pre_attr and attr.  NFSv3's SETATTR3resok.obj_wcc needs that
+ * pair to be atomic with the change, which a getattr in front of the op is
+ * not. */
 int
 chimera_vfs_compound_add_setattr(
     struct chimera_vfs_compound    *compound,
     struct chimera_vfs_open_handle *handle,
     const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        pre_attr_mask,
     uint64_t                        attr_mask);
 
 /* Give an op the handle it should act on, after appending it -- see ADDRESSING

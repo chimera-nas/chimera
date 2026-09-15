@@ -388,7 +388,8 @@ chimera_vfs_compound_add_lookup(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen,
-    uint64_t                     attr_mask)
+    uint64_t                     attr_mask,
+    uint64_t                     dir_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -409,6 +410,7 @@ chimera_vfs_compound_add_lookup(
     op->name[namelen] = '\0';
     op->name_len      = (uint32_t) namelen;
     op->attr_mask     = attr_mask;
+    op->dir_attr_mask = dir_attr_mask;
 
     return index;
 } /* chimera_vfs_compound_add_lookup */
@@ -527,7 +529,8 @@ chimera_vfs_compound_add_commit(
     struct chimera_vfs_compound *compound,
     uint64_t                     offset,
     uint64_t                     count,
-    uint64_t                     pre_attr_mask)
+    uint64_t                     pre_attr_mask,
+    uint64_t                     post_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -539,9 +542,10 @@ chimera_vfs_compound_add_commit(
         return -1;
     }
 
-    op->offset    = offset;
-    op->count     = count;
-    op->attr_mask = pre_attr_mask;
+    op->offset        = offset;
+    op->count         = count;
+    op->pre_attr_mask = pre_attr_mask;
+    op->attr_mask     = post_attr_mask;
 
     return index;
 } /* chimera_vfs_compound_add_commit */
@@ -1144,7 +1148,8 @@ chimera_vfs_compound_add_readdir(
     uint32_t                     dircount,
     uint32_t                     maxcount,
     uint32_t                     max_entries,
-    uint64_t                     attr_mask)
+    uint64_t                     attr_mask,
+    uint64_t                     dir_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1166,7 +1171,8 @@ chimera_vfs_compound_add_readdir(
     op->dircount    = dircount;
     op->maxcount    = maxcount;
     op->max_entries = max_entries;
-    op->attr_mask   = attr_mask;
+    op->attr_mask     = attr_mask;
+    op->dir_attr_mask = dir_attr_mask;
 
     return index;
 } /* chimera_vfs_compound_add_readdir */
@@ -1177,6 +1183,7 @@ chimera_vfs_compound_add_readdir_stream(
     uint64_t                              cookie,
     uint64_t                              verifier,
     uint64_t                              attr_mask,
+    uint64_t                              dir_attr_mask,
     uint32_t                              flags,
     const char                           *pattern,
     uint32_t                              pattern_len,
@@ -1202,6 +1209,7 @@ chimera_vfs_compound_add_readdir_stream(
     op->cookie              = cookie;
     op->verifier            = verifier;
     op->attr_mask           = attr_mask;
+    op->dir_attr_mask       = dir_attr_mask;
     op->readdir_flags       = flags;
     op->readdir_pattern     = pattern;
     op->readdir_pattern_len = pattern_len;
@@ -1491,6 +1499,7 @@ chimera_vfs_compound_add_read(
     uint32_t                          count,
     struct evpl_iovec                *iov,
     int                               max_iov,
+    uint64_t                          attr_mask,
     const struct chimera_claim_actor *io_owner)
 {
     struct chimera_vfs_compound_op *op;
@@ -1510,6 +1519,7 @@ chimera_vfs_compound_add_read(
 
     op->iov       = iov;
     op->in_handle = handle;
+    op->attr_mask = attr_mask;
 
     if (io_owner) {
         op->io_owner      = *io_owner;
@@ -1567,6 +1577,7 @@ chimera_vfs_compound_add_setattr(
     struct chimera_vfs_compound    *compound,
     struct chimera_vfs_open_handle *handle,
     const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        pre_attr_mask,
     uint64_t                        attr_mask)
 {
     struct chimera_vfs_compound_op *op;
@@ -1579,8 +1590,9 @@ chimera_vfs_compound_add_setattr(
         return -1;
     }
 
-    op->in_handle = handle;
-    op->attr_mask = attr_mask;
+    op->in_handle     = handle;
+    op->pre_attr_mask = pre_attr_mask;
+    op->attr_mask     = attr_mask;
 
     if (set_attr) {
         op->set_attr = *set_attr;
@@ -1763,9 +1775,11 @@ chimera_vfs_compound_lookup_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    (void) dir_attr;
-
     if (error_code == CHIMERA_VFS_OK) {
+        if (dir_attr) {
+            chimera_vfs_compound_store_attr_to(&op->dir_post_attr, dir_attr);
+        }
+
         if (attr) {
             chimera_vfs_compound_store_attr(op, attr);
         }
@@ -1839,10 +1853,14 @@ chimera_vfs_compound_commit_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    (void) post_attr;
+    if (error_code == CHIMERA_VFS_OK) {
+        if (pre_attr) {
+            chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
+        }
 
-    if (error_code == CHIMERA_VFS_OK && pre_attr) {
-        chimera_vfs_compound_store_attr(op, pre_attr);
+        if (post_attr) {
+            chimera_vfs_compound_store_attr(op, post_attr);
+        }
     }
 
     chimera_vfs_compound_op_done(compound, error_code);
@@ -1916,7 +1934,10 @@ chimera_vfs_compound_readdir_callback(
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
     (void) handle;
-    (void) dir_attr;
+
+    if (dir_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_post_attr, dir_attr);
+    }
 
     if (error_code == CHIMERA_VFS_OK) {
         op->r_cookie   = cookie;
@@ -2256,8 +2277,6 @@ chimera_vfs_compound_read_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    (void) attr;
-
     if (error_code != CHIMERA_VFS_OK) {
         /* Nothing was handed over, so nothing is ours to keep. */
         evpl_iovecs_release(compound->thread->evpl, iov, niov);
@@ -2270,6 +2289,10 @@ chimera_vfs_compound_read_callback(
      * and an array of its own to describe them, and an evpl_iovec records the
      * address of the struct that owns it, so the descriptors cannot be copied
      * into the caller's array.  Keep whichever array the read actually used. */
+    if (attr) {
+        chimera_vfs_compound_store_attr(op, attr);
+    }
+
     op->iov      = iov;
     op->niov     = niov;
     op->read_len = count;
@@ -2322,12 +2345,15 @@ chimera_vfs_compound_setattr_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    (void) pre_attr;
     (void) set_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_compound_op_done(compound, error_code);
         return;
+    }
+
+    if (pre_attr) {
+        chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
     }
 
     chimera_vfs_compound_store_attr(op, post_attr);
@@ -3068,7 +3094,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                            target,
                                            op->offset, op->count,
                                            op->iov, op->max_iov,
-                                           0, &op->io_owner,
+                                           op->attr_mask, &op->io_owner,
                                            chimera_vfs_compound_read_callback,
                                            compound);
                 } else {
@@ -3076,7 +3102,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                      target,
                                      op->offset, op->count,
                                      op->iov, op->max_iov,
-                                     0,
+                                     op->attr_mask,
                                      chimera_vfs_compound_read_callback,
                                      compound);
                 }
@@ -3117,7 +3143,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 chimera_vfs_setattr(compound->thread, compound->cred,
                                     target,
                                     &op->set_attr,
-                                    0, op->attr_mask,
+                                    op->pre_attr_mask, op->attr_mask,
                                     chimera_vfs_compound_setattr_callback,
                                     compound);
             }
@@ -3188,7 +3214,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   compound->handle,
                                   op->name, op->name_len,
                                   op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                                  0,
+                                  op->dir_attr_mask,
                                   chimera_vfs_compound_lookup_callback,
                                   compound);
             break;
@@ -3210,7 +3236,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             chimera_vfs_commit(compound->thread, compound->cred,
                                target,
                                op->offset, op->count,
-                               op->attr_mask, 0,
+                               op->pre_attr_mask, op->attr_mask,
                                chimera_vfs_compound_commit_callback,
                                compound);
             break;
@@ -3508,7 +3534,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             chimera_vfs_readdir(compound->thread, compound->cred,
                                 target,
                                 op->attr_mask,
-                                0,
+                                op->dir_attr_mask,
                                 op->cookie,
                                 op->verifier,
                                 op->readdir_flags,

@@ -53,7 +53,7 @@ chimera_dispatch_commit(
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->commit.handle,
                                        CHIMERA_VFS_OPEN_INFERRED);
-    chimera_vfs_compound_add_commit(request->compound, 0, 0, 0);
+    chimera_vfs_compound_add_commit(request->compound, 0, 0, 0, 0);
 
     chimera_vfs_compound_submit(request->compound,
                                 chimera_commit_sequence_complete, request);
