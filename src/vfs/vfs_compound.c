@@ -1345,7 +1345,9 @@ chimera_vfs_compound_add_create(
     const char                     *target,
     int                             targetlen,
     const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask)
+    uint64_t                        attr_mask,
+    uint64_t                        dir_pre_attr_mask,
+    uint64_t                        dir_post_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1373,6 +1375,8 @@ chimera_vfs_compound_add_create(
     op->name_len      = (uint32_t) namelen;
     op->create_type   = create_type;
     op->attr_mask     = attr_mask;
+    op->dir_pre_attr_mask = dir_pre_attr_mask;
+    op->dir_attr_mask     = dir_post_attr_mask;
 
     if (set_attr) {
         op->set_attr = *set_attr;
@@ -1398,7 +1402,9 @@ chimera_vfs_compound_add_remove(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen,
-    unsigned int                 flags)
+    unsigned int                 flags,
+    uint64_t                     dir_pre_attr_mask,
+    uint64_t                     dir_post_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1419,6 +1425,8 @@ chimera_vfs_compound_add_remove(
     op->name[namelen] = '\0';
     op->name_len      = (uint32_t) namelen;
     op->remove_flags  = flags;
+    op->dir_pre_attr_mask = dir_pre_attr_mask;
+    op->dir_attr_mask     = dir_post_attr_mask;
 
     return index;
 } /* chimera_vfs_compound_add_remove */
@@ -1430,7 +1438,9 @@ chimera_vfs_compound_add_rename(
     int                          namelen,
     const char                  *new_name,
     int                          new_namelen,
-    unsigned int                 flags)
+    unsigned int                 flags,
+    uint64_t                     dir_pre_attr_mask,
+    uint64_t                     dir_post_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1453,6 +1463,8 @@ chimera_vfs_compound_add_rename(
     op->name_len      = (uint32_t) namelen;
 
     op->remove_flags = flags;
+    op->dir_pre_attr_mask = dir_pre_attr_mask;
+    op->dir_attr_mask     = dir_post_attr_mask;
 
     memcpy(op->new_name, new_name, new_namelen);
     op->new_name[new_namelen] = '\0';
@@ -1466,7 +1478,9 @@ chimera_vfs_compound_add_link(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen,
-    uint64_t                     attr_mask)
+    uint64_t                     attr_mask,
+    uint64_t                     dir_pre_attr_mask,
+    uint64_t                     dir_post_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1487,6 +1501,8 @@ chimera_vfs_compound_add_link(
     op->name[namelen] = '\0';
     op->name_len      = (uint32_t) namelen;
     op->attr_mask     = attr_mask;
+    op->dir_pre_attr_mask = dir_pre_attr_mask;
+    op->dir_attr_mask     = dir_post_attr_mask;
 
     return index;
 } /* chimera_vfs_compound_add_link */
@@ -1609,7 +1625,9 @@ chimera_vfs_compound_add_open(
     unsigned int                    flags,
     uint32_t                        opts,
     const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask)
+    uint64_t                        attr_mask,
+    uint64_t                        dir_pre_attr_mask,
+    uint64_t                        dir_post_attr_mask)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1633,8 +1651,10 @@ chimera_vfs_compound_add_open(
         op->name_len      = (uint32_t) namelen;
     }
 
-    op->open_flags = flags;
-    op->open_opts  = opts;
+    op->open_flags        = flags;
+    op->open_opts         = opts;
+    op->dir_pre_attr_mask = dir_pre_attr_mask;
+    op->dir_attr_mask     = dir_post_attr_mask;
     op->attr_mask  = attr_mask;
 
     if (set_attr) {
@@ -1745,6 +1765,12 @@ chimera_vfs_compound_open_callback(
  * caller that asks for one sees it absent rather than dangling, and a caller
  * that needs one issues the getattr itself.  Anything computed FROM the ACL
  * while it was live -- ACCESS's granted mask -- is unaffected. */
+/* The executor asks for these on a directory it changes whatever the caller
+ * wanted, because NFSv4's change_info4 is built from them.  A caller's own
+ * directory masks are added to this, never substituted for it. */
+#define CHIMERA_VFS_COMPOUND_DIR_FLOOR \
+    (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME)
+
 static void
 chimera_vfs_compound_store_attr_to(
     struct chimera_vfs_attrs       *dst,
@@ -2125,8 +2151,8 @@ chimera_vfs_compound_open_at_callback(
                             CHIMERA_VFS_OPEN_INFERRED,
                             &op->set_attr,
                             op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                            CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
-                            CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                            op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                            op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                             chimera_vfs_compound_open_at_callback,
                             compound);
         return;
@@ -3018,8 +3044,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                 op->open_flags,
                                 &op->set_attr,
                                 op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
-                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                 chimera_vfs_compound_open_at_callback,
                                 compound);
             break;
@@ -3032,10 +3058,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                          op->name, op->name_len,
                                          &op->set_attr,
                                          op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                                         CHIMERA_VFS_ATTR_CHANGE |
-                                         CHIMERA_VFS_ATTR_CTIME,
-                                         CHIMERA_VFS_ATTR_CHANGE |
-                                         CHIMERA_VFS_ATTR_CTIME,
+                                         op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                         op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                          chimera_vfs_compound_create_callback,
                                          compound);
                     break;
@@ -3047,10 +3071,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                            (int) op->link_target_len,
                                            &op->set_attr,
                                            op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                                           CHIMERA_VFS_ATTR_CHANGE |
-                                           CHIMERA_VFS_ATTR_CTIME,
-                                           CHIMERA_VFS_ATTR_CHANGE |
-                                           CHIMERA_VFS_ATTR_CTIME,
+                                           op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                           op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                            chimera_vfs_compound_symlink_callback,
                                            compound);
                     break;
@@ -3060,10 +3082,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                          op->name, op->name_len,
                                          &op->set_attr,
                                          op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                                         CHIMERA_VFS_ATTR_CHANGE |
-                                         CHIMERA_VFS_ATTR_CTIME,
-                                         CHIMERA_VFS_ATTR_CHANGE |
-                                         CHIMERA_VFS_ATTR_CTIME,
+                                         op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                         op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                          chimera_vfs_compound_create_callback,
                                          compound);
                     break;
@@ -3154,10 +3174,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   compound->handle,
                                   op->name, op->name_len,
                                   NULL, 0, op->remove_flags,
-                                  CHIMERA_VFS_ATTR_CHANGE |
-                                  CHIMERA_VFS_ATTR_CTIME,
-                                  CHIMERA_VFS_ATTR_CHANGE |
-                                  CHIMERA_VFS_ATTR_CTIME,
+                                  op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                  op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                   NULL,
                                   chimera_vfs_compound_remove_callback,
                                   compound);
@@ -3181,10 +3199,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                   compound->fh, compound->fh_len,
                                   op->new_name, op->new_name_len,
                                   NULL, 0, op->remove_flags,
-                                  CHIMERA_VFS_ATTR_CHANGE |
-                                  CHIMERA_VFS_ATTR_CTIME,
-                                  CHIMERA_VFS_ATTR_CHANGE |
-                                  CHIMERA_VFS_ATTR_CTIME,
+                                  op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                  op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                   NULL, NULL,
                                   chimera_vfs_compound_rename_callback,
                                   compound);
@@ -3200,10 +3216,8 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                 compound->fh, compound->fh_len,
                                 op->name, op->name_len,
                                 0, op->attr_mask,
-                                CHIMERA_VFS_ATTR_CHANGE |
-                                CHIMERA_VFS_ATTR_CTIME,
-                                CHIMERA_VFS_ATTR_CHANGE |
-                                CHIMERA_VFS_ATTR_CTIME,
+                                op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                 NULL, NULL,
                                 chimera_vfs_compound_link_callback,
                                 compound);

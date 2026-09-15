@@ -1684,7 +1684,7 @@ nfs4_vfs_add_open_op(
     }
 
     return chimera_vfs_compound_add_open(compound, name, namelen, flags, opts,
-                                         &attr, attr_mask);
+                                         &attr, attr_mask, 0, 0);
 } /* nfs4_vfs_add_open_op */
 
 /*
@@ -1978,7 +1978,7 @@ nfs4_vfs_add_create_op(
                                            (int) args->objname.len,
                                            target, targetlen,
                                            &attr,
-                                           CHIMERA_VFS_ATTR_FH);
+                                           CHIMERA_VFS_ATTR_FH, 0, 0);
 } /* nfs4_vfs_add_create_op */
 
 int
@@ -3357,7 +3357,7 @@ chimera_nfs4_compound_try_vfs(
                     compound,
                     (const char *) argop->opremove.target.data,
                     (int) argop->opremove.target.len,
-                    0);
+                    0, 0, 0);
                 map->vfs_res = idx;
                 break;
 
@@ -3371,7 +3371,7 @@ chimera_nfs4_compound_try_vfs(
                     (int) argop->oprename.oldname.len,
                     (const char *) argop->oprename.newname.data,
                     (int) argop->oprename.newname.len,
-                    0);
+                    0, 0, 0);
                 map->vfs_res = idx;
                 break;
 
@@ -3382,7 +3382,7 @@ chimera_nfs4_compound_try_vfs(
                     compound,
                     (const char *) argop->oplink.newname.data,
                     (int) argop->oplink.newname.len,
-                    0);
+                    0, 0, 0);
                 map->vfs_res = idx;
                 break;
 
