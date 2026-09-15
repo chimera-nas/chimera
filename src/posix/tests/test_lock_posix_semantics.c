@@ -59,6 +59,51 @@ expect(
     }
 } /* expect */
 
+static const char *
+lock_type_str(short type)
+{
+    switch (type) {
+        case F_RDLCK: return "F_RDLCK";
+        case F_WRLCK: return "F_WRLCK";
+        case F_UNLCK: return "F_UNLCK";
+        default:      return "?";
+    } /* switch */
+} /* lock_type_str */
+
+/*
+ * F_GETLK assertions report what came back, not just that it was wrong.
+ *
+ * These cases are the ones that have shown up as rare CI-only failures, where
+ * a single line of "FAIL: <what>" says nothing about which lock answered.  The
+ * whole diagnosis turns on the returned descriptor: a stale WRITE fragment left
+ * under a downgraded range reports F_WRLCK with l_start inside the downgrade,
+ * whereas a range that was never carved at all reports the original geometry,
+ * and a wrong-owner answer reports someone else's l_pid.  Printing rc, the
+ * type, and the range costs nothing on the passing path and makes the next
+ * occurrence self-explaining rather than another unreproducible line.
+ */
+static void
+expect_getlk(
+    int                 rc,
+    const struct flock *got,
+    short               want_type,
+    const char         *what)
+{
+    if (rc == 0 && got->l_type == want_type) {
+        return;
+    }
+
+    fprintf(stderr, "FAIL: %s\n", what);
+    fprintf(stderr,
+            "      F_GETLK rc=%d errno=%d; expected l_type=%s, got l_type=%s"
+            " l_whence=%d l_start=%lld l_len=%lld l_pid=%lld\n",
+            rc, rc == 0 ? 0 : errno,
+            lock_type_str(want_type), lock_type_str(got->l_type),
+            (int) got->l_whence, (long long) got->l_start,
+            (long long) got->l_len, (long long) got->l_pid);
+    fails++;
+} /* expect_getlk */
+
 int
 main(
     int    argc,
@@ -124,8 +169,8 @@ main(
     chimera_posix_set_lock_owner(&owner_b);
     fl = lock_desc(F_WRLCK, 0, 4);
     rc = chimera_posix_fcntl(fd, F_GETLK, &fl);
-    expect(rc == 0 && fl.l_type == F_UNLCK,
-           "closing one descriptor dropped the process's locks on the file");
+    expect_getlk(rc, &fl, F_UNLCK,
+                 "closing one descriptor dropped the process's locks on the file");
 
     fl = lock_desc(F_WRLCK, 0, 4);
     expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == 0,
@@ -148,8 +193,8 @@ main(
     chimera_posix_set_lock_owner(&owner_b);
     fl = lock_desc(F_RDLCK, 2, 1);
     rc = chimera_posix_fcntl(fd, F_GETLK, &fl);
-    expect(rc == 0 && fl.l_type == F_UNLCK,
-           "a read lock in the downgraded range is not blocked");
+    expect_getlk(rc, &fl, F_UNLCK,
+                 "a read lock in the downgraded range is not blocked");
 
     /* The real symptom is a hang, so take it non-blocking: F_SETLKW here
      * would never return against a stale write fragment. */
@@ -160,8 +205,8 @@ main(
     /* Outside the downgraded range A's write lock must still stand. */
     fl = lock_desc(F_RDLCK, 0, 1);
     rc = chimera_posix_fcntl(fd, F_GETLK, &fl);
-    expect(rc == 0 && fl.l_type == F_WRLCK,
-           "A still holds the write lock outside the downgrade");
+    expect_getlk(rc, &fl, F_WRLCK,
+                 "A still holds the write lock outside the downgrade");
 
     chimera_posix_close(fd);
 
