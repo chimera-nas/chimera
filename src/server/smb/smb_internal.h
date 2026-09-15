@@ -554,6 +554,12 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *r_open_file;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_vfs_attrs        set_attr;
+            /* The creator's native owner / group SIDs, seeded from the identity
+             * cache at create time; set_attr.va_owner_sid / va_group_sid point
+             * here so the backend can persist them beside the new object's
+             * uid / gid (len 0 = the cache had none, nothing is stamped). */
+            struct chimera_sid              owner_sid;
+            struct chimera_sid              group_sid;
             /* Set by the open/mkdir callbacks when this CREATE actually created
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */

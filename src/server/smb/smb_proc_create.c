@@ -4375,6 +4375,44 @@ chimera_smb_create_persist_prepare(
     return request->create.persist_hs.value_len > 0;
 } /* chimera_smb_create_persist_prepare */
 
+/*
+ * Stamp the creator's native owner/group SIDs on the create's set_attr, when
+ * the identity cache already knows them.  Nothing is stamped on a miss: the
+ * companion stays absent and the backend keeps its algorithmic fallback.
+ */
+static void
+chimera_smb_seed_creator_sids(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_cred *cred;
+    struct chimera_vfs      *vfs;
+    char                     sidstr[CHIMERA_IDMAP_SID_MAX];
+
+    if (!request->session_handle || !request->session_handle->session) {
+        return;
+    }
+
+    cred = &request->session_handle->session->cred;
+    vfs  = request->compound->thread->shared->vfs;
+
+    if (!vfs) {
+        return;
+    }
+
+    if (chimera_vfs_identity_uid_to_sid(vfs, cred->uid, sidstr,
+                                        sizeof(sidstr)) > 0 &&
+        chimera_sid_from_str(&request->create.owner_sid, sidstr) == 0) {
+        request->create.set_attr.va_owner_sid = &request->create.owner_sid;
+        request->create.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_OWNER_SID;
+    }
+
+    if (chimera_vfs_identity_gid_to_sid(vfs, cred->gid, sidstr,
+                                        sizeof(sidstr)) > 0 &&
+        chimera_sid_from_str(&request->create.group_sid, sidstr) == 0) {
+        request->create.set_attr.va_group_sid = &request->create.group_sid;
+        request->create.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
+    }
+} /* chimera_smb_seed_creator_sids */
+
 /* Issue the open_at against the (already opened) parent handle in
  * request->create.parent_handle.  Shared by the plain path and the
  * post-overwrite-check path. */
@@ -4491,6 +4529,25 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
             request->create.set_attr.va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
             request->create.set_attr.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
         }
+
+        /* Seed the owner/group SID companions from the creator's identity.
+         *
+         * A CREATE carries no security descriptor unless the client sends an
+         * SD create context, so without this the backend is handed nothing but
+         * a uid/gid and stores the algorithmic modefromsid form -- every file
+         * and directory made over SMB then holds S-1-5-88-* on disk, readable
+         * only by something that can map it back, which is what native-SID
+         * storage exists to avoid.  The SD create-context path
+         * (chimera_smb_parse_sd_to_acl) does not seed them either: it takes the
+         * SIDs the client named, not the creator's.
+         *
+         * Cache probe only, never a resolve: chimera_vfs_identity_uid_to_sid is
+         * a synchronous RCU lookup, and the creator is the session's own
+         * authenticated user, whose identity was resolved at session setup.  A
+         * miss (a local user with no SID, or a winbind outage) simply leaves the
+         * companion unstamped and the backend falls back to modefromsid exactly
+         * as before -- a create must not block on the identity authority. */
+        chimera_smb_seed_creator_sids(request);
     }
 
     /* Persistent-handle grants are keyed by the base file name; skip them for
