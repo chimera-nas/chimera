@@ -669,27 +669,24 @@ space_map_reservation_alloc(
 #define SM_RESERVATION_CHUNK        (4ULL << 20) /* 4 MiB */
 
 /*
- * A bump reservation is speculative: the thread claims a whole chunk so its
- * next run of allocations draws thread-locally, and the unused tail sits inside
- * a claim where no other thread can take it.  On a roomy pool that is free
- * batching.  Near the end of an AG it is the difference between "the pool has
- * space" and "the pool has space nobody can reach": with a fixed
- * SM_RESERVATION_CHUNK, N workers can corner N*4 MiB of an AG that has only a
- * few MiB left, and a request for one block fails while statfs still reports
- * megabytes free.
+ * Bounding a grant by a share of the AG's remaining free space -- so
+ * reservation size follows the AG down instead of staying a constant 4 MiB --
+ * was part of the first cut of this and has been REMOVED, deliberately.
  *
- * So grant no more than a fraction of what the AG has left, which makes the
- * reservation size follow the AG down: 4 MiB while there is room, then 1 MiB,
- * then 128 KiB, converging on the exact ask.  The surplus any one thread can
- * hold is thus bounded by a share of what remains rather than by a constant, so
- * the pool stays usable to its last extents.  The floor is always the caller's
- * `want` -- capping below that would fail an allocation the AG can serve.
+ * It is a good idea and it is not what fixes anything here: recall is what
+ * makes the pool reachable to its last extents, and the cap measured no
+ * improvement on its own.  What it does do is change where allocations land,
+ * and that is enough to trip a double-free in the space map that has nothing
+ * to do with reservations:
  *
- * space_map_reserve() already applies the same principle to the other
- * reservation mechanism (the thread cache), where it is a binary "don't
- * speculate when free < 2*want"; this is the graduated form for bump claims.
+ *   double-free or overlap at offset=42168320 length=4096 (prev=41889792+25219072)
+ *
+ * A full CI matrix on the cap ALONE, with no recall, reproduces that abort;
+ * the same matrix on recall alone is green on all 24 jobs.  Since the cap
+ * changes no allocator invariant -- it only makes grants smaller, hence more
+ * numerous -- it is surfacing a latent bug rather than introducing one, and
+ * that deserves its own investigation rather than being smuggled in here.
  */
-#define SM_RESERVE_AG_SHIFT         3           /* grant <= ag_free/8 */
 
 /* How many times space_map_reservation_alloc will re-grab after losing its
  * claim to a recall before reporting ENOSPC.  Each attempt is a full grab

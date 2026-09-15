@@ -1419,19 +1419,6 @@ sm_ag_try_claim_locked(
 {
     uint32_t want_class = sm_ag_size_class(want);
     uint32_t klass;
-    uint64_t ag_cap;
-
-    /* Bound the speculative part of the grant by a share of what this AG has
-     * left (see SM_RESERVE_AG_SHIFT).  Never below `want`: the point is to stop
-     * one thread cornering the tail of an AG, not to fail a request the AG can
-     * still serve. */
-    ag_cap = ag->free_bytes >> SM_RESERVE_AG_SHIFT;
-    if (ag_cap < want) {
-        ag_cap = want;
-    }
-    if (chunk > ag_cap) {
-        chunk = ag_cap;
-    }
 
     /*
      * Find a claim-free window via the by-size index instead of walking
