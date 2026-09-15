@@ -398,8 +398,15 @@ struct chimera_vfs_compound_op {
     /* Attributes of the DIRECTORY an op names a child in, landing in
      * `dir_post_attr`.  Separate from pre_attr_mask because these are a second
      * object's attributes, not this one's at an earlier moment: NFSv3's
-     * LOOKUP3resok returns obj_attributes and dir_attributes side by side. */
+     * LOOKUP3resok returns obj_attributes and dir_attributes side by side.
+     *
+     * For an op that CHANGES the directory, `dir_pre_attr_mask` is the reading
+     * taken before it, into `dir_pre_attr`, and this one is the reading after.
+     * That pair is NFSv3's wcc_data.  The executor always adds CHANGE and CTIME
+     * to both, because NFSv4's change_info4 is built from them whatever the
+     * caller asked for. */
     uint64_t                              dir_attr_mask;
+    uint64_t                              dir_pre_attr_mask;
     uint32_t                              requested;
     uint64_t                              offset; /* COMMIT                             */
     uint64_t                              count; /* COMMIT                             */
@@ -911,7 +918,9 @@ chimera_vfs_compound_add_open(
     unsigned int                    flags,
     uint32_t                        opts,
     const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask);
+    uint64_t                        attr_mask,
+    uint64_t                        dir_pre_attr_mask,
+    uint64_t                        dir_post_attr_mask);
 
 /* ---- path-addressed operations ----
  *
@@ -1129,7 +1138,9 @@ chimera_vfs_compound_add_create(
     const char                     *target,
     int                             targetlen,
     const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask);
+    uint64_t                        attr_mask,
+    uint64_t                        dir_pre_attr_mask,
+    uint64_t                        dir_post_attr_mask);
 
 /* Rename `name` in the saved object to `new_name` in the current object.  A
  * sequence that reaches this without a SAVEFH fails the op with EINVAL, the
@@ -1142,7 +1153,9 @@ chimera_vfs_compound_add_rename(
     int                          namelen,
     const char                  *new_name,
     int                          new_namelen,
-    unsigned int                 flags);
+    unsigned int                 flags,
+    uint64_t                     dir_pre_attr_mask,
+    uint64_t                     dir_post_attr_mask);
 
 /* Link the saved object into the current object as `name`.  `attr_mask` is
  * fetched against the newly linked object, for a caller whose reply describes
@@ -1152,7 +1165,9 @@ chimera_vfs_compound_add_link(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen,
-    uint64_t                     attr_mask);
+    uint64_t                     attr_mask,
+    uint64_t                     dir_pre_attr_mask,
+    uint64_t                     dir_post_attr_mask);
 
 /* Unlink `name` from the current object, which stays current.
  *
@@ -1165,7 +1180,9 @@ chimera_vfs_compound_add_remove(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen,
-    unsigned int                 flags);
+    unsigned int                 flags,
+    uint64_t                     dir_pre_attr_mask,
+    uint64_t                     dir_post_attr_mask);
 
 /* Read `count` bytes from `offset` of the current object, or -- when `handle` is
  * non-NULL -- of that handle, which is BORROWED.
