@@ -5058,11 +5058,23 @@ function(_smbtorture_add_suite backend parent pid)
     add_test(NAME ${name}
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
                 ${SMBTORTURE_CMD} -b ${backend} ${ARGN})
+    # smb2.maxfid opens 65520 files and closes them all -- 131k namespace
+    # operations, each an intent-log transaction on the journalling backends --
+    # so what it measures is how fast a backend commits metadata, and it needs
+    # several times the budget of an ordinary suite.  tools/smbtorture/regen.sh
+    # special-cases the same subtest for the same reason; this is the ctest half
+    # of that, which the earlier fix missed.  Under ASAN it is slower again,
+    # which is why cairn times out here at a budget it clears in the matrix.
+    set(_timeout 600)
+    if(parent STREQUAL "smb2.maxfid")
+        set(_timeout 1200)
+    endif()
+
     set_tests_properties(${name} PROPERTIES
         LABELS "smbtorture"
         ENVIRONMENT "${SMBTORTURE_LSAN};SMBTORTURE_JUNIT_FILE=${SMBTORTURE_JUNIT_DIR}/smbtorture_${pid}_${backend}.xml;SMBTORTURE_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/smbtorture_to_junit.py"
         SKIP_RETURN_CODE 77
-        TIMEOUT 600)
+        TIMEOUT ${_timeout})
 endfunction()
 
 # One per-subtest ctest entry (timing-fragile suites keep their isolation).
