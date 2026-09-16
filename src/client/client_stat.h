@@ -90,7 +90,7 @@ chimera_stat_sequence_complete(
 } /* chimera_stat_sequence_complete */
 
 static inline void
-chimera_stat_walk(
+chimera_dispatch_stat(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
