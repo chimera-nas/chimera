@@ -7,6 +7,7 @@
 #include "nfs_common/nfs3_attr.h"
 #include "server/server.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 
@@ -46,34 +47,36 @@ chimera_nfs3_rename_complete(
 /* Issue the rename.  target_fh is left NULL: when a caching protocol is enabled
  * the VFS resolves the clobbered destination's FH itself and recalls any
  * delegation/lease on it -- and on the renamed source -- before the rename. */
+/*
+ * PUTFH the source directory, park it, then make the target directory current.
+ * The sequence's RENAME reads (SAVED, CURRENT) exactly as the VFS call reads
+ * (from_dir, to_dir), so neither operand needs naming.
+ */
 static void
-chimera_nfs3_rename_dispatch(struct nfs_request *req)
+chimera_nfs3_rename_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct RENAME3args               *args   = req->args_rename;
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              from_pre, from_post, to_pre, to_post;
+    enum chimera_vfs_error                status;
 
-    /* req->fh / req->saved_fh are the decoded+authenticated source / dest
-     * directory handles (set in chimera_nfs3_rename below). */
-    chimera_vfs_rename_at(thread->vfs_thread,
-                          &req->cred,
-                          req->fh,
-                          req->fhlen,
-                          args->from.name.str,
-                          args->from.name.len,
-                          req->saved_fh,
-                          req->saved_fhlen,
-                          args->to.name.str,
-                          args->to.name.len,
-                          NULL,
-                          0,
-                          CHIMERA_VFS_REMOVE_RECALL,
-                          CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
-                          CHIMERA_NFS3_ATTR_MASK,
-                          NULL,
-                          NULL,
-                          chimera_nfs3_rename_complete,
-                          req);
-} /* chimera_nfs3_rename_dispatch */
+    status = chimera_vfs_compound_status(compound);
+
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    from_pre  = op->from_dir_pre_attr;
+    from_post = op->from_dir_post_attr;
+    to_pre    = op->dir_pre_attr;
+    to_post   = op->dir_post_attr;
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_rename_complete(status, &from_pre, &from_post,
+                                 &to_pre, &to_post, req);
+} /* chimera_nfs3_rename_sequence_complete */
 
 void
 chimera_nfs3_rename(
@@ -87,6 +90,7 @@ chimera_nfs3_rename(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
     struct RENAME3res                 res;
     uint16_t                          todir_export_id = 0;
     int                               rc;
@@ -122,5 +126,21 @@ chimera_nfs3_rename(
 
     req->args_rename = args;
 
-    chimera_nfs3_rename_dispatch(req);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_savefh(compound);
+    chimera_vfs_compound_add_putfh(compound, req->saved_fh, req->saved_fhlen);
+    chimera_vfs_compound_add_rename(compound,
+                                    args->from.name.str,
+                                    args->from.name.len,
+                                    args->to.name.str,
+                                    args->to.name.len,
+                                    CHIMERA_VFS_REMOVE_RECALL,
+                                    CHIMERA_NFS3_ATTR_WCC_MASK |
+                                    CHIMERA_VFS_ATTR_ATOMIC,
+                                    CHIMERA_NFS3_ATTR_MASK);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_rename_sequence_complete, req);
 } /* chimera_nfs3_rename */
