@@ -739,6 +739,24 @@ chimera_vfs_rename_at(
         return;
     }
 
+    /* "If the old argument and the new argument resolve to either the same
+     * existing directory entry or different directory entries for the same
+     * existing file, rename() shall return successfully and perform no other
+     * action" (XSH rename).  Unconditionally: the call asks nothing of the
+     * caller's permissions, and vfs_rename() agrees, returning 0 on
+     * source == target before may_delete() is reached.  Chimera ran the whole
+     * gate chain and could answer EACCES for a rename that does nothing.
+     *
+     * The same-entry half is settled here, where it costs one comparison.
+     * The other half -- two names for one file, via a hard link -- needs both
+     * sides resolved and is left to the backends, which compare inodes. */
+    if (fhlen == new_fhlen && namelen == new_namelen &&
+        memcmp(fh, new_fh, fhlen) == 0 &&
+        memcmp(name, new_name, namelen) == 0) {
+        callback(CHIMERA_VFS_OK, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     /* Both names are bounded before dispatch, but the VERDICT is not
      * unconditionally ENAMETOOLONG: search permission on the directory holding
      * the over-long name is owed first (chimera_vfs_name_too_long_fh).  When

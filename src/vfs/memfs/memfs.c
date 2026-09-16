@@ -4558,6 +4558,12 @@ memfs_allocate(
         }
     }
 
+    /* fallocate CHANGES the file, so it sheds the set-id bits on the same rule
+     * a write does: every ext4_fallocate() path runs file_modified(), which
+     * calls file_remove_privs().  Both arms -- allocate and punch -- clear,
+     * because both write. */
+    inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+
     inode->mtime = now;
     inode->ctime = now;
     inode->change++;
