@@ -344,6 +344,145 @@ test_cross_reboot_replay(void)
 } /* test_cross_reboot_replay */
 
 /* ------------------------------------------------------------------ *
+*  Hydrated session: the reclaim obligation                          *
+* ------------------------------------------------------------------ */
+
+/*
+ * A client whose 4.1 session is rebuilt out of the KV store resumes it without
+ * ever seeing NFS4ERR_BADSESSION, so it runs no EXCHANGE_ID and no
+ * CREATE_SESSION and nothing in the protocol ever prompts it for a
+ * RECLAIM_COMPLETE.  RFC 8881 section 18.51.3 attaches that obligation to
+ * establishing a NEW client ID, which this client did not do, so the
+ * reconstructed record must come back already carrying the mark.  Without it
+ * the per-client gate in chimera_nfs4_open() refuses every non-reclaim OPEN
+ * with NFS4ERR_GRACE for the life of the mount -- that gate has no deadline,
+ * unlike the server-wide window.
+ */
+static void
+test_cross_reboot_reclaim_complete(void)
+{
+    struct nfs4_client_table       table_a,table_b;
+    struct nfs4_session           *session;
+    struct nfs4_drc_session_record srec;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    uint8_t                        sbuf[4096];
+    uint32_t                       slen;
+    static const uint8_t           owner[] = "co_owner_hydrated";
+    uint64_t                       clientid;
+
+    /* --- instance A: a live 4.1 session that never sent RECLAIM_COMPLETE,
+     * which is the ordinary state of a persisted record: the session is
+     * written at CREATE_SESSION, before any RECLAIM_COMPLETE could arrive. */
+    nfs4_client_table_init(&table_a,1);
+    clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
+                                    0x4321ULL,41,NULL,NULL);
+    session = nfs4_create_session(&table_a,clientid,0,8,4096,
+                                  NULL,NULL,NULL);
+    CHECK(session != NULL);
+    session->nfs4_session_persist = true;
+    memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
+    CHECK(!nfs4_client_reclaim_complete(&table_a,clientid));
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = session->client_unified->client_id;
+    srec.verifier              = session->client_unified->verifier;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = session->replay_max_slots;
+    srec.replay_maxresp_cached = session->replay_maxresp_cached;
+    srec.fore                  = session->nfs4_session_fore_attrs;
+    srec.back                  = session->nfs4_session_back_attrs;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    slen = nfs4_drc_session_serialize(sbuf,sizeof(sbuf),&srec);
+    CHECK(slen > 0);
+
+    /* --- reboot --- */
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_a,NULL,NULL);
+    nfs4_client_table_free(&table_a);
+
+    /* --- instance B: the lazy hydrate a SEQUENCE on the old sessionid runs */
+    nfs4_client_table_init(&table_b,1);
+    CHECK(nfs4_drc_session_deserialize(sbuf,slen,&srec) == 0);
+    nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,0x9999ULL);
+
+    session = nfs4_session_lookup(&table_b,sessionid);
+    CHECK(session != NULL);
+
+    /* The decisive check, asked of the clientid the OPEN gate actually uses:
+     * chimera_nfs4_open() passes req->session->nfs4_session_clientid.  The
+     * restored client is not held to a reclaim it has no way to learn it
+     * owes. */
+    CHECK(nfs4_client_reclaim_complete(&table_b,
+                                       session->nfs4_session_clientid));
+
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_b,NULL,NULL);
+    nfs4_client_table_free(&table_b);
+
+    printf("ok: cross_reboot_reclaim_complete\n");
+} /* test_cross_reboot_reclaim_complete */
+
+/*
+ * Guard rails for the test above, so it cannot pass for the wrong reason.
+ *
+ * 1. A client that really did establish a new client ID in this instance owes
+ *    its RECLAIM_COMPLETE (RFC 8881 section 18.51.3) and a second global one
+ *    is NFS4ERR_COMPLETE_ALREADY (section 18.51.4).
+ * 2. Reconstructing a session whose client ALREADY exists in the table must
+ *    not stamp that client: nfs4_drc_ensure_client returns early for it, so
+ *    the mark cannot leak into the legitimate new-client-ID path.
+ */
+static void
+test_reclaim_complete_not_granted_to_new_clients(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    static const uint8_t           owner[] = "co_owner_fresh";
+    uint64_t                       clientid;
+
+    nfs4_client_table_init(&table,1);
+    clientid = nfs4_client_register(&table,owner,(int) sizeof(owner) - 1,
+                                    0x5555ULL,41,NULL,NULL);
+
+    /* (1) a freshly established client owes its RECLAIM_COMPLETE */
+    CHECK(!nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(!nfs4_client_mark_reclaim_complete(&table,clientid));
+    CHECK(nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(nfs4_client_mark_reclaim_complete(&table,clientid));
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    /* (2) reconstruction must not stamp a client that is already present */
+    nfs4_client_table_init(&table,1);
+    clientid = nfs4_client_register(&table,owner,(int) sizeof(owner) - 1,
+                                    0x5555ULL,41,NULL,NULL);
+    /* Any sessionid this table does not know will do: production hydrates
+     * only on a lookup miss, so the id must not already be live here. */
+    memset(sessionid,0xA5,NFS4_SESSIONID_SIZE);
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = clientid;
+    srec.verifier              = 0x5555ULL;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = 8;
+    srec.replay_maxresp_cached = 4096;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    nfs4_drc_reconstruct_session(&table,sessionid,&srec,0x9999ULL);
+    CHECK(!nfs4_client_reclaim_complete(&table,clientid));
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: reclaim_complete_not_granted_to_new_clients\n");
+} /* test_reclaim_complete_not_granted_to_new_clients */
+
+/* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
 * ------------------------------------------------------------------ */
 
@@ -977,6 +1116,8 @@ main(void)
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
     test_cross_reboot_replay();
+    test_cross_reboot_reclaim_complete();
+    test_reclaim_complete_not_granted_to_new_clients();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();
