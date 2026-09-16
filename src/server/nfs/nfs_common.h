@@ -143,6 +143,13 @@ struct nfs_request {
     uint32_t                          sec_bit;
     struct chimera_vfs_open_handle   *handle;
     int                               index;
+    /* NFSv3 SETATTR's ctime guard, settled by the sequence's gate.  A gate can
+     * only stop a sequence with a chimera_vfs_error, and no errno means
+     * NFS3ERR_NOT_SYNC -- so the real answer travels here and the completion
+     * reads it back, the same out-of-band route NFSv4's VERIFY uses.
+     * `guard_index` is the op the gate judges; -1 when there is no guard. */
+    int                               nfs3_guard_index;
+    uint8_t                           nfs3_guard_failed;
     uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
     bool                              seen_sequence;    /* set once OP_SEQUENCE has run in this compound */
     /* NFS4.1 "current stateid" (RFC 8881 §16.2.3.1.2): a per-COMPOUND value

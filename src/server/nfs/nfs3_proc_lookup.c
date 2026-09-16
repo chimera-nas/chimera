@@ -7,6 +7,7 @@
 #include "nfs_common/nfs3_attr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
@@ -50,7 +51,7 @@ chimera_nfs3_lookup_complete(
         chimera_nfs3_set_post_op_attr(&res.resfail.dir_attributes, dir_attr);
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    /* The open belonged to the sequence and went with it. */
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
@@ -59,41 +60,40 @@ chimera_nfs3_lookup_complete(
     nfs_request_free(thread, req);
 } /* chimera_nfs3_lookup_complete */
 
+/*
+ * PUTFH, OPEN, LOOKUP.  The directory attributes come back from the LOOKUP
+ * itself rather than from a GETATTR behind it -- LOOKUP3res carries them in
+ * both arms, and on the resfail arm there is no successful op to hang one on.
+ */
 static void
-chimera_nfs3_lookup_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs3_lookup_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct LOOKUP3args               *args   = req->args_lookup;
-    struct LOOKUP3res                 res;
-    int                               rc;
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr, dir_attr;
+    enum chimera_vfs_error                status;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
+    status = chimera_vfs_compound_status(compound);
 
-        chimera_vfs_lookup_at(thread->vfs_thread, &req->cred,
-                              handle,
-                              args->what.name.str,
-                              args->what.name.len,
-                              CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
-                              CHIMERA_NFS3_ATTR_MASK,
-                              chimera_nfs3_lookup_complete,
-                              req);
-    } else {
-        res.status =
-            chimera_vfs_error_to_nfsstat3(error_code);
-        res.resfail.dir_attributes.attributes_follow = 0;
-        rc                                           = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res,
-                                                                                                 req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    memset(&attr, 0, sizeof(attr));
+    memset(&dir_attr, 0, sizeof(dir_attr));
+
+    /* Everything out of the sequence before it is freed and recycled. */
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    dir_attr = op->dir_post_attr;
+
+    if (status == CHIMERA_VFS_OK) {
+        attr = op->attr;
     }
-} /* chimera_nfs3_lookup_open_callback */
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_lookup_complete(status, &attr, &dir_attr, req);
+} /* chimera_nfs3_lookup_sequence_complete */
 
 
 void
@@ -108,6 +108,7 @@ chimera_nfs3_lookup(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
     struct LOOKUP3res                 res;
     int                               rc;
 
@@ -130,11 +131,20 @@ chimera_nfs3_lookup(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs3_lookup_open_callback,
-                        req);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    chimera_vfs_compound_add_lookup(compound,
+                                    args->what.name.str,
+                                    args->what.name.len,
+                                    CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
+                                    CHIMERA_NFS3_ATTR_MASK);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_lookup_sequence_complete, req);
 
 } /* chimera_nfs3_lookup */

@@ -7,12 +7,23 @@
 #include "nfs_common/nfs3_attr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 
+static void
+chimera_nfs3_readdir_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint64_t                        verifier,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *dir_attr,
+    void                           *private_data);
+
 static int
-chimera_nfs3_readdir_callback(
+chimera_nfs3_readdir_append_entry(
     uint64_t                        inum,
     uint64_t                        cookie,
     const char                     *name,
@@ -63,7 +74,67 @@ chimera_nfs3_readdir_callback(
     }
 
     return 0;
-} /* chimera_nfs3_readdir_callback */
+} /* chimera_nfs3_readdir_append_entry */
+
+/* The reversibility half of the streaming contract: everything the append above
+ * advances is wound back.  The entries themselves are dbuf allocations that a
+ * retry simply re-makes -- reset has to undo the CALLER's state, not reclaim
+ * memory the request already owns and frees with itself. */
+static void
+chimera_nfs3_readdir_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct nfs_request             *req    = private_data;
+    struct nfs_nfs3_readdir_cursor *cursor = &req->readdir3_cursor;
+
+    cursor->count   = 0;
+    cursor->entries = NULL;
+    cursor->last    = NULL;
+} /* chimera_nfs3_readdir_reset */
+
+static int
+chimera_nfs3_readdir_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *private_data)
+{
+    return chimera_nfs3_readdir_append_entry(inum, cookie, name, namelen, attrs,
+                                           private_data);
+} /* chimera_nfs3_readdir_append */
+
+static void
+chimera_nfs3_readdir_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              dir_attr;
+    enum chimera_vfs_error                status;
+    uint64_t                              verifier;
+    uint32_t                              eof;
+
+    status = chimera_vfs_compound_status(compound);
+
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    /* Both arms carry dir_attributes. */
+    dir_attr = op->dir_post_attr;
+    verifier = op->r_verifier;
+    eof      = op->eof;
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_readdir_complete(status, NULL, 0, verifier, eof, &dir_attr, req);
+} /* chimera_nfs3_readdir_sequence_complete */
 
 static void
 chimera_nfs3_readdir_complete(
@@ -105,50 +176,11 @@ chimera_nfs3_readdir_complete(
     rc = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, NULL, res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    /* The open belonged to the sequence and went with it. */
 
     nfs_request_free(req->thread, req);
 } /* chimera_nfs3_readdir_complete */ /* chimera_nfs3_readdirplus_complete */
 
-static void
-chimera_nfs3_readdir_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct READDIR3args              *args   = req->args_readdir;
-    struct READDIR3res               *res    = &req->res_readdir;
-    int                               rc;
-
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
-
-        uint64_t cookieverf;
-        memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-        chimera_vfs_readdir(thread->vfs_thread, &req->cred,
-                            handle,
-                            0,
-                            CHIMERA_NFS3_ATTR_MASK,
-                            args->cookie,
-                            cookieverf,
-                            CHIMERA_VFS_READDIR_EMIT_DOT,
-                            NULL, 0, /* no search-pattern filter */
-                            chimera_nfs3_readdir_callback,
-                            chimera_nfs3_readdir_complete,
-                            req);
-
-    } else {
-        res->status = chimera_vfs_error_to_nfsstat3(error_code);
-        chimera_nfs3_set_post_op_attr(&res->resfail.dir_attributes, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, NULL, res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
-    }
-} /* chimera_nfs3_readdir_open_callback */
 
 void
 chimera_nfs3_readdir(
@@ -161,6 +193,8 @@ chimera_nfs3_readdir(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
+    uint64_t                          cookieverf;
     struct READDIR3res               *res;
     struct nfs_nfs3_readdir_cursor   *cursor;
 
@@ -193,11 +227,29 @@ chimera_nfs3_readdir(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs3_readdir_open_callback,
-                        req);
+    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    /* Streaming, because the entries are marshalled into the request's own dbuf
+     * as they arrive and the sequence keeps no copy of them. */
+    chimera_vfs_compound_add_readdir_stream(compound,
+                                            args->cookie,
+                                            cookieverf,
+                                            0,
+                                            CHIMERA_NFS3_ATTR_MASK,
+                                            CHIMERA_VFS_READDIR_EMIT_DOT,
+                                            NULL, 0,
+                                            chimera_nfs3_readdir_reset,
+                                            chimera_nfs3_readdir_append,
+                                            req);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_readdir_sequence_complete, req);
 
 } /* chimera_nfs3_readdir */

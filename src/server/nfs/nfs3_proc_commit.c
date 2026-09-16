@@ -8,6 +8,7 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
@@ -37,7 +38,7 @@ chimera_nfs3_commit_complete(
         chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, pre_attr, post_attr);
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    /* The open belonged to the sequence and went with it. */
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
@@ -45,40 +46,33 @@ chimera_nfs3_commit_complete(
     nfs_request_free(thread, req);
 } /* chimera_nfs3_commit_complete */
 
+/*
+ * PUTFH, OPEN, COMMIT.  COMMIT3res carries file_wcc on both arms, and the pair
+ * has to bracket the flush, so it comes from the COMMIT rather than from
+ * getattrs around it.
+ */
 static void
-chimera_nfs3_commit_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs3_commit_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct COMMIT3args               *args   = req->args_commit;
-    struct COMMIT3res                 res;
-    int                               rc;
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              pre_attr, post_attr;
+    enum chimera_vfs_error                status;
 
-    if (error_code == CHIMERA_VFS_OK) {
+    status = chimera_vfs_compound_status(compound);
 
-        req->handle = handle;
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
 
-        chimera_vfs_commit(thread->vfs_thread, &req->cred,
-                           handle,
-                           args->offset,
-                           args->count,
-                           CHIMERA_NFS3_ATTR_WCC_MASK,
-                           CHIMERA_NFS3_ATTR_MASK,
-                           chimera_nfs3_commit_complete,
-                           req);
-    } else {
-        res.status = chimera_vfs_error_to_nfsstat3(error_code);
-        chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_COMMIT(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
-    }
-} /* chimera_nfs3_commit_open_callback */
+    pre_attr  = op->pre_attr;
+    post_attr = op->attr;
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_commit_complete(status, &pre_attr, &post_attr, req);
+} /* chimera_nfs3_commit_sequence_complete */
 
 void
 chimera_nfs3_commit(
@@ -92,6 +86,7 @@ chimera_nfs3_commit(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
     struct COMMIT3res                 res;
     int                               rc;
 
@@ -114,11 +109,17 @@ chimera_nfs3_commit(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs3_commit_open_callback,
-                        req);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_commit(compound,
+                                    args->offset, args->count,
+                                    CHIMERA_NFS3_ATTR_WCC_MASK,
+                                    CHIMERA_NFS3_ATTR_MASK);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_commit_sequence_complete, req);
 
 } /* chimera_nfs3_commit */

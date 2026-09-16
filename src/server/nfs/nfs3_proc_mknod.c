@@ -8,6 +8,7 @@
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
@@ -53,7 +54,7 @@ chimera_nfs3_mknod_complete(
         chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, r_dir_pre_attr, r_dir_post_attr);
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    /* The parent open belonged to the sequence and went with it. */
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
@@ -61,76 +62,40 @@ chimera_nfs3_mknod_complete(
     nfs_request_free(thread, req);
 } /* chimera_nfs3_mknod_complete */
 
+/*
+ * PUTFH, OPEN, CREATE.  The new object becomes current, so its handle and
+ * attributes come back on the CREATE itself.
+ */
 static void
-chimera_nfs3_mknod_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs3_mknod_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct MKNOD3args                *args   = req->args_mknod;
-    struct MKNOD3res                  res;
-    struct chimera_vfs_attrs         *attr;
-    struct sattr3                    *sattr;
-    int                               rc;
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr, pre_attr, post_attr;
+    enum chimera_vfs_error                status;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
+    status = chimera_vfs_compound_status(compound);
 
-        attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
-        chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
+    memset(&attr, 0, sizeof(attr));
 
-        switch (args->what.type) {
-            case NF3CHR:
-            case NF3BLK:
-                sattr = &args->what.device.dev_attributes;
-                chimera_nfs3_sattr3_to_va(attr, sattr);
-                attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
-                attr->va_mode      = (attr->va_mode & ~S_IFMT) | chimera_nfs3_type_to_vfs(args->what.type);
-                attr->va_set_mask |= CHIMERA_VFS_ATTR_RDEV;
-                attr->va_rdev      = ((uint64_t) args->what.device.spec.specdata1 << 32) |
-                    (uint64_t) args->what.device.spec.specdata2;
-                break;
-            case NF3SOCK:
-            case NF3FIFO:
-                sattr = &args->what.pipe_attributes;
-                chimera_nfs3_sattr3_to_va(attr, sattr);
-                attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
-                attr->va_mode      = (attr->va_mode & ~S_IFMT) | chimera_nfs3_type_to_vfs(args->what.type);
-                attr->va_set_mask |= CHIMERA_VFS_ATTR_RDEV;
-                attr->va_rdev      = 0;
-                break;
-            default:
-                chimera_vfs_release(thread->vfs_thread, handle);
-                res.status = NFS3ERR_BADTYPE;
-                chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-                rc = shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, NULL, &res, req->encoding);
-                chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-                nfs_request_free(thread, req);
-                return;
-        } /* switch */
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
 
-        chimera_vfs_mknod_at(thread->vfs_thread, &req->cred,
-                             handle,
-                             args->where.name.str,
-                             args->where.name.len,
-                             attr,
-                             CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
-                             CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
-                             CHIMERA_NFS3_ATTR_MASK,
-                             chimera_nfs3_mknod_complete,
-                             req);
-    } else {
-        res.status = chimera_vfs_error_to_nfsstat3(error_code);
-        chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    /* dir_wcc rides on both arms. */
+    pre_attr  = op->dir_pre_attr;
+    post_attr = op->dir_post_attr;
+
+    if (status == CHIMERA_VFS_OK) {
+        attr = op->attr;
     }
-} /* chimera_nfs3_mknod_open_callback */
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_mknod_complete(status, NULL, &attr, &pre_attr, &post_attr,
+                                req);
+} /* chimera_nfs3_mknod_sequence_complete */
 
 void
 chimera_nfs3_mknod(
@@ -144,6 +109,8 @@ chimera_nfs3_mknod(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
+    struct chimera_vfs_attrs         *attr;
     struct MKNOD3res                  res;
     int                               rc;
 
@@ -169,10 +136,61 @@ chimera_nfs3_mknod(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs3_mknod_open_callback,
-                        req);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
+
+    /* The node's type and rdev are carried in the attributes, so which arm of
+     * the union the client sent decides what CREATE is asked to make. */
+    switch (args->what.type) {
+        case NF3CHR:
+        case NF3BLK:
+            chimera_nfs3_sattr3_to_va(attr, &args->what.device.dev_attributes);
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+            attr->va_mode      = (attr->va_mode & ~S_IFMT) |
+                chimera_nfs3_type_to_vfs(args->what.type);
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_RDEV;
+            attr->va_rdev      = ((uint64_t) args->what.device.spec.specdata1 << 32) |
+                (uint64_t) args->what.device.spec.specdata2;
+            break;
+        case NF3SOCK:
+        case NF3FIFO:
+            chimera_nfs3_sattr3_to_va(attr, &args->what.pipe_attributes);
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+            attr->va_mode      = (attr->va_mode & ~S_IFMT) |
+                chimera_nfs3_type_to_vfs(args->what.type);
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_RDEV;
+            attr->va_rdev      = 0;
+            break;
+        default:
+            memset(&res, 0, sizeof(res));
+            res.status = NFS3ERR_BADTYPE;
+            chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
+            rc = shared->nfs_v3.send_reply_NFSPROC3_MKNOD(evpl, NULL, &res,
+                                                          req->encoding);
+            chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+            nfs_request_free(thread, req);
+            return;
+    } /* switch */
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    chimera_vfs_compound_add_create(compound,
+                                    CHIMERA_VFS_COMPOUND_CREATE_NODE,
+                                    args->where.name.str,
+                                    args->where.name.len,
+                                    NULL, 0,
+                                    attr,
+                                    CHIMERA_NFS3_ATTR_MASK |
+                                    CHIMERA_VFS_ATTR_FH,
+                                    CHIMERA_NFS3_ATTR_WCC_MASK |
+                                    CHIMERA_VFS_ATTR_ATOMIC,
+                                    CHIMERA_NFS3_ATTR_MASK);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_mknod_sequence_complete, req);
 } /* chimera_nfs3_mknod */

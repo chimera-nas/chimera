@@ -7,6 +7,7 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
@@ -45,51 +46,47 @@ chimera_nfs3_read_complete(
     rc = shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    /* The open belonged to the sequence and went with it. */
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_read_complete */
 
+/*
+ * PUTFH, OPEN, READ.  The data iovecs are TAKEN from the sequence: they are the
+ * reply's payload and have to outlive the sequence that produced them.
+ */
 static void
-chimera_nfs3_read_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs3_read_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct READ3args                 *args   = req->args_read;
-    struct READ3res                   res;
-    struct evpl_iovec                *iov;
-    int                               rc;
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    struct evpl_iovec                    *iov = NULL;
+    enum chimera_vfs_error                status;
+    uint32_t                              idx, count = 0, eof = 0;
+    int                                   niov = 0;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
+    status = chimera_vfs_compound_status(compound);
 
-        iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
-        chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
+    memset(&attr, 0, sizeof(attr));
 
-        chimera_vfs_read(thread->vfs_thread, &req->cred,
-                         handle,
-                         args->offset,
-                         args->count,
-                         iov,
-                         256,
-                         CHIMERA_NFS3_ATTR_MASK,
-                         chimera_nfs3_read_complete,
-                         req);
-    } else {
-        res.status =
-            chimera_vfs_error_to_nfsstat3(error_code);
-        res.resfail.file_attributes.attributes_follow = 0;
-        rc                                            = shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, NULL, &res,
-                                                                                                req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    idx = chimera_vfs_compound_num_ops(compound) - 1;
+    op  = chimera_vfs_compound_op(compound, idx);
+
+    attr = op->attr;
+
+    if (status == CHIMERA_VFS_OK) {
+        count = op->read_len;
+        eof   = op->eof_read;
+        chimera_vfs_compound_take_iov(compound, idx, &iov, &niov);
     }
-} /* chimera_nfs3_read_open_callback */
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_read_complete(status, count, eof, iov, niov, &attr, req);
+} /* chimera_nfs3_read_sequence_complete */
 
 void
 chimera_nfs3_read(
@@ -103,6 +100,8 @@ chimera_nfs3_read(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
+    struct evpl_iovec                *iov;
     struct READ3res                   res;
     int                               rc;
 
@@ -133,10 +132,19 @@ chimera_nfs3_read(
         args->count = CHIMERA_NFS3_MAX_XFER;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs3_read_open_callback,
-                        req);
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
+    chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_read(compound, NULL,
+                                  args->offset, args->count,
+                                  iov, 256,
+                                  CHIMERA_NFS3_ATTR_MASK, NULL);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_read_sequence_complete, req);
 } /* chimera_nfs3_read */

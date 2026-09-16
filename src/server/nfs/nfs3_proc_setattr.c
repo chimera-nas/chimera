@@ -6,6 +6,7 @@
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
@@ -26,6 +27,12 @@ chimera_nfs3_setattr_complete(
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
+    /* The gate's EINVAL is a stand-in: a guarded SETATTR whose ctime had moved
+     * owes the client NFS3ERR_NOT_SYNC, and no errno means that. */
+    if (req->nfs3_guard_failed) {
+        res.status = NFS3ERR_NOT_SYNC;
+    }
+
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_wcc_data(&res.resok.obj_wcc, pre_attr, post_attr);
     } else {
@@ -35,122 +42,75 @@ chimera_nfs3_setattr_complete(
     rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    /* The open belonged to the sequence and went with it. */
 
     nfs_request_free(thread, req);
 } /* chimera_nfs3_setattr_complete */
 
+/*
+ * The ctime guard, answered while the sequence is still running.
+ *
+ * RFC 1813's guarded SETATTR is a compare-and-set: the change must not happen
+ * if the object's ctime has moved.  A GETATTR ahead of the SETATTR is only
+ * half of that -- something has to refuse to go on -- and that is what a gate
+ * is.  It answers from the attributes the GETATTR already fetched, so it does
+ * no I/O and can be asked again if the sequence is ever retried.
+ */
 static void
-chimera_nfs3_setattr_do_setattr(struct nfs_request *req)
+chimera_nfs3_setattr_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct SETATTR3args              *args   = req->args_setattr;
-    struct chimera_vfs_attrs         *attr;
+    struct nfs_request                   *req  = private_data;
+    struct SETATTR3args                  *args = req->args_setattr;
+    const struct chimera_vfs_compound_op *op;
 
-    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
-    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
-
-    chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
-
-    chimera_vfs_setattr(thread->vfs_thread, &req->cred,
-                        req->handle,
-                        attr,
-                        CHIMERA_NFS3_ATTR_WCC_MASK,
-                        CHIMERA_NFS3_ATTR_MASK,
-                        chimera_nfs3_setattr_complete,
-                        req);
-} /* chimera_nfs3_setattr_do_setattr */
-
-static void
-chimera_nfs3_setattr_guard_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct SETATTR3args              *args   = req->args_setattr;
-    struct SETATTR3res                res;
-    int                               rc;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res.status = chimera_vfs_error_to_nfsstat3(error_code);
-        chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        chimera_vfs_release(thread->vfs_thread, req->handle);
-        nfs_request_free(thread, req);
+    if (*status != CHIMERA_VFS_OK || (int) index != req->nfs3_guard_index) {
         return;
     }
 
-    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME) ||
-        attr->va_ctime.tv_sec  != args->guard.obj_ctime.seconds ||
-        attr->va_ctime.tv_nsec != args->guard.obj_ctime.nseconds) {
-        res.status = NFS3ERR_NOT_SYNC;
-        chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        chimera_vfs_release(thread->vfs_thread, req->handle);
-        nfs_request_free(thread, req);
-        return;
-    }
+    op = chimera_vfs_compound_op(compound, index);
 
-    chimera_nfs3_setattr_do_setattr(req);
-} /* chimera_nfs3_setattr_guard_callback */
+    if (!(op->attr.va_set_mask & CHIMERA_VFS_ATTR_CTIME) ||
+        op->attr.va_ctime.tv_sec  != args->guard.obj_ctime.seconds ||
+        op->attr.va_ctime.tv_nsec != args->guard.obj_ctime.nseconds) {
+        /* Carried out of band: NFS3ERR_NOT_SYNC has no errno that means it. */
+        req->nfs3_guard_failed = 1;
+        *status                = CHIMERA_VFS_EINVAL;
+    }
+} /* chimera_nfs3_setattr_gate */
 
 static void
-chimera_nfs3_setattr_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs3_setattr_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct SETATTR3args              *args   = req->args_setattr;
-    struct SETATTR3res                res;
-    int                               rc;
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              pre_attr, post_attr;
+    enum chimera_vfs_error                status;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
+    status = chimera_vfs_compound_status(compound);
 
-        if (args->guard.check) {
-            chimera_vfs_getattr(thread->vfs_thread, &req->cred,
-                                handle,
-                                CHIMERA_VFS_ATTR_CTIME,
-                                chimera_nfs3_setattr_guard_callback,
-                                req);
-        } else {
-            chimera_nfs3_setattr_do_setattr(req);
-        }
+    memset(&pre_attr, 0, sizeof(pre_attr));
+    memset(&post_attr, 0, sizeof(post_attr));
 
-    } else {
-        /* A size-setting SETATTR asks for a data handle (see the OPEN_PATH
-         * choice in chimera_nfs3_setattr), and a non-regular object refuses
-         * one: ELOOP for a symlink, ENXIO for a device or socket.  RFC 1813
-         * says SETATTR's size is meaningful only for a regular file and any
-         * other type answers NFS3ERR_INVAL, which is what the in-engine
-         * backends return from their own setattr -- they accept the open and
-         * reject the size.  Without this the passthrough backends failed at
-         * the open instead, and the unmapped errno surfaced as
-         * NFS3ERR_SERVERFAULT.  (A directory already arrives as EISDIR, which
-         * maps to NFS3ERR_ISDIR on its own.) */
-        if (args->new_attributes.size.set_it &&
-            (error_code == CHIMERA_VFS_ELOOP ||
-             error_code == CHIMERA_VFS_ENXIO)) {
-            res.status = NFS3ERR_INVAL;
-        } else {
-            res.status = chimera_vfs_error_to_nfsstat3(error_code);
-        }
-        chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-        nfs_request_free(thread, req);
+    /* A guard that refused stopped the sequence at the GETATTR, so the SETATTR
+     * never ran and there is no wcc to report -- which is right: nothing
+     * changed. */
+    if (!req->nfs3_guard_failed) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        pre_attr  = op->pre_attr;
+        post_attr = op->attr;
     }
-} /* chimera_nfs3_setattr_open_callback */
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs3_setattr_complete(status, &pre_attr, NULL, &post_attr, req);
+} /* chimera_nfs3_setattr_sequence_complete */
 
 void
 chimera_nfs3_setattr(
@@ -164,6 +124,8 @@ chimera_nfs3_setattr(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_vfs_compound      *compound;
+    struct chimera_vfs_attrs         *attr;
     struct SETATTR3res                res;
     unsigned int                      open_flags;
     int                               rc;
@@ -200,11 +162,30 @@ chimera_nfs3_setattr(
         open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        open_flags,
-                        chimera_nfs3_setattr_open_callback,
-                        req);
+    attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
+    chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
+
+    chimera_nfs3_sattr3_to_va(attr, &args->new_attributes);
+
+    req->nfs3_guard_index  = -1;
+    req->nfs3_guard_failed = 0;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound, open_flags, 0);
+
+    if (args->guard.check) {
+        req->nfs3_guard_index =
+            chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_CTIME);
+        chimera_vfs_compound_set_gate(compound, chimera_nfs3_setattr_gate, req);
+    }
+
+    chimera_vfs_compound_add_setattr(compound, NULL, attr,
+                                     CHIMERA_NFS3_ATTR_WCC_MASK,
+                                     CHIMERA_NFS3_ATTR_MASK);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs3_setattr_sequence_complete, req);
 
 } /* chimera_nfs3_setattr */
