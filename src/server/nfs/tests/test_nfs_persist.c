@@ -14,6 +14,8 @@
  * essence of NFSv4.1 cross-reboot exactly-once semantics.
  */
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,7 @@
 #include "common/logging.h"
 #include "nfs_common.h"
 #include "nfs4_session.h"
+#include "nfs4_lease.h"
 #include "nfs4_recovery.h"
 #include "nfs4_drc.h"
 #include "nfs3_drc.h"
@@ -481,6 +484,166 @@ test_reclaim_complete_not_granted_to_new_clients(void)
 
     printf("ok: reclaim_complete_not_granted_to_new_clients\n");
 } /* test_reclaim_complete_not_granted_to_new_clients */
+
+/*
+ * nfs_recovery_kickoff() forces the grace window open before its async KV
+ * reads have populated to_reclaim, so pending_reclaim is legitimately 0 while
+ * the scan is in flight.  The 1 Hz sweep must not read that as "everybody
+ * reclaimed" and close the window: a reclaim arriving after it would be
+ * refused NFS4ERR_NO_GRACE and the client would lose its locks.
+ */
+static void
+test_grace_survives_sweep_during_load(void)
+{
+    struct nfs_recovery rec;
+
+    /* vfs == NULL leaves kv_module unset, so persistence stays enabled --
+     * persistence_disabled keys off the module name being "memkv". */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    CHECK(!rec.persistence_disabled);
+
+    /* Mimic kickoff: claim the load, then force the window open with the scan
+     * still outstanding and nothing counted yet. */
+    atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
+    pthread_mutex_lock(&rec.lock);
+    rec.in_grace     = true;
+    rec.grace_end_ns = nfs_lease_now_ns() + 180ULL * 1000000000ULL;
+    pthread_mutex_unlock(&rec.lock);
+    CHECK(rec.pending_reclaim == 0);
+
+    /* A sweep tick lands here.  The window must survive it. */
+    nfs_recovery_sweep_once(&rec);
+    CHECK(rec.in_grace);
+
+    /* Once the scan has settled with nothing to reclaim, the same tick may
+     * close the window -- that is the intended fast path, still reachable. */
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+    nfs_recovery_sweep_once(&rec);
+    CHECK(!rec.in_grace);
+
+    nfs_recovery_free(&rec);
+
+    /* The guard is scoped to the zero-count exit: the deadline still ends the
+     * window while the load is in flight.  (That bounds rec->in_grace only;
+     * nfs_recovery_open_check answers NFS4ERR_GRACE until the load is READY
+     * regardless, so a load that never settles is an outage either way.) */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
+    pthread_mutex_lock(&rec.lock);
+    rec.in_grace     = true;
+    rec.grace_end_ns = 0;          /* deadline already in the past */
+    pthread_mutex_unlock(&rec.lock);
+    nfs_recovery_sweep_once(&rec);
+    CHECK(!rec.in_grace);
+
+    nfs_recovery_free(&rec);
+    printf("ok: grace_survives_sweep_during_load\n");
+} /* test_grace_survives_sweep_during_load */
+
+/* Add a to_reclaim record the way nfs_recovery_scan_cb does when the KV scan
+ * streams one in. */
+static void
+recovery_add_record(
+    struct nfs_recovery*rec,
+    const char         *owner)
+{
+    struct nfs_recovery_record*r = calloc(1,sizeof(*r));
+
+    r->owner_len = (uint16_t) strlen(owner);
+    memcpy(r->owner_string,owner,r->owner_len);
+
+    pthread_mutex_lock(&rec->lock);
+    HASH_ADD_KEYPTR(hh,rec->to_reclaim,r->owner_string,r->owner_len,r);
+    rec->pending_reclaim++;
+    pthread_mutex_unlock(&rec->lock);
+} /* recovery_add_record */
+
+/* The unified client record the recovery gates key on; only the owner
+ * matters to them. */
+static void
+recovery_client(
+    struct nfs_client*c,
+    const char       *owner)
+{
+    memset(c,0,sizeof(*c));
+    c->owner_len = (uint16_t) strlen(owner);
+    memcpy(c->owner_string,owner,c->owner_len);
+} /* recovery_client */
+
+/*
+ * The same zero-count hazard on the RECLAIM_COMPLETE path.  The NFS4ERR_DELAY
+ * gates that would keep a client from getting this far during the load are
+ * conditioned on server.nfs4_drc (default off), while the load itself runs
+ * for any durable KV module: with the reply cache disabled a client whose
+ * record has already streamed in can send its global RECLAIM_COMPLETE while
+ * another client's record is still in flight.
+ *
+ * Asserted through nfs_recovery_open_check, i.e. as the second client's
+ * CLAIM_PREVIOUS sees it, not through the in_grace flag alone; the populated
+ * to_reclaim set also covers the positive sweep case (records loaded, READY,
+ * one reclaim outstanding: the tick must not close) and the last-reclaim
+ * transition that nfs_recovery_sweep_once alone with an empty set cannot.
+ */
+static void
+test_grace_survives_reclaim_complete_during_load(void)
+{
+    struct nfs_recovery      rec;
+    static struct nfs_client a,b,stranger;
+
+    recovery_client(&a,"co_owner_a");
+    recovery_client(&b,"co_owner_b");
+    recovery_client(&stranger,"co_owner_never_persisted");
+
+    /* nfs4_drc off: the configuration in which nothing delays the clients */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,false) == 0);
+    CHECK(!rec.persistence_disabled);
+
+    /* kickoff: load claimed, window forced open, scan outstanding */
+    atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
+    pthread_mutex_lock(&rec.lock);
+    rec.in_grace     = true;
+    rec.grace_end_ns = nfs_lease_now_ns() + 180ULL * 1000000000ULL;
+    pthread_mutex_unlock(&rec.lock);
+
+    /* A reclaim that races its own record load is admitted, not refused. */
+    CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4_OK);
+
+    /* A's record streams in; A re-establishes and, holding nothing worth
+     * reclaiming, sends its global RECLAIM_COMPLETE at once.  B's record is
+     * still in flight. */
+    recovery_add_record(&rec,"co_owner_a");
+    CHECK(rec.pending_reclaim == 1);
+    nfs_recovery_reclaim_complete(&rec,&a);
+    CHECK(rec.pending_reclaim == 0);
+    CHECK(rec.in_grace);                 /* the window must survive that... */
+    nfs_recovery_sweep_once(&rec);
+    CHECK(rec.in_grace);                 /* ...and the next tick */
+
+    /* B's record lands and the scan settles with B still owed its reclaim. */
+    recovery_add_record(&rec,"co_owner_b");
+    CHECK(rec.pending_reclaim == 1);
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+    nfs_recovery_sweep_once(&rec);
+    CHECK(rec.in_grace);
+
+    /* What each client's OPEN sees while B is outstanding. */
+    CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4_OK);
+    CHECK(nfs_recovery_open_check(&rec,&b,false) == NFS4ERR_GRACE);
+    CHECK(nfs_recovery_open_check(&rec,&a,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_open_check(&rec,&stranger,true) == NFS4ERR_RECLAIM_BAD);
+    CHECK(nfs_recovery_io_check(&rec) == NFS4ERR_GRACE);
+
+    /* B finishes: the last outstanding reclaim closes the window at once. */
+    nfs_recovery_reclaim_complete(&rec,&b);
+    CHECK(rec.pending_reclaim == 0);
+    CHECK(!rec.in_grace);
+    CHECK(nfs_recovery_open_check(&rec,&b,false) == NFS4_OK);
+    CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_io_check(&rec) == NFS4_OK);
+
+    nfs_recovery_free(&rec);
+    printf("ok: grace_survives_reclaim_complete_during_load\n");
+} /* test_grace_survives_reclaim_complete_during_load */
 
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
@@ -1118,6 +1281,8 @@ main(void)
     test_cross_reboot_replay();
     test_cross_reboot_reclaim_complete();
     test_reclaim_complete_not_granted_to_new_clients();
+    test_grace_survives_sweep_during_load();
+    test_grace_survives_reclaim_complete_during_load();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();
