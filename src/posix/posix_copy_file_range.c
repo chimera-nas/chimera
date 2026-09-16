@@ -88,16 +88,46 @@ chimera_posix_copy_file_range(
      * file are EINVAL.  This is a POSIX rule -- SMB copychunk, NFS4 COPY and S3
      * copy permit overlap -- so the check lives here in the POSIX layer, keyed
      * on file-handle identity so every backend agrees.  len == 0 already
-     * returned above. */
+     * returned above.
+     *
+     * The length the check uses is the one SHORTENED TO THE SOURCE'S EOF, not
+     * the one asked for.  generic_copy_file_checks() clamps first --
+     *
+     *     size_in = i_size_read(inode_in);
+     *     if (pos_in >= size_in) count = 0; else count = min(count, ...);
+     *     ... if (inode_in == inode_out && pos_out + count > pos_in && ...)
+     *
+     * -- so a request whose source offset is already at or past EOF copies
+     * zero bytes and cannot overlap anything, even when it names one file at
+     * one offset for both ends.  Testing the requested length instead called
+     * that EINVAL where the answer is a 0-byte success. */
     if (in_entry->handle->fh_len == out_entry->handle->fh_len &&
         memcmp(in_entry->handle->fh, out_entry->handle->fh,
-               in_entry->handle->fh_len) == 0 &&
-        src_off < dst_off + (off_t) len &&
-        dst_off < src_off + (off_t) len) {
-        chimera_posix_fd_release(out_entry, 0);
-        chimera_posix_fd_release(in_entry, 0);
-        errno = EINVAL;
-        return -1;
+               in_entry->handle->fh_len) == 0) {
+        struct stat st;
+        off_t       clamped = 0;
+
+        if (chimera_posix_fstat(fd_in, &st) == 0) {
+            if (src_off < st.st_size) {
+                clamped = (off_t) len;
+                if (clamped > st.st_size - src_off) {
+                    clamped = st.st_size - src_off;
+                }
+            }
+        } else {
+            /* The size is unknown; judge the request as asked rather than
+             * letting an unrelated failure permit an overlapping copy. */
+            clamped = (off_t) len;
+        }
+
+        if (clamped > 0 &&
+            src_off < dst_off + clamped &&
+            dst_off < src_off + clamped) {
+            chimera_posix_fd_release(out_entry, 0);
+            chimera_posix_fd_release(in_entry, 0);
+            errno = EINVAL;
+            return -1;
+        }
     }
 
     chimera_posix_completion_init(&st.comp, &req);
