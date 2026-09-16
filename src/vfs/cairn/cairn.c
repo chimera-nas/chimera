@@ -4629,6 +4629,11 @@ cairn_allocate(
         }
     }
 
+    /* fallocate changes the file, so it sheds the set-id bits on the same
+     * rule a write does -- file_modified() -> file_remove_privs().  Same as
+     * memfs's allocate path. */
+    inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+
     inode->mtime = now;
     inode->ctime = now;
     inode->change++;
