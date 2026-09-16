@@ -1801,11 +1801,17 @@ chimera_vfs_compound_lookup_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    if (error_code == CHIMERA_VFS_OK) {
-        if (dir_attr) {
-            chimera_vfs_compound_store_attr_to(&op->dir_post_attr, dir_attr);
-        }
+    /* The directory is kept even when the lookup FAILED.  NFSv3's LOOKUP3res
+     * carries dir_attributes in both arms -- resok and resfail -- and a client
+     * that just missed on a name is exactly the one that wants to know whether
+     * the directory it searched has changed.  The attributes are the
+     * directory's own and the failure says nothing about them; an unfilled
+     * va_set_mask is what says "not available", not this test. */
+    if (dir_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_post_attr, dir_attr);
+    }
 
+    if (error_code == CHIMERA_VFS_OK) {
         if (attr) {
             chimera_vfs_compound_store_attr(op, attr);
         }
@@ -1879,14 +1885,12 @@ chimera_vfs_compound_commit_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    if (error_code == CHIMERA_VFS_OK) {
-        if (pre_attr) {
-            chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
-        }
+    if (pre_attr) {
+        chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
+    }
 
-        if (post_attr) {
-            chimera_vfs_compound_store_attr(op, post_attr);
-        }
+    if (post_attr) {
+        chimera_vfs_compound_store_attr(op, post_attr);
     }
 
     chimera_vfs_compound_op_done(compound, error_code);
@@ -2221,15 +2225,25 @@ chimera_vfs_compound_create_callback(
 
     (void) set_attr;
 
+    /* The directory pair is kept whatever the status: every NFSv3 create-class
+     * reply -- CREATE3res, MKDIR3res, SYMLINK3res, MKNOD3res -- carries
+     * dir_wcc on both arms, and a create that lost a race is exactly when a
+     * client wants to know the directory moved. */
+    if (dir_pre_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_pre_attr, dir_pre_attr);
+    }
+
+    if (dir_post_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_post_attr, dir_post_attr);
+    }
+
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_compound_op_done(compound, error_code);
         return;
     }
 
     chimera_vfs_compound_store_attr(op, attr);
-    op->dir_pre_attr  = *dir_pre_attr;
-    op->dir_post_attr = *dir_post_attr;
-    op->created       = 1;
+    op->created = 1;
 
     /* The new object becomes current, which is what lets a caller ask for its
      * file handle or its attributes without naming it again. */
@@ -2303,6 +2317,16 @@ chimera_vfs_compound_read_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
+    /* Attributes are kept whatever the status.  Every NFSv3 reply that carries
+     * them carries them on the failure arm too -- resfail.file_attributes,
+     * file_wcc, obj_wcc -- and a client that just failed an operation is
+     * exactly the one that needs to know what the object looks like now.  An
+     * unfilled va_set_mask is what says "not available"; the status is not.
+     */
+    if (attr) {
+        chimera_vfs_compound_store_attr(op, attr);
+    }
+
     if (error_code != CHIMERA_VFS_OK) {
         /* Nothing was handed over, so nothing is ours to keep. */
         evpl_iovecs_release(compound->thread->evpl, iov, niov);
@@ -2339,19 +2363,21 @@ chimera_vfs_compound_write_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_op_done(compound, error_code);
-        return;
-    }
-
     /* Both readings are taken by the backend around the write itself, so a
-     * caller comparing them sees this write's effect and no other's. */
+     * caller comparing them sees this write's effect and no other's, and they
+     * are kept whatever the status -- WRITE3res carries file_wcc on both
+     * arms. */
     if (pre_attr) {
         chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
     }
 
     if (post_attr) {
         chimera_vfs_compound_store_attr(op, post_attr);
+    }
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
     }
 
     op->written   = length;
@@ -2373,16 +2399,18 @@ chimera_vfs_compound_setattr_callback(
 
     (void) set_attr;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_op_done(compound, error_code);
-        return;
-    }
-
     if (pre_attr) {
         chimera_vfs_compound_store_attr_to(&op->pre_attr, pre_attr);
     }
 
-    chimera_vfs_compound_store_attr(op, post_attr);
+    if (post_attr) {
+        chimera_vfs_compound_store_attr(op, post_attr);
+    }
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
 
     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
 } /* chimera_vfs_compound_setattr_callback */
@@ -2397,16 +2425,19 @@ chimera_vfs_compound_remove_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_op_done(compound, error_code);
-        return;
+    /* A REMOVE does not move the current object: it unlinks a name FROM it.
+     * Kept whatever the status -- REMOVE3res and RMDIR3res carry dir_wcc on
+     * both arms, and a failed unlink is when a client most wants to know
+     * whether the directory moved under it. */
+    if (pre_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_pre_attr, pre_attr);
     }
 
-    /* A REMOVE does not move the current object: it unlinks a name FROM it. */
-    op->dir_pre_attr  = *pre_attr;
-    op->dir_post_attr = *post_attr;
+    if (post_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_post_attr, post_attr);
+    }
 
-    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+    chimera_vfs_compound_op_done(compound, error_code);
 } /* chimera_vfs_compound_remove_callback */
 
 /*
@@ -2430,25 +2461,24 @@ chimera_vfs_compound_rename_callback(
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_op_done(compound, error_code);
-        return;
-    }
-
+    /* Both pairs are kept whatever the status: RENAME3res carries fromdir_wcc
+     * and todir_wcc on both arms. */
     if (fromdir_pre_attr) {
-        op->from_dir_pre_attr = *fromdir_pre_attr;
+        chimera_vfs_compound_store_attr_to(&op->from_dir_pre_attr,
+                                           fromdir_pre_attr);
     }
     if (fromdir_post_attr) {
-        op->from_dir_post_attr = *fromdir_post_attr;
+        chimera_vfs_compound_store_attr_to(&op->from_dir_post_attr,
+                                           fromdir_post_attr);
     }
     if (todir_pre_attr) {
-        op->dir_pre_attr = *todir_pre_attr;
+        chimera_vfs_compound_store_attr_to(&op->dir_pre_attr, todir_pre_attr);
     }
     if (todir_post_attr) {
-        op->dir_post_attr = *todir_post_attr;
+        chimera_vfs_compound_store_attr_to(&op->dir_post_attr, todir_post_attr);
     }
 
-    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+    chimera_vfs_compound_op_done(compound, error_code);
 } /* chimera_vfs_compound_rename_callback */
 
 /* LINK's callback also hands back the linked object's own attributes; the
