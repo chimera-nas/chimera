@@ -613,10 +613,24 @@ nfs_recovery_reclaim_complete(
     const struct nfs_client *client)
 {
     struct nfs_recovery_record *r;
+    bool                        loading;
 
     if (!client) {
         return;
     }
+
+    /* Same hazard as in nfs_recovery_sweep_once: while the cold-start scan is
+     * still streaming records in, pending_reclaim counts only the clients
+     * loaded so far.  The NFS4ERR_DELAY gates in EXCHANGE_ID and
+     * CREATE_SESSION would keep every client away until the load settles,
+     * but they are conditioned on server.nfs4_drc, which is off by default,
+     * whereas the load runs for any durable KV module -- so with the reply
+     * cache disabled a client whose record has already loaded can
+     * re-establish and send its global RECLAIM_COMPLETE while a slower
+     * record is still in flight.  Retire its record either way, but honour
+     * the zero count only once the load is READY; until then the deadline,
+     * or the first sweep tick after READY, ends the window. */
+    loading = nfs_recovery_loading(rec);
 
     pthread_mutex_lock(&rec->lock);
     HASH_FIND(hh, rec->to_reclaim, client->owner_string, client->owner_len, r);
@@ -625,7 +639,7 @@ nfs_recovery_reclaim_complete(
         if (rec->pending_reclaim) {
             rec->pending_reclaim--;
         }
-        if (rec->pending_reclaim == 0) {
+        if (rec->pending_reclaim == 0 && !loading) {
             rec->in_grace     = false;
             rec->grace_end_ns = 0;
         }
@@ -638,6 +652,21 @@ nfs_recovery_sweep_once(struct nfs_recovery *rec)
 {
     uint64_t now;
     bool     end_now = false;
+    bool     loading;
+
+    /* to_reclaim is populated asynchronously by the cold-start scan, but
+     * nfs_recovery_kickoff forces the window open before that scan has
+     * returned its first record.  A tick landing in that gap sees
+     * pending_reclaim == 0, reads it as "every client has reclaimed", and
+     * closes a window that had not started; nfs_recovery_finalize_load never
+     * re-arms it, so the CLAIM_PREVIOUS that arrives once the records do load
+     * is refused NFS4ERR_NO_GRACE and the client silently loses its locks.
+     * While the load is in flight only the grace_end_ns deadline may end the
+     * window.  load_state is read outside rec->lock exactly as
+     * nfs_recovery_open_check reads it: it is atomic, and the helper answers
+     * false when persistence is disabled (memkv), where in_grace is never set
+     * anyway. */
+    loading = nfs_recovery_loading(rec);
 
     pthread_mutex_lock(&rec->lock);
     if (!rec->in_grace) {
@@ -645,7 +674,7 @@ nfs_recovery_sweep_once(struct nfs_recovery *rec)
         return;
     }
     now = nfs_lease_now_ns();
-    if (now >= rec->grace_end_ns || rec->pending_reclaim == 0) {
+    if (now >= rec->grace_end_ns || (rec->pending_reclaim == 0 && !loading)) {
         end_now = true;
     }
     if (end_now) {
