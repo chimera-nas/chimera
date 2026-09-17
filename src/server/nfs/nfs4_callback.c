@@ -945,10 +945,10 @@ nfs4_cb_getattr_deliver(struct nfs4_cb_getattr *w)
     r->got_size         = w->got_size;
     r->size             = w->size;
 
-    pthread_mutex_lock(&x->cb_recall_lock);
+    evpl_mutex_lock(&x->cb_recall_lock);
     r->next             = x->cb_getattr_queue;
     x->cb_getattr_queue = r;
-    pthread_mutex_unlock(&x->cb_recall_lock);
+    evpl_mutex_unlock(&x->cb_recall_lock);
 
     evpl_ring_doorbell(&x->cb_doorbell);
 } /* nfs4_cb_getattr_deliver */
@@ -1150,7 +1150,7 @@ nfs4_find_conflicting_write_deleg(
         return NULL;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
         struct nfs_delegation *d;
 
@@ -1171,7 +1171,7 @@ nfs4_find_conflicting_write_deleg(
         deleg = d;
         break;
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     chimera_vfs_state_put(vfs_state, file);
     return deleg;
@@ -1206,10 +1206,10 @@ nfs4_cb_getattr(
     w->priv             = priv;
     w->resume           = resume;
 
-    pthread_mutex_lock(&holder->cb_recall_lock);
+    evpl_mutex_lock(&holder->cb_recall_lock);
     w->next                  = holder->cb_getattr_queue;
     holder->cb_getattr_queue = w;
-    pthread_mutex_unlock(&holder->cb_recall_lock);
+    evpl_mutex_unlock(&holder->cb_recall_lock);
 
     evpl_ring_doorbell(&holder->cb_doorbell);
 } /* nfs4_cb_getattr */
@@ -1230,7 +1230,7 @@ nfs4_cb_doorbell_drain(
 
     (void) evpl;
 
-    pthread_mutex_lock(&thread->cb_recall_lock);
+    evpl_mutex_lock(&thread->cb_recall_lock);
     queue                         = thread->cb_recall_queue;
     thread->cb_recall_queue       = NULL;
     lrq                           = thread->cb_layoutrecall_queue;
@@ -1239,7 +1239,7 @@ nfs4_cb_doorbell_drain(
     thread->cb_getattr_queue      = NULL;
     tq                            = thread->cb_teardown_queue;
     thread->cb_teardown_queue     = NULL;
-    pthread_mutex_unlock(&thread->cb_recall_lock);
+    evpl_mutex_unlock(&thread->cb_recall_lock);
 
     while (queue) {
         struct nfs_delegation *deleg = queue;
@@ -1331,10 +1331,10 @@ nfs4_cb_recall_enqueue(struct nfs_delegation *deleg)
 
     atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
 
-    pthread_mutex_lock(&owner->cb_recall_lock);
+    evpl_mutex_lock(&owner->cb_recall_lock);
     deleg->recall_qnext    = owner->cb_recall_queue;
     owner->cb_recall_queue = deleg;
-    pthread_mutex_unlock(&owner->cb_recall_lock);
+    evpl_mutex_unlock(&owner->cb_recall_lock);
 
     evpl_ring_doorbell(&owner->cb_doorbell);
 } /* nfs4_cb_recall_enqueue */
@@ -1390,7 +1390,7 @@ nfs4_cb_resend_recalls_on_rebind(
      * race.  (Reading claim.break_state under client->lock, without the file
      * lock, matches the existing nfs_deleg_recall_timeout_check pattern -- a
      * benign racy read of an enum used only to decide whether to retry.) */
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     LL_FOREACH2(client->delegations, deleg, next_in_client)
     {
         if (atomic_load_explicit(&deleg->cb_recall_state,
@@ -1413,7 +1413,7 @@ nfs4_cb_resend_recalls_on_rebind(
         atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
         pending[count++] = deleg;
     }
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 
     /* The stale callback channel still references the destroyed session (whose
      * backchannel_conn is now NULL), so it cannot carry a recall.  Tear it down
@@ -1521,10 +1521,10 @@ nfs4_cb_path_teardown(
         } else {
             struct chimera_server_nfs_thread *owner = chan->owner_thread;
 
-            pthread_mutex_lock(&owner->cb_recall_lock);
+            evpl_mutex_lock(&owner->cb_recall_lock);
             chan->teardown_next      = owner->cb_teardown_queue;
             owner->cb_teardown_queue = chan;
-            pthread_mutex_unlock(&owner->cb_recall_lock);
+            evpl_mutex_unlock(&owner->cb_recall_lock);
 
             evpl_ring_doorbell(&owner->cb_doorbell);
         }
@@ -1538,7 +1538,7 @@ nfs4_cb_path_teardown(
 void
 nfs4_cb_thread_init(struct chimera_server_nfs_thread *thread)
 {
-    pthread_mutex_init(&thread->cb_recall_lock, NULL);
+    evpl_mutex_init(&thread->cb_recall_lock, NULL);
     thread->cb_recall_queue   = NULL;
     thread->cb_getattr_queue  = NULL;
     thread->cb_teardown_queue = NULL;
@@ -1553,5 +1553,5 @@ nfs4_cb_thread_destroy(struct chimera_server_nfs_thread *thread)
         evpl_remove_doorbell(thread->evpl, &thread->cb_doorbell);
         thread->cb_doorbell_armed = 0;
     }
-    pthread_mutex_destroy(&thread->cb_recall_lock);
+    evpl_mutex_destroy(&thread->cb_recall_lock);
 } /* nfs4_cb_thread_destroy */

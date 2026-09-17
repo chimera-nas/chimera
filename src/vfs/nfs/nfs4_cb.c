@@ -44,17 +44,17 @@ chimera_nfs4_cb_find_server(
     struct chimera_nfs4_client_session *session;
     int                                 i;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     for (i = 0; i < shared->max_servers; i++) {
         server  = shared->servers[i];
         session = server ? server->nfs4_session : NULL;
         if (session &&
             memcmp(session->sessionid, sessionid, NFS4_SESSIONID_SIZE) == 0) {
-            pthread_mutex_unlock(&shared->lock);
+            evpl_mutex_unlock(&shared->lock);
             return server;
         }
     }
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
     return NULL;
 } /* chimera_nfs4_cb_find_server */
 
@@ -244,10 +244,10 @@ chimera_nfs4_cb_establish_done(
 
     item->status = status;
 
-    pthread_mutex_lock(&origin->cb_resume_lock);
+    evpl_mutex_lock(&origin->cb_resume_lock);
     item->next             = origin->cb_resume_done;
     origin->cb_resume_done = item;
-    pthread_mutex_unlock(&origin->cb_resume_lock);
+    evpl_mutex_unlock(&origin->cb_resume_lock);
 
     evpl_ring_doorbell(&origin->cb_resume_doorbell);
 } /* chimera_nfs4_cb_establish_done */
@@ -280,7 +280,7 @@ chimera_nfs4_cb_create_session_callback(
         res->resarray[0].opcreate_session.csr_status != NFS4_OK) {
         chimera_nfsclient_error("NFS4 back-channel CREATE_SESSION failed (rpc=%d compound=%d)",
                                 status, res ? res->status : -1);
-        pthread_mutex_destroy(&session->lock);
+        evpl_mutex_destroy(&session->lock);
         free(session);
         item->session = NULL;
         chimera_nfs4_cb_establish_done(item, EIO);
@@ -296,9 +296,9 @@ chimera_nfs4_cb_create_session_callback(
     * slot count is known; threads borrow/return ids from it (nfs4_slot.c). */
     chimera_nfs4_session_pool_init(session);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     server->nfs4_session = session;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     chimera_nfsclient_info(
         "NFS4 back-channel session established, clientid=%lu max_slots=%u",
@@ -407,7 +407,7 @@ chimera_nfs4_cb_exchange_id_callback(
     eid_res = &res->resarray[0].opexchange_id.eir_resok4;
 
     session = calloc(1, sizeof(*session));
-    pthread_mutex_init(&session->lock, NULL);
+    evpl_mutex_init(&session->lock, NULL);
     session->clientid = eid_res->eir_clientid;
 
     /* The server's own reference, released when the last mount goes away and
@@ -501,10 +501,10 @@ chimera_nfs4_cb_control_doorbell(
 
     (void) evpl;
 
-    pthread_mutex_lock(&shared->cb_lock);
+    evpl_mutex_lock(&shared->cb_lock);
     queue                      = shared->cb_establish_queue;
     shared->cb_establish_queue = NULL;
-    pthread_mutex_unlock(&shared->cb_lock);
+    evpl_mutex_unlock(&shared->cb_lock);
 
     cb_programs[0] = &shared->nfs_v4_cb.rpc2;
 
@@ -563,7 +563,7 @@ chimera_nfs4_cb_control_notify(
         return;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     for (i = 0; i < shared->max_servers; i++) {
         server = shared->servers[i];
         if (server && server->cb_conn == conn) {
@@ -571,7 +571,7 @@ chimera_nfs4_cb_control_notify(
             break;
         }
     }
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 } /* chimera_nfs4_cb_control_notify */
 
 /* Control-thread init (runs on the control thread's evpl before
@@ -645,10 +645,10 @@ chimera_nfs4_cb_resume_drain(
 
     (void) evpl;
 
-    pthread_mutex_lock(&thread->cb_resume_lock);
+    evpl_mutex_lock(&thread->cb_resume_lock);
     item                   = thread->cb_resume_done;
     thread->cb_resume_done = NULL;
-    pthread_mutex_unlock(&thread->cb_resume_lock);
+    evpl_mutex_unlock(&thread->cb_resume_lock);
 
     while (item) {
         struct chimera_nfs_client_server_thread *server_thread = item->server_thread;
@@ -672,7 +672,7 @@ chimera_nfs4_cb_resume_drain(
 void
 chimera_nfs4_cb_thread_init(struct chimera_nfs_thread *thread)
 {
-    pthread_mutex_init(&thread->cb_resume_lock, NULL);
+    evpl_mutex_init(&thread->cb_resume_lock, NULL);
     thread->cb_resume_done = NULL;
     evpl_add_doorbell(thread->evpl, &thread->cb_resume_doorbell,
                       chimera_nfs4_cb_resume_drain);
@@ -700,7 +700,7 @@ chimera_nfs4_cb_thread_destroy(struct chimera_nfs_thread *thread)
         item = next;
     }
     thread->cb_resume_done = NULL;
-    pthread_mutex_destroy(&thread->cb_resume_lock);
+    evpl_mutex_destroy(&thread->cb_resume_lock);
 } /* chimera_nfs4_cb_thread_destroy */
 
 void
@@ -714,7 +714,7 @@ chimera_nfs4_cb_establish_session(
     item->server_thread = server_thread;
     item->request       = request;
 
-    pthread_mutex_lock(&shared->cb_lock);
+    evpl_mutex_lock(&shared->cb_lock);
 
     /* Lazily start the control thread on first use.  evpl_thread_create blocks
      * until chimera_nfs4_cb_control_init has run (and armed cb_doorbell), so the
@@ -729,7 +729,7 @@ chimera_nfs4_cb_establish_session(
 
     item->next                 = shared->cb_establish_queue;
     shared->cb_establish_queue = item;
-    pthread_mutex_unlock(&shared->cb_lock);
+    evpl_mutex_unlock(&shared->cb_lock);
 
     evpl_ring_doorbell(&shared->cb_doorbell);
 } /* chimera_nfs4_cb_establish_session */

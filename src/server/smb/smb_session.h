@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdatomic.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <uthash.h>
 
 #include "vfs/vfs.h"
@@ -315,7 +315,7 @@ struct chimera_smb_tree {
     struct chimera_smb_share     *share;
 
     struct chimera_smb_open_file *open_files[CHIMERA_SMB_OPEN_FILE_BUCKETS];
-    pthread_mutex_t               open_files_lock[CHIMERA_SMB_OPEN_FILE_BUCKETS];
+    evpl_mutex_t               open_files_lock[CHIMERA_SMB_OPEN_FILE_BUCKETS];
 
     /* DH2Q creates that are deferred BEFORE their open_file is hashed into
      * open_files[]: a hard share conflict against a holder whose handle-caching
@@ -330,7 +330,7 @@ struct chimera_smb_tree {
      * request.  Guarded by pending_creates_lock; the list is short (one entry per
      * deferred create on this tree). */
     struct chimera_smb_request   *pending_creates;
-    pthread_mutex_t               pending_creates_lock;
+    evpl_mutex_t               pending_creates_lock;
 
     struct chimera_smb_tree      *prev;
     struct chimera_smb_tree      *next;
@@ -399,7 +399,7 @@ struct chimera_smb_session {
     struct chimera_smb_session *prev;
     struct chimera_smb_session *next;
 
-    pthread_mutex_t             lock;
+    evpl_mutex_t             lock;
     struct chimera_smb_tree   **trees;
 
     int                         max_trees;
@@ -462,7 +462,7 @@ chimera_smb_session_create()
 {
     struct chimera_smb_session *session = calloc(1, sizeof(struct chimera_smb_session));
 
-    pthread_mutex_init(&session->lock, NULL);
+    evpl_mutex_init(&session->lock, NULL);
 
     session->max_trees = 32;
     session->flags     = 0;
@@ -480,7 +480,7 @@ chimera_smb_session_create()
 static void
 chimera_smb_session_destroy(struct chimera_smb_session *session)
 {
-    pthread_mutex_destroy(&session->lock);
+    evpl_mutex_destroy(&session->lock);
     free(session->trees);
     free(session);
 } /* chimera_smb_session_release */

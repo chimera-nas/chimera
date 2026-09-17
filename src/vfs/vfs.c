@@ -80,10 +80,10 @@ chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread *delegation_th
     struct chimera_vfs_request *requests, *request;
     struct chimera_vfs_module  *module;
 
-    pthread_mutex_lock(&delegation_thread->lock);
+    evpl_mutex_lock(&delegation_thread->lock);
     requests                    = delegation_thread->requests;
     delegation_thread->requests = NULL;
-    pthread_mutex_unlock(&delegation_thread->lock);
+    evpl_mutex_unlock(&delegation_thread->lock);
 
     while (requests) {
         request = requests;
@@ -249,10 +249,10 @@ chimera_vfs_close_thread_wake_shutdown(
     if (count == 0 && close_thread->num_pending == 0) {
         /* Fully drained: hand off to the waiter in chimera_vfs_destroy.  Signal
          * under the lock so the wakeup can't be lost against its cond_wait. */
-        pthread_mutex_lock(&close_thread->lock);
+        evpl_mutex_lock(&close_thread->lock);
         close_thread->signaled = 1;
-        pthread_cond_signal(&close_thread->cond);
-        pthread_mutex_unlock(&close_thread->lock);
+        evpl_cond_signal(&close_thread->cond);
+        evpl_mutex_unlock(&close_thread->lock);
         return;
     }
 
@@ -461,7 +461,7 @@ chimera_vfs_spawn_delegation_pool(
     for (int i = 0; i < count; i++) {
         pool[i].vfs  = vfs;
         pool[i].mode = mode;
-        pthread_mutex_init(&pool[i].lock, NULL);
+        evpl_mutex_init(&pool[i].lock, NULL);
 
         pool[i].evpl_thread = evpl_thread_create(
             NULL,
@@ -706,8 +706,8 @@ chimera_vfs_init(
     vfs->async_delegation_threads     = chimera_vfs_spawn_delegation_pool(
         vfs, num_async_delegation_threads, CHIMERA_VFS_DELEGATION_ASYNC);
 
-    pthread_mutex_init(&vfs->close_thread.lock, NULL);
-    pthread_cond_init(&vfs->close_thread.cond, NULL);
+    evpl_mutex_init(&vfs->close_thread.lock, NULL);
+    evpl_cond_init(&vfs->close_thread.cond, NULL);
     vfs->close_thread.vfs      = vfs;
     vfs->close_thread.shutdown = 0;
 
@@ -790,7 +790,7 @@ chimera_vfs_module_capabilities(
 #define CHIMERA_RCU_TEARDOWN_MAX_THREADS 64
 
 struct chimera_rcu_teardown_ctx {
-    pthread_t              thread;
+    evpl_native_thread_t              thread;
     struct call_rcu_data **crdps;
     int                    count;
     int                    started;
@@ -899,7 +899,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
         ctx[t].count = (idx + per <= n) ? per : (n - idx);
         idx         += ctx[t].count;
 
-        if (pthread_create(&ctx[t].thread, NULL, chimera_vfs_rcu_teardown_worker, &ctx[t]) == 0) {
+        if (evpl_native_thread_create(&ctx[t].thread, NULL, chimera_vfs_rcu_teardown_worker, &ctx[t]) == 0) {
             ctx[t].started = 1;
         } else {
             /* Spawn failed -- free this chunk inline so nothing leaks. */
@@ -909,7 +909,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 
     for (int t = 0; t < nthreads; t++) {
         if (ctx[t].started) {
-            pthread_join(ctx[t].thread, NULL);
+            evpl_native_thread_join(ctx[t].thread, NULL);
         }
     }
 
@@ -923,15 +923,15 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     struct chimera_vfs_module *module;
     int                        i;
 
-    pthread_mutex_lock(&vfs->close_thread.lock);
+    evpl_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;
 
     __sync_synchronize();
 
     evpl_ring_doorbell(&vfs->close_thread.doorbell);
 
-    pthread_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
-    pthread_mutex_unlock(&vfs->close_thread.lock);
+    evpl_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
+    evpl_mutex_unlock(&vfs->close_thread.lock);
 
     /* Stop the identity resolver first: its workers ring protocol/delegation
      * thread doorbells and write the user cache, both of which must still be
@@ -1033,14 +1033,14 @@ chimera_vfs_process_completion(
     struct chimera_vfs_thread  *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
     struct chimera_vfs_request *complete_requests, *unblocked_requests, *io_resume_requests, *request;
 
-    pthread_mutex_lock(&thread->lock);
+    evpl_mutex_lock(&thread->lock);
     complete_requests                 = thread->pending_complete_requests;
     unblocked_requests                = thread->unblocked_requests;
     io_resume_requests                = thread->pending_io_resume;
     thread->pending_complete_requests = NULL;
     thread->unblocked_requests        = NULL;
     thread->pending_io_resume         = NULL;
-    pthread_mutex_unlock(&thread->lock);
+    evpl_mutex_unlock(&thread->lock);
 
     while (complete_requests) {
         request = complete_requests;
@@ -1231,7 +1231,7 @@ chimera_vfs_thread_init(
         evpl_set_loop_hooks(evpl, &chimera_vfs_rcu_hooks);
     }
 
-    pthread_mutex_init(
+    evpl_mutex_init(
         &thread->lock,
         NULL);
 

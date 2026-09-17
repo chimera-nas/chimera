@@ -266,7 +266,7 @@ chimera_vfs_umount_dump_referenced(
             struct vfs_open_cache_shard    *shard = &cache->shards[i];
             struct chimera_vfs_open_handle *handle;
 
-            pthread_mutex_lock(&shard->lock);
+            evpl_mutex_lock(&shard->lock);
             for (handle = shard->handles; handle;
                  handle = handle->bucket_next) {
                 char fhhex[CHIMERA_VFS_FH_SIZE * 2 + 1];
@@ -284,7 +284,7 @@ chimera_vfs_umount_dump_referenced(
                     handle->access_mode,
                     (unsigned long long) handle->cred_hash);
             }
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
         }
     }
 } /* chimera_vfs_umount_dump_referenced */

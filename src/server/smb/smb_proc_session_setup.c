@@ -476,14 +476,14 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                 return;
             }
 
-            pthread_mutex_lock(&shared->sessions_lock);
+            evpl_mutex_lock(&shared->sessions_lock);
             if (session->num_channels >= SMB2_MAX_CHANNELS) {
                 over_limit = 1;
             } else {
                 session->num_channels++;
                 session_handle->bound_channel = 1;
             }
-            pthread_mutex_unlock(&shared->sessions_lock);
+            evpl_mutex_unlock(&shared->sessions_lock);
 
             if (over_limit) {
                 chimera_smb_complete_request(request, SMB2_STATUS_INSUFFICIENT_RESOURCES);
@@ -781,13 +781,13 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
              * invalid credentials and expects both channels dead).  Clearing
              * AUTHORIZED keeps the refcnt-driven release below from HASH_DELing
              * a second time. */
-            pthread_mutex_lock(&shared->sessions_lock);
+            evpl_mutex_lock(&shared->sessions_lock);
             if (failed_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) {
                 failed_session->flags |= CHIMERA_SMB_SESSION_DELETED;
                 failed_session->flags &= ~CHIMERA_SMB_SESSION_AUTHORIZED;
                 HASH_DEL(shared->sessions, failed_session);
             }
-            pthread_mutex_unlock(&shared->sessions_lock);
+            evpl_mutex_unlock(&shared->sessions_lock);
 
             HASH_DEL(conn->session_handles, request->session_handle);
             chimera_smb_session_release(thread, shared, failed_session, false);

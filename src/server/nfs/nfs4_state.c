@@ -18,7 +18,7 @@
 static void
 shard_init(struct nfs_state_shard *shard)
 {
-    pthread_rwlock_init(&shard->lock, NULL);
+    evpl_rwlock_init(&shard->lock, NULL);
     shard->slots          = NULL;
     shard->slots_capacity = 0;
     shard->slots_used     = 0;
@@ -56,7 +56,7 @@ shard_free(
 
     free(shard->slots);
     free(shard->free_idx);
-    pthread_rwlock_destroy(&shard->lock);
+    chimera_rwlock_destroy(&shard->lock);
 } /* shard_free */
 
 static int
@@ -171,14 +171,14 @@ nfs_state_table_alloc(
     shard_idx = (uint8_t) (rr % NFS_STATE_NUM_SHARDS);
     shard     = &table->shards[shard_idx];
 
-    pthread_rwlock_wrlock(&shard->lock);
+    evpl_rwlock_wrlock(&shard->lock);
 
     if (shard->free_count) {
         slot_idx = shard->free_idx[--shard->free_count];
     } else {
         if (shard->slots_used == shard->slots_capacity) {
             if (shard_grow_locked(shard) != 0) {
-                pthread_rwlock_unlock(&shard->lock);
+                evpl_rwlock_unlock(&shard->lock);
                 return -1;
             }
         }
@@ -195,7 +195,7 @@ nfs_state_table_alloc(
     *out_slot_idx   = slot_idx;
     *out_generation = slot->generation;
 
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
     return 0;
 } /* nfs_state_table_alloc */
 
@@ -210,7 +210,7 @@ nfs_state_table_install(
     struct nfs_state_shard *shard = &table->shards[shard_idx];
     struct nfs_state_slot  *slot;
 
-    pthread_rwlock_wrlock(&shard->lock);
+    evpl_rwlock_wrlock(&shard->lock);
 
     chimera_nfs_abort_if(slot_idx >= shard->slots_used,
                          "install on unallocated slot %u/%u",
@@ -220,7 +220,7 @@ nfs_state_table_install(
     slot->type  = type;
     slot->state = state;
 
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
 } /* nfs_state_table_install */
 
 void
@@ -232,7 +232,7 @@ nfs_state_table_free_slot(
     struct nfs_state_shard *shard = &table->shards[shard_idx];
     struct nfs_state_slot  *slot;
 
-    pthread_rwlock_wrlock(&shard->lock);
+    evpl_rwlock_wrlock(&shard->lock);
 
     chimera_nfs_abort_if(slot_idx >= shard->slots_used,
                          "free of unallocated slot %u/%u",
@@ -246,7 +246,7 @@ nfs_state_table_free_slot(
 
     (void) shard_push_free_locked(shard, slot_idx);
 
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
 } /* nfs_state_table_free_slot */
 
 static void
@@ -259,7 +259,7 @@ nfs_state_table_free_slot_replay(
     struct nfs_state_shard *shard = &table->shards[shard_idx];
     struct nfs_state_slot  *slot;
 
-    pthread_rwlock_wrlock(&shard->lock);
+    evpl_rwlock_wrlock(&shard->lock);
 
     chimera_nfs_abort_if(slot_idx >= shard->slots_used,
                          "free of unallocated slot %u/%u",
@@ -278,7 +278,7 @@ nfs_state_table_free_slot_replay(
 
     (void) shard_push_free_locked(shard, slot_idx);
 
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
 } /* nfs_state_table_free_slot_replay */
 
 /* Like nfs_state_table_free_slot, but for a slot whose owning client was
@@ -295,7 +295,7 @@ nfs_state_table_expire_slot(
     struct nfs_state_shard *shard = &table->shards[shard_idx];
     struct nfs_state_slot  *slot;
 
-    pthread_rwlock_wrlock(&shard->lock);
+    evpl_rwlock_wrlock(&shard->lock);
 
     chimera_nfs_abort_if(slot_idx >= shard->slots_used,
                          "expire of unallocated slot %u/%u",
@@ -307,7 +307,7 @@ nfs_state_table_expire_slot(
 
     (void) shard_push_free_locked(shard, slot_idx);
 
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
 } /* nfs_state_table_expire_slot */
 
 /*
@@ -362,10 +362,10 @@ state_table_lookup_locked(
 
     shard = &table->shards[view.shard];
 
-    pthread_rwlock_rdlock(&shard->lock);
+    evpl_rwlock_rdlock(&shard->lock);
 
     if (view.slot_idx >= shard->slots_used) {
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_BAD_STATEID;
     }
 
@@ -410,7 +410,7 @@ state_table_lookup_locked(
         if (owner_client &&
             atomic_load_explicit(&owner_client->reclaim_pending,
                                  memory_order_acquire)) {
-            pthread_rwlock_unlock(&shard->lock);
+            evpl_rwlock_unlock(&shard->lock);
             return NFS4ERR_EXPIRED;
         }
 
@@ -445,7 +445,7 @@ state_table_lookup_locked(
         status = NFS4_OK;
     }
 
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
     return status;
 } /* state_table_lookup_locked */
 
@@ -506,10 +506,10 @@ nfs_state_table_lookup_replay(
     }
 
     shard = &table->shards[view.shard];
-    pthread_rwlock_rdlock(&shard->lock);
+    evpl_rwlock_rdlock(&shard->lock);
 
     if (view.slot_idx >= shard->slots_used) {
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_BAD_STATEID;
     }
 
@@ -518,12 +518,12 @@ nfs_state_table_lookup_replay(
         slot->replay_generation != view.generation ||
         slot->replay.op != op ||
         slot->replay.seqid != seqid) {
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_BAD_STATEID;
     }
 
     *out_replay = slot->replay;
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
     return NFS4_OK;
 } /* nfs_state_table_lookup_replay */
 
@@ -640,7 +640,7 @@ nfs_client_alloc(
     memcpy(c->owner_string, owner_string, owner_len);
     c->owner_len = owner_len;
     atomic_init(&c->refcount, 1);
-    pthread_mutex_init(&c->lock, NULL);
+    evpl_mutex_init(&c->lock, NULL);
     return c;
 } /* nfs_client_alloc */
 
@@ -685,12 +685,12 @@ open_state_destroy_locked(
              * Ordering: owner->lock (held by caller) -> lock_owner->lock.
              * Flag-guarded: a racing nfs_lock_state_destroy may have unlinked
              * this side already. */
-            pthread_mutex_lock(&ls->lock_owner->lock);
+            evpl_mutex_lock(&ls->lock_owner->lock);
             if (ls->on_owner_list) {
                 LL_DELETE2(ls->lock_owner->states, ls, next_in_owner);
                 ls->on_owner_list = 0;
             }
-            pthread_mutex_unlock(&ls->lock_owner->lock);
+            evpl_mutex_unlock(&ls->lock_owner->lock);
         }
         ls_prev_destroyed = atomic_exchange_explicit(&ls->destroyed, 1,
                                                      memory_order_acq_rel);
@@ -742,7 +742,7 @@ nfs_client_destroy(
         return;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     /* HASH_ITER + HASH_DELETE + free is the standard uthash teardown
      * pattern, but scan-build can't reason through the macro expansion
@@ -754,7 +754,7 @@ nfs_client_destroy(
 
     HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
     {
-        pthread_mutex_lock(&oo->lock);
+        evpl_mutex_lock(&oo->lock);
         struct nfs_open_state *os, *os_tmp;
         HASH_ITER(hh, oo->states_by_fh, os, os_tmp)
         {
@@ -762,7 +762,7 @@ nfs_client_destroy(
              * DESTROY_CLIENTID); mark its stateids EXPIRED, not free. */
             open_state_destroy_locked(oo, os, table, vfs_thread, true);
         }
-        pthread_mutex_unlock(&oo->lock);
+        evpl_mutex_unlock(&oo->lock);
 
         /* Unpublish, then drop the hash-table slot ref; a borrowing in-flight
          * request defers the free to its own put(). */
@@ -803,8 +803,8 @@ nfs_client_destroy(
      * connection) before the client struct goes away. */
     nfs4_cb_path_teardown(&client->cb_path, synchronous);
 
-    pthread_mutex_unlock(&client->lock);
-    pthread_mutex_destroy(&client->lock);
+    evpl_mutex_unlock(&client->lock);
+    evpl_mutex_destroy(&client->lock);
     free(client);
 } /* nfs_client_destroy */
 
@@ -818,7 +818,7 @@ nfs_client_expire_state(
         return;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     client->expired = 1;
 
 #ifndef __clang_analyzer__
@@ -827,13 +827,13 @@ nfs_client_expire_state(
 
     HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
     {
-        pthread_mutex_lock(&oo->lock);
+        evpl_mutex_lock(&oo->lock);
         struct nfs_open_state *os, *os_tmp;
         HASH_ITER(hh, oo->states_by_fh, os, os_tmp)
         {
             open_state_destroy_locked(oo, os, table, vfs_thread, true);
         }
-        pthread_mutex_unlock(&oo->lock);
+        evpl_mutex_unlock(&oo->lock);
 
         /* Unpublish, then drop the hash-table slot ref.  If an in-flight OPEN
          * still borrows this owner, its ref keeps the struct alive until its
@@ -866,7 +866,7 @@ nfs_client_expire_state(
     /* Runtime lease expiry: the owner thread is still alive, so marshal the
      * channel free to it rather than freeing in-line. */
     nfs4_cb_path_teardown(&client->cb_path, false);
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 } /* nfs_client_expire_state */
 
 struct nfs_open_owner *
@@ -883,7 +883,7 @@ nfs_open_owner_find_or_adopt(
         owner_len = NFS4_OPAQUE_LIMIT;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_FIND(hh, client->open_owners_by_str, owner_bytes, owner_len, owner);
 
@@ -894,7 +894,7 @@ nfs_open_owner_find_or_adopt(
         /* Take the caller ref while still holding client->lock, which is
          * serialized against teardown's HASH_DELETE. */
         nfs_open_owner_get(owner);
-        pthread_mutex_unlock(&client->lock);
+        evpl_mutex_unlock(&client->lock);
         return owner;
     }
 
@@ -911,7 +911,7 @@ nfs_open_owner_find_or_adopt(
         if (out_created) {
             *out_created = false;
         }
-        pthread_mutex_unlock(&client->lock);
+        evpl_mutex_unlock(&client->lock);
         return adopt;
     }
 
@@ -922,7 +922,7 @@ nfs_open_owner_find_or_adopt(
     owner->owner_len = owner_len;
     owner->seqid     = 0;
     owner->confirmed = false;
-    pthread_mutex_init(&owner->lock, NULL);
+    evpl_mutex_init(&owner->lock, NULL);
     /* refcount 2: one for the hash-table slot, one for the caller. */
     atomic_init(&owner->refcount, 2);
 
@@ -932,7 +932,7 @@ nfs_open_owner_find_or_adopt(
     if (out_created) {
         *out_created = true;
     }
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return owner;
 } /* nfs_open_owner_find_or_adopt */
 
@@ -965,7 +965,7 @@ nfs_open_owner_put(struct nfs_open_owner *owner)
     chimera_nfs_abort_if(prev == 0, "open_owner refcount underflow on %p",
                          owner);
     if (prev == 1) {
-        pthread_mutex_destroy(&owner->lock);
+        evpl_mutex_destroy(&owner->lock);
         free(owner);
     }
 } /* nfs_open_owner_put */
@@ -982,9 +982,9 @@ nfs_open_owner_find_state(
         return NULL;
     }
 
-    pthread_mutex_lock(&owner->lock);
+    evpl_mutex_lock(&owner->lock);
     HASH_FIND(hh, owner->states_by_fh, fh, fh_len, state);
-    pthread_mutex_unlock(&owner->lock);
+    evpl_mutex_unlock(&owner->lock);
     return state;
 } /* nfs_open_owner_find_state */
 
@@ -1047,12 +1047,12 @@ nfs_open_state_create(
      * unpublished this owner, installing a fresh open_state on it would
      * orphan the state (and any lock_state later rooted on it) forever --
      * no teardown walk can reach it through the client's owner hash. */
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_FIND(hh, client->open_owners_by_str,
               owner->owner, owner->owner_len, published);
     if (published != owner) {
-        pthread_mutex_unlock(&client->lock);
+        evpl_mutex_unlock(&client->lock);
         nfs_state_table_free_slot(table, shard, slot_idx);
         free(state);
         return NULL;
@@ -1065,9 +1065,9 @@ nfs_open_state_create(
 
     nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_OPEN, state);
 
-    pthread_mutex_lock(&owner->lock);
+    evpl_mutex_lock(&owner->lock);
     HASH_ADD_KEYPTR(hh, owner->states_by_fh, state->fh, state->fh_len, state);
-    pthread_mutex_unlock(&owner->lock);
+    evpl_mutex_unlock(&owner->lock);
 
     /* Encode before dropping client->lock: once published, a concurrent
      * expire may destroy and free the state. */
@@ -1075,7 +1075,7 @@ nfs_open_state_create(
                         NFS4_STATEID_TYPE_OPEN, shard, slot_idx, gen,
                         table->epoch);
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return state;
 } /* nfs_open_state_create */
 
@@ -1095,7 +1095,7 @@ nfs_client_check_share_conflict(
         return NFS4ERR_BAD_STATEID;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
     {
@@ -1106,7 +1106,7 @@ nfs_client_check_share_conflict(
             continue;
         }
 
-        pthread_mutex_lock(&oo->lock);
+        evpl_mutex_lock(&oo->lock);
         HASH_FIND(hh, oo->states_by_fh, fh, fh_len, peer);
         if (peer) {
             /* RFC 7530 §9.10: SHARE_DENIED if my deny clashes with their
@@ -1116,14 +1116,14 @@ nfs_client_check_share_conflict(
                 status = NFS4ERR_SHARE_DENIED;
             }
         }
-        pthread_mutex_unlock(&oo->lock);
+        evpl_mutex_unlock(&oo->lock);
 
         if (status != NFS4_OK) {
             break;
         }
     }
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return status;
 } /* nfs_client_check_share_conflict */
 
@@ -1142,7 +1142,7 @@ nfs_client_check_io_denied(
         return NFS4ERR_BAD_STATEID;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
     {
@@ -1152,19 +1152,19 @@ nfs_client_check_io_denied(
             continue;
         }
 
-        pthread_mutex_lock(&oo->lock);
+        evpl_mutex_lock(&oo->lock);
         HASH_FIND(hh, oo->states_by_fh, fh, fh_len, peer);
         if (peer && (peer->share_deny & requested_access)) {
             status = NFS4ERR_LOCKED;
         }
-        pthread_mutex_unlock(&oo->lock);
+        evpl_mutex_unlock(&oo->lock);
 
         if (status != NFS4_OK) {
             break;
         }
     }
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return status;
 } /* nfs_client_check_io_denied */
 
@@ -1181,15 +1181,15 @@ nfs_client_has_open_state_for_fh(
         return false;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
     {
         struct nfs_open_state *state = NULL;
 
-        pthread_mutex_lock(&oo->lock);
+        evpl_mutex_lock(&oo->lock);
         HASH_FIND(hh, oo->states_by_fh, fh, fh_len, state);
-        pthread_mutex_unlock(&oo->lock);
+        evpl_mutex_unlock(&oo->lock);
 
         if (state) {
             found = true;
@@ -1197,7 +1197,7 @@ nfs_client_has_open_state_for_fh(
         }
     }
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return found;
 } /* nfs_client_has_open_state_for_fh */
 
@@ -1220,16 +1220,16 @@ nfs_client_has_leased_state(struct nfs_client *client)
     struct nfs_lock_owner *lo, *lo_tmp;
     bool                   found;
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     found = (client->delegations != NULL) || (client->layouts_by_fh != NULL);
 
     if (!found) {
         HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
         {
-            pthread_mutex_lock(&oo->lock);
+            evpl_mutex_lock(&oo->lock);
             found = (oo->states_by_fh != NULL);
-            pthread_mutex_unlock(&oo->lock);
+            evpl_mutex_unlock(&oo->lock);
 
             if (found) {
                 break;
@@ -1240,9 +1240,9 @@ nfs_client_has_leased_state(struct nfs_client *client)
     if (!found) {
         HASH_ITER(hh, client->lock_owners_by_str, lo, lo_tmp)
         {
-            pthread_mutex_lock(&lo->lock);
+            evpl_mutex_lock(&lo->lock);
             found = (lo->states != NULL);
-            pthread_mutex_unlock(&lo->lock);
+            evpl_mutex_unlock(&lo->lock);
 
             if (found) {
                 break;
@@ -1250,7 +1250,7 @@ nfs_client_has_leased_state(struct nfs_client *client)
         }
     }
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return found;
 } /* nfs_client_has_leased_state */
 
@@ -1336,11 +1336,11 @@ nfs_open_state_destroy(
 {
     struct nfs_open_owner *owner = state->owner;
 
-    pthread_mutex_lock(&owner->lock);
+    evpl_mutex_lock(&owner->lock);
     /* A single open being closed/rolled back -- its stateid becomes invalid
      * (free), not expired. */
     open_state_destroy_locked(owner, state, table, vfs_thread, false);
-    pthread_mutex_unlock(&owner->lock);
+    evpl_mutex_unlock(&owner->lock);
 } /* nfs_open_state_destroy */
 
 /* --- pNFS layout state ------------------------------------------------- */
@@ -1353,9 +1353,9 @@ nfs_layout_state_find(
 {
     struct nfs_layout_state *st;
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     HASH_FIND(hh, client->layouts_by_fh, fh, fh_len, st);
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 
     return st;
 } /* nfs_layout_state_find */
@@ -1401,9 +1401,9 @@ nfs_layout_state_create(
 
     nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_LAYOUT, st);
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     HASH_ADD_KEYPTR(hh, client->layouts_by_fh, st->fh, st->fh_len, st);
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 
     /* Publish into the server-wide fh->holder index so a conflicting op from
      * any client can find and recall this layout. */
@@ -1484,9 +1484,9 @@ nfs_layout_state_destroy(
 {
     struct nfs_client *client = st->client;
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     layout_state_destroy_locked(client, st, table, vfs_thread);
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 } /* nfs_layout_state_destroy */
 
 void
@@ -1495,7 +1495,7 @@ nfs_layout_state_destroy_all(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread)
 {
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     /* The uthash delete-during-iteration idiom trips scan-build's
      * use-after-free checker; guard it the way the client teardown above
@@ -1509,7 +1509,7 @@ nfs_layout_state_destroy_all(
     }
 #endif /* ifndef __clang_analyzer__ */
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 } /* nfs_layout_state_destroy_all */
 
 struct nfs_lock_owner *
@@ -1525,7 +1525,7 @@ nfs_lock_owner_find_or_create(
         owner_len = NFS4_OPAQUE_LIMIT;
     }
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_FIND(hh, client->lock_owners_by_str, owner_bytes, owner_len, owner);
 
@@ -1535,7 +1535,7 @@ nfs_lock_owner_find_or_create(
         }
         /* Take the caller ref while still holding client->lock. */
         nfs_lock_owner_get(owner);
-        pthread_mutex_unlock(&client->lock);
+        evpl_mutex_unlock(&client->lock);
         return owner;
     }
 
@@ -1545,7 +1545,7 @@ nfs_lock_owner_find_or_create(
     memcpy(owner->owner, owner_bytes, owner_len);
     owner->owner_len = owner_len;
     owner->seqid     = 0;
-    pthread_mutex_init(&owner->lock, NULL);
+    evpl_mutex_init(&owner->lock, NULL);
     /* refcount 2: one for the hash-table slot, one for the caller. */
     atomic_init(&owner->refcount, 2);
 
@@ -1555,7 +1555,7 @@ nfs_lock_owner_find_or_create(
     if (out_created) {
         *out_created = true;
     }
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return owner;
 } /* nfs_lock_owner_find_or_create */
 
@@ -1577,7 +1577,7 @@ nfs_lock_owner_put(struct nfs_lock_owner *owner)
     chimera_nfs_abort_if(prev == 0, "lock_owner refcount underflow on %p",
                          owner);
     if (prev == 1) {
-        pthread_mutex_destroy(&owner->lock);
+        evpl_mutex_destroy(&owner->lock);
         free(owner);
     }
 } /* nfs_lock_owner_put */
@@ -1619,12 +1619,12 @@ nfs_lock_state_create(
      * proceeds and a later sweep finds the state on both lists), or the
      * client was already expired (fail: installing now would orphan the
      * state forever, since teardown has already walked these lists). */
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_FIND(hh, client->lock_owners_by_str,
               lock_owner->owner, lock_owner->owner_len, published);
     if (published != lock_owner) {
-        pthread_mutex_unlock(&client->lock);
+        evpl_mutex_unlock(&client->lock);
         nfs_state_table_free_slot(table, shard, slot_idx);
         free(state);
         return NULL;
@@ -1636,10 +1636,10 @@ nfs_lock_state_create(
      * lock_state on one list only.  The destroyed check must share that
      * critical section: destroy_locked flips the flag under owner->lock
      * before walking. */
-    pthread_mutex_lock(&open_state->owner->lock);
+    evpl_mutex_lock(&open_state->owner->lock);
     if (atomic_load_explicit(&open_state->destroyed, memory_order_acquire)) {
-        pthread_mutex_unlock(&open_state->owner->lock);
-        pthread_mutex_unlock(&client->lock);
+        evpl_mutex_unlock(&open_state->owner->lock);
+        evpl_mutex_unlock(&client->lock);
         nfs_state_table_free_slot(table, shard, slot_idx);
         free(state);
         return NULL;
@@ -1658,14 +1658,14 @@ nfs_lock_state_create(
 
     nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_LOCK, state);
 
-    pthread_mutex_lock(&lock_owner->lock);
+    evpl_mutex_lock(&lock_owner->lock);
     LL_PREPEND2(lock_owner->states, state, next_in_owner);
     state->on_owner_list = 1;
-    pthread_mutex_unlock(&lock_owner->lock);
+    evpl_mutex_unlock(&lock_owner->lock);
 
     LL_PREPEND2(open_state->locks, state, next_in_open);
     state->on_open_list = 1;
-    pthread_mutex_unlock(&open_state->owner->lock);
+    evpl_mutex_unlock(&open_state->owner->lock);
 
     /* Encode before dropping client->lock: once published, a concurrent
      * expire may destroy and free the state. */
@@ -1673,7 +1673,7 @@ nfs_lock_state_create(
                         NFS4_STATEID_TYPE_LOCK, shard, slot_idx, gen,
                         table->epoch);
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     return state;
 } /* nfs_lock_state_create */
 
@@ -1789,20 +1789,20 @@ nfs_lock_state_destroy(
     /* Flag-guarded unlinks: the expire/CLOSE cascade in
      * open_state_destroy_locked may race this and unlink either side
      * first. */
-    pthread_mutex_lock(&lock_owner->lock);
+    evpl_mutex_lock(&lock_owner->lock);
     if (state->on_owner_list) {
         LL_DELETE2(lock_owner->states, state, next_in_owner);
         state->on_owner_list = 0;
     }
-    pthread_mutex_unlock(&lock_owner->lock);
+    evpl_mutex_unlock(&lock_owner->lock);
 
     if (open_state) {
-        pthread_mutex_lock(&open_state->owner->lock);
+        evpl_mutex_lock(&open_state->owner->lock);
         if (state->on_open_list) {
             LL_DELETE2(open_state->locks, state, next_in_open);
             state->on_open_list = 0;
         }
-        pthread_mutex_unlock(&open_state->owner->lock);
+        evpl_mutex_unlock(&open_state->owner->lock);
     }
 
     nfs_state_table_free_slot(table, state->shard, state->slot_idx);
@@ -1857,7 +1857,7 @@ nfs_delegation_create(
     /* RFC 7530/8881 §10.4.3 combine state.  sc is captured at grant by the
      * OPEN path; combine_valid stays false until then (lazy capture on first
      * CB_GETATTR otherwise). */
-    pthread_mutex_init(&deleg->combine_lock, NULL);
+    evpl_mutex_init(&deleg->combine_lock, NULL);
     deleg->combine_sc    = 0;
     deleg->combine_last  = 0;
     deleg->combine_valid = false;
@@ -1868,9 +1868,9 @@ nfs_delegation_create(
 
     nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_DELEG, deleg);
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     LL_PREPEND2(client->delegations, deleg, next_in_client);
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 
     nfs4_stateid_encode(out_stateid, deleg->seqid,
                         NFS4_STATEID_TYPE_DELEG, shard, slot_idx, gen,
@@ -1894,7 +1894,7 @@ delegation_cleanup(
         chimera_vfs_state_put(vfs_state, deleg->file_state);
         deleg->file_state = NULL;
     }
-    pthread_mutex_destroy(&deleg->combine_lock);
+    evpl_mutex_destroy(&deleg->combine_lock);
     free(deleg);
 } /* delegation_cleanup */
 
@@ -1928,9 +1928,9 @@ delegation_destroy_common(
     }
 
     if (unlink_client && deleg->client) {
-        pthread_mutex_lock(&deleg->client->lock);
+        evpl_mutex_lock(&deleg->client->lock);
         LL_DELETE2(deleg->client->delegations, deleg, next_in_client);
-        pthread_mutex_unlock(&deleg->client->lock);
+        evpl_mutex_unlock(&deleg->client->lock);
     }
 
     if (expire) {
@@ -2050,10 +2050,10 @@ nfs_state_table_free_revoked_deleg(
 
     shard = &table->shards[view.shard];
 
-    pthread_rwlock_rdlock(&shard->lock);
+    evpl_rwlock_rdlock(&shard->lock);
 
     if (view.slot_idx >= shard->slots_used) {
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_BAD_STATEID;
     }
 
@@ -2062,28 +2062,28 @@ nfs_state_table_free_revoked_deleg(
     if (slot->type == NFS4_SLOT_TYPE_EXPIRED) {
         nfsstat4 st = (slot->generation == view.generation)
                       ? NFS4ERR_EXPIRED : NFS4ERR_STALE_STATEID;
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return st;
     }
     if (slot->type == NFS4_SLOT_TYPE_FREE) {
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_BAD_STATEID;
     }
     if (slot->generation != view.generation) {
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_STALE_STATEID;
     }
     if (slot->type != NFS4_SLOT_TYPE_DELEG ||
         !atomic_load_explicit(&((struct nfs_delegation *) slot->state)->revoked,
                               memory_order_acquire)) {
         /* A live (non-revoked) state cannot be freed while in use. */
-        pthread_rwlock_unlock(&shard->lock);
+        evpl_rwlock_unlock(&shard->lock);
         return NFS4ERR_LOCKS_HELD;
     }
 
     deleg = slot->state;
     atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
-    pthread_rwlock_unlock(&shard->lock);
+    evpl_rwlock_unlock(&shard->lock);
 
     /* Our +1 ref above keeps `deleg` alive across destroy, which drops only
      * the lifetime ref (refcount stays >0); the release then drops our ref and

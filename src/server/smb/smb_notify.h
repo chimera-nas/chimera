@@ -5,7 +5,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include "vfs/vfs_notify.h"
 #include "smb_common/smb_encrypt.h"
 #include "smb_secure_send.h"
@@ -91,7 +91,7 @@ struct chimera_smb_notify_request {
  * and the freshly-parked request never gets woken up.
  */
 struct chimera_smb_notify_state {
-    pthread_mutex_t                  lock;
+    evpl_mutex_t                  lock;
     struct chimera_vfs_notify_watch *watch;
     /* Outstanding CHANGE_NOTIFY requests on this open, oldest first.
      *

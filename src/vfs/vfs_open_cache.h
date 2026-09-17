@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "common/format.h"
 #include "common/misc.h"
@@ -14,7 +14,7 @@
 #include "prometheus-c.h"
 
 struct vfs_open_cache_shard {
-    pthread_mutex_t                     lock;
+    evpl_mutex_t                     lock;
     struct chimera_vfs_open_handle     *handles;
     struct chimera_vfs_open_handle     *pending_close;
     struct chimera_vfs_open_handle     *free_handles;
@@ -203,7 +203,7 @@ chimera_vfs_open_cache_init(
     }
 
     for (unsigned int i = 0; i < cache->num_shards; i++) {
-        pthread_mutex_init(&cache->shards[i].lock, NULL);
+        evpl_mutex_init(&cache->shards[i].lock, NULL);
         cache->shards[i].handles        = NULL;
         cache->shards[i].free_handles   = NULL;
         cache->shards[i].pending_close  = NULL;
@@ -236,7 +236,7 @@ chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
             handle = tmp;
         }
 
-        pthread_mutex_destroy(&shard->lock);
+        evpl_mutex_destroy(&shard->lock);
     }
 
     if (cache->metrics) {
@@ -318,10 +318,10 @@ chimera_vfs_open_cache_release_blocked(
             /* This is a request from a different thread, so we need to send it home */
             /* Wake it under the lock; see chimera_vfs_complete_delegate for
              * why the ring must not follow the unlock. */
-            pthread_mutex_lock(&request_thread->lock);
+            evpl_mutex_lock(&request_thread->lock);
             LL_PREPEND(request_thread->unblocked_requests, request);
             evpl_ring_doorbell(&request_thread->doorbell);
-            pthread_mutex_unlock(&request_thread->lock);
+            evpl_mutex_unlock(&request_thread->lock);
         }
     }
 
@@ -343,7 +343,7 @@ chimera_vfs_open_cache_release(
 
     chimera_vfs_abort_if(handle->cache_id != shard->cache_id, "handle released by wrong cache");
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     handle->flags &= ~CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE;
 
@@ -375,7 +375,7 @@ chimera_vfs_open_cache_release(
 
                 chimera_vfs_close_ref_capture(&close_ref, handle);
                 chimera_vfs_open_cache_free(shard, handle);
-                pthread_mutex_unlock(&shard->lock);
+                evpl_mutex_unlock(&shard->lock);
                 chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
                 chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
                 return;
@@ -385,7 +385,7 @@ chimera_vfs_open_cache_release(
         }
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
 
@@ -403,13 +403,13 @@ chimera_vfs_open_cache_dup(
 
     chimera_vfs_abort_if(handle->cache_id != shard->cache_id, "handle duped by wrong cache");
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     chimera_vfs_abort_if(handle->opencnt == 0, "dup on handle with zero opencnt");
 
     handle->opencnt++;
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
 } /* chimera_vfs_open_cache_dup */
 
@@ -444,7 +444,7 @@ chimera_vfs_open_cache_evict(
         struct vfs_open_cache_shard    *shard = &cache->shards[s];
         struct chimera_vfs_open_handle *handle;
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         for (handle = shard->handles; handle; handle = handle->bucket_next) {
             if (handle->fh_len == fhlen && memcmp(handle->fh, fh, fhlen) == 0) {
@@ -453,7 +453,7 @@ chimera_vfs_open_cache_evict(
         }
 
         if (!handle) {
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             continue;
         }
 
@@ -468,14 +468,14 @@ chimera_vfs_open_cache_evict(
             shard->open_handles--;
             chimera_vfs_open_cache_free(shard, handle);
 
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
         } else {
             /* In use: detach now, close on the final release. */
             chimera_vfs_open_cache_shard_remove(shard, handle);
             shard->open_handles--;
             handle->flags |= CHIMERA_VFS_OPEN_HANDLE_DETACHED;
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
         }
 
         return;   /* an fh maps to a single cached handle */
@@ -513,7 +513,7 @@ chimera_vfs_open_cache_populate(
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     handle->vfs_private = vfs_private_data;
     handle->flags      &= ~CHIMERA_VFS_OPEN_HANDLE_PENDING;
@@ -523,7 +523,7 @@ chimera_vfs_open_cache_populate(
         handle->blocked_requests = NULL;
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     if (requests) {
         chimera_vfs_open_cache_release_blocked(thread, requests, 0);
@@ -560,7 +560,7 @@ chimera_vfs_open_cache_acquire(
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     handle = chimera_vfs_open_cache_shard_find(shard, fh, fhlen, access_mode, cred_hash);
 
@@ -633,7 +633,7 @@ chimera_vfs_open_cache_acquire(
             prometheus_counter_increment(shard->acquire);
 
             chimera_vfs_open_cache_free(shard, existing);
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
 
             if (close_ref.needs_close) {
                 chimera_vfs_close_ref_dispatch(thread, &close_ref,
@@ -653,7 +653,7 @@ chimera_vfs_open_cache_acquire(
 
     prometheus_counter_increment(shard->acquire);
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     if (done) {
         callback(request, handle);
@@ -687,7 +687,7 @@ chimera_vfs_open_cache_insert(
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     prometheus_counter_increment(shard->insert);
 
@@ -732,7 +732,7 @@ chimera_vfs_open_cache_insert(
             chimera_vfs_close_ref_capture(&close_ref, existing);
 
             chimera_vfs_open_cache_free(shard, existing);
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
             callback(request, handle);
             return;
@@ -760,7 +760,7 @@ chimera_vfs_open_cache_insert(
                 chimera_vfs_close_ref_capture(&close_ref, victim);
 
                 chimera_vfs_open_cache_free(shard, victim);
-                pthread_mutex_unlock(&shard->lock);
+                evpl_mutex_unlock(&shard->lock);
                 chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
                 callback(request, handle);
                 return;
@@ -774,7 +774,7 @@ chimera_vfs_open_cache_insert(
     /* Insert new handle into shard */
     chimera_vfs_open_cache_shard_insert(shard, handle);
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     callback(request, handle);
 } /* chimera_vfs_open_cache_insert */
@@ -796,7 +796,7 @@ chimera_vfs_open_cache_defer_close(
     for (unsigned int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         while (shard->pending_close) {
 
@@ -825,7 +825,7 @@ chimera_vfs_open_cache_defer_close(
         /* Count AFTER processing - this is the number of handles still in the cache */
         count += shard->open_handles;
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
     }
     *r_count = count;
     return closed;
@@ -863,7 +863,7 @@ chimera_vfs_open_cache_purge_by_mount(
     for (unsigned int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         handle = shard->handles;
 
@@ -897,7 +897,7 @@ chimera_vfs_open_cache_purge_by_mount(
             handle = next;
         }
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
     }
 
     return referenced;
@@ -921,7 +921,7 @@ chimera_vfs_open_cache_mark_for_close_by_mount(
     for (unsigned int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         for (handle = shard->handles; handle; handle = handle->bucket_next) {
             if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
@@ -931,7 +931,7 @@ chimera_vfs_open_cache_mark_for_close_by_mount(
             }
         }
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
     }
 
     return count;
@@ -958,7 +958,7 @@ chimera_vfs_open_cache_lookup_ref(
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     /* Scan for any handle matching fh with opencnt > 0, regardless of access_mode */
     for (handle = shard->handles; handle; handle = handle->bucket_next) {
@@ -972,7 +972,7 @@ chimera_vfs_open_cache_lookup_ref(
         }
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     return found;
 } /* chimera_vfs_open_cache_lookup_ref */
@@ -995,7 +995,7 @@ chimera_vfs_open_cache_exists(
 
     shard = &cache->shards[fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     /* Scan for any handle matching fh, regardless of access_mode */
     for (handle = shard->handles; handle; handle = handle->bucket_next) {
@@ -1006,7 +1006,7 @@ chimera_vfs_open_cache_exists(
         }
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     return found;
 } /* chimera_vfs_open_cache_exists */
@@ -1035,7 +1035,7 @@ chimera_vfs_open_cache_set_doc(
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     handle->doc_delete_on_close = 1;
     handle->doc_parent_fh_len   = parent_fh_len;
@@ -1050,7 +1050,7 @@ chimera_vfs_open_cache_set_doc(
         memcpy(handle->doc_name, name, name_len);
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 } /* chimera_vfs_open_cache_set_doc */
 
 /*
@@ -1065,13 +1065,13 @@ chimera_vfs_open_cache_clear_doc(
 
     shard = &cache->shards[handle->fh_hash & cache->shard_mask];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     handle->doc_delete_on_close = 0;
     handle->doc_parent_fh_len   = 0;
     handle->doc_name_len        = 0;
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 } /* chimera_vfs_open_cache_clear_doc */
 
 /*
@@ -1109,7 +1109,7 @@ chimera_vfs_open_cache_release_doc(
     chimera_vfs_abort_if(handle->cache_id != shard->cache_id,
                          "handle released by wrong cache");
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     handle->flags &= ~CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE;
 
@@ -1140,7 +1140,7 @@ chimera_vfs_open_cache_release_doc(
 
         do_doc = 1;
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         chimera_vfs_open_cache_release_blocked(thread, requests, 0);
         return do_doc;
     }
@@ -1151,7 +1151,7 @@ chimera_vfs_open_cache_release_doc(
 
             chimera_vfs_close_ref_capture(&close_ref, handle);
             chimera_vfs_open_cache_free(shard, handle);
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             chimera_vfs_open_cache_release_blocked(thread, requests, 0);
             chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
             return 0;
@@ -1160,7 +1160,7 @@ chimera_vfs_open_cache_release_doc(
         DL_APPEND(shard->pending_close, handle);
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     chimera_vfs_open_cache_release_blocked(thread, requests, 0);
 
     return 0;

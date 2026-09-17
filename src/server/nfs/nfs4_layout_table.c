@@ -30,7 +30,7 @@ nfs_layout_table_init(struct nfs_layout_table *table)
     int i;
 
     for (i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
-        pthread_mutex_init(&table->shards[i].lock, NULL);
+        evpl_mutex_init(&table->shards[i].lock, NULL);
         table->shards[i].by_fh = NULL;
     }
 } /* nfs_layout_table_init */
@@ -58,7 +58,7 @@ nfs_layout_table_destroy(struct nfs_layout_table *table)
         }
 #endif /* ifndef __clang_analyzer__ */
 
-        pthread_mutex_destroy(&table->shards[i].lock);
+        evpl_mutex_destroy(&table->shards[i].lock);
     }
 } /* nfs_layout_table_destroy */
 
@@ -70,7 +70,7 @@ nfs_layout_table_register(
     struct nfs_layout_shard *shard = &table->shards[layout_shard_index(ls->fh, ls->fh_len)];
     struct nfs_layout_entry *e;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     HASH_FIND(hh, shard->by_fh, ls->fh, ls->fh_len, e);
     if (!e) {
@@ -83,7 +83,7 @@ nfs_layout_table_register(
     ls->global_next = e->holders;
     e->holders      = ls;
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 } /* nfs_layout_table_register */
 
 void
@@ -95,7 +95,7 @@ nfs_layout_table_deregister(
     struct nfs_layout_entry         *e;
     struct nfs_layout_recall_waiter *waiters = NULL, *w, *wn;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     HASH_FIND(hh, shard->by_fh, ls->fh, ls->fh_len, e);
     if (e) {
@@ -119,7 +119,7 @@ nfs_layout_table_deregister(
         }
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     if (waiters) {
         chimera_nfs_info("pNFS: file fully returned, resuming deferred operation(s)");
@@ -146,11 +146,11 @@ nfs_layout_table_recall_prepare(
     struct nfs_layout_state *ls;
     int                      n = 0;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
     if (!e || !e->holders) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return 0;
     }
 
@@ -164,7 +164,7 @@ nfs_layout_table_recall_prepare(
         out_holders[n++] = ls;
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     return n;
 } /* nfs_layout_table_recall_prepare */
 
@@ -178,7 +178,7 @@ nfs_layout_table_recall_active(
     struct nfs_layout_entry *e;
     bool                     active;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     /* The entry carries waiters only between recall_prepare and the last
      * holder's deregistration, which frees the entry -- so a non-empty waiter
@@ -186,6 +186,6 @@ nfs_layout_table_recall_active(
     HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
     active = (e && e->waiters);
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     return active;
 } /* nfs_layout_table_recall_active */

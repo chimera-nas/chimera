@@ -183,9 +183,9 @@ test_ttl_expiration(void)
 #endif /* ifndef __clang_analyzer__ */
 
     /* Signal the expiry thread to wake up and do a sweep */
-    pthread_mutex_lock(&cache->expiry_lock);
-    pthread_cond_signal(&cache->expiry_cond);
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
     /* Give expiry thread time to process */
     usleep(100000);
@@ -222,9 +222,9 @@ test_pinned_no_expire(void)
 #endif /* ifndef __clang_analyzer__ */
 
     /* Signal the expiry thread */
-    pthread_mutex_lock(&cache->expiry_lock);
-    pthread_cond_signal(&cache->expiry_cond);
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
     usleep(100000);
 
@@ -451,7 +451,7 @@ test_group_ttl_expiration(void)
     urcu_qsbr_read_unlock();
 
     /* Drive the sweep directly rather than waiting out its 60s period. */
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
     {
         struct chimera_vfs_group *group, *next;
         struct timespec           ts;
@@ -472,7 +472,7 @@ test_group_ttl_expiration(void)
             }
         }
     }
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
 
     urcu_qsbr_synchronize_rcu();
     urcu_qsbr_read_lock();

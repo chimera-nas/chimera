@@ -48,7 +48,7 @@ chimera_nfs4_destroy_clientid(
             .machinename_len = req->principal_machinename_len,
         };
 
-        pthread_mutex_lock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+        evpl_mutex_lock(&shared->nfs4_shared_clients.nfs4_ct_lock);
         HASH_FIND(nfs4_client_hh_by_id,
                   shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
                   &args->dca_clientid, sizeof(args->dca_clientid), c);
@@ -62,7 +62,7 @@ chimera_nfs4_destroy_clientid(
                 memcpy(owner, c->nfs4_client_owner, owner_len);
             }
         }
-        pthread_mutex_unlock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+        evpl_mutex_unlock(&shared->nfs4_shared_clients.nfs4_ct_lock);
     }
 
     if (wrong_cred) {

@@ -67,10 +67,10 @@ chimera_vfs_implicit_break_cb(
         return;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     file->implicit_draining = 1;
     drop_now                = (file->implicit_inflight == 0);
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (drop_now) {
         chimera_vfs_implicit_finish_drain(state, file);
@@ -84,7 +84,7 @@ chimera_vfs_implicit_finish_drain(
 {
     bool removed = false;
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     if (file->implicit_active) {
         chimera_vfs_claim_unlink_locked(file, &file->implicit_claim);
         file->implicit_active            = 0;
@@ -92,7 +92,7 @@ chimera_vfs_implicit_finish_drain(
         removed                          = true;
     }
     file->implicit_draining = 0;
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (removed) {
         chimera_vfs_claim_pump_pending(state, file);
@@ -114,9 +114,9 @@ chimera_vfs_claim_drive_breaks(
     struct chimera_vfs_claim     *conflict = NULL;
     enum chimera_vfs_claim_result result;
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     result = chimera_vfs_claim_admit_locked(file, probe, &conflict);
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     while (result == CHIMERA_CLAIM_BREAKING && conflict) {
         if (conflict->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
@@ -135,9 +135,9 @@ chimera_vfs_claim_drive_breaks(
             break;
         }
         conflict = NULL;
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         result = chimera_vfs_claim_admit_locked(file, probe, &conflict);
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
     }
 
     return result;
@@ -271,9 +271,9 @@ chimera_vfs_io_sync_gate(
         return false;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     if (!chimera_vfs_io_sync_victim_locked(file, actor)) {
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         chimera_vfs_state_put(state, file);
         return false;
     }
@@ -283,7 +283,7 @@ chimera_vfs_io_sync_gate(
     request->io_owns_lease_ref = 1;
     chimera_vfs_io_park_locked(file, request);
     request->io_lease_file = file;
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     return true;
 } /* chimera_vfs_io_sync_gate */
@@ -309,7 +309,7 @@ chimera_vfs_claim_pump_io(
 
     do {
         n = 0;
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         for (t = file->io_wait_head;
              t && n < CHIMERA_VFS_IO_PUMP_BATCH;
              t = t->next) {
@@ -318,7 +318,7 @@ chimera_vfs_claim_pump_io(
                 reqs[n++] = t->private_data;
             }
         }
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
 
         for (i = 0; i < n; i++) {
             chimera_vfs_io_resume_post(reqs[i]);
@@ -362,15 +362,15 @@ chimera_vfs_io_try(
 
         chimera_vfs_claim_trigger_fire(state, file, CHIMERA_TRIGGER_WRITE,
                                        actor, 0);
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         if (chimera_vfs_io_sync_victim_locked(file, actor)) {
             chimera_vfs_io_park_locked(file, request); /* re-park in place */
             request->io_lease_file = file;
-            pthread_mutex_unlock(&file->lock);
+            evpl_mutex_unlock(&file->lock);
             return;
         }
         repump = chimera_vfs_io_unpark_locked(file, request);
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         if (repump) {
             chimera_vfs_claim_pump_io(state, file);
         }
@@ -390,15 +390,15 @@ chimera_vfs_io_try(
         if (chimera_vfs_claim_trigger_ns_unlink(state, file,
                                                 request->io_handle,
                                                 request->io_recall_retain)) {
-            pthread_mutex_lock(&file->lock);
+            evpl_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
-            pthread_mutex_unlock(&file->lock);
+            evpl_mutex_unlock(&file->lock);
             return;
         }
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         repump = chimera_vfs_io_unpark_locked(file, request);
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         if (repump) {
             chimera_vfs_claim_pump_io(state, file);
         }
@@ -413,15 +413,15 @@ chimera_vfs_io_try(
         if (chimera_vfs_claim_trigger_ns_full(state, file,
                                               request->io_handle,
                                               request->io_recall_flush_only)) {
-            pthread_mutex_lock(&file->lock);
+            evpl_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
-            pthread_mutex_unlock(&file->lock);
+            evpl_mutex_unlock(&file->lock);
             return;
         }
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         repump = chimera_vfs_io_unpark_locked(file, request);
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         if (repump) {
             chimera_vfs_claim_pump_io(state, file);
         }
@@ -434,7 +434,7 @@ chimera_vfs_io_try(
     need = (request->opcode == CHIMERA_VFS_OP_WRITE)
         ? CHIMERA_CLAIM_W : CHIMERA_CLAIM_R;
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
 
     /* Park while our own claim drains, and behind any earlier parked I/O
      * (the submission-order barrier — see chimera_vfs_io_park_locked; the
@@ -445,7 +445,7 @@ chimera_vfs_io_try(
          file->io_wait_head != &request->io_lease_ticket)) {
         chimera_vfs_io_park_locked(file, request);
         request->io_lease_file = file;
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         return;
     }
 
@@ -482,7 +482,7 @@ chimera_vfs_io_try(
             if (file->bl_state == CHIMERA_VFS_BL_HELD &&
                 (file->bl_refused & need)) {
                 repump = chimera_vfs_io_unpark_locked(file, request);
-                pthread_mutex_unlock(&file->lock);
+                evpl_mutex_unlock(&file->lock);
                 if (repump) {
                     chimera_vfs_claim_pump_io(state, file);
                 }
@@ -497,7 +497,7 @@ chimera_vfs_io_try(
             file->bl_want_used |= need;
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
-            pthread_mutex_unlock(&file->lock);
+            evpl_mutex_unlock(&file->lock);
             chimera_vfs_claim_backend_reeval(state, file);
             return;
         }
@@ -516,7 +516,7 @@ chimera_vfs_io_try(
         file->bl_want_used      &= (uint8_t) ~need;
         file->bl_last_used       = chimera_vfs_now_ticks();
         repump                   = chimera_vfs_io_unpark_locked(file, request);
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
 
         if (repump) {
             /* We were the barrier head; re-post the next in line. */
@@ -543,7 +543,7 @@ chimera_vfs_io_try(
 
     if (result == CHIMERA_CLAIM_DENIED) {
         repump = chimera_vfs_io_unpark_locked(file, request);
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         if (repump) {
             chimera_vfs_claim_pump_io(state, file);
         }
@@ -560,7 +560,7 @@ chimera_vfs_io_try(
      * the recalls outside the lock (no lost wakeup). */
     chimera_vfs_io_park_locked(file, request);
     request->io_lease_file = file;
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (chimera_vfs_claim_drive_breaks(state, file, &probe) !=
         CHIMERA_CLAIM_BREAKING) {
@@ -723,14 +723,14 @@ chimera_vfs_io_claim_release(struct chimera_vfs_request *request)
     request->io_lease_file = NULL;
     state                  = request->thread->vfs->vfs_state;
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     if (file->implicit_inflight > 0) {
         file->implicit_inflight--;
     }
     finish = (file->implicit_inflight == 0 &&
               file->implicit_draining &&
               file->implicit_active);
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (finish) {
         chimera_vfs_implicit_finish_drain(state, file);
@@ -770,7 +770,7 @@ chimera_vfs_claim_io_denied(
         return false;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_RANGE]; cur; cur = cur->next) {
         if (cur->break_state == CHIMERA_CLAIM_BREAK_REVOKED) {
             continue;
@@ -801,7 +801,7 @@ chimera_vfs_claim_io_denied(
             }
         }
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     chimera_vfs_state_put(state, file);
     return conflict;
@@ -823,7 +823,7 @@ chimera_vfs_claim_revoke_expired_breaks(
 
     (void) state;
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
         /* NFSv4 delegations are never force-revoked by the sweep: their
          * lifetime is governed by the NFSv4 client lease / CB_PATH_DOWN
@@ -837,7 +837,7 @@ chimera_vfs_claim_revoke_expired_breaks(
             expired[n++] = cur;
         }
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     for (i = 0; i < n; i++) {
         chimera_vfs_claim_revoke(expired[i]);
@@ -862,10 +862,10 @@ chimera_vfs_state_reap_idle(
         int                             n = 0;
         int                             i;
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         if (shard->count == 0) {
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             continue;
         }
 
@@ -881,7 +881,7 @@ chimera_vfs_state_reap_idle(
                 }
             }
         }
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
 
         for (i = 0; i < n; i++) {
             bool reapable;
@@ -890,7 +890,7 @@ chimera_vfs_state_reap_idle(
 
             file = cand[i];
 
-            pthread_mutex_lock(&file->lock);
+            evpl_mutex_lock(&file->lock);
             reapable = file->implicit_active &&
                 !file->implicit_draining &&
                 file->implicit_inflight == 0 &&
@@ -901,7 +901,7 @@ chimera_vfs_state_reap_idle(
             }
             has_waiters = (file->io_wait_head != NULL);
             has_caching = (file->claims[CHIMERA_CLAIM_CLASS_CACHE] != NULL);
-            pthread_mutex_unlock(&file->lock);
+            evpl_mutex_unlock(&file->lock);
 
             if (has_caching) {
                 chimera_vfs_claim_revoke_expired_breaks(state, file);
@@ -916,14 +916,14 @@ chimera_vfs_state_reap_idle(
             /* An idle backend cover is released lazily: post the file so
              * the service step re-derives the union and drops an empty,
              * idle token (escalate-or-reuse keeps a live one). */
-            pthread_mutex_lock(&file->lock);
+            evpl_mutex_lock(&file->lock);
             if (file->bl_state == CHIMERA_VFS_BL_HELD &&
                 chimera_vfs_claim_elapsed_ms(file->bl_last_used, now) >=
                 idle_ms) {
-                pthread_mutex_unlock(&file->lock);
+                evpl_mutex_unlock(&file->lock);
                 chimera_vfs_claim_backend_reeval(state, file);
             } else {
-                pthread_mutex_unlock(&file->lock);
+                evpl_mutex_unlock(&file->lock);
             }
 
             chimera_vfs_state_put(state, file);

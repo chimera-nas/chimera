@@ -421,12 +421,12 @@ nfs4_drc_ensure_client(
 {
     struct nfs4_client *client;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), client);
     if (client) {
-        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
         return;
     }
 
@@ -469,7 +469,7 @@ nfs4_drc_ensure_client(
         }
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_drc_ensure_client */
 
 void
@@ -561,7 +561,7 @@ struct nfs4_drc_hydra {
 void
 nfs4_drc_hydra_init(struct chimera_server_nfs_shared *shared)
 {
-    pthread_mutex_init(&shared->nfs4_drc_hydra_lock, NULL);
+    evpl_mutex_init(&shared->nfs4_drc_hydra_lock, NULL);
     shared->nfs4_drc_hydra = NULL;
 } /* nfs4_drc_hydra_init */
 
@@ -577,7 +577,7 @@ nfs4_drc_hydra_destroy(struct chimera_server_nfs_shared *shared)
         free(h);
     }
 #endif /* ifndef __clang_analyzer__ */
-    pthread_mutex_destroy(&shared->nfs4_drc_hydra_lock);
+    evpl_mutex_destroy(&shared->nfs4_drc_hydra_lock);
 } /* nfs4_drc_hydra_destroy */
 
 struct nfs4_drc_hydrate_ctx {
@@ -673,12 +673,12 @@ nfs4_drc_hydrate_reply_complete(
     /* Reconstruction settled: flip the hydra entry to DONE so a retry that
      * still cannot find the session in memory resolves to ABSENT (not a
      * perpetual DELAY) and a bad sessionid is not rescanned. */
-    pthread_mutex_lock(&shared->nfs4_drc_hydra_lock);
+    evpl_mutex_lock(&shared->nfs4_drc_hydra_lock);
     HASH_FIND(hh, shared->nfs4_drc_hydra, ctx->sessionid, NFS4_SESSIONID_SIZE, h);
     if (h) {
         h->state = NFS4_DRC_HYDRA_DONE;
     }
-    pthread_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+    evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
 
     if (ctx->found) {
         chimera_nfs_info("NFS4.1 DRC: hydrated session + %u reply record(s) "
@@ -723,20 +723,20 @@ nfs4_drc_session_hydrate(
         return NFS4_DRC_HYDRATE_ABSENT;
     }
 
-    pthread_mutex_lock(&shared->nfs4_drc_hydra_lock);
+    evpl_mutex_lock(&shared->nfs4_drc_hydra_lock);
     HASH_FIND(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
     if (h) {
         enum nfs4_drc_hydrate_result r =
             (h->state == NFS4_DRC_HYDRA_DONE) ? NFS4_DRC_HYDRATE_ABSENT
                                               : NFS4_DRC_HYDRATE_INFLIGHT;
-        pthread_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+        evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
         return r;
     }
     h = calloc(1, sizeof(*h));
     memcpy(h->sessionid, sessionid, NFS4_SESSIONID_SIZE);
     h->state = NFS4_DRC_HYDRA_INFLIGHT;
     HASH_ADD(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
-    pthread_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+    evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
 
     /* First contact for this sessionid: scan its band out of the KV store.
      * Phase 1 reconstructs the session (+ client); phase 2 repopulates its

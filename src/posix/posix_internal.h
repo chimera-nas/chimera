@@ -6,7 +6,7 @@
 #define CHIMERA_POSIX_INTERNAL_H
 
 #include <errno.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,8 +36,8 @@ struct chimera_posix_dir {
 };
 
 struct chimera_posix_completion {
-    pthread_mutex_t                mutex;
-    pthread_cond_t                 cond;
+    evpl_mutex_t                mutex;
+    evpl_cond_t                 cond;
     struct chimera_client_request *request;
     enum chimera_vfs_error status;
     int                            done;
@@ -101,8 +101,8 @@ struct chimera_posix_ofd_lock {
 };
 
 struct chimera_posix_fd_entry {
-    pthread_mutex_t                 lock;
-    pthread_cond_t                  cond;
+    evpl_mutex_t                 lock;
+    evpl_cond_t                  cond;
     struct chimera_vfs_open_handle *handle;
     struct chimera_posix_fd_entry  *next;
     struct chimera_posix_ofd       *ofd;
@@ -120,7 +120,7 @@ struct chimera_posix_fd_entry {
 typedef struct chimera_posix_fd_entry CHIMERA_FILE;
 
 struct chimera_posix_worker {
-    pthread_mutex_t                lock;
+    evpl_mutex_t                lock;
     struct chimera_client_request *pending_requests;
     struct evpl_doorbell           doorbell;
     struct chimera_client_thread  *client_thread;
@@ -135,7 +135,7 @@ struct chimera_posix_client {
     struct chimera_posix_worker   *workers;
     int                            nworkers;
     atomic_uint                    next_worker;
-    pthread_mutex_t                fd_lock;
+    evpl_mutex_t                fd_lock;
     struct chimera_posix_fd_entry *fds;
     struct chimera_posix_fd_entry *free_list;
     int                            max_fds;
@@ -379,11 +379,11 @@ chimera_posix_ofd_adopt(
     struct chimera_posix_fd_entry *entry,
     struct chimera_posix_fd_entry *src)
 {
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
     chimera_posix_ofd_release_locked(entry);
     entry->ofd = src->ofd;
     entry->ofd->refcnt++;
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 } // chimera_posix_ofd_adopt
 
 /* chimera_vfs_error values are a protocol enum whose numbers happen to follow
@@ -435,11 +435,11 @@ chimera_posix_complete(
     struct chimera_posix_completion *comp,
     enum chimera_vfs_error           status)
 {
-    pthread_mutex_lock(&comp->mutex);
+    evpl_mutex_lock(&comp->mutex);
     comp->status = status;
     comp->done   = 1;
-    pthread_cond_signal(&comp->cond);
-    pthread_mutex_unlock(&comp->mutex);
+    evpl_cond_signal(&comp->cond);
+    evpl_mutex_unlock(&comp->mutex);
 } // chimera_posix_complete
 
 static FORCE_INLINE void
@@ -447,8 +447,8 @@ chimera_posix_completion_init(
     struct chimera_posix_completion *comp,
     struct chimera_client_request   *req)
 {
-    pthread_mutex_init(&comp->mutex, NULL);
-    pthread_cond_init(&comp->cond, NULL);
+    evpl_mutex_init(&comp->mutex, NULL);
+    evpl_cond_init(&comp->cond, NULL);
     comp->request = req;
     comp->status  = CHIMERA_VFS_OK;
     comp->done    = 0;
@@ -473,8 +473,8 @@ chimera_posix_completion_init(
 static FORCE_INLINE void
 chimera_posix_completion_destroy(struct chimera_posix_completion *comp)
 {
-    pthread_mutex_destroy(&comp->mutex);
-    pthread_cond_destroy(&comp->cond);
+    evpl_mutex_destroy(&comp->mutex);
+    evpl_cond_destroy(&comp->cond);
 } // chimera_posix_completion_destroy
 
 static FORCE_INLINE void
@@ -485,9 +485,9 @@ chimera_posix_worker_enqueue(
 {
     request->sync_callback = callback;
 
-    pthread_mutex_lock(&worker->lock);
+    evpl_mutex_lock(&worker->lock);
     DL_APPEND(worker->pending_requests, request);
-    pthread_mutex_unlock(&worker->lock);
+    evpl_mutex_unlock(&worker->lock);
 
     evpl_ring_doorbell(&worker->doorbell);
 } // chimera_posix_worker_enqueue
@@ -548,11 +548,11 @@ chimera_posix_close_on_worker(
 static FORCE_INLINE int
 chimera_posix_wait(struct chimera_posix_completion *comp)
 {
-    pthread_mutex_lock(&comp->mutex);
+    evpl_mutex_lock(&comp->mutex);
     while (!comp->done) {
-        pthread_cond_wait(&comp->cond, &comp->mutex);
+        evpl_cond_wait(&comp->cond, &comp->mutex);
     }
-    pthread_mutex_unlock(&comp->mutex);
+    evpl_mutex_unlock(&comp->mutex);
 
     return chimera_posix_errno_from_status(comp->status);
 } // chimera_posix_wait
@@ -692,7 +692,7 @@ chimera_posix_fd_alloc_at_least(
     struct chimera_posix_fd_entry **pp, **best_pp = NULL;
     int                             fd, best = posix->max_fds;
 
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
 
     for (pp = &posix->free_list; *pp; pp = &(*pp)->next) {
         int idx = (int) (*pp - posix->fds);
@@ -704,7 +704,7 @@ chimera_posix_fd_alloc_at_least(
     }
 
     if (!best_pp) {
-        pthread_mutex_unlock(&posix->fd_lock);
+        evpl_mutex_unlock(&posix->fd_lock);
         return -1;
     }
 
@@ -712,7 +712,7 @@ chimera_posix_fd_alloc_at_least(
     *best_pp    = entry->next;
     entry->next = NULL;
 
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 
     fd = (int) (entry - posix->fds);
 
@@ -721,10 +721,10 @@ chimera_posix_fd_alloc_at_least(
     entry->ofd = calloc(1, sizeof(*entry->ofd));
 
     if (!entry->ofd) {
-        pthread_mutex_lock(&posix->fd_lock);
+        evpl_mutex_lock(&posix->fd_lock);
         entry->next      = posix->free_list;
         posix->free_list = entry;
-        pthread_mutex_unlock(&posix->fd_lock);
+        evpl_mutex_unlock(&posix->fd_lock);
         return -1;
     }
 
@@ -769,11 +769,11 @@ chimera_posix_fd_free(
     entry->error_flag  = 0;
     entry->ungetc_char = -1;
 
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
     chimera_posix_ofd_release_locked(entry);
     entry->next      = posix->free_list;
     posix->free_list = entry;
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 } // chimera_posix_fd_free
 
 static FORCE_INLINE struct chimera_posix_fd_entry *
@@ -791,11 +791,11 @@ chimera_posix_fd_acquire(
 
     entry = &posix->fds[fd];
 
-    pthread_mutex_lock(&entry->lock);
+    evpl_mutex_lock(&entry->lock);
 
     // If CLOSED, return error
     if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
-        pthread_mutex_unlock(&entry->lock);
+        evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return NULL;
     }
@@ -805,13 +805,13 @@ chimera_posix_fd_acquire(
         // Wait for existing IO to complete
         while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
             entry->io_waiters++;
-            pthread_cond_wait(&entry->cond, &entry->lock);
+            evpl_cond_wait(&entry->cond, &entry->lock);
             entry->io_waiters--;
         }
 
         // Check if fd was closed or is closing
         if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
-            pthread_mutex_unlock(&entry->lock);
+            evpl_mutex_unlock(&entry->lock);
             errno = EBADF;
             return NULL;
         }
@@ -825,10 +825,10 @@ chimera_posix_fd_acquire(
         if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
             entry->close_waiters++;
             while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
-                pthread_cond_wait(&entry->cond, &entry->lock);
+                evpl_cond_wait(&entry->cond, &entry->lock);
             }
             entry->close_waiters--;
-            pthread_mutex_unlock(&entry->lock);
+            evpl_mutex_unlock(&entry->lock);
             errno = EBADF;
             return NULL;
         }
@@ -839,12 +839,12 @@ chimera_posix_fd_acquire(
 
         // Wait for existing operations to complete
         while (entry->refcnt > 0) {
-            pthread_cond_wait(&entry->cond, &entry->lock);
+            evpl_cond_wait(&entry->cond, &entry->lock);
         }
     }
 
     entry->refcnt++;
-    pthread_mutex_unlock(&entry->lock);
+    evpl_mutex_unlock(&entry->lock);
 
     return entry;
 } // chimera_posix_fd_acquire
@@ -854,13 +854,13 @@ chimera_posix_fd_release(
     struct chimera_posix_fd_entry *entry,
     unsigned int                   flags_to_clear)
 {
-    pthread_mutex_lock(&entry->lock);
+    evpl_mutex_lock(&entry->lock);
 
     // If completing an IO operation
     if (flags_to_clear & CHIMERA_POSIX_FD_IO_ACTIVE) {
         entry->flags &= ~CHIMERA_POSIX_FD_IO_ACTIVE;
         if (entry->io_waiters > 0) {
-            pthread_cond_signal(&entry->cond);
+            evpl_cond_signal(&entry->cond);
         }
     }
 
@@ -870,7 +870,7 @@ chimera_posix_fd_release(
         entry->flags        |= CHIMERA_POSIX_FD_CLOSED;
         entry->pending_close = 0;
         if (entry->close_waiters > 0) {
-            pthread_cond_broadcast(&entry->cond);
+            evpl_cond_broadcast(&entry->cond);
         }
     }
 
@@ -878,10 +878,10 @@ chimera_posix_fd_release(
 
     // Signal if refcnt is zero and a close is pending
     if (entry->refcnt == 0 && entry->pending_close) {
-        pthread_cond_signal(&entry->cond);
+        evpl_cond_signal(&entry->cond);
     }
 
-    pthread_mutex_unlock(&entry->lock);
+    evpl_mutex_unlock(&entry->lock);
 } // chimera_posix_fd_release
 
 /* POSIX ties I/O rights to the descriptor's access mode, checked at open
@@ -919,11 +919,11 @@ chimera_posix_fd_lseek(
 
     entry = &posix->fds[fd];
 
-    pthread_mutex_lock(&entry->lock);
+    evpl_mutex_lock(&entry->lock);
 
     // If CLOSED, return error
     if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
-        pthread_mutex_unlock(&entry->lock);
+        evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return -1;
     }
@@ -931,13 +931,13 @@ chimera_posix_fd_lseek(
     // Wait for any IO to complete
     while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
         entry->io_waiters++;
-        pthread_cond_wait(&entry->cond, &entry->lock);
+        evpl_cond_wait(&entry->cond, &entry->lock);
         entry->io_waiters--;
     }
 
     // Check again if fd was closed while waiting
     if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
-        pthread_mutex_unlock(&entry->lock);
+        evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return -1;
     }
@@ -954,21 +954,21 @@ chimera_posix_fd_lseek(
             new_offset = file_size + offset;
             break;
         default:
-            pthread_mutex_unlock(&entry->lock);
+            evpl_mutex_unlock(&entry->lock);
             errno = EINVAL;
             return -1;
     } // switch
 
     // Validate new offset
     if (new_offset < 0) {
-        pthread_mutex_unlock(&entry->lock);
+        evpl_mutex_unlock(&entry->lock);
         errno = EINVAL;
         return -1;
     }
 
     entry->ofd->offset = (uint64_t) new_offset;
 
-    pthread_mutex_unlock(&entry->lock);
+    evpl_mutex_unlock(&entry->lock);
 
     return new_offset;
 } // chimera_posix_fd_lseek

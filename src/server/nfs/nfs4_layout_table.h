@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <uthash.h>
@@ -50,7 +50,7 @@ struct nfs_layout_entry {
 };
 
 struct nfs_layout_shard {
-    pthread_mutex_t          lock;
+    evpl_mutex_t          lock;
     struct nfs_layout_entry *by_fh;
 };
 

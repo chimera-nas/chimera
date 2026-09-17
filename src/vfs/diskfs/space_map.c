@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -227,7 +227,7 @@ sm_ag_init(
     ag->log_delta_count = 0;
     ag->condensing      = 0;
 
-    pthread_mutex_init(&ag->lock, NULL);
+    evpl_mutex_init(&ag->lock, NULL);
     rb_tree_init(&ag->free_by_offset);
     memset(ag->free_by_size, 0, sizeof(ag->free_by_size));
     ag->size_nonempty = 0;
@@ -249,7 +249,7 @@ static void
 sm_ag_destroy(struct sm_ag *ag)
 {
     rb_tree_destroy(&ag->free_by_offset, sm_extent_release, NULL);
-    pthread_mutex_destroy(&ag->lock);
+    evpl_mutex_destroy(&ag->lock);
 } /* sm_ag_destroy */
 
 /*
@@ -459,7 +459,7 @@ space_map_create(
     sm->intent_log_size = intent_log_size;
     sm->num_devices     = num_devices;
     sm->devices         = calloc(num_devices, sizeof(*sm->devices));
-    pthread_mutex_init(&sm->lock, NULL);
+    evpl_mutex_init(&sm->lock, NULL);
 
     /* Pass 1: size each device and count remote AGs so the relocated-log
      * region (which is reserved out of device 0's AG 0) can be sized first. */
@@ -627,7 +627,7 @@ space_map_destroy(struct space_map *sm)
         }
     }
 
-    pthread_mutex_destroy(&sm->lock);
+    evpl_mutex_destroy(&sm->lock);
     free(sm->devices);
     free(sm);
 } /* space_map_destroy */
@@ -650,16 +650,16 @@ sm_try_alloc_from_ag(
     if (__atomic_load_n(&ag->free_bytes, __ATOMIC_RELAXED) < want) {
         return 1;
     }
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     if (!sm_ag_can_alloc_locked(ag, want)) {
-        pthread_mutex_unlock(&ag->lock);
+        evpl_mutex_unlock(&ag->lock);
         return 1;
     }
     rc = sm_ag_alloc_locked(ag, want, &offset);
     sm_abort_if(rc != 0, "AG %u/%u: can_alloc/alloc mismatch (want=%lu)",
                 ag->device_id, ag->ag_index, (unsigned long) want);
     ag->ckpt_dirty = 1;     /* un-checkpointed delta now exists for this AG */
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 
     /* Record the alloc delta into the txn so it rides the redo record (durable +
      * replayed on crash).  Purely in-memory -- no AG-log block claim, so the
@@ -712,12 +712,12 @@ sm_pick_and_alloc(
          * the can't-satisfy return, so it must NOT be treated as a park here.) */
     }
 
-    pthread_mutex_lock(&sm->lock);
+    evpl_mutex_lock(&sm->lock);
     start_dev = sm->device_rotor;
     if (++sm->device_rotor >= sm->num_devices) {
         sm->device_rotor = 0;
     }
-    pthread_mutex_unlock(&sm->lock);
+    evpl_mutex_unlock(&sm->lock);
 
     for (d = 0; d < sm->num_devices; d++) {
         uint32_t          C, w, start_w, start_ag;
@@ -789,12 +789,12 @@ sm_pick_and_alloc(
          * false ENOSPC, so before giving up on this device fall back to the
          * full linear scan.  With a consistent index this finds nothing the
          * fast path missed; it exists purely as a correctness guarantee. */
-        pthread_mutex_lock(&sm->lock);
+        evpl_mutex_lock(&sm->lock);
         start_ag = dev->ag_rotor;
         if (++dev->ag_rotor >= dev->num_ags) {
             dev->ag_rotor = 0;
         }
-        pthread_mutex_unlock(&sm->lock);
+        evpl_mutex_unlock(&sm->lock);
 
         for (a = 0; a < dev->num_ags; a++) {
             uint32_t ai = (start_ag + a) % dev->num_ags;
@@ -862,9 +862,9 @@ space_map_journal_alloc_exact(
     ag = sm_free_resolve_ag(sm, device_id, device_offset, length,
                             "space_map_journal_alloc_exact");
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     ag->ckpt_dirty = 1;
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 
     /* The exact range was already removed from the free tree by the volatile
      * reservation; here we only record the alloc delta for the redo record. */
@@ -1136,9 +1136,9 @@ space_map_free_journal(
     }
     ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_free_journal");
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     ag->ckpt_dirty = 1;
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 
     /* Record the FREE delta into the txn so it rides the redo record.  Purely
      * in-memory -- no AG-log block claim, never parks.  (The transactional free
@@ -1170,9 +1170,9 @@ space_map_free_apply(
     }
     ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_free_apply");
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     sm_ag_free_locked(ag, offset, aligned);
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 } /* space_map_free_apply */
 
 static void
@@ -1210,7 +1210,7 @@ space_map_alloc_apply(
     }
     ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_alloc_apply");
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     /* The claim kept this range free in the tree until now; remove it.  (mark_used
      * asserts the range is within a free extent, catching any double-apply.) */
     sm_ag_mark_used_locked(ag, offset, aligned);
@@ -1231,7 +1231,7 @@ space_map_alloc_apply(
             }
         }
     }
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 } /* space_map_alloc_apply */
 
 /*
@@ -1256,7 +1256,7 @@ space_map_alloc_discard(
     }
     ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_alloc_discard");
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     for (c = ag->claims; c; c = c->next) {
         if (offset >= c->base && offset < c->base + c->len) {
             if (__atomic_sub_fetch(&c->refcount, 1, __ATOMIC_RELAXED) == 0 &&
@@ -1266,7 +1266,7 @@ space_map_alloc_discard(
             break;
         }
     }
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 } /* space_map_alloc_discard */
 
 /* --- Reservation claim list (per-AG, protected by ag->lock) --- */
@@ -1517,12 +1517,12 @@ space_map_reserve_chunk(
         chunk = want;
     }
 
-    pthread_mutex_lock(&sm->lock);
+    evpl_mutex_lock(&sm->lock);
     start_dev = sm->device_rotor;
     if (++sm->device_rotor >= sm->num_devices) {
         sm->device_rotor = 0;
     }
-    pthread_mutex_unlock(&sm->lock);
+    evpl_mutex_unlock(&sm->lock);
 
     for (d = 0; d < sm->num_devices; d++) {
         uint32_t          dev_id     = (start_dev + d) % sm->num_devices;
@@ -1561,10 +1561,10 @@ space_map_reserve_chunk(
                         continue;
                     }
                     ag = &dev->ags[ai];
-                    pthread_mutex_lock(&ag->lock);
+                    evpl_mutex_lock(&ag->lock);
                     if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
                                                &claim) == 0) {
-                        pthread_mutex_unlock(&ag->lock);
+                        evpl_mutex_unlock(&ag->lock);
                         r->device_id = dev_id;
                         r->ag_index  = ai;
                         r->base      = base;
@@ -1573,7 +1573,7 @@ space_map_reserve_chunk(
                         r->valid     = 1;
                         return 0;
                     }
-                    pthread_mutex_unlock(&ag->lock);
+                    evpl_mutex_unlock(&ag->lock);
                 }
             }
         }
@@ -1589,12 +1589,12 @@ space_map_reserve_chunk(
          * ag->lock -- authoritative, and (like sm_pick_and_alloc's backstop) a
          * pure correctness guarantee that finds nothing the fast path missed once
          * the index reconciles. */
-        pthread_mutex_lock(&sm->lock);
+        evpl_mutex_lock(&sm->lock);
         start_ag = dev->ag_rotor;
         if (++dev->ag_rotor >= dev->num_ags) {
             dev->ag_rotor = 0;
         }
-        pthread_mutex_unlock(&sm->lock);
+        evpl_mutex_unlock(&sm->lock);
 
         for (a = 0; a < dev->num_ags; a++) {
             uint32_t         ai = (start_ag + a) % dev->num_ags;
@@ -1602,10 +1602,10 @@ space_map_reserve_chunk(
             uint64_t         base, len;
             struct sm_claim *claim;
 
-            pthread_mutex_lock(&ag->lock);
+            evpl_mutex_lock(&ag->lock);
             if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
                                        &claim) == 0) {
-                pthread_mutex_unlock(&ag->lock);
+                evpl_mutex_unlock(&ag->lock);
                 r->device_id = dev_id;
                 r->ag_index  = ai;
                 r->base      = base;
@@ -1614,7 +1614,7 @@ space_map_reserve_chunk(
                 r->valid     = 1;
                 return 0;
             }
-            pthread_mutex_unlock(&ag->lock);
+            evpl_mutex_unlock(&ag->lock);
         }
     }
 
@@ -1644,14 +1644,14 @@ space_map_reserve_chunk(
             uint64_t         base, len;
             struct sm_claim *claim;
 
-            pthread_mutex_lock(&ag->lock);
+            evpl_mutex_lock(&ag->lock);
             if (sm_ag_recall_claims_locked(ag) == 0) {
-                pthread_mutex_unlock(&ag->lock);
+                evpl_mutex_unlock(&ag->lock);
                 continue;       /* nothing was being held here */
             }
             if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
                                        &claim) == 0) {
-                pthread_mutex_unlock(&ag->lock);
+                evpl_mutex_unlock(&ag->lock);
                 r->device_id = dev_id;
                 r->ag_index  = a;
                 r->base      = base;
@@ -1660,7 +1660,7 @@ space_map_reserve_chunk(
                 r->valid     = 1;
                 return 0;
             }
-            pthread_mutex_unlock(&ag->lock);
+            evpl_mutex_unlock(&ag->lock);
         }
     }
 
@@ -1761,13 +1761,13 @@ space_map_release_reservation(
     }
     ag = &sm->devices[r->device_id].ags[r->ag_index];
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     if (r->claim->refcount == 0) {
         sm_ag_remove_claim_locked(ag, r->claim);
     } else {
         r->claim->retiring = 1;
     }
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 
     r->valid = 0;
     r->claim = NULL;
@@ -2103,7 +2103,7 @@ space_map_recover_delta(
     }
     ag = &sm->devices[device_id].ags[ag_index];
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     if (op == SM_AG_LOG_OP_ALLOC) {
         if (sm_ag_range_is_free_locked(ag, offset, length)) {
             sm_ag_mark_used_locked(ag, offset, length);
@@ -2114,7 +2114,7 @@ space_map_recover_delta(
         }
     }
     sm_ag_mc_update(ag);
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 } /* space_map_recover_delta */
 
 static uint64_t sm_ag_condense_into(
@@ -2154,7 +2154,7 @@ space_map_condense_prepare(
     struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
     uint64_t      payload;
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     sm_abort_if(!ag->condensing, "condense_prepare on a non-condensing AG");
 
     payload = sm_ag_condense_into(ag, (uint8_t *) buf, ag->log_generation + 1,
@@ -2166,7 +2166,7 @@ space_map_condense_prepare(
      * device 0, NOT the AG's (queueless) remote data device. */
     *r_log_device_id = ag->log_device_id;
     *r_payload       = payload;
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
     return 0;
 } /* space_map_condense_prepare */
 
@@ -2185,7 +2185,7 @@ space_map_condense_commit(
 {
     struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     sm_abort_if(!ag->condensing, "condense_commit on a non-condensing AG");
     ag->log_slot        = 1 - ag->log_slot;
     ag->log_generation += 1;
@@ -2196,7 +2196,7 @@ space_map_condense_commit(
      * may have re-dirtied it (delta with seq > ckpt_seq) -- leave ckpt_dirty as
      * it stands in that case; only clear it if no newer delta arrived. */
     __atomic_store_n(&ag->ckpt_seq, ckpt_seq, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
 } /* space_map_condense_commit */
 
 /* Read an AG's published checkpoint frontier (the highest redo seq folded into
@@ -2227,12 +2227,12 @@ space_map_ag_begin_checkpoint(
     struct sm_ag *ag    = &sm->devices[device_id].ags[ag_index];
     int           start = 0;
 
-    pthread_mutex_lock(&ag->lock);
+    evpl_mutex_lock(&ag->lock);
     if (!ag->condensing) {
         ag->condensing = 1;
         start          = 1;
     }
-    pthread_mutex_unlock(&ag->lock);
+    evpl_mutex_unlock(&ag->lock);
     return start;
 } /* space_map_ag_begin_checkpoint */
 
@@ -2352,7 +2352,7 @@ sm_persist_batch_submit(
 
     if (rc == 0) {
         for (i = 0; i < *count; i++) {
-            pthread_mutex_lock(&updates[i].ag->lock);
+            evpl_mutex_lock(&updates[i].ag->lock);
             updates[i].ag->log_slot        = updates[i].slot;
             updates[i].ag->log_generation  = updates[i].generation;
             updates[i].ag->log_base_count  = updates[i].base_count;
@@ -2360,7 +2360,7 @@ sm_persist_batch_submit(
             __atomic_store_n(&updates[i].ag->ckpt_seq, updates[i].ckpt_seq,
                              __ATOMIC_RELEASE);
             updates[i].ag->ckpt_dirty = 0;
-            pthread_mutex_unlock(&updates[i].ag->lock);
+            evpl_mutex_unlock(&updates[i].ag->lock);
         }
     }
 
@@ -2406,7 +2406,7 @@ space_map_persist(
             uint32_t      slot;
             uint64_t      gen, payload, aligned, slot_off;
 
-            pthread_mutex_lock(&ag->lock);
+            evpl_mutex_lock(&ag->lock);
             buf      = arena + bytes;
             slot     = 1 - ag->log_slot;
             gen      = ag->log_generation + 1;
@@ -2417,14 +2417,14 @@ space_map_persist(
 
             if (count == SM_PERSIST_BATCH_OPS ||
                 (bytes > 0 && bytes + aligned > SM_PERSIST_BATCH_BYTES)) {
-                pthread_mutex_unlock(&ag->lock);
+                evpl_mutex_unlock(&ag->lock);
                 if (sm_persist_batch_submit(io, writes, updates, &count, &bytes) != 0) {
                     free(arena);
                     return -1;
                 }
                 /* The AG may have mutated while unlocked during the submit;
                  * recondense it into the now-empty arena. */
-                pthread_mutex_lock(&ag->lock);
+                evpl_mutex_lock(&ag->lock);
                 buf      = arena;
                 slot     = 1 - ag->log_slot;
                 gen      = ag->log_generation + 1;
@@ -2448,7 +2448,7 @@ space_map_persist(
             updates[count].ckpt_seq = ckpt_seq;
             count++;
             bytes += aligned;
-            pthread_mutex_unlock(&ag->lock);
+            evpl_mutex_unlock(&ag->lock);
         }
     }
 
@@ -2553,10 +2553,10 @@ space_map_load(
                 return -1;
             }
 
-            pthread_mutex_lock(&ag->lock);
+            evpl_mutex_lock(&ag->lock);
             sm_ag_reconstruct(ag, buf);
             ag->log_slot = (uint32_t) best;
-            pthread_mutex_unlock(&ag->lock);
+            evpl_mutex_unlock(&ag->lock);
             free(buf);
         }
     }

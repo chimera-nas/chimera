@@ -105,7 +105,7 @@ chimera_nfs4_open_state_alloc(void)
     if (state) {
         atomic_init(&state->dirty, 0);
         state->seqid = 1;
-        pthread_mutex_init(&state->layout.acq_lock, NULL);
+        evpl_mutex_init(&state->layout.acq_lock, NULL);
     }
 
     return state;
@@ -134,7 +134,7 @@ chimera_nfs4_stateid_is_open(const struct stateid4 *stateid)
 static inline void
 chimera_nfs4_open_state_free(struct chimera_nfs4_open_state *state)
 {
-    pthread_mutex_destroy(&state->layout.acq_lock);
+    evpl_mutex_destroy(&state->layout.acq_lock);
     free(state);
 } /* chimera_nfs4_open_state_free */
 

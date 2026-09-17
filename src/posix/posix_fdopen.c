@@ -25,15 +25,15 @@ chimera_posix_fdopen(
     entry = &posix->fds[fd];
 
     /* Check if the fd is valid (has a handle) */
-    pthread_mutex_lock(&entry->lock);
+    evpl_mutex_lock(&entry->lock);
 
     if (!entry->handle || (entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
-        pthread_mutex_unlock(&entry->lock);
+        evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return NULL;
     }
 
-    pthread_mutex_unlock(&entry->lock);
+    evpl_mutex_unlock(&entry->lock);
 
     /* In our implementation, CHIMERA_FILE is the same as fd_entry pointer */
     return entry;

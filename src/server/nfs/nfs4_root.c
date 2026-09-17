@@ -222,7 +222,7 @@ nfs4_root_export_fh_resolve_complete(
         return;
     }
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     /* Prime the cache unless the "/" export changed while the resolve was in
      * flight; a stale prime would mis-recognize the old root. */
     if (shared->root_export_id == ctx->export_id) {
@@ -230,7 +230,7 @@ nfs4_root_export_fh_resolve_complete(
         shared->root_export_fh_len = attr->va_fh_len;
         shared->root_export_fh_id  = ctx->export_id;
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     ctx->callback(CHIMERA_VFS_OK, attr->va_fh, attr->va_fh_len,
                   ctx->thread, ctx->req);
@@ -252,7 +252,7 @@ nfs4_root_export_fh_resolve(
     int                               found = 0;
     const char                       *path;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     root_id = shared->root_export_id;
 
     if (root_id != 0) {
@@ -265,7 +265,7 @@ nfs4_root_export_fh_resolve(
             }
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     if (!found) {
         callback(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);
@@ -281,13 +281,13 @@ nfs4_root_export_fh_resolve(
 
     if (path[0] == '\0') {
         /* The "/" export's path is the VFS root itself; nothing to resolve. */
-        pthread_mutex_lock(&shared->exports_lock);
+        evpl_mutex_lock(&shared->exports_lock);
         if (shared->root_export_id == root_id) {
             memcpy(shared->root_export_fh, fh, fh_len);
             shared->root_export_fh_len = fh_len;
             shared->root_export_fh_id  = root_id;
         }
-        pthread_mutex_unlock(&shared->exports_lock);
+        evpl_mutex_unlock(&shared->exports_lock);
         callback(CHIMERA_VFS_OK, fh, fh_len, thread, req);
         return;
     }
@@ -323,14 +323,14 @@ nfs4_root_export_fh_get(
     uint32_t                          fh_len = 0;
     uint16_t                          root_id;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     root_id = shared->root_export_id;
 
     if (root_id != 0 && shared->root_export_fh_id == root_id) {
         memcpy(fh, shared->root_export_fh, shared->root_export_fh_len);
         fh_len = shared->root_export_fh_len;
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     if (root_id == 0) {
         callback(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);

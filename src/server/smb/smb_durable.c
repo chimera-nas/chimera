@@ -41,7 +41,7 @@ struct chimera_smb_durable_recover_ctx {
 SYMBOL_EXPORT void
 chimera_smb_durable_table_init(struct chimera_smb_durable_table *table)
 {
-    pthread_mutex_init(&table->lock, NULL);
+    evpl_mutex_init(&table->lock, NULL);
     table->by_pid = NULL;
 } /* chimera_smb_durable_table_init */
 
@@ -62,7 +62,7 @@ chimera_smb_durable_table_destroy(struct chimera_smb_durable_table *table)
         entry = tmp;
     }
 
-    pthread_mutex_destroy(&table->lock);
+    evpl_mutex_destroy(&table->lock);
 } /* chimera_smb_durable_table_destroy */
 
 SYMBOL_EXPORT void
@@ -94,9 +94,9 @@ chimera_smb_durable_register(
     entry->name_len = name_len;
     memcpy(entry->name, name, name_len);
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_ADD(hh, shared->durable.by_pid, persistent_id, sizeof(entry->persistent_id), entry);
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 } /* chimera_smb_durable_register */
 
 /* Insert a cold entry recovered from a backend record at startup.  open_file is
@@ -128,10 +128,10 @@ chimera_smb_durable_recover_entry(
     entry->name_len = name_len;
     memcpy(entry->name, record->name, name_len);
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &pid, sizeof(pid), existing);
     if (existing) {
-        pthread_mutex_unlock(&shared->durable.lock);
+        evpl_mutex_unlock(&shared->durable.lock);
         free(entry);
         return;
     }
@@ -142,7 +142,7 @@ chimera_smb_durable_recover_entry(
     if (atomic_load(&shared->next_persistent_id) <= pid) {
         atomic_store(&shared->next_persistent_id, pid + 1);
     }
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 } /* chimera_smb_durable_recover_entry */
 
 SYMBOL_EXPORT void
@@ -152,12 +152,12 @@ chimera_smb_durable_forget(
 {
     struct chimera_smb_durable_entry *entry;
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
     if (entry) {
         HASH_DELETE(hh, shared->durable.by_pid, entry);
     }
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     if (entry) {
         free(entry);
@@ -289,7 +289,7 @@ chimera_smb_durable_purge_parked(
     struct chimera_smb_durable_entry *entry;
     struct chimera_smb_open_file     *open_file = NULL;
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
     if (entry && entry->parked && (include_persistent || !entry->persistent) &&
         !entry->cold && entry->open_file) {
@@ -297,7 +297,7 @@ chimera_smb_durable_purge_parked(
         open_file = entry->open_file;
         free(entry);
     }
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     if (!open_file) {
         return false;
@@ -333,7 +333,7 @@ chimera_smb_durable_conn_disconnecting(
     struct chimera_smb_durable_entry *entry;
     enum chimera_smb_durable_yield    yield = CHIMERA_SMB_DURABLE_YIELD_NONE;
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
     if (entry && !entry->persistent && !entry->cold && entry->open_file) {
         struct chimera_smb_conn *cc = entry->open_file->create_conn;
@@ -378,7 +378,7 @@ chimera_smb_durable_conn_disconnecting(
             yield = CHIMERA_SMB_DURABLE_YIELD_SPECULATIVE;
         }
     }
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     return yield;
 } /* chimera_smb_durable_conn_disconnecting */
@@ -394,7 +394,7 @@ chimera_smb_durable_park(
 
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &pid, sizeof(pid), entry);
     if (entry) {
         /* The disconnect-survival timeout: a resiliency request SETS the open's
@@ -421,7 +421,7 @@ chimera_smb_durable_park(
             entry->deadline.tv_nsec -= 1000000000L;
         }
     }
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     /* Park the caching grant's claim AND the share reservation so the claim
      * core treats this disconnected holder as courtesy-held (advertised H and
@@ -459,7 +459,7 @@ chimera_smb_durable_parked_hold(
 
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
     if (entry && entry->parked && !entry->cold && entry->open_file) {
         bool within = entry->never_expires ||
@@ -472,7 +472,7 @@ chimera_smb_durable_parked_hold(
             }
         }
     }
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     return hold;
 } /* chimera_smb_durable_parked_hold */
@@ -503,7 +503,7 @@ chimera_smb_durable_claim(
 
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
 
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
 
@@ -601,7 +601,7 @@ chimera_smb_durable_claim(
         *status = SMB2_STATUS_SUCCESS;
     }
 
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     return open_file;
 } /* chimera_smb_durable_claim */
@@ -652,7 +652,7 @@ chimera_smb_durable_claim_by_guid(
 
     *r_open_file = NULL;
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
 
     HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
     {
@@ -717,7 +717,7 @@ chimera_smb_durable_claim_by_guid(
         /* else: ineligible replay on our own live open -> NONE (fresh open). */
     }
 
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     return result;
 } /* chimera_smb_durable_claim_by_guid */
@@ -735,7 +735,7 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
      * the heavyweight teardown after the lock is dropped. */
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
 
     HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
     {
@@ -757,7 +757,7 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
         expired          = entry;
     }
 
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     while (expired) {
         struct chimera_smb_open_file *open_file = expired->open_file;
@@ -815,7 +815,7 @@ chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
     struct chimera_smb_durable_entry *entry, *tmp;
     struct chimera_smb_durable_entry *reap = NULL;
 
-    pthread_mutex_lock(&shared->durable.lock);
+    evpl_mutex_lock(&shared->durable.lock);
 
     HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
     {
@@ -827,7 +827,7 @@ chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
         reap             = entry;
     }
 
-    pthread_mutex_unlock(&shared->durable.lock);
+    evpl_mutex_unlock(&shared->durable.lock);
 
     while (reap) {
         struct chimera_smb_open_file *open_file = reap->open_file;

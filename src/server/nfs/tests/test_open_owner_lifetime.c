@@ -43,7 +43,7 @@
  * (no VFS, RPC, or compound dispatch in the picture).
  */
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -96,9 +96,9 @@ test_open_owner_borrow_survives_sweep(void)
     /* ...but the borrowed reference kept the struct alive, so the OPEN's async
      * completion can safely advance the seqid (nfs4_proc_open.c:479).  Pre-fix,
      * expire_state freed oo and this is a heap-use-after-free. */
-    pthread_mutex_lock(&oo->lock);
+    evpl_mutex_lock(&oo->lock);
     oo->seqid = 42;
-    pthread_mutex_unlock(&oo->lock);
+    evpl_mutex_unlock(&oo->lock);
     CHECK(oo->seqid == 42);
 
     /* Completion drops the borrow ref; the last reference frees oo cleanly. */
@@ -128,9 +128,9 @@ test_lock_owner_borrow_survives_sweep(void)
 
     CHECK(HASH_COUNT(client->lock_owners_by_str) == 0);
 
-    pthread_mutex_lock(&lo->lock);
+    evpl_mutex_lock(&lo->lock);
     lo->seqid = 7;
-    pthread_mutex_unlock(&lo->lock);
+    evpl_mutex_unlock(&lo->lock);
     CHECK(lo->seqid == 7);
 
     nfs_lock_owner_put(lo);
@@ -356,9 +356,9 @@ test_open_owner_adopt_after_sweep(void)
     oo = nfs_open_owner_find_or_create(client, "owner-A", 7, &created);
     CHECK(created);
 
-    pthread_mutex_lock(&oo->lock);
+    evpl_mutex_lock(&oo->lock);
     oo->seqid = 5;
-    pthread_mutex_unlock(&oo->lock);
+    evpl_mutex_unlock(&oo->lock);
 
     /* Sweep unpublishes the owner; the request's pin keeps it alive. */
     nfs_client_expire_state(client, &table, NULL);
@@ -600,17 +600,17 @@ test_concurrent_install_vs_expire(void)
 {
     struct nfs_state_table table;
     struct stress_ctx      ctx;
-    pthread_t              worker, sweeper;
+    evpl_native_thread_t              worker, sweeper;
 
     nfs_state_table_init(&table, 1);
     ctx.table  = &table;
     ctx.client = nfs_client_alloc(9, "client-race2", 12, 0x6666, /*minor*/ 0);
     atomic_init(&ctx.done, 0);
 
-    CHECK(pthread_create(&worker, NULL, stress_worker, &ctx) == 0);
-    CHECK(pthread_create(&sweeper, NULL, stress_sweeper, &ctx) == 0);
-    CHECK(pthread_join(worker, NULL) == 0);
-    CHECK(pthread_join(sweeper, NULL) == 0);
+    CHECK(evpl_native_thread_create(&worker, NULL, stress_worker, &ctx) == 0);
+    CHECK(evpl_native_thread_create(&sweeper, NULL, stress_sweeper, &ctx) == 0);
+    CHECK(evpl_native_thread_join(worker, NULL) == 0);
+    CHECK(evpl_native_thread_join(sweeper, NULL) == 0);
 
     /* Final sweep + teardown must leave nothing behind (ASAN leak check). */
     nfs_client_expire_state(ctx.client, &table, NULL);

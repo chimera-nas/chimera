@@ -302,7 +302,7 @@ struct nfs4_client_table {
     /* Monotonic source for SETCLIENTID setclientid_confirm verifiers; every
      * value handed out is unique for the life of the table. */
     uint64_t             nfs4_ct_next_confirm;
-    pthread_mutex_t      nfs4_ct_lock;
+    evpl_mutex_t      nfs4_ct_lock;
 };
 
 /* A clientid carries the minting instance's node_id in its high 16 bits and a

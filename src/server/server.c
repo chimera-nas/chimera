@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -190,8 +190,8 @@ struct chimera_server {
     struct chimera_rest_server         *rest;
     int                                 num_protocols;
     int                                 threads_online;
-    pthread_mutex_t                     lock;
-    pthread_cond_t                      all_threads_online;
+    evpl_mutex_t                     lock;
+    evpl_cond_t                      all_threads_online;
 };
 
 struct chimera_thread {
@@ -397,7 +397,7 @@ chimera_server_config_init(void)
      * spawns hundreds of threads per server instance, which is wasteful for
      * short-lived or lightly-loaded instances (memory, process-teardown cost)
      * AND is a correctness hazard: liburcu's call_rcu_data_init does NOT retry
-     * pthread_create and abort()s the whole process on a transient EAGAIN
+     * evpl_native_thread_create and abort()s the whole process on a transient EAGAIN
      * ("Unrecoverable error: Resource temporarily unavailable").  Spawning
      * hundreds of RCU threads at once -- as many in-process server instances do
      * in parallel under a -j CI run -- makes that EAGAIN abort likely, which is
@@ -1655,11 +1655,11 @@ chimera_server_thread_init(
 
     thread->rest_thread = chimera_rest_thread_init(evpl, server->rest, thread->vfs_thread);
 
-    pthread_mutex_lock(&server->lock);
+    evpl_mutex_lock(&server->lock);
     if (++server->threads_online == server->config->core_threads) {
-        pthread_cond_signal(&server->all_threads_online);
+        evpl_cond_signal(&server->all_threads_online);
     }
-    pthread_mutex_unlock(&server->lock);
+    evpl_mutex_unlock(&server->lock);
 
     return thread;
 } /* chimera_server_thread_init */
@@ -2812,8 +2812,8 @@ chimera_server_init(
 
     server->config = config;
 
-    pthread_mutex_init(&server->lock, NULL);
-    pthread_cond_init(&server->all_threads_online, NULL);
+    evpl_mutex_init(&server->lock, NULL);
+    evpl_cond_init(&server->all_threads_online, NULL);
 
     chimera_server_info("Initializing VFS...");
     server->vfs = chimera_vfs_init(config->sync_delegation ? config->sync_delegation_threads : 0,
@@ -2919,11 +2919,11 @@ chimera_server_start(struct chimera_server *server)
 
     chimera_server_info("Waiting for %d threads to start...", server->config->core_threads);
 
-    pthread_mutex_lock(&server->lock);
+    evpl_mutex_lock(&server->lock);
     while (server->threads_online < server->config->core_threads) {
-        pthread_cond_wait(&server->all_threads_online, &server->lock);
+        evpl_cond_wait(&server->all_threads_online, &server->lock);
     }
-    pthread_mutex_unlock(&server->lock);
+    evpl_mutex_unlock(&server->lock);
 
     for (i = 0; i < server->num_protocols; i++) {
         if (!server->protocol_private[i]) {

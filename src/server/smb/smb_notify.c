@@ -495,7 +495,7 @@ chimera_smb_notify_callback(
      * thread->notify_ready_lock acquisition here matches the order taken
      * by close — state->lock outer, notify_ready_lock inner — so there
      * is no AB-BA deadlock between them. */
-    pthread_mutex_lock(&state->lock);
+    evpl_mutex_lock(&state->lock);
 
     /* The OLDEST outstanding request is the one a change wakes; the rest wait
      * for the next one. */
@@ -504,15 +504,15 @@ chimera_smb_notify_callback(
         thread             = nr->thread;
         nr->on_ready_queue = 1;
 
-        pthread_mutex_lock(&thread->notify_ready_lock);
+        evpl_mutex_lock(&thread->notify_ready_lock);
         nr->ready_next       = thread->notify_ready;
         thread->notify_ready = nr;
-        pthread_mutex_unlock(&thread->notify_ready_lock);
+        evpl_mutex_unlock(&thread->notify_ready_lock);
 
         wake = 1;
     }
 
-    pthread_mutex_unlock(&state->lock);
+    evpl_mutex_unlock(&state->lock);
 
     if (wake) {
         evpl_ring_doorbell(&thread->notify_doorbell);
@@ -539,7 +539,7 @@ chimera_smb_notify_queue_cleanup(struct chimera_smb_open_file *open_file)
         return 0;
     }
 
-    pthread_mutex_lock(&state->lock);
+    evpl_mutex_lock(&state->lock);
 
     /* EVERY outstanding request, not just the oldest: the handle is going
      * away, so there will never be another change, and one left queued would
@@ -552,15 +552,15 @@ chimera_smb_notify_queue_cleanup(struct chimera_smb_open_file *open_file)
         nr->cleanup        = 1;
         nr->on_ready_queue = 1;
 
-        pthread_mutex_lock(&thread->notify_ready_lock);
+        evpl_mutex_lock(&thread->notify_ready_lock);
         nr->ready_next       = thread->notify_ready;
         thread->notify_ready = nr;
-        pthread_mutex_unlock(&thread->notify_ready_lock);
+        evpl_mutex_unlock(&thread->notify_ready_lock);
 
         wake = 1;
     }
 
-    pthread_mutex_unlock(&state->lock);
+    evpl_mutex_unlock(&state->lock);
 
     if (wake) {
         evpl_ring_doorbell(&thread->notify_doorbell);
@@ -610,7 +610,7 @@ chimera_smb_notify_do_send_response(
         return;
     }
 
-    pthread_mutex_lock(&state->lock);
+    evpl_mutex_lock(&state->lock);
 
     /* Bail if close/cancel claimed nr while it was sitting on the ready
      * queue: whoever took it off the watch's queue owns it now.
@@ -621,7 +621,7 @@ chimera_smb_notify_do_send_response(
     if (!chimera_smb_notify_q_contains(state, nr) ||
         (!cleanup && state->q_head != nr)) {
         nr->on_ready_queue = 0;
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
         return;
     }
 
@@ -638,7 +638,7 @@ chimera_smb_notify_do_send_response(
          * re-arms the ready queue via the callback.  Just clear the queued
          * flag.  On the cleanup/deleted paths we must complete the request. */
         nr->on_ready_queue = 0;
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
         return;
     }
 
@@ -671,7 +671,7 @@ chimera_smb_notify_do_send_response(
          * since watch_update narrowed the mask) rewakes us.  On the
          * cleanup/deleted paths we must still complete the request. */
         nr->on_ready_queue = 0;
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
         return;
     }
 
@@ -688,7 +688,7 @@ chimera_smb_notify_do_send_response(
         struct chimera_server_smb_thread   *thread = nr->thread;
         struct chimera_smb_notify_request **pp;
 
-        pthread_mutex_lock(&thread->notify_ready_lock);
+        evpl_mutex_lock(&thread->notify_ready_lock);
         pp = &thread->notify_ready;
         while (*pp) {
             if (*pp == nr) {
@@ -698,11 +698,11 @@ chimera_smb_notify_do_send_response(
             }
             pp = &(*pp)->ready_next;
         }
-        pthread_mutex_unlock(&thread->notify_ready_lock);
+        evpl_mutex_unlock(&thread->notify_ready_lock);
         nr->on_ready_queue = 0;
     }
 
-    pthread_mutex_unlock(&state->lock);
+    evpl_mutex_unlock(&state->lock);
 
     /* Size the response buffer to the client's OutputBufferLength plus
      * the SMB2 framing.  An undersize buffer would force a NOTIFY_ENUM_DIR
@@ -890,7 +890,7 @@ chimera_smb_notify_claim(struct chimera_smb_notify_request *nr)
         return 0;
     }
 
-    pthread_mutex_lock(&state->lock);
+    evpl_mutex_lock(&state->lock);
 
     if (chimera_smb_notify_q_unlink(state, nr)) {
         owned = 1;
@@ -902,7 +902,7 @@ chimera_smb_notify_claim(struct chimera_smb_notify_request *nr)
         struct chimera_server_smb_thread   *thread = nr->thread;
         struct chimera_smb_notify_request **pp;
 
-        pthread_mutex_lock(&thread->notify_ready_lock);
+        evpl_mutex_lock(&thread->notify_ready_lock);
         pp = &thread->notify_ready;
         while (*pp) {
             if (*pp == nr) {
@@ -912,13 +912,13 @@ chimera_smb_notify_claim(struct chimera_smb_notify_request *nr)
             }
             pp = &(*pp)->ready_next;
         }
-        pthread_mutex_unlock(&thread->notify_ready_lock);
+        evpl_mutex_unlock(&thread->notify_ready_lock);
 
         nr->on_ready_queue = 0;
         owned              = 1;
     }
 
-    pthread_mutex_unlock(&state->lock);
+    evpl_mutex_unlock(&state->lock);
     return owned;
 } /* chimera_smb_notify_claim */
 
@@ -1026,9 +1026,9 @@ chimera_smb_notify_close(
      * STATUS_NOTIFY_CLEANUP, carrying any buffered records — NOT
      * STATUS_CANCELLED, which is reserved for an explicit SMB2 CANCEL. */
     for (;;) {
-        pthread_mutex_lock(&state->lock);
+        evpl_mutex_lock(&state->lock);
         nr = state->q_head;
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
 
         if (!nr) {
             break;
@@ -1044,7 +1044,7 @@ chimera_smb_notify_close(
         state->watch = NULL;
     }
 
-    pthread_mutex_destroy(&state->lock);
+    evpl_mutex_destroy(&state->lock);
     free(state);
 } /* chimera_smb_notify_close */
 
@@ -1082,10 +1082,10 @@ chimera_smb_notify_doorbell_callback(
                           notify_doorbell);
 
     /* Drain the ready queue under the lock */
-    pthread_mutex_lock(&thread->notify_ready_lock);
+    evpl_mutex_lock(&thread->notify_ready_lock);
     ready                = thread->notify_ready;
     thread->notify_ready = NULL;
-    pthread_mutex_unlock(&thread->notify_ready_lock);
+    evpl_mutex_unlock(&thread->notify_ready_lock);
 
     /* Process each ready request on the SMB thread */
     for (nr = ready; nr; nr = next) {
@@ -1109,7 +1109,7 @@ void
 chimera_smb_notify_thread_init(struct chimera_server_smb_thread *thread)
 {
     thread->notify_ready = NULL;
-    pthread_mutex_init(&thread->notify_ready_lock, NULL);
+    evpl_mutex_init(&thread->notify_ready_lock, NULL);
     evpl_add_doorbell(thread->evpl, &thread->notify_doorbell,
                       chimera_smb_notify_doorbell_callback);
 } /* chimera_smb_notify_thread_init */
@@ -1118,5 +1118,5 @@ void
 chimera_smb_notify_thread_destroy(struct chimera_server_smb_thread *thread)
 {
     evpl_remove_doorbell(thread->evpl, &thread->notify_doorbell);
-    pthread_mutex_destroy(&thread->notify_ready_lock);
+    evpl_mutex_destroy(&thread->notify_ready_lock);
 } /* chimera_smb_notify_thread_destroy */

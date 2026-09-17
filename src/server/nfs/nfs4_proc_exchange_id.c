@@ -233,7 +233,7 @@ chimera_nfs4_exchange_id(
         uint32_t            sp_how;
         int                 immutable = 0;
 
-        pthread_mutex_lock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
+        evpl_mutex_lock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
         HASH_FIND(nfs4_client_hh_by_id,
                   thread->shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
                   &eid.clientid, sizeof(eid.clientid), c);
@@ -259,7 +259,7 @@ chimera_nfs4_exchange_id(
                 nfs_client_touch(uc);
             }
         }
-        pthread_mutex_unlock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
+        evpl_mutex_unlock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
         if (uc) {
             nfs_recovery_persist(thread->vfs_thread,
                                  &thread->shared->nfs4_recovery, uc);

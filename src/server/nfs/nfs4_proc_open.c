@@ -275,7 +275,7 @@ chimera_nfs4_open_grant_delegation(
      * delegation and conflicting opens land on the same file_state. */
     fh_hash = XXH3_64bits(req->fh, req->fhlen) & INT64_MAX;
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     LL_FOREACH2(client->delegations, d, next_in_client)
     {
         if (d->fh_len == req->fhlen &&
@@ -284,7 +284,7 @@ chimera_nfs4_open_grant_delegation(
             break;
         }
     }
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
     if (exists) {
         return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
@@ -342,11 +342,11 @@ chimera_nfs4_open_grant_delegation(
         (file_attr->va_set_mask &
          (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME))) {
         uint64_t sc = chimera_nfs4_change_from_attrs(file_attr);
-        pthread_mutex_lock(&deleg->combine_lock);
+        evpl_mutex_lock(&deleg->combine_lock);
         deleg->combine_sc    = sc;
         deleg->combine_last  = sc;
         deleg->combine_valid = true;
-        pthread_mutex_unlock(&deleg->combine_lock);
+        evpl_mutex_unlock(&deleg->combine_lock);
     }
 
     res->resok4.delegation.delegation_type = deleg_type;
@@ -649,7 +649,7 @@ chimera_nfs4_open_finish(
         struct OPEN4res       *res =
             &req->res_compound.resarray[req->index].opopen;
 
-        pthread_mutex_lock(&owner->lock);
+        evpl_mutex_lock(&owner->lock);
         owner->seqid = args->seqid;
         nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
                            status == NFS4_OK ? &res->resok4.stateid : NULL);
@@ -659,7 +659,7 @@ chimera_nfs4_open_finish(
         if (status == NFS4_OK) {
             owner->replay.rflags = res->resok4.rflags;
         }
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
     }
 
     /* Drop the borrow ref transferred onto the request in
@@ -1784,7 +1784,7 @@ chimera_nfs4_open(
             client, args->owner.owner.data, args->owner.owner.len,
             &created);
 
-        pthread_mutex_lock(&owner->lock);
+        evpl_mutex_lock(&owner->lock);
         int                    cls = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
                                                                args->seqid);
 
@@ -1811,7 +1811,7 @@ chimera_nfs4_open(
             res->resok4.rflags                     = owner->replay.rflags;
             res->resok4.num_attrset                = 0;
             res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             /* Early return before the borrow ref transfers to the request;
              * release it here. */
             nfs_open_owner_put(owner);
@@ -1822,14 +1822,14 @@ chimera_nfs4_open(
         if (cls != NFS4_SEQID_NEW) {
             /* NFS4ERR_BAD_SEQID is in the no-advance set; do not touch
              * owner state. */
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_open_owner_put(owner);
             res->status = NFS4ERR_BAD_SEQID;
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
 
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
         /* Transfer the find_or_create ref onto the request; dropped in
          * chimera_nfs4_open_complete. */
         req->open_4_0_owner = owner;

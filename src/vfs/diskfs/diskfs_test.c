@@ -46,9 +46,9 @@ diskfs_test_lock_all_ags(
 
         for (a = 0; a < dev->num_ags; a++) {
             if (lock) {
-                pthread_mutex_lock(&dev->ags[a].lock);
+                evpl_mutex_lock(&dev->ags[a].lock);
             } else {
-                pthread_mutex_unlock(&dev->ags[a].lock);
+                evpl_mutex_unlock(&dev->ags[a].lock);
             }
         }
     }
@@ -270,7 +270,7 @@ diskfs_test_inode(
     /* Freshest source: a resident inode whose home block is still pinned in the
      * cache (dirty / mid-transaction). */
     shard = diskfs_inode_shard(shared, inum);
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
     if (inode && inode->block) {
         struct diskfs_bt_node_hdr *h =
@@ -281,10 +281,10 @@ diskfs_test_inode(
         out->nlink       = inode->nlink;
         out->tree_height = (uint16_t) (h->level + 1);
         out->root_nitems = h->nitems;
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return 0;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* Idle inode: its home block has been returned to the cache, so read the
      * on-disk image directly from the backing device file.  This can lag the
@@ -326,11 +326,11 @@ diskfs_test_reclaim_idle(struct diskfs_shared *shared)
     for (i = 0; i < r->nworkers; i++) {
         struct diskfs_reclaim_worker *w = &r->workers[i];
 
-        pthread_mutex_lock(&w->lock);
+        evpl_mutex_lock(&w->lock);
         if (w->head != NULL || w->condenses != 0) {
             idle = 0;
         }
-        pthread_mutex_unlock(&w->lock);
+        evpl_mutex_unlock(&w->lock);
         if (!idle) {
             break;
         }

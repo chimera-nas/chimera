@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <sys/stat.h>
 #include <openssl/evp.h>
 
@@ -163,7 +163,7 @@ struct chimera_smb_client_server {
      * with the server; the id is a pure function of the path, so entries stay
      * valid across the per-trace mount cycles that reuse a slot.  path_lock
      * guards it. */
-    pthread_mutex_t       path_lock;
+    evpl_mutex_t       path_lock;
     struct smb_path_ent  *path_buckets[CHIMERA_SMB_PATH_BUCKETS];
     char                  hostname[256];
     char                  share[256];
@@ -249,7 +249,7 @@ struct chimera_smb_client_server {
 };
 
 struct chimera_smb_client_shared {
-    pthread_mutex_t                    lock;
+    evpl_mutex_t                    lock;
     struct chimera_smb_client_server **servers;
     int                                max_servers;
     enum evpl_protocol_id tcp_protocol;

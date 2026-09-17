@@ -63,13 +63,13 @@ chimera_nfs_mount_record(
 {
     struct chimera_nfs_mount_entry *entry;
 
-    pthread_mutex_lock(&shared->mount_entries_lock);
+    evpl_mutex_lock(&shared->mount_entries_lock);
 
     LL_FOREACH(shared->mount_entries, entry)
     {
         if (strcmp(entry->hostname, hostname) == 0 &&
             strcmp(entry->directory, directory) == 0) {
-            pthread_mutex_unlock(&shared->mount_entries_lock);
+            evpl_mutex_unlock(&shared->mount_entries_lock);
             return;
         }
     }
@@ -80,7 +80,7 @@ chimera_nfs_mount_record(
     LL_PREPEND(shared->mount_entries, entry);
     shared->num_mount_entries++;
 
-    pthread_mutex_unlock(&shared->mount_entries_lock);
+    evpl_mutex_unlock(&shared->mount_entries_lock);
 } /* chimera_nfs_mount_record */
 
 /* Remove the rmtab entry matching (hostname, directory), if any (UMNT). */
@@ -92,7 +92,7 @@ chimera_nfs_mount_remove(
 {
     struct chimera_nfs_mount_entry *entry;
 
-    pthread_mutex_lock(&shared->mount_entries_lock);
+    evpl_mutex_lock(&shared->mount_entries_lock);
     LL_FOREACH(shared->mount_entries, entry)
     {
         if (strcmp(entry->hostname, hostname) == 0 &&
@@ -105,7 +105,7 @@ chimera_nfs_mount_remove(
             break;
         }
     }
-    pthread_mutex_unlock(&shared->mount_entries_lock);
+    evpl_mutex_unlock(&shared->mount_entries_lock);
 } /* chimera_nfs_mount_remove */
 
 /* Remove all rmtab entries for a host (UMNTALL). */
@@ -116,7 +116,7 @@ chimera_nfs_mount_remove_host(
 {
     struct chimera_nfs_mount_entry *entry, *next, *keep = NULL;
 
-    pthread_mutex_lock(&shared->mount_entries_lock);
+    evpl_mutex_lock(&shared->mount_entries_lock);
     /* Single pass partitioning the list: free entries for this host, re-link
      * the survivors.  next is captured before any free so the cursor never
      * touches freed memory. */
@@ -135,7 +135,7 @@ chimera_nfs_mount_remove_host(
         entry = next;
     }
     shared->mount_entries = keep;
-    pthread_mutex_unlock(&shared->mount_entries_lock);
+    evpl_mutex_unlock(&shared->mount_entries_lock);
 } /* chimera_nfs_mount_remove_host */
 
 /* Copy an XDR mount path argument into a NUL-terminated, length-bounded buffer. */
@@ -343,7 +343,7 @@ chimera_nfs_mount_dump(
     struct mountbody                 *head = NULL, *tail = NULL, *node;
     int                               rc;
 
-    pthread_mutex_lock(&shared->mount_entries_lock);
+    evpl_mutex_lock(&shared->mount_entries_lock);
     LL_FOREACH(shared->mount_entries, entry)
     {
         node = xdr_dbuf_alloc_space(sizeof(*node), encoding->dbuf);
@@ -368,7 +368,7 @@ chimera_nfs_mount_dump(
         }
         tail = node;
     }
-    pthread_mutex_unlock(&shared->mount_entries_lock);
+    evpl_mutex_unlock(&shared->mount_entries_lock);
 
     res.mounts = head;
 
@@ -434,7 +434,7 @@ chimera_nfs_mount_export(
     struct exportnode                *head = NULL, *tail = NULL, *node;
     int                               rc;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         node = xdr_dbuf_alloc_space(sizeof(*node), encoding->dbuf);
@@ -460,7 +460,7 @@ chimera_nfs_mount_export(
         }
         tail = node;
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     res.exports = head;
 

@@ -234,11 +234,11 @@ nfs4_v40_drc_cache_insert(
     }
     memcpy(buf, reply, reply_len);
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
 
     c = nfs4_v40_drc_conn_get_locked(drc, conn);
     if (!c) {
-        pthread_mutex_unlock(&drc->lock);
+        evpl_mutex_unlock(&drc->lock);
         free(buf);
         return;
     }
@@ -255,7 +255,7 @@ nfs4_v40_drc_cache_insert(
             e->len      = reply_len;
             drc->bytes += reply_len;
             c->bytes   += reply_len;
-            pthread_mutex_unlock(&drc->lock);
+            evpl_mutex_unlock(&drc->lock);
             return;
         }
     }
@@ -275,7 +275,7 @@ nfs4_v40_drc_cache_insert(
     drc->bytes += reply_len;
     c->bytes   += reply_len;
 
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 } /* nfs4_v40_drc_cache_insert */
 
 int
@@ -297,7 +297,7 @@ nfs4_v40_drc_cache_lookup(
         return 0;
     }
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     c = nfs4_v40_drc_conn_find_locked(drc, conn);
     if (c) {
         for (i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
@@ -312,7 +312,7 @@ nfs4_v40_drc_cache_lookup(
             }
         }
     }
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 
     if (!buf) {
         return 0;  /* miss, or OOM -- which degrades to re-executing */
@@ -334,12 +334,12 @@ nfs4_v40_drc_conn_close(
         return;
     }
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     c = nfs4_v40_drc_conn_find_locked(drc, conn);
     if (c) {
         nfs4_v40_drc_conn_free_locked(drc, c);
     }
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 } /* nfs4_v40_drc_conn_close */
 
 /* ------------------------------------------------------------------ *
@@ -498,7 +498,7 @@ nfs4_v40_drc_dispatch(
 void
 nfs4_v40_drc_init(struct nfs4_v40_drc *drc)
 {
-    pthread_mutex_init(&drc->lock, NULL);
+    evpl_mutex_init(&drc->lock, NULL);
     drc->conns         = NULL;
     drc->bytes         = 0;
     drc->orig_dispatch = NULL;
@@ -517,7 +517,7 @@ nfs4_v40_drc_destroy(struct nfs4_v40_drc *drc)
         nfs4_v40_drc_conn_free_locked(drc, c);
     }
 #endif /* ifndef __clang_analyzer__ */
-    pthread_mutex_destroy(&drc->lock);
+    evpl_mutex_destroy(&drc->lock);
 } /* nfs4_v40_drc_destroy */
 
 void

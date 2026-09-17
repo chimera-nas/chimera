@@ -5,7 +5,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <uthash.h>
 #include "vfs/vfs.h"
 #include "sdk/vfs_fh.h"
@@ -124,7 +124,7 @@ struct chimera_vfs_notify_watch {
     int                                   gated_inflight;
 
     /* Per-watch lock protects ring buffer state */
-    pthread_mutex_t                       lock;
+    evpl_mutex_t                       lock;
 
     /* Linkage within bucket (exact watches) */
     struct chimera_vfs_notify_watch      *next;
@@ -155,7 +155,7 @@ struct chimera_vfs_notify_bucket {
     struct chimera_vfs_notify_watch    *watches;
     struct chimera_vfs_notify_tombstone tombstones[CHIMERA_VFS_NOTIFY_TOMBSTONE_COUNT];
     int                                 tombstone_next; /* ring write index */
-    pthread_mutex_t                     lock;
+    evpl_mutex_t                     lock;
 };
 
 /* Per-mount subtree watch registry */
@@ -197,7 +197,7 @@ struct chimera_vfs_notify {
 
     /* Subtree watch registry keyed by mount_id */
     struct chimera_vfs_notify_mount_entry   *mount_entries;
-    pthread_mutex_t                          mount_entries_lock;
+    evpl_mutex_t                          mount_entries_lock;
 
     /* RPL cache */
     struct chimera_vfs_rpl_cache            *rpl_cache;
@@ -207,13 +207,13 @@ struct chimera_vfs_notify {
     struct chimera_vfs_notify_pending_event *free_events;
     int                                      num_pending;
     int                                      shutdown;     /* set during destroy to block new resolvers */
-    pthread_mutex_t                          pending_lock;
+    evpl_mutex_t                          pending_lock;
 
     /* Completion gates: namespace mutations parked until every sync watcher
      * acks its invalidation (or the deadline sweep gives up on it).  The
      * sync-watch count is the dispatch-path fast gate: zero (no FUSE
      * coherence=sync mounts) means gate_install is a single atomic load. */
-    pthread_mutex_t                          gates_lock;
+    evpl_mutex_t                          gates_lock;
     struct chimera_vfs_notify_gate          *gates;
     int                                      num_sync_watches; /* atomics */
 

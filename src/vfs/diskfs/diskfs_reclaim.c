@@ -269,7 +269,7 @@ diskfs_drain_final_cb(
      * re-faulted while the tombstone was un-pushed used to read the device
      * directly, see the pre-retire dinode, and could re-orphan the inode,
      * double-freeing its blocks.) */
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, d->inum, inum, inode);
     if (inode && inode->nlink == 0 && inode->refcnt == 0 &&
         !inode->writer && !inode->readers && !inode->wait_head) {
@@ -278,7 +278,7 @@ diskfs_drain_final_cb(
         shard->ninodes--;
         diskfs_inode_struct_free(inode);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_drain_complete(d);
 } /* diskfs_drain_final_cb */
@@ -613,11 +613,11 @@ diskfs_reclaim_doorbell_cb(
 
     (void) evpl;
 
-    pthread_mutex_lock(&w->lock);
+    evpl_mutex_lock(&w->lock);
     jobs    = w->head;
     w->head = NULL;
     w->tail = NULL;
-    pthread_mutex_unlock(&w->lock);
+    evpl_mutex_unlock(&w->lock);
 
     while (jobs) {
         j    = jobs;
@@ -659,14 +659,14 @@ diskfs_reclaim_submit_job(
     idx = __atomic_fetch_add(&r->rr, 1, __ATOMIC_RELAXED) % r->nworkers;
     w   = &r->workers[idx];
 
-    pthread_mutex_lock(&w->lock);
+    evpl_mutex_lock(&w->lock);
     if (w->tail) {
         w->tail->next = j;
     } else {
         w->head = j;
     }
     w->tail = j;
-    pthread_mutex_unlock(&w->lock);
+    evpl_mutex_unlock(&w->lock);
 
     evpl_ring_doorbell(&w->doorbell);
 } /* diskfs_reclaim_submit_job */
@@ -732,7 +732,7 @@ diskfs_reclaim_thread_shutdown(
         w->head = j->next;
         free(j);
     }
-    pthread_mutex_destroy(&w->lock);
+    evpl_mutex_destroy(&w->lock);
 } /* diskfs_reclaim_thread_shutdown */
 
 
@@ -750,7 +750,7 @@ diskfs_reclaim_create(struct diskfs_shared *shared)
         struct diskfs_reclaim_worker *w = &r->workers[i];
 
         w->shared = shared;
-        pthread_mutex_init(&w->lock, NULL);
+        evpl_mutex_init(&w->lock, NULL);
         w->thread = evpl_thread_create(NULL, diskfs_reclaim_thread_init,
                                        diskfs_reclaim_thread_shutdown, w);
         while (!__atomic_load_n(&w->ready, __ATOMIC_ACQUIRE)) {
@@ -938,9 +938,9 @@ diskfs_inode_orphaned_recorded_cb(void *priv)
      * are recoverable.  Otherwise the final ref drop (close / pin release)
      * submits it.  (A duplicate submit from a racing ref drop is benign: the
      * second drain finds the bumped generation and skips.) */
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     reclaim = (c.inode->refcnt == 0);
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     if (reclaim) {
         diskfs_reclaim_submit(c.thread->shared, c.inode->inum, c.inode->gen);
     }
@@ -976,9 +976,9 @@ diskfs_inode_orphaned(
 
     /* Shard-locked like every other ref drop, so it can't race a concurrent
      * deferred-mtime pin release. */
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     --inode->refcnt;
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     c->thread = thread;
     c->inode  = inode;
@@ -1004,13 +1004,13 @@ diskfs_inode_ref_drop(
                                                           inode->inum);
     int                        reclaim;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     --inode->refcnt;
     reclaim = (inode->refcnt == 0 && inode->nlink == 0);
     if (diskfs_inode_idle(inode) && !inode->on_lru) {
         diskfs_inode_lru_push_tail(shard, inode);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     if (reclaim) {
         diskfs_reclaim_submit(thread->shared, inode->inum, inode->gen);
@@ -1081,13 +1081,13 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
     uint32_t                  dev;
     uint64_t                  off;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     if (shared->orphans_scanned) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         return;
     }
     shared->orphans_scanned = 1;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     /* All reads here go through a transient evpl pump (VFIO-safe); the orphan
      * tree is not dirty at mount, so reading the on-disk image is correct. */
@@ -1099,7 +1099,7 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
      * never pumps to completion, hanging the mount.  Stamps each root with
      * its filesystem.  Holding shared->lock across the loads keeps the list
      * stable against a concurrent mkfs/rmfs (both rare at first-mount). */
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     {
         struct diskfs_fs *fsit;
 
@@ -1111,7 +1111,7 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
             }
         }
     }
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     /* Load each orphan-list shard inode (nlink 1) and read its tree from its
      * home block, collecting every recorded orphan inum + gen. */

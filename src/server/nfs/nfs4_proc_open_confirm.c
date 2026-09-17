@@ -58,7 +58,7 @@ chimera_nfs4_open_confirm(
     open_state = state_void;
     owner      = open_state->owner;
 
-    pthread_mutex_lock(&owner->lock);
+    evpl_mutex_lock(&owner->lock);
 
     seqid_class = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
                                             args->seqid);
@@ -68,7 +68,7 @@ chimera_nfs4_open_confirm(
          * resok carries the confirmed stateid. */
         res->status              = owner->replay.status;
         res->resok4.open_stateid = owner->replay.stateid;
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         chimera_nfs4_compound_complete(req, res->status);
@@ -76,7 +76,7 @@ chimera_nfs4_open_confirm(
     }
 
     if (seqid_class != NFS4_SEQID_NEW) {
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         res->status = NFS4ERR_BAD_SEQID;
@@ -88,7 +88,7 @@ chimera_nfs4_open_confirm(
      * A (non-replayed) confirm of an already-confirmed owner is a stale use of
      * the stateid. */
     if (owner->confirmed) {
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         res->status = NFS4ERR_BAD_STATEID;
@@ -103,7 +103,7 @@ chimera_nfs4_open_confirm(
     status = nfs4_stateid_check_seqid(open_state->seqid,
                                       args->open_stateid.seqid);
     if (status != NFS4_OK) {
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         res->status = status;
@@ -126,7 +126,7 @@ chimera_nfs4_open_confirm(
     nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN_CONFIRM,
                        NFS4_OK, &res->resok4.open_stateid);
 
-    pthread_mutex_unlock(&owner->lock);
+    evpl_mutex_unlock(&owner->lock);
 
     nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                             thread->vfs_thread);

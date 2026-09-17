@@ -4,7 +4,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <uthash.h>
 
 #include "fuse_node_table.h"
@@ -24,7 +24,7 @@ struct chimera_fuse_node {
 };
 
 struct chimera_fuse_node_table {
-    pthread_mutex_t           lock;
+    evpl_mutex_t           lock;
     struct chimera_fuse_node *by_id;
     struct chimera_fuse_node *by_fh;
     uint64_t                  next_nodeid;
@@ -35,7 +35,7 @@ chimera_fuse_node_table_create(void)
 {
     struct chimera_fuse_node_table *table = calloc(1, sizeof(*table));
 
-    pthread_mutex_init(&table->lock, NULL);
+    evpl_mutex_init(&table->lock, NULL);
 
     /* FUSE_ROOT_ID (1) is reserved for the mount root. */
     table->next_nodeid = 2;
@@ -58,7 +58,7 @@ chimera_fuse_node_table_destroy(struct chimera_fuse_node_table *table)
     }
 #endif /* ifndef __clang_analyzer__ */
 
-    pthread_mutex_destroy(&table->lock);
+    evpl_mutex_destroy(&table->lock);
 
     free(table);
 } /* chimera_fuse_node_table_destroy */
@@ -75,7 +75,7 @@ chimera_fuse_node_insert(
     chimera_fuse_node_abort_if(fh_len > CHIMERA_VFS_FH_SIZE,
                                "fuse node insert: fh_len %u exceeds max", fh_len);
 
-    pthread_mutex_lock(&table->lock);
+    evpl_mutex_lock(&table->lock);
 
     HASH_FIND(hh_fh, table->by_fh, fh, fh_len, node);
 
@@ -94,7 +94,7 @@ chimera_fuse_node_insert(
 
     nodeid = node->nodeid;
 
-    pthread_mutex_unlock(&table->lock);
+    evpl_mutex_unlock(&table->lock);
 
     return nodeid;
 } /* chimera_fuse_node_insert */
@@ -108,19 +108,19 @@ chimera_fuse_node_get_fh(
 {
     struct chimera_fuse_node *node;
 
-    pthread_mutex_lock(&table->lock);
+    evpl_mutex_lock(&table->lock);
 
     HASH_FIND(hh_id, table->by_id, &nodeid, sizeof(nodeid), node);
 
     if (!node) {
-        pthread_mutex_unlock(&table->lock);
+        evpl_mutex_unlock(&table->lock);
         return -1;
     }
 
     memcpy(fh_out, node->fh, node->fh_len);
     *fh_len_out = node->fh_len;
 
-    pthread_mutex_unlock(&table->lock);
+    evpl_mutex_unlock(&table->lock);
 
     return 0;
 } /* chimera_fuse_node_get_fh */
@@ -134,18 +134,18 @@ chimera_fuse_node_lookup(
 {
     struct chimera_fuse_node *node;
 
-    pthread_mutex_lock(&table->lock);
+    evpl_mutex_lock(&table->lock);
 
     HASH_FIND(hh_fh, table->by_fh, fh, fh_len, node);
 
     if (!node) {
-        pthread_mutex_unlock(&table->lock);
+        evpl_mutex_unlock(&table->lock);
         return -1;
     }
 
     *nodeid_out = node->nodeid;
 
-    pthread_mutex_unlock(&table->lock);
+    evpl_mutex_unlock(&table->lock);
 
     return 0;
 } /* chimera_fuse_node_lookup */
@@ -159,14 +159,14 @@ chimera_fuse_node_forget(
     struct chimera_fuse_node *node;
     int                       retired = 0;
 
-    pthread_mutex_lock(&table->lock);
+    evpl_mutex_lock(&table->lock);
 
     HASH_FIND(hh_id, table->by_id, &nodeid, sizeof(nodeid), node);
 
     /* A FORGET for an unknown nodeid is kernel/daemon count drift; there is
      * nothing to reply to, so note it and move on. */
     if (!node) {
-        pthread_mutex_unlock(&table->lock);
+        evpl_mutex_unlock(&table->lock);
         chimera_error("fuse", __FILE__, __LINE__,
                       "fuse forget for unknown nodeid %llu",
                       (unsigned long long) nodeid);
@@ -182,7 +182,7 @@ chimera_fuse_node_forget(
         node->lookup_count -= nlookup;
     }
 
-    pthread_mutex_unlock(&table->lock);
+    evpl_mutex_unlock(&table->lock);
 
     return retired;
 } /* chimera_fuse_node_forget */

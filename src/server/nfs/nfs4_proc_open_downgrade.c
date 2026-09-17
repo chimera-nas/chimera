@@ -55,7 +55,7 @@ chimera_nfs4_open_downgrade(
     open_state = state_void;
     owner      = open_state->owner;
 
-    pthread_mutex_lock(&owner->lock);
+    evpl_mutex_lock(&owner->lock);
 
     if (is_v40) {
         int seqid_class = nfs4_owner_seqid_classify(owner->seqid,
@@ -64,14 +64,14 @@ chimera_nfs4_open_downgrade(
         if (seqid_class == NFS4_SEQID_REPLAY) {
             res->status              = owner->replay.status;
             res->resok4.open_stateid = owner->replay.stateid;
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
         if (seqid_class != NFS4_SEQID_NEW) {
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = NFS4ERR_BAD_SEQID;
@@ -90,7 +90,7 @@ chimera_nfs4_open_downgrade(
                 nfs4_replay_record(&owner->replay, args->seqid,
                                    OP_OPEN_DOWNGRADE, status, NULL);
             }
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = status;
@@ -119,7 +119,7 @@ chimera_nfs4_open_downgrade(
             nfs4_replay_record(&owner->replay, args->seqid,
                                OP_OPEN_DOWNGRADE, NFS4ERR_INVAL, NULL);
         }
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         res->status = NFS4ERR_INVAL;
@@ -148,7 +148,7 @@ chimera_nfs4_open_downgrade(
                            NFS4_OK, &res->resok4.open_stateid);
     }
 
-    pthread_mutex_unlock(&owner->lock);
+    evpl_mutex_unlock(&owner->lock);
 
     /* RFC 7530 §16.19: the downgrade changes the *effective* share
      * reservation, so the cross-protocol claim that arbitrates against SMB

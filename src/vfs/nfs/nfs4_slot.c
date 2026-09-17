@@ -346,7 +346,7 @@ chimera_nfs4_slot_table_init(
     /* Hold the session for as long as this table holds ids out of its pool. */
     atomic_fetch_add(&session->refcnt, 1);
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
 
     chimera_nfs4_pool_apply_target(session);
 
@@ -374,7 +374,7 @@ chimera_nfs4_slot_table_init(
         st->floor++;
     }
 
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
 
     st->initialized = 1;
 } /* chimera_nfs4_slot_table_init */
@@ -440,7 +440,7 @@ chimera_nfs4_slot_table_destroy(struct chimera_nfs_client_server_thread *server_
             st->local_free[st->local_free_top++] = ctx->slot_id;
         }
 
-        pthread_mutex_lock(&session->lock);
+        evpl_mutex_lock(&session->lock);
         chimera_nfs4_pool_apply_target(session);
         {
             uint32_t usable = atomic_load_explicit(&session->usable, memory_order_relaxed);
@@ -458,7 +458,7 @@ chimera_nfs4_slot_table_destroy(struct chimera_nfs_client_server_thread *server_
         }
         st->leased = 0;
         st->floor  = 0;
-        pthread_mutex_unlock(&session->lock);
+        evpl_mutex_unlock(&session->lock);
     }
 
     while (st->ctx_freelist) {
@@ -509,7 +509,7 @@ chimera_nfs4_session_put(struct chimera_nfs4_client_session *session)
     }
 
     chimera_nfs4_session_pool_destroy(session);
-    pthread_mutex_destroy(&session->lock);
+    evpl_mutex_destroy(&session->lock);
     free(session);
 } /* chimera_nfs4_session_put */
 
@@ -585,9 +585,9 @@ chimera_nfs4_compound_call_cb(
             cnt = keep_floor;
         }
         if (cnt > 0) {
-            pthread_mutex_lock(&session->lock);
+            evpl_mutex_lock(&session->lock);
             chimera_nfs4_pool_return(session, st, cnt);
-            pthread_mutex_unlock(&session->lock);
+            evpl_mutex_unlock(&session->lock);
         }
     }
 
@@ -669,9 +669,9 @@ chimera_nfs4_compound_call(
             if (want > CHIMERA_NFS4_REFILL_BATCH) {
                 want = CHIMERA_NFS4_REFILL_BATCH;
             }
-            pthread_mutex_lock(&session->lock);
+            evpl_mutex_lock(&session->lock);
             chimera_nfs4_pool_borrow(session, st, shared, want);
-            pthread_mutex_unlock(&session->lock);
+            evpl_mutex_unlock(&session->lock);
         }
 
         if (st->local_free_top == 0) {

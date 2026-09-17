@@ -375,10 +375,10 @@ chimera_fuse_resume_post(struct chimera_fuse_request *req)
 {
     struct chimera_fuse_thread *thread = req->thread;
 
-    pthread_mutex_lock(&thread->resume_lock);
+    evpl_mutex_lock(&thread->resume_lock);
     req->next            = thread->resume_queue;
     thread->resume_queue = req;
-    pthread_mutex_unlock(&thread->resume_lock);
+    evpl_mutex_unlock(&thread->resume_lock);
 
     evpl_ring_doorbell(&thread->resume_doorbell);
 } /* chimera_fuse_resume_post */
@@ -391,10 +391,10 @@ chimera_fuse_resume_doorbell(
     struct chimera_fuse_thread  *thread = container_of(doorbell, struct chimera_fuse_thread, resume_doorbell);
     struct chimera_fuse_request *queue, *req;
 
-    pthread_mutex_lock(&thread->resume_lock);
+    evpl_mutex_lock(&thread->resume_lock);
     queue                = thread->resume_queue;
     thread->resume_queue = NULL;
-    pthread_mutex_unlock(&thread->resume_lock);
+    evpl_mutex_unlock(&thread->resume_lock);
 
     while (queue) {
         req   = queue;

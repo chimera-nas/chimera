@@ -302,7 +302,7 @@ chimera_fuse_lock_finish(struct chimera_fuse_request *req)
     struct chimera_fuse_lock_file *lf    = req->u.lock.lf;
     int                            error = req->u.lock.result_errno;
 
-    pthread_mutex_lock(&mount->lock_lock);
+    evpl_mutex_lock(&mount->lock_lock);
 
     if (req->u.lock.parked) {
         DL_DELETE2(mount->parked_locks, req, u.lock.park_prev, u.lock.park_next);
@@ -320,7 +320,7 @@ chimera_fuse_lock_finish(struct chimera_fuse_request *req)
 
     chimera_fuse_lock_file_maybe_free(mount, state, lf);
 
-    pthread_mutex_unlock(&mount->lock_lock);
+    evpl_mutex_unlock(&mount->lock_lock);
 
     chimera_fuse_reply(req, error, NULL, 0);
 } /* chimera_fuse_lock_finish */
@@ -372,7 +372,7 @@ chimera_fuse_setlk_unlock(
     struct chimera_fuse_open_file *file  = chimera_fuse_file(in->fh);
     struct chimera_fuse_lock_file *lf;
 
-    pthread_mutex_lock(&mount->lock_lock);
+    evpl_mutex_lock(&mount->lock_lock);
 
     lf = chimera_fuse_lock_file_get(mount, state, in->owner,
                                     file->handle, 0);
@@ -382,7 +382,7 @@ chimera_fuse_setlk_unlock(
         chimera_fuse_lock_file_maybe_free(mount, state, lf);
     }
 
-    pthread_mutex_unlock(&mount->lock_lock);
+    evpl_mutex_unlock(&mount->lock_lock);
 
     /* Unlocking a range with no locks in it succeeds (POSIX). */
     chimera_fuse_reply(req, 0, NULL, 0);
@@ -437,13 +437,13 @@ chimera_fuse_op_setlk(
     chimera_fuse_lock_lease_init(&entry->claim, mount, in->owner,
                                  entry->start, entry->end, entry->exclusive);
 
-    pthread_mutex_lock(&mount->lock_lock);
+    evpl_mutex_lock(&mount->lock_lock);
 
     lf = chimera_fuse_lock_file_get(mount, state, in->owner,
                                     file->handle, 1);
 
     if (!lf) {
-        pthread_mutex_unlock(&mount->lock_lock);
+        evpl_mutex_unlock(&mount->lock_lock);
         free(entry);
         chimera_fuse_reply(req, EIO, NULL, 0);
         return;
@@ -478,7 +478,7 @@ chimera_fuse_op_setlk(
              chimera_fuse_conflict_is_lock(&conflict))) {
             lf->pending--;
             chimera_fuse_lock_file_maybe_free(mount, state, lf);
-            pthread_mutex_unlock(&mount->lock_lock);
+            evpl_mutex_unlock(&mount->lock_lock);
             free(entry);
             chimera_fuse_reply(req, EAGAIN, NULL, 0);
             return;
@@ -499,7 +499,7 @@ chimera_fuse_op_setlk(
     req->u.lock.parked = 1;
     DL_APPEND2(mount->parked_locks, req, u.lock.park_prev, u.lock.park_next);
 
-    pthread_mutex_unlock(&mount->lock_lock);
+    evpl_mutex_unlock(&mount->lock_lock);
 
     /* wait=true so breakable cache holders are recalled and waited through;
      * wait_hard=false so a genuine lock conflict still completes rather than
@@ -537,12 +537,12 @@ chimera_fuse_locks_release_owner(
     key.owner   = owner;
     key.fh_hash = fh_hash;
 
-    pthread_mutex_lock(&mount->lock_lock);
+    evpl_mutex_lock(&mount->lock_lock);
 
     HASH_FIND(hh, mount->lock_files, &key, sizeof(key), lf);
 
     if (!lf) {
-        pthread_mutex_unlock(&mount->lock_lock);
+        evpl_mutex_unlock(&mount->lock_lock);
         return;
     }
 
@@ -562,7 +562,7 @@ chimera_fuse_locks_release_owner(
 
     chimera_fuse_lock_file_maybe_free(mount, state, lf);
 
-    pthread_mutex_unlock(&mount->lock_lock);
+    evpl_mutex_unlock(&mount->lock_lock);
 } /* chimera_fuse_locks_release_owner */
 
 int
@@ -574,7 +574,7 @@ chimera_fuse_locks_interrupt(
     struct chimera_fuse_request *parked;
     bool                         cancelled = false;
 
-    pthread_mutex_lock(&mount->lock_lock);
+    evpl_mutex_lock(&mount->lock_lock);
 
     DL_FOREACH2(mount->parked_locks, parked, u.lock.park_next)
     {
@@ -584,7 +584,7 @@ chimera_fuse_locks_interrupt(
     }
 
     if (!parked) {
-        pthread_mutex_unlock(&mount->lock_lock);
+        evpl_mutex_unlock(&mount->lock_lock);
         return 0;
     }
 
@@ -595,7 +595,7 @@ chimera_fuse_locks_interrupt(
         parked->u.lock.result_errno = EINTR;
     }
 
-    pthread_mutex_unlock(&mount->lock_lock);
+    evpl_mutex_unlock(&mount->lock_lock);
 
     if (cancelled) {
         /* The grant callback will never fire; complete with EINTR on the
@@ -621,16 +621,16 @@ chimera_fuse_locks_shutdown(
     /* Cancel parked acquires first; each cancelled request completes with
      * EINTR on its owning thread (still alive: stop() runs before the
      * thread pool is torn down). */
-    pthread_mutex_lock(&mount->lock_lock);
+    evpl_mutex_lock(&mount->lock_lock);
 
     DL_FOREACH_SAFE2(mount->parked_locks, parked, ptmp, u.lock.park_next)
     {
         if (chimera_vfs_claim_cancel(state,
                                      &parked->u.lock.entry->ticket)) {
             parked->u.lock.result_errno = EINTR;
-            pthread_mutex_unlock(&mount->lock_lock);
+            evpl_mutex_unlock(&mount->lock_lock);
             chimera_fuse_resume_post(parked);
-            pthread_mutex_lock(&mount->lock_lock);
+            evpl_mutex_lock(&mount->lock_lock);
         }
     }
 
@@ -650,5 +650,5 @@ chimera_fuse_locks_shutdown(
         chimera_fuse_lock_file_maybe_free(mount, state, lf);
     }
 
-    pthread_mutex_unlock(&mount->lock_lock);
+    evpl_mutex_unlock(&mount->lock_lock);
 } /* chimera_fuse_locks_shutdown */

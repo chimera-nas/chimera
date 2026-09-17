@@ -38,7 +38,7 @@ struct chimera_vfs_rpl_cache_entry {
 struct chimera_vfs_rpl_cache_shard {
     struct chimera_vfs_rpl_cache_entry **fwd_entries; /* forward index slots */
     struct chimera_vfs_rpl_cache_entry **rev_entries; /* reverse index slots */
-    pthread_mutex_t                      entry_lock;
+    evpl_mutex_t                      entry_lock;
 };
 
 struct chimera_vfs_rpl_cache {
@@ -96,7 +96,7 @@ chimera_vfs_rpl_cache_create(
         shard->rev_entries = calloc(cache->num_slots * cache->num_entries,
                                     sizeof(struct chimera_vfs_rpl_cache_entry *));
 
-        pthread_mutex_init(&shard->entry_lock, NULL);
+        evpl_mutex_init(&shard->entry_lock, NULL);
     }
 
     return cache;
@@ -126,7 +126,7 @@ chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
         free(shard->fwd_entries);
         free(shard->rev_entries);
 
-        pthread_mutex_destroy(&shard->entry_lock);
+        evpl_mutex_destroy(&shard->entry_lock);
     }
 
     chimera_rcu_pool_destroy(&cache->pool);
@@ -335,7 +335,7 @@ chimera_vfs_rpl_cache_insert(
 
     /* Insert into forward index */
     urcu_qsbr_read_lock();
-    pthread_mutex_lock(&shard->entry_lock);
+    evpl_mutex_lock(&shard->entry_lock);
 
     slot     = &shard->fwd_entries[chimera_vfs_rpl_cache_fwd_slot(cache, fwd_key)];
     slot_end = slot + cache->num_entries;
@@ -391,7 +391,7 @@ chimera_vfs_rpl_cache_insert(
     /* Insert into reverse index */
     chimera_vfs_rpl_cache_rev_insert(cache, shard, entry);
 
-    pthread_mutex_unlock(&shard->entry_lock);
+    evpl_mutex_unlock(&shard->entry_lock);
     urcu_qsbr_read_unlock();
 
     if (best_entry) {
@@ -429,7 +429,7 @@ chimera_vfs_rpl_cache_invalidate(
     for (shard_idx = 0; shard_idx < cache->num_shards; shard_idx++) {
         shard = &cache->shards[shard_idx];
 
-        pthread_mutex_lock(&shard->entry_lock);
+        evpl_mutex_lock(&shard->entry_lock);
 
         slot     = &shard->rev_entries[(rev_key & cache->num_slots_mask) << cache->num_entries_bits];
         slot_end = slot + cache->num_entries;
@@ -470,7 +470,7 @@ chimera_vfs_rpl_cache_invalidate(
             slot++;
         }
 
-        pthread_mutex_unlock(&shard->entry_lock);
+        evpl_mutex_unlock(&shard->entry_lock);
 
         if (removed_entry) {
             break;

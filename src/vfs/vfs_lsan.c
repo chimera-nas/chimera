@@ -16,7 +16,7 @@ const char *
 __lsan_default_suppressions(void)
 {
     return
-        /* OpenSSL one-time global initialization (via pthread_once) */
+        /* OpenSSL one-time global initialization (via evpl_once) */
         "leak:CONF_modules_load\n"
         "leak:ossl_init_config_ossl_\n"
         "leak:CRYPTO_malloc\n"

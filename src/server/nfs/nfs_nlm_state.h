@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <uthash.h>
 #include <utlist.h>
 
@@ -81,7 +81,7 @@ struct nlm_client {
  * All mutations are protected by mutex.
  */
 struct nlm_state {
-    pthread_mutex_t    mutex;
+    evpl_mutex_t    mutex;
     struct nlm_client *clients;             /* uthash table, keyed by hostname */
     int                in_grace;            /* non-zero during grace period */
     time_t             grace_end;           /* time_t when grace period expires */

@@ -61,14 +61,14 @@ chimera_nfs4_locku(
     chimera_nfs_abort_if(!lock_owner, "lock_state without lock_owner");
 
     if (is_v40 && lock_owner) {
-        pthread_mutex_lock(&lock_owner->lock);
+        evpl_mutex_lock(&lock_owner->lock);
         int seqid_class = nfs4_owner_seqid_classify(lock_owner->seqid,
                                                     &lock_owner->replay,
                                                     args->seqid);
         if (seqid_class == NFS4_SEQID_REPLAY) {
             res->status       = lock_owner->replay.status;
             res->lock_stateid = lock_owner->replay.stateid;
-            pthread_mutex_unlock(&lock_owner->lock);
+            evpl_mutex_unlock(&lock_owner->lock);
             nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
@@ -76,7 +76,7 @@ chimera_nfs4_locku(
             return;
         }
         if (seqid_class != NFS4_SEQID_NEW) {
-            pthread_mutex_unlock(&lock_owner->lock);
+            evpl_mutex_unlock(&lock_owner->lock);
             nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
@@ -84,7 +84,7 @@ chimera_nfs4_locku(
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
-        pthread_mutex_unlock(&lock_owner->lock);
+        evpl_mutex_unlock(&lock_owner->lock);
     }
 
     /* RFC 7530 §9.1.4.2: a stale lock-stateid seqid is NFS4ERR_OLD_STATEID
@@ -219,11 +219,11 @@ chimera_nfs4_locku(
 
     /* RFC 7530 §9.1.7: record cached reply for the lock_owner. */
     if (is_v40 && lock_owner) {
-        pthread_mutex_lock(&lock_owner->lock);
+        evpl_mutex_lock(&lock_owner->lock);
         lock_owner->seqid = args->seqid;
         nfs4_replay_record(&lock_owner->replay, args->seqid, OP_LOCKU,
                            NFS4_OK, &res->lock_stateid);
-        pthread_mutex_unlock(&lock_owner->lock);
+        evpl_mutex_unlock(&lock_owner->lock);
     }
 
     nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,

@@ -9,7 +9,7 @@
 #include <stdatomic.h>
 #include <ctype.h>
 #include <time.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
@@ -47,7 +47,7 @@ chimera_s3_multipart_table_create(int nbuckets)
     table           = calloc(1, sizeof(*table));
     table->nbuckets = nbuckets;
     table->buckets  = calloc(nbuckets, sizeof(*table->buckets));
-    pthread_rwlock_init(&table->lock, NULL);
+    evpl_rwlock_init(&table->lock, NULL);
 
     return table;
 } /* chimera_s3_multipart_table_create */
@@ -63,7 +63,7 @@ chimera_s3_multipart_upload_free_now(struct chimera_s3_multipart_upload *upload)
     free(upload->bucket_name);
     free(upload->object_key);
     free(upload->tagging);
-    pthread_mutex_destroy(&upload->lock);
+    evpl_mutex_destroy(&upload->lock);
     free(upload);
 } /* chimera_s3_multipart_upload_free_now */
 
@@ -93,7 +93,7 @@ chimera_s3_multipart_table_destroy(struct chimera_s3_multipart_table *table)
         }
     }
 
-    pthread_rwlock_destroy(&table->lock);
+    chimera_rwlock_destroy(&table->lock);
     free(table->buckets);
     free(table);
 } /* chimera_s3_multipart_table_destroy */
@@ -159,21 +159,21 @@ chimera_s3_multipart_table_insert(
     upload->bucket_fhlen = bucket_fhlen;
 
     clock_gettime(CLOCK_REALTIME, &upload->created);
-    pthread_mutex_init(&upload->lock, NULL);
+    evpl_mutex_init(&upload->lock, NULL);
     upload->refcount = 1; /* the table itself */
     upload->removed  = 0;
     upload->parts    = NULL;
 
     bucket_idx = chimera_s3_multipart_hash(upload->upload_id) % table->nbuckets;
 
-    pthread_rwlock_wrlock(&table->lock);
+    evpl_rwlock_wrlock(&table->lock);
     upload->prev = NULL;
     upload->next = table->buckets[bucket_idx];
     if (table->buckets[bucket_idx]) {
         table->buckets[bucket_idx]->prev = upload;
     }
     table->buckets[bucket_idx] = upload;
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     return upload;
 } /* chimera_s3_multipart_table_insert */
@@ -193,17 +193,17 @@ chimera_s3_multipart_table_lookup(
 
     bucket_idx = chimera_s3_multipart_hash(upload_id) % table->nbuckets;
 
-    pthread_rwlock_rdlock(&table->lock);
+    evpl_rwlock_rdlock(&table->lock);
     for (upload = table->buckets[bucket_idx]; upload; upload = upload->next) {
         if (memcmp(upload->upload_id, upload_id, CHIMERA_S3_UPLOAD_ID_LEN) == 0 &&
             !upload->removed) {
-            pthread_mutex_lock(&upload->lock);
+            evpl_mutex_lock(&upload->lock);
             upload->refcount++;
-            pthread_mutex_unlock(&upload->lock);
+            evpl_mutex_unlock(&upload->lock);
             break;
         }
     }
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     return upload;
 } /* chimera_s3_multipart_table_lookup */
@@ -215,12 +215,12 @@ chimera_s3_multipart_upload_release(
 {
     int free_now = 0;
 
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     upload->refcount--;
     if (upload->refcount == 0 && upload->removed) {
         free_now = 1;
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
 
     if (free_now) {
         struct chimera_s3_part *part, *next;
@@ -249,7 +249,7 @@ chimera_s3_multipart_table_detach(
 
     bucket_idx = chimera_s3_multipart_hash(upload_id) % table->nbuckets;
 
-    pthread_rwlock_wrlock(&table->lock);
+    evpl_rwlock_wrlock(&table->lock);
     for (upload = table->buckets[bucket_idx]; upload; upload = upload->next) {
         if (memcmp(upload->upload_id, upload_id, CHIMERA_S3_UPLOAD_ID_LEN) == 0 &&
             !upload->removed) {
@@ -267,7 +267,7 @@ chimera_s3_multipart_table_detach(
             break;
         }
     }
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     return upload;
 } /* chimera_s3_multipart_table_detach */
@@ -544,7 +544,7 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
     }
 
     /* Insert sorted; replace if part_number already present. */
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     prev = NULL;
     cur  = upload->parts;
     while (cur && cur->part_number < part->part_number) {
@@ -568,7 +568,7 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
             upload->parts = part;
         }
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
 
     if (replaced) {
         chimera_s3_multipart_part_destroy_async(thread, replaced);
@@ -2389,9 +2389,9 @@ chimera_s3_complete_finish_common(
             /* Drop the table's implicit (insert) ref now that it is unlinked. */
             chimera_s3_multipart_upload_release(thread, ctx->upload);
         } else {
-            pthread_mutex_lock(&ctx->upload->lock);
+            evpl_mutex_lock(&ctx->upload->lock);
             ctx->upload->completing = 0;
-            pthread_mutex_unlock(&ctx->upload->lock);
+            evpl_mutex_unlock(&ctx->upload->lock);
         }
         /* Drop our (ctx) ref. On success this is the last ref -> free + async
          * part cleanup. On failure the table's ref remains, keeping it alive. */
@@ -3006,7 +3006,7 @@ chimera_s3_complete_multipart_upload_body_done(
         return;
     }
 
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     err = chimera_s3_validate_complete_manifest(client_parts, n_client,
                                                 upload, &server_parts);
 
@@ -3017,7 +3017,7 @@ chimera_s3_complete_multipart_upload_body_done(
          * rather than assembling again. */
         uint64_t combined[2];
 
-        pthread_mutex_unlock(&upload->lock);
+        evpl_mutex_unlock(&upload->lock);
         free(server_parts);
         chimera_s3_multipart_upload_release(thread, upload);
 
@@ -3040,7 +3040,7 @@ chimera_s3_complete_multipart_upload_body_done(
          * retried Complete still resolves it) until assembly succeeds. */
         upload->completing = 1;
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
     free(client_parts);
 
     if (err != CHIMERA_S3_STATUS_OK) {
@@ -3200,7 +3200,7 @@ chimera_s3_list_parts(
     is_truncated = 0;
     next_marker  = 0;
 
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     for (part = upload->parts; part; part = part->next) {
         if (part->part_number <= marker) {
             continue;
@@ -3253,7 +3253,7 @@ chimera_s3_list_parts(
         chimera_s3_mp_append(&bp, "  </Part>\n");
         emitted++;
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
 
     /* Owner / Initiator. No per-user identity model exists yet, so emit a
      * stable placeholder identity. */
@@ -3326,7 +3326,7 @@ chimera_s3_list_multipart_uploads(
         request->multipart.upload_id_marker : NULL;
 
     /* Snapshot matching uploads out from under the table lock. */
-    pthread_rwlock_rdlock(&table->lock);
+    evpl_rwlock_rdlock(&table->lock);
     for (i = 0; i < table->nbuckets; i++) {
         for (upload = table->buckets[i]; upload; upload = upload->next) {
             if (upload->removed) {
@@ -3348,7 +3348,7 @@ chimera_s3_list_multipart_uploads(
             n++;
         }
     }
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     /* Sort by (key, upload-id) so pagination markers are well-defined. */
     if (n > 1) {

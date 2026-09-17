@@ -124,7 +124,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     /* Create watch on first CHANGE_NOTIFY for this open */
     if (!open_file->notify_state) {
         state = calloc(1, sizeof(*state));
-        pthread_mutex_init(&state->lock, NULL);
+        evpl_mutex_init(&state->lock, NULL);
 
         state->watch = chimera_vfs_notify_watch_create(
             vfs_notify,
@@ -152,7 +152,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
      * otherwise an event arriving between them is lost: callback sees
      * pending == NULL and returns, then we install the new pending but
      * no further callback fires until the next event. */
-    pthread_mutex_lock(&state->lock);
+    evpl_mutex_lock(&state->lock);
 
     /* A request already outstanding on this handle owns the ring until it is
      * answered, so this one parks behind it rather than draining ahead of it.
@@ -179,7 +179,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
      * STATUS_DELETE_PENDING.  DELETE takes precedence over any buffered
      * events, matching MS-SMB2 3.3.4.4 and the send_response classification. */
     if (chimera_vfs_notify_watch_take_deleted(state->watch)) {
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_DELETE_PENDING);
         return;
@@ -206,7 +206,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     nevents = chimera_smb_notify_coalesce_events(events, nevents);
 
     if (nevents > 0 || overflowed) {
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
 
         /* If serializing all events at the client's OutputBufferLength
          * would truncate the stream, escalate to NOTIFY_ENUM_DIR rather
@@ -282,7 +282,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
      * never reach this check. */
     if (request->compound->num_requests > 1 &&
         request != request->compound->requests[request->compound->num_requests - 1]) {
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
@@ -302,7 +302,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
 
         if (conn->async_outstanding >=
             (uint32_t) shared->config.smb2_max_async_credits - 1) {
-            pthread_mutex_unlock(&state->lock);
+            evpl_mutex_unlock(&state->lock);
             chimera_smb_open_file_release(request, open_file);
             chimera_smb_complete_request(request,
                                          SMB2_STATUS_INSUFFICIENT_RESOURCES);
@@ -316,7 +316,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
         /* OOM — bail out cleanly instead of NULL-dereffing.  state->lock
          * was held going into the park path; the open_file resolve ref
          * is still owned by the request. */
-        pthread_mutex_unlock(&state->lock);
+        evpl_mutex_unlock(&state->lock);
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request,
                                      SMB2_STATUS_INSUFFICIENT_RESOURCES);
@@ -345,7 +345,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     chimera_smb_secure_send_snapshot(request, &nr->secure);
 
     chimera_smb_notify_q_push(state, nr);
-    pthread_mutex_unlock(&state->lock);
+    evpl_mutex_unlock(&state->lock);
 
     /* Add to connection's parked notify list for CANCEL lookup.
      * conn->parked_notifies is single-threaded under the connection's

@@ -1531,10 +1531,10 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
 {
     struct diskfs_iq_channel *head, *ch;
 
-    pthread_mutex_lock(&il->registration_lock);
+    evpl_mutex_lock(&il->registration_lock);
     head             = il->pending_head;
     il->pending_head = NULL;
-    pthread_mutex_unlock(&il->registration_lock);
+    evpl_mutex_unlock(&il->registration_lock);
 
     while (head) {
         ch               = head;
@@ -2375,11 +2375,11 @@ diskfs_txn_commit_finish(
                                    tb->block->device_offset);
             XXH128_hash_t              snap_hash;
 
-            pthread_mutex_lock(&bshard->lock);
+            evpl_mutex_lock(&bshard->lock);
             diskfs_block_buf_ref_locked(tb->block->buf);
             tb->snap     = tb->block->iov;
             tb->snap_buf = tb->block->buf;
-            pthread_mutex_unlock(&bshard->lock);
+            evpl_mutex_unlock(&bshard->lock);
 
             /* Hash the snapshotted image here, on the submitting worker, so the
              * single IL thread never hashes 4 KiB/block -- it just copies this

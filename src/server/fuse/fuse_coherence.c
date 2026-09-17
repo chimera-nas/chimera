@@ -55,10 +55,10 @@ chimera_fuse_notice_post(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_notice *notice)
 {
-    pthread_mutex_lock(&shared->notifier_lock);
+    evpl_mutex_lock(&shared->notifier_lock);
     LL_APPEND(shared->notices, notice);
-    pthread_cond_signal(&shared->notifier_cond);
-    pthread_mutex_unlock(&shared->notifier_lock);
+    evpl_cond_signal(&shared->notifier_cond);
+    evpl_mutex_unlock(&shared->notifier_lock);
 } /* chimera_fuse_notice_post */
 
 /* One non-reply write to the mount's primary channel.  ENOENT means the
@@ -198,14 +198,14 @@ chimera_fuse_grant_resolve(
 
     atomic_store(&grant->state, CHIMERA_FUSE_GRANT_BROKEN);
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
 
     if (atomic_fetch_sub(&grant->refcount, 1) == 1) {
         HASH_DELETE(hh, mount->grants, grant);
         free_grant = 1;
     }
 
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     if (free_grant) {
         chimera_vfs_state_put(state, grant->file_state);
@@ -231,24 +231,24 @@ chimera_fuse_dirwatch_drain(
     int                                   nevents, overflowed, i;
     int                                   touched = 0;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
 
     HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
 
     if (!dw || !dw->watch) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         return;
     }
 
     /* Re-arm BEFORE draining: an event landing after the drain must
      * queue a fresh notice or it would sit in the queue forever. */
-    pthread_mutex_lock(&mount->dir_notifier_lock);
+    evpl_mutex_lock(&mount->dir_notifier_lock);
     dw->queued = 0;
-    pthread_mutex_unlock(&mount->dir_notifier_lock);
+    evpl_mutex_unlock(&mount->dir_notifier_lock);
 
     sev = chimera_vfs_notify_drain_sync(dw->watch);
 
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     if (sev) {
         touched = 1;
@@ -275,18 +275,18 @@ chimera_fuse_dirwatch_drain(
     }
 
     for (;;) {
-        pthread_mutex_lock(&mount->grant_lock);
+        evpl_mutex_lock(&mount->grant_lock);
 
         HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
 
         if (!dw || !dw->watch) {
-            pthread_mutex_unlock(&mount->grant_lock);
+            evpl_mutex_unlock(&mount->grant_lock);
             return;
         }
 
         nevents = chimera_vfs_notify_drain(dw->watch, events, 16, &overflowed);
 
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
 
         if (nevents > 0 || overflowed) {
             touched = 1;
@@ -326,11 +326,11 @@ chimera_fuse_notifier(void *arg)
     struct chimera_fuse_shared *shared = arg;
     struct chimera_fuse_notice *notice;
 
-    pthread_mutex_lock(&shared->notifier_lock);
+    evpl_mutex_lock(&shared->notifier_lock);
 
     for (;;) {
         while (!shared->notices && !shared->notifier_stop) {
-            pthread_cond_wait(&shared->notifier_cond, &shared->notifier_lock);
+            evpl_cond_wait(&shared->notifier_cond, &shared->notifier_lock);
         }
 
         if (!shared->notices) {
@@ -341,7 +341,7 @@ chimera_fuse_notifier(void *arg)
         notice          = shared->notices;
         shared->notices = notice->next;
 
-        pthread_mutex_unlock(&shared->notifier_lock);
+        evpl_mutex_unlock(&shared->notifier_lock);
 
         switch (notice->type) {
             case CHIMERA_FUSE_NOTICE_INVAL_FILE:
@@ -354,10 +354,10 @@ chimera_fuse_notifier(void *arg)
 
         free(notice);
 
-        pthread_mutex_lock(&shared->notifier_lock);
+        evpl_mutex_lock(&shared->notifier_lock);
     }
 
-    pthread_mutex_unlock(&shared->notifier_lock);
+    evpl_mutex_unlock(&shared->notifier_lock);
 
     return NULL;
 } /* chimera_fuse_notifier */
@@ -377,11 +377,11 @@ chimera_fuse_dir_notifier(void *arg)
     struct chimera_fuse_mount  *mount = arg;
     struct chimera_fuse_notice *notice;
 
-    pthread_mutex_lock(&mount->dir_notifier_lock);
+    evpl_mutex_lock(&mount->dir_notifier_lock);
 
     for (;;) {
         while (!mount->dir_notices && !mount->dir_notifier_stop) {
-            pthread_cond_wait(&mount->dir_notifier_cond,
+            evpl_cond_wait(&mount->dir_notifier_cond,
                               &mount->dir_notifier_lock);
         }
 
@@ -392,16 +392,16 @@ chimera_fuse_dir_notifier(void *arg)
         notice             = mount->dir_notices;
         mount->dir_notices = notice->next;
 
-        pthread_mutex_unlock(&mount->dir_notifier_lock);
+        evpl_mutex_unlock(&mount->dir_notifier_lock);
 
         chimera_fuse_dirwatch_drain(mount->shared, mount, notice->nodeid);
 
         free(notice);
 
-        pthread_mutex_lock(&mount->dir_notifier_lock);
+        evpl_mutex_lock(&mount->dir_notifier_lock);
     }
 
-    pthread_mutex_unlock(&mount->dir_notifier_lock);
+    evpl_mutex_unlock(&mount->dir_notifier_lock);
 
     return NULL;
 } /* chimera_fuse_dir_notifier */
@@ -412,14 +412,14 @@ chimera_fuse_notifier_start(struct chimera_fuse_shared *shared)
     int m;
 
     shared->notifier_stop = 0;
-    pthread_create(&shared->notifier, NULL, chimera_fuse_notifier, shared);
+    evpl_native_thread_create(&shared->notifier, NULL, chimera_fuse_notifier, shared);
     shared->notifier_running = 1;
 
     for (m = 0; m < shared->num_mounts; m++) {
         struct chimera_fuse_mount *mount = &shared->mounts[m];
 
         mount->dir_notifier_stop = 0;
-        pthread_create(&mount->dir_notifier, NULL,
+        evpl_native_thread_create(&mount->dir_notifier, NULL,
                        chimera_fuse_dir_notifier, mount);
         mount->dir_notifier_running = 1;
     }
@@ -437,12 +437,12 @@ chimera_fuse_notifier_stop(struct chimera_fuse_shared *shared)
             continue;
         }
 
-        pthread_mutex_lock(&mount->dir_notifier_lock);
+        evpl_mutex_lock(&mount->dir_notifier_lock);
         mount->dir_notifier_stop = 1;
-        pthread_cond_signal(&mount->dir_notifier_cond);
-        pthread_mutex_unlock(&mount->dir_notifier_lock);
+        evpl_cond_signal(&mount->dir_notifier_cond);
+        evpl_mutex_unlock(&mount->dir_notifier_lock);
 
-        pthread_join(mount->dir_notifier, NULL);
+        evpl_native_thread_join(mount->dir_notifier, NULL);
 
         mount->dir_notifier_running = 0;
     }
@@ -451,12 +451,12 @@ chimera_fuse_notifier_stop(struct chimera_fuse_shared *shared)
         return;
     }
 
-    pthread_mutex_lock(&shared->notifier_lock);
+    evpl_mutex_lock(&shared->notifier_lock);
     shared->notifier_stop = 1;
-    pthread_cond_signal(&shared->notifier_cond);
-    pthread_mutex_unlock(&shared->notifier_lock);
+    evpl_cond_signal(&shared->notifier_cond);
+    evpl_mutex_unlock(&shared->notifier_lock);
 
-    pthread_join(shared->notifier, NULL);
+    evpl_native_thread_join(shared->notifier, NULL);
 
     shared->notifier_running = 0;
 } /* chimera_fuse_notifier_stop */
@@ -568,13 +568,13 @@ chimera_fuse_grant_ensure(
     struct chimera_fuse_grant *grant;
     int                        rc;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
 
     HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
 
     if (grant) {
         if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE) {
-            pthread_mutex_unlock(&mount->grant_lock);
+            evpl_mutex_unlock(&mount->grant_lock);
             return CHIMERA_FUSE_COVER_HELD;
         }
 
@@ -585,7 +585,7 @@ chimera_fuse_grant_ensure(
             rc = CHIMERA_FUSE_COVER_FRESH;
         }
 
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         return rc;
     }
 
@@ -605,13 +605,13 @@ chimera_fuse_grant_ensure(
                                               grant->fh_hash, true);
 
     if (!grant->file_state) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         free(grant);
         return CHIMERA_FUSE_COVER_NONE;
     }
 
     if (chimera_fuse_grant_arm(state, grant) != 0) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         chimera_vfs_state_put(state, grant->file_state);
         free(grant);
         return CHIMERA_FUSE_COVER_NONE;
@@ -619,7 +619,7 @@ chimera_fuse_grant_ensure(
 
     HASH_ADD(hh, mount->grants, nodeid, sizeof(grant->nodeid), grant);
 
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     return CHIMERA_FUSE_COVER_FRESH;
 } /* chimera_fuse_grant_ensure */
@@ -636,17 +636,17 @@ chimera_fuse_cover_touch(
     struct chimera_fuse_grant    *grant;
     int                           have_grant;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
     HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
     have_grant = grant != NULL;
     if (!have_grant) {
         HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
         if (dw) {
-            pthread_mutex_unlock(&mount->grant_lock);
+            evpl_mutex_unlock(&mount->grant_lock);
             return CHIMERA_FUSE_COVER_HELD;
         }
     }
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     if (have_grant) {
         /* Known regular file: re-arm through the normal path (drops and
@@ -670,10 +670,10 @@ chimera_fuse_grant_active(
     struct chimera_fuse_grant *grant;
     int                        active;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
     HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
     active = grant && atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE;
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     return active;
 } /* chimera_fuse_grant_active */
@@ -698,12 +698,12 @@ chimera_fuse_grant_forget(
     struct chimera_fuse_grant *grant;
     int                        free_grant = 0;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
 
     HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
 
     if (!grant) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         return;
     }
 
@@ -718,7 +718,7 @@ chimera_fuse_grant_forget(
         free_grant = 1;
     }
 
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     if (free_grant) {
         chimera_vfs_state_put(state, grant->file_state);
@@ -748,10 +748,10 @@ chimera_fuse_dirwatch_cb(
     struct chimera_fuse_mount    *mount = dw->mount;
     struct chimera_fuse_notice   *notice;
 
-    pthread_mutex_lock(&mount->dir_notifier_lock);
+    evpl_mutex_lock(&mount->dir_notifier_lock);
 
     if (dw->queued) {
-        pthread_mutex_unlock(&mount->dir_notifier_lock);
+        evpl_mutex_unlock(&mount->dir_notifier_lock);
         return;
     }
 
@@ -764,9 +764,9 @@ chimera_fuse_dirwatch_cb(
     notice->nodeid = dw->nodeid;
 
     LL_APPEND(mount->dir_notices, notice);
-    pthread_cond_signal(&mount->dir_notifier_cond);
+    evpl_cond_signal(&mount->dir_notifier_cond);
 
-    pthread_mutex_unlock(&mount->dir_notifier_lock);
+    evpl_mutex_unlock(&mount->dir_notifier_lock);
 } /* chimera_fuse_dirwatch_cb */
 
 int
@@ -782,12 +782,12 @@ chimera_fuse_watch_dir(
 
     (void) thread;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
 
     HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
 
     if (dw) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         return CHIMERA_FUSE_COVER_HELD;
     }
 
@@ -802,7 +802,7 @@ chimera_fuse_watch_dir(
                                                 chimera_fuse_dirwatch_cb, dw);
 
     if (!dw->watch) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         free(dw);
         return CHIMERA_FUSE_COVER_NONE;
     }
@@ -817,7 +817,7 @@ chimera_fuse_watch_dir(
 
     HASH_ADD(hh, mount->dirwatches, nodeid, sizeof(dw->nodeid), dw);
 
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     return CHIMERA_FUSE_COVER_FRESH;
 } /* chimera_fuse_watch_dir */
@@ -830,12 +830,12 @@ chimera_fuse_watch_forget(
 {
     struct chimera_fuse_dirwatch *dw;
 
-    pthread_mutex_lock(&mount->grant_lock);
+    evpl_mutex_lock(&mount->grant_lock);
 
     HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
 
     if (!dw) {
-        pthread_mutex_unlock(&mount->grant_lock);
+        evpl_mutex_unlock(&mount->grant_lock);
         return;
     }
 
@@ -846,7 +846,7 @@ chimera_fuse_watch_forget(
      * so after this returns no callback can touch dw again. */
     chimera_vfs_notify_watch_destroy(vfs->vfs_notify, dw->watch);
 
-    pthread_mutex_unlock(&mount->grant_lock);
+    evpl_mutex_unlock(&mount->grant_lock);
 
     free(dw);
 } /* chimera_fuse_watch_forget */

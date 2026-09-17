@@ -1141,8 +1141,8 @@ diskfs_init(
     json_decref(cfg);
 
 
-    pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->gen_lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->gen_lock, NULL);
     diskfs_metrics_init(shared, metrics);
 
     /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
@@ -1344,7 +1344,7 @@ diskfs_init(
     }
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
         rb_tree_init(&shared->inode_cache->shards[i].inodes);
-        pthread_mutex_init(&shared->inode_cache->shards[i].lock, NULL);
+        evpl_mutex_init(&shared->inode_cache->shards[i].lock, NULL);
     }
 
     /* Block cache: sharded RCU hash of 4 KiB device blocks. */
@@ -1356,7 +1356,7 @@ diskfs_init(
 
     for (i = 0; i < shared->num_kv_shards; i++) {
         rb_tree_init(&shared->kv_shards[i].entries);
-        pthread_mutex_init(&shared->kv_shards[i].lock, NULL);
+        evpl_mutex_init(&shared->kv_shards[i].lock, NULL);
     }
 
     /* Bring up the intent log thread.  Spin until its init has registered
@@ -1372,7 +1372,7 @@ diskfs_init(
     shared->intent_log.ctx_pool     = NULL;
     shared->intent_log.apply_ready  = 0;      /* Stage B: apply thread */
     shared->intent_log.applied_seq  = 0;
-    pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
+    evpl_mutex_init(&shared->intent_log.registration_lock, NULL);
 
     /* Commit thread first: it allocates the cross-thread hand-off ring the
      * push thread consumes, and opens the intent-log device queue. */
@@ -1475,9 +1475,9 @@ diskfs_bootstrap_orphans(struct diskfs_thread *thread)
     struct diskfs_mount_io *mio;
 
     /* Guard against concurrent first-touch from multiple workers. */
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     if (shared->orphans_created) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         return;
     }
 
@@ -1585,7 +1585,7 @@ diskfs_bootstrap_orphans(struct diskfs_thread *thread)
 
     diskfs_mount_io_close(mio);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 } /* diskfs_bootstrap_orphans */
 
 
@@ -1645,7 +1645,7 @@ diskfs_teardown(
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
         rb_tree_destroy(&shared->inode_cache->shards[i].inodes,
                         diskfs_inode_cache_release, NULL);
-        pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
+        evpl_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 
     /* Shut down the intent-log threads before tearing down anything they
@@ -1689,7 +1689,7 @@ diskfs_teardown(
         }
     }
 
-    pthread_mutex_destroy(&shared->intent_log.registration_lock);
+    evpl_mutex_destroy(&shared->intent_log.registration_lock);
     free(shared->intent_log.handoff);
     free(shared->intent_log.apply_queue);   /* Stage B */
     free(shared->intent_log.metrics.block_io_device_ops);
@@ -1765,14 +1765,14 @@ diskfs_teardown(
         fs = fs_tmp;
     }
 
-    pthread_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->lock);
     free(shared->devices);
     free(shared->inode_cache);
 
     /* Clean up KV shards */
     for (i = 0; i < shared->num_kv_shards; i++) {
         rb_tree_destroy(&shared->kv_shards[i].entries, diskfs_kv_entry_release, NULL);
-        pthread_mutex_destroy(&shared->kv_shards[i].lock);
+        evpl_mutex_destroy(&shared->kv_shards[i].lock);
     }
     free(shared->kv_shards);
 
@@ -1827,7 +1827,7 @@ diskfs_thread_init(
     /* Inode lock-grant delivery queue + doorbell.  Register its poll before
      * the block-device queue polls so granted inode waiters are resumed before
      * the worker spends a loop iteration polling every VFIO queue. */
-    pthread_mutex_init(&thread->grant_lock, NULL);
+    evpl_mutex_init(&thread->grant_lock, NULL);
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
     __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELAXED);
@@ -1843,7 +1843,7 @@ diskfs_thread_init(
     }
 
     /* B+tree op resume queue: doorbell (cross-thread) + deferral (same-thread). */
-    pthread_mutex_init(&thread->resume_lock, NULL);
+    evpl_mutex_init(&thread->resume_lock, NULL);
     thread->resume_head            = NULL;
     thread->resume_tail            = NULL;
     thread->bt_op_free_list        = NULL;
@@ -1854,9 +1854,9 @@ diskfs_thread_init(
     thread->resume_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_bt_resume_poll,
                                         thread);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
     diskfs_thread_metrics_init(thread);
 
     /* Deferred-mtime coalescing flusher: scan from this worker's first owned
@@ -1868,10 +1868,10 @@ diskfs_thread_init(
     }
 
     /* Hand the channel to the intent log thread via the pending list. */
-    pthread_mutex_lock(&shared->intent_log.registration_lock);
+    evpl_mutex_lock(&shared->intent_log.registration_lock);
     thread->iq_channel->next_pending = shared->intent_log.pending_head;
     shared->intent_log.pending_head  = thread->iq_channel;
-    pthread_mutex_unlock(&shared->intent_log.registration_lock);
+    evpl_mutex_unlock(&shared->intent_log.registration_lock);
 
     /* Publish "registration pending" before the doorbell: the commit thread
      * services this from its per-iteration poll (reg_dirty) when awake, or from
@@ -2008,13 +2008,13 @@ diskfs_thread_destroy(void *private_data)
         evpl_remove_poll(thread->evpl, thread->grant_poll);
     }
     evpl_remove_doorbell(thread->evpl, &thread->grant_doorbell);
-    pthread_mutex_destroy(&thread->grant_lock);
+    evpl_mutex_destroy(&thread->grant_lock);
 
     if (thread->resume_poll) {
         evpl_remove_poll(thread->evpl, thread->resume_poll);
     }
     evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
-    pthread_mutex_destroy(&thread->resume_lock);
+    evpl_mutex_destroy(&thread->resume_lock);
 
     while (thread->bt_op_free_list) {
         struct diskfs_bt_op *op = thread->bt_op_free_list;

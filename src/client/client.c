@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <unistd.h>
 #include <utlist.h>
 

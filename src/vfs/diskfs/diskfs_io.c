@@ -687,10 +687,10 @@ diskfs_inode_dinode_clean(
     struct diskfs_block       *blk;
     int                        clean;
 
-    pthread_mutex_lock(&bs->lock);
+    evpl_mutex_lock(&bs->lock);
     blk   = diskfs_block_lookup_locked(bs, bucket, dev, off);
     clean = (blk == NULL || blk->state == DISKFS_BLOCK_CLEAN);
-    pthread_mutex_unlock(&bs->lock);
+    evpl_mutex_unlock(&bs->lock);
     return clean;
 } /* diskfs_inode_dinode_clean */
 
@@ -896,7 +896,7 @@ diskfs_inode_load_resume(
         return;
     }
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, lc->inum, inum, inode);
     if (!inode) {
         diskfs_inode_cache_recycle_locked(shared, shard);
@@ -935,14 +935,14 @@ diskfs_inode_load_resume(
     } else {
         /* Lost a concurrent fault race: the winner published the inode (and
          * does/did its own record loads).  Just re-drive the acquire. */
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         diskfs_block_unpin(self, blk, DISKFS_BLOCK_CLEAN);
         diskfs_inode_acquire(self, lc->txn, lc->fs, lc->inum, lc->gen,
                              lc->mode, lc->cb, lc->private_data);
         free(lc);
         return;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* The fields are copied out; the record loads below re-claim the block
      * from the cache themselves (resident, since we just loaded it). */
@@ -1972,9 +1972,9 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
         struct diskfs_inode_shard *shard  = diskfs_inode_shard(shared, inode->inum);
         uint64_t                   now_ns = (uint64_t) now.tv_sec * 1000000000ULL + now.tv_nsec;
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
         diskfs_inode_mtime_dirty_locked(shard, inode, now_ns);
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
 
         diskfs_txn_drop_inode_block(thread, diskfs_private->txn, inode);
         diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_DEFERRED);
@@ -4747,14 +4747,14 @@ diskfs_commit_acquired_cb(
     diskfs_map_attrs(thread, &request->commit.r_post_attr, inode);
 
     shard = diskfs_inode_shard(thread->shared, inode->inum);
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     if (inode->mtime_dirty) {
         diskfs_inode_mtime_unlink_locked(shard, inode);
         /* Drop the dirty-pin; the txn write lock holds the inode.  Never the
          * final reference: the COMMIT's own open handle still holds one, so
          * no reclaim check is needed here. */
         --inode->refcnt;
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         /* Establish the home block (async-load if it was evicted) so the commit
          * logs the coalesced mtime; inline when resident, else resumes via
          * diskfs_commit_pinned_cb. */
@@ -4762,7 +4762,7 @@ diskfs_commit_acquired_cb(
                                       diskfs_commit_pinned_cb, request, 0);
         return;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_op_ok(request, cp->txn);     /* nothing deferred -- inline commit */
 } /* diskfs_commit_acquired_cb */

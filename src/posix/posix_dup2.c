@@ -15,7 +15,7 @@ chimera_posix_remove_from_free_list(
 {
     struct chimera_posix_fd_entry **pp;
 
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
 
     pp = &posix->free_list;
 
@@ -28,7 +28,7 @@ chimera_posix_remove_from_free_list(
         pp = &(*pp)->next;
     }
 
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 } /* chimera_posix_remove_from_free_list */
 
 SYMBOL_EXPORT int
@@ -68,7 +68,7 @@ chimera_posix_dup2(
     new_entry = &posix->fds[newfd];
 
     /* Lock the new entry to check if it's in use */
-    pthread_mutex_lock(&new_entry->lock);
+    evpl_mutex_lock(&new_entry->lock);
 
     /* If newfd is open, we need to close it silently */
     if (new_entry->handle && !(new_entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
@@ -77,7 +77,7 @@ chimera_posix_dup2(
 
         /* Mark as closed */
         new_entry->flags |= CHIMERA_POSIX_FD_CLOSED;
-        pthread_mutex_unlock(&new_entry->lock);
+        evpl_mutex_unlock(&new_entry->lock);
 
         /* This implicit close is a POSIX release point exactly as close(2)
          * is: drop every byte-range lock the process holds on the file,
@@ -88,7 +88,7 @@ chimera_posix_dup2(
         /* Close the old handle */
         chimera_posix_close_on_worker(worker, old_handle);
     } else {
-        pthread_mutex_unlock(&new_entry->lock);
+        evpl_mutex_unlock(&new_entry->lock);
 
         /* If the entry is not open, it might be in the free list - remove it */
         chimera_posix_remove_from_free_list(posix, new_entry);
@@ -98,14 +98,14 @@ chimera_posix_dup2(
     chimera_dup_handle(worker->client_thread, handle);
 
     /* Set up the new fd entry. */
-    pthread_mutex_lock(&new_entry->lock);
+    evpl_mutex_lock(&new_entry->lock);
     new_entry->handle      = handle;
     new_entry->flags       = 0;
     new_entry->refcnt      = 0;
     new_entry->eof_flag    = 0;
     new_entry->error_flag  = 0;
     new_entry->ungetc_char = -1;
-    pthread_mutex_unlock(&new_entry->lock);
+    evpl_mutex_unlock(&new_entry->lock);
 
     /* POSIX: the duplicate SHARES the source's open file description --
      * one file offset, one set of status flags -- releasing whatever

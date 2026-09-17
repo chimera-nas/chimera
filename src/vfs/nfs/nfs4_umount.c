@@ -241,7 +241,7 @@ chimera_nfs4_umount(
     struct chimera_nfs_client_server_thread *server_thread;
     struct chimera_nfs4_umount_teardown     *td;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     DL_DELETE(shared->mounts, mount);
 
@@ -262,7 +262,7 @@ chimera_nfs4_umount(
         server->nfs4_session = NULL;
     }
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     if (session) {
         /* This thread may never have talked to the server -- the umount can

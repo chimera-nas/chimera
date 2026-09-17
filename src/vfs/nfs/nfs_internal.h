@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <sys/stat.h>
 #include "common/platform.h"
 #include <utlist.h>
@@ -176,7 +176,7 @@ struct chimera_nfs4_client_session {
      * destroyed on the wire; the memory outlives that until every table has
      * noticed and let go, so no thread ever dereferences a freed session. */
     _Atomic int      refcnt;
-    pthread_mutex_t  lock;          /* guards the pool + usable; NOT per-op        */
+    evpl_mutex_t  lock;          /* guards the pool + usable; NOT per-op        */
     uint8_t          sessionid[NFS4_SESSIONID_SIZE];
     uint64_t         clientid;
     uint32_t         max_slots;     /* fore-channel slots granted (ca_maxrequests) */
@@ -312,7 +312,7 @@ struct chimera_nfs_client_server {
      * server hands back a single stateid per file however many times it is
      * opened, and the CLOSE that ends it may only go once the last handle is
      * done; see nfs4_open_state.h. */
-    pthread_mutex_t                     open_state_lock;
+    evpl_mutex_t                     open_state_lock;
     struct chimera_nfs4_open_file      *open_files;
 
     /* Persistent back-channel / control connection, owned by the control thread
@@ -367,7 +367,7 @@ struct chimera_nfs4_client_devcache_entry {
 };
 
 struct chimera_nfs4_client_devcache {
-    pthread_mutex_t                           lock;
+    evpl_mutex_t                           lock;
     uint32_t                                  count;
     struct chimera_nfs4_client_devcache_entry entries[CHIMERA_NFS4_CLIENT_DEVCACHE_MAX];
 };
@@ -405,7 +405,7 @@ struct chimera_nfs_shared {
     struct chimera_nfs_client_server  **servers;
     struct chimera_nfs_client_server   *servers_map;
     int                                 max_servers;
-    pthread_mutex_t                     lock;
+    evpl_mutex_t                     lock;
 
     /* Number of NFS client (evpl) threads, counted at thread_init; used to size
      * each thread's fore-channel slot block (max_slots / nfs_thread_count). */
@@ -418,12 +418,12 @@ struct chimera_nfs_shared {
      * back-channel CB_LAYOUTRECALL handler can find one by file handle and fence
      * its DS I/O.  Layouts are embedded in open states; this list links them via
      * layout->reg_next under pnfs_layout_lock. */
-    pthread_mutex_t                     pnfs_layout_lock;
+    evpl_mutex_t                     pnfs_layout_lock;
     struct chimera_nfs4_layout         *pnfs_layouts;
 
     /* Granted byte-range claims, keyed by the token we minted for them (see
      * struct chimera_nfs3_range above). */
-    pthread_mutex_t                     nlm_range_lock;
+    evpl_mutex_t                     nlm_range_lock;
     struct chimera_nfs3_range          *nlm_ranges;
     uint64_t                            nlm_next_token;
 
@@ -444,7 +444,7 @@ struct chimera_nfs_shared {
     struct evpl                        *cb_evpl;
     struct evpl_rpc2_thread            *cb_rpc2_thread;
     struct evpl_doorbell                cb_doorbell;
-    pthread_mutex_t                     cb_lock;
+    evpl_mutex_t                     cb_lock;
     struct chimera_nfs4_cb_establish   *cb_establish_queue;
     int                                 cb_started;
 
@@ -477,7 +477,7 @@ struct chimera_nfs_thread {
      * thread_init, removed at thread_destroy) -- per RFC of evpl, doorbells must
      * not be freed from their own callback. */
     struct evpl_doorbell                      cb_resume_doorbell;
-    pthread_mutex_t                           cb_resume_lock;
+    evpl_mutex_t                           cb_resume_lock;
     struct chimera_nfs4_cb_establish         *cb_resume_done;
     int                                       cb_resume_armed;
 };

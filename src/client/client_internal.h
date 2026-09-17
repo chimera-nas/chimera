@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <sys/uio.h>
 #include <utlist.h>
 

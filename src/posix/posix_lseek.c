@@ -93,9 +93,9 @@ chimera_posix_lseek_hole_data(
     int err = chimera_posix_wait(&ctx.comp);
 
     if (!err && !probe) {
-        pthread_mutex_lock(&entry->lock);
+        evpl_mutex_lock(&entry->lock);
         entry->ofd->offset = ctx.r_offset;
-        pthread_mutex_unlock(&entry->lock);
+        evpl_mutex_unlock(&entry->lock);
     }
 
     chimera_posix_fd_release(entry, 0);

@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <time.h>
 #include <urcu/urcu-qsbr.h>
 #include <xxhash.h>
@@ -49,7 +49,7 @@ struct chimera_s3_cred {
 
 struct chimera_s3_cred_cache_bucket {
     struct chimera_s3_cred *head;
-    pthread_mutex_t         lock;
+    evpl_mutex_t         lock;
 };
 
 struct chimera_s3_cred_cache {
@@ -57,9 +57,9 @@ struct chimera_s3_cred_cache {
     int                                  ttl;
     int                                  num_credentials;
     struct chimera_s3_cred_cache_bucket *buckets;
-    pthread_t                            expiry_thread;
-    pthread_mutex_t                      expiry_lock;
-    pthread_cond_t                       expiry_cond;
+    evpl_native_thread_t                            expiry_thread;
+    evpl_mutex_t                      expiry_lock;
+    evpl_cond_t                       expiry_cond;
     int                                  shutdown;
     /* Synthetic addition to CLOCK_REALTIME, applied to every expiry
      * decision (stamping at add, comparing at sweep).  Zero in production;
@@ -132,7 +132,7 @@ chimera_s3_cred_cache_sweep(struct chimera_s3_cred_cache *cache)
     chimera_s3_cred_cache_now(cache, &ts);
 
     for (i = 0; i < cache->num_buckets; i++) {
-        pthread_mutex_lock(&cache->buckets[i].lock);
+        evpl_mutex_lock(&cache->buckets[i].lock);
 
         cred = cache->buckets[i].head;
         while (cred) {
@@ -147,7 +147,7 @@ chimera_s3_cred_cache_sweep(struct chimera_s3_cred_cache *cache)
             cred = next;
         }
 
-        pthread_mutex_unlock(&cache->buckets[i].lock);
+        evpl_mutex_unlock(&cache->buckets[i].lock);
     }
 } // chimera_s3_cred_cache_sweep
 
@@ -171,13 +171,13 @@ chimera_s3_cred_cache_expiry_thread(void *arg)
 
     /* Not registered as a QSBR reader -- a thread parked in cond_timedwait
      * must not sit in the grace-period quorum. */
-    pthread_mutex_lock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
 
     while (!cache->shutdown) {
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 60;
 
-        pthread_cond_timedwait(&cache->expiry_cond, &cache->expiry_lock, &ts);
+        chimera_cond_timedwait(&cache->expiry_cond, &cache->expiry_lock, &ts);
 
         if (cache->shutdown) {
             break;
@@ -186,7 +186,7 @@ chimera_s3_cred_cache_expiry_thread(void *arg)
         chimera_s3_cred_cache_sweep(cache);
     }
 
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
     return NULL;
 } // chimera_s3_cred_cache_expiry_thread
@@ -208,13 +208,13 @@ chimera_s3_cred_cache_create(
                             sizeof(struct chimera_s3_cred_cache_bucket));
 
     for (i = 0; i < num_buckets; i++) {
-        pthread_mutex_init(&cache->buckets[i].lock, NULL);
+        evpl_mutex_init(&cache->buckets[i].lock, NULL);
     }
 
-    pthread_mutex_init(&cache->expiry_lock, NULL);
-    pthread_cond_init(&cache->expiry_cond, NULL);
+    evpl_mutex_init(&cache->expiry_lock, NULL);
+    evpl_cond_init(&cache->expiry_cond, NULL);
 
-    pthread_create(&cache->expiry_thread, NULL,
+    evpl_native_thread_create(&cache->expiry_thread, NULL,
                    chimera_s3_cred_cache_expiry_thread, cache);
 
     return cache;
@@ -226,12 +226,12 @@ chimera_s3_cred_cache_destroy(struct chimera_s3_cred_cache *cache)
     struct chimera_s3_cred *cred, *next;
     int                     i;
 
-    pthread_mutex_lock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
     cache->shutdown = 1;
-    pthread_cond_signal(&cache->expiry_cond);
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
-    pthread_join(cache->expiry_thread, NULL);
+    evpl_native_thread_join(cache->expiry_thread, NULL);
 
     urcu_qsbr_barrier();
 
@@ -242,13 +242,13 @@ chimera_s3_cred_cache_destroy(struct chimera_s3_cred_cache *cache)
             free(cred);
             cred = next;
         }
-        pthread_mutex_destroy(&cache->buckets[i].lock);
+        evpl_mutex_destroy(&cache->buckets[i].lock);
     }
 
     free(cache->buckets);
 
-    pthread_mutex_destroy(&cache->expiry_lock);
-    pthread_cond_destroy(&cache->expiry_cond);
+    evpl_mutex_destroy(&cache->expiry_lock);
+    evpl_cond_destroy(&cache->expiry_cond);
 
     free(cache);
 } // chimera_s3_cred_cache_destroy
@@ -307,7 +307,7 @@ chimera_s3_cred_cache_add(
         cred->expiration.tv_nsec = now.tv_nsec;
     }
 
-    pthread_mutex_lock(&cache->buckets[bucket_idx].lock);
+    evpl_mutex_lock(&cache->buckets[bucket_idx].lock);
 
     /* Check for existing entry with same access_key and remove it */
     existing = cache->buckets[bucket_idx].head;
@@ -324,7 +324,7 @@ chimera_s3_cred_cache_add(
     rcu_assign_pointer(cache->buckets[bucket_idx].head, cred);
     __atomic_add_fetch(&cache->num_credentials, 1, __ATOMIC_RELAXED);
 
-    pthread_mutex_unlock(&cache->buckets[bucket_idx].lock);
+    evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
 
     return 0;
 } // chimera_s3_cred_cache_add
@@ -342,19 +342,19 @@ chimera_s3_cred_cache_remove(
     bucket_idx     = chimera_s3_cred_cache_hash(access_key, access_key_len,
                                                 cache->num_buckets);
 
-    pthread_mutex_lock(&cache->buckets[bucket_idx].lock);
+    evpl_mutex_lock(&cache->buckets[bucket_idx].lock);
 
     cred = cache->buckets[bucket_idx].head;
     while (cred) {
         if (strcmp(cred->access_key, access_key) == 0) {
             chimera_s3_cred_cache_remove_locked(cache, cred, bucket_idx);
-            pthread_mutex_unlock(&cache->buckets[bucket_idx].lock);
+            evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
             return 0;
         }
         cred = cred->next;
     }
 
-    pthread_mutex_unlock(&cache->buckets[bucket_idx].lock);
+    evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
     return -1;
 } // chimera_s3_cred_cache_remove
 

@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <sys/resource.h>
 
 #include "evpl/evpl.h"

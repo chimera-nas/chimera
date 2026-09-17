@@ -59,14 +59,14 @@ chimera_nfs4_lock_finish(
                 args->locker.open_owner.lock_seqid;
 
             if (oo) {
-                pthread_mutex_lock(&oo->lock);
+                evpl_mutex_lock(&oo->lock);
                 oo->seqid = open_seqid;
                 nfs4_replay_record(&oo->replay, open_seqid, OP_LOCK,
                                    status, cache_stateid);
-                pthread_mutex_unlock(&oo->lock);
+                evpl_mutex_unlock(&oo->lock);
             }
             if (lo) {
-                pthread_mutex_lock(&lo->lock);
+                evpl_mutex_lock(&lo->lock);
                 lo->seqid = lock_seqid;
                 /* The initial LOCK is replayed through the open_owner seqid,
                  * but the lock_owner must still be marked initialized so the
@@ -74,7 +74,7 @@ chimera_nfs4_lock_finish(
                  * fresh seqid. */
                 nfs4_replay_record(&lo->replay, lock_seqid, OP_LOCK,
                                    status, cache_stateid);
-                pthread_mutex_unlock(&lo->lock);
+                evpl_mutex_unlock(&lo->lock);
             }
         } else {
             struct nfs_lock_owner *lo         = req->lock_4_0_lock_owner;
@@ -82,11 +82,11 @@ chimera_nfs4_lock_finish(
                 args->locker.lock_owner.lock_seqid;
 
             if (lo) {
-                pthread_mutex_lock(&lo->lock);
+                evpl_mutex_lock(&lo->lock);
                 lo->seqid = lock_seqid;
                 nfs4_replay_record(&lo->replay, lock_seqid, OP_LOCK,
                                    status, cache_stateid);
-                pthread_mutex_unlock(&lo->lock);
+                evpl_mutex_unlock(&lo->lock);
             }
         }
     }
@@ -383,7 +383,7 @@ chimera_nfs4_lock(
          * is created so a replay short-circuits without leaving stray state. */
         if (req->minorversion == 0) {
             struct nfs_open_owner *oo = open_state->owner;
-            pthread_mutex_lock(&oo->lock);
+            evpl_mutex_lock(&oo->lock);
             int                    cls = nfs4_owner_seqid_classify(
                 oo->seqid, &oo->replay,
                 args->locker.open_owner.open_seqid);
@@ -391,19 +391,19 @@ chimera_nfs4_lock(
             if (cls == NFS4_SEQID_REPLAY) {
                 res->status              = oo->replay.status;
                 res->resok4.lock_stateid = oo->replay.stateid;
-                pthread_mutex_unlock(&oo->lock);
+                evpl_mutex_unlock(&oo->lock);
                 chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
                                                    lock_owner, res->status);
                 return;
             }
             if (cls != NFS4_SEQID_NEW) {
-                pthread_mutex_unlock(&oo->lock);
+                evpl_mutex_unlock(&oo->lock);
                 res->status = NFS4ERR_BAD_SEQID;
                 chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
                                                    lock_owner, res->status);
                 return;
             }
-            pthread_mutex_unlock(&oo->lock);
+            evpl_mutex_unlock(&oo->lock);
 
             /* RFC 7530 §9.1.4.2: the supplied open stateid must not be a
              * superseded (old) or never-issued seqid. */
@@ -432,7 +432,7 @@ chimera_nfs4_lock(
             if (!created) {
                 struct nfs_lock_state *ls, *match = NULL;
 
-                pthread_mutex_lock(&lock_owner->lock);
+                evpl_mutex_lock(&lock_owner->lock);
                 for (ls = lock_owner->states; ls; ls = ls->next_in_owner) {
                     if (ls->open_state &&
                         ls->open_state->fh_len == req->fhlen &&
@@ -452,7 +452,7 @@ chimera_nfs4_lock(
                     } else {
                         res->status = NFS4ERR_BAD_SEQID;
                     }
-                    pthread_mutex_unlock(&lock_owner->lock);
+                    evpl_mutex_unlock(&lock_owner->lock);
                     chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
                                                        lock_owner, res->status);
                     return;
@@ -465,7 +465,7 @@ chimera_nfs4_lock(
                     reuse_slot  = match->slot_idx;
                     reuse_gen   = match->generation;
                 }
-                pthread_mutex_unlock(&lock_owner->lock);
+                evpl_mutex_unlock(&lock_owner->lock);
             }
 
             /* Transfer the borrow refs onto the request; dropped in
@@ -492,7 +492,7 @@ chimera_nfs4_lock(
              * one.  The reuse was only ever wired into the 4.0 path. */
             struct nfs_lock_state *ls;
 
-            pthread_mutex_lock(&lock_owner->lock);
+            evpl_mutex_lock(&lock_owner->lock);
             for (ls = lock_owner->states; ls; ls = ls->next_in_owner) {
                 if (ls->open_state &&
                     ls->open_state->fh_len == req->fhlen &&
@@ -504,7 +504,7 @@ chimera_nfs4_lock(
                     break;
                 }
             }
-            pthread_mutex_unlock(&lock_owner->lock);
+            evpl_mutex_unlock(&lock_owner->lock);
         }
         /* Re-establish an emptied stateid in place: re-acquire it by its slot
          * (the lookup checks shard/slot/generation, not the stateid seqid) and
@@ -632,7 +632,7 @@ chimera_nfs4_lock(
         /* RFC 7530 §9.1.7 entry-time seqid classification on the lock_owner. */
         if (req->minorversion == 0) {
             struct nfs_lock_owner *lo = lock_state->lock_owner;
-            pthread_mutex_lock(&lo->lock);
+            evpl_mutex_lock(&lo->lock);
             int                    cls = nfs4_owner_seqid_classify(
                 lo->seqid, &lo->replay,
                 args->locker.lock_owner.lock_seqid);
@@ -640,7 +640,7 @@ chimera_nfs4_lock(
             if (cls == NFS4_SEQID_REPLAY) {
                 res->status              = lo->replay.status;
                 res->resok4.lock_stateid = lo->replay.stateid;
-                pthread_mutex_unlock(&lo->lock);
+                evpl_mutex_unlock(&lo->lock);
                 nfs_state_table_release(table, lock_state,
                                         NFS4_SLOT_TYPE_LOCK,
                                         thread->vfs_thread);
@@ -649,7 +649,7 @@ chimera_nfs4_lock(
                 return;
             }
             if (cls != NFS4_SEQID_NEW) {
-                pthread_mutex_unlock(&lo->lock);
+                evpl_mutex_unlock(&lo->lock);
                 nfs_state_table_release(table, lock_state,
                                         NFS4_SLOT_TYPE_LOCK,
                                         thread->vfs_thread);
@@ -658,7 +658,7 @@ chimera_nfs4_lock(
                 chimera_nfs4_compound_complete(req, res->status);
                 return;
             }
-            pthread_mutex_unlock(&lo->lock);
+            evpl_mutex_unlock(&lo->lock);
 
             /* RFC 7530 §9.1.4.2: the supplied lock stateid must not be a
              * superseded (old) or never-issued seqid. */

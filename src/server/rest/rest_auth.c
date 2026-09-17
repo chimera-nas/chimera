@@ -13,7 +13,7 @@
 #if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
 #include <crypt.h>
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
-#include <pthread.h>
+#include "common/thread.h"
 #include <unistd.h>    /* crypt(3) */
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
 
@@ -266,14 +266,14 @@ chimera_rest_crypt_match(
 
     return result && strcmp(result, hash) == 0;
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
-    static pthread_mutex_t crypt_lock = PTHREAD_MUTEX_INITIALIZER;
+    static evpl_mutex_t crypt_lock = EVPL_MUTEX_INITIALIZER;
     char                  *result;
     int                    match;
 
-    pthread_mutex_lock(&crypt_lock);
+    evpl_mutex_lock(&crypt_lock);
     result = crypt(password, hash);
     match  = result && strcmp(result, hash) == 0;
-    pthread_mutex_unlock(&crypt_lock);
+    evpl_mutex_unlock(&crypt_lock);
 
     return match;
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */

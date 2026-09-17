@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -281,7 +281,7 @@ struct cairn_shared {
      * lock).  Per-op resolution does not consult this: it comes in on the
      * request as mount_private. */
     struct cairn_fs                         *fs_list;
-    pthread_mutex_t                          lock;
+    evpl_mutex_t                          lock;
     /*
      * Striped per-inode mutexes (used by helpers below for fine-grained
      * locking on the metadata of a single inode).  Combined with
@@ -295,8 +295,8 @@ struct cairn_shared {
      * metadata-mutating op with the appropriate stripe locks is tracked
      * as Phase A.2.
      */
-    pthread_mutex_t                          multi_inode_lock;
-    pthread_mutex_t                          inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
+    evpl_mutex_t                          multi_inode_lock;
+    evpl_mutex_t                          inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
     int                                      noatime;
 };
 
@@ -408,7 +408,7 @@ cairn_inode_handle_release(struct cairn_inode_handle *ih)
     rocksdb_pinnableslice_destroy(ih->slice);
 } /* cairn_inode_handle_release */
 
-static inline pthread_mutex_t *
+static inline evpl_mutex_t *
 cairn_inode_stripe(
     struct cairn_shared *shared,
     uint64_t             inum)
@@ -421,7 +421,7 @@ cairn_lock_inode(
     struct cairn_shared *shared,
     uint64_t             inum)
 {
-    pthread_mutex_lock(cairn_inode_stripe(shared, inum));
+    evpl_mutex_lock(cairn_inode_stripe(shared, inum));
 } /* cairn_lock_inode */
 
 static inline void
@@ -429,7 +429,7 @@ cairn_unlock_inode(
     struct cairn_shared *shared,
     uint64_t             inum)
 {
-    pthread_mutex_unlock(cairn_inode_stripe(shared, inum));
+    evpl_mutex_unlock(cairn_inode_stripe(shared, inum));
 } /* cairn_unlock_inode */
 
 /*
@@ -443,11 +443,11 @@ cairn_lock_inodes(
     uint64_t            *inums,
     int                  n)
 {
-    pthread_mutex_t *stripes[8];
+    evpl_mutex_t *stripes[8];
     int              ns = 0, i, j;
 
     for (i = 0; i < n; i++) {
-        pthread_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
+        evpl_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
         int              dup = 0;
         for (j = 0; j < ns; j++) {
             if (stripes[j] == s) {
@@ -467,7 +467,7 @@ cairn_lock_inodes(
     }
 
     for (i = 0; i < ns; i++) {
-        pthread_mutex_lock(stripes[i]);
+        evpl_mutex_lock(stripes[i]);
     }
 } /* cairn_lock_inodes */
 
@@ -477,11 +477,11 @@ cairn_unlock_inodes(
     uint64_t            *inums,
     int                  n)
 {
-    pthread_mutex_t *stripes[8];
+    evpl_mutex_t *stripes[8];
     int              ns = 0, i, j;
 
     for (i = 0; i < n; i++) {
-        pthread_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
+        evpl_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
         int              dup = 0;
         for (j = 0; j < ns; j++) {
             if (stripes[j] == s) {
@@ -494,7 +494,7 @@ cairn_unlock_inodes(
     }
 
     for (i = 0; i < ns; i++) {
-        pthread_mutex_unlock(stripes[i]);
+        evpl_mutex_unlock(stripes[i]);
     }
 } /* cairn_unlock_inodes */
 
@@ -1370,10 +1370,10 @@ cairn_init(
         shared->noatime = 0; // Default to false
     }
 
-    pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->multi_inode_lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->multi_inode_lock, NULL);
     for (i = 0; i < CAIRN_INODE_LOCK_STRIPES; i++) {
-        pthread_mutex_init(&shared->inode_mutexes[i], NULL);
+        evpl_mutex_init(&shared->inode_mutexes[i], NULL);
     }
 
     /*
@@ -1596,10 +1596,10 @@ cairn_destroy(void *private_data)
     rocksdb_block_based_options_destroy(shared->meta_table_options);
     rocksdb_block_based_options_destroy(shared->data_table_options);
     for (i = 0; i < CAIRN_INODE_LOCK_STRIPES; i++) {
-        pthread_mutex_destroy(&shared->inode_mutexes[i]);
+        evpl_mutex_destroy(&shared->inode_mutexes[i]);
     }
-    pthread_mutex_destroy(&shared->multi_inode_lock);
-    pthread_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->multi_inode_lock);
+    evpl_mutex_destroy(&shared->lock);
     free(shared);
 } /* cairn_destroy */
 
@@ -1944,9 +1944,9 @@ cairn_thread_init(
 
     thread->shared = shared;
     thread->evpl   = evpl;
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     thread->next_inum = 3;
 
@@ -2602,12 +2602,12 @@ cairn_mount(
         path    = path_end;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs = namelen ? cairn_fs_find(shared, name, namelen) : NULL;
 
     if (unlikely(!fs)) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2615,14 +2615,14 @@ cairn_mount(
 
     fs->mount_count++;
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     rc = cairn_lookup_path(thread, fs, path, path_end - path, &ih);
 
     if (unlikely(rc)) {
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         fs->mount_count--;
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2651,9 +2651,9 @@ cairn_umount(
     struct cairn_fs *fs = request->umount.mount_private;
 
     if (fs) {
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         fs->mount_count--;
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
     }
 
     request->status = CHIMERA_VFS_OK;
@@ -2733,10 +2733,10 @@ cairn_mkfs(
     fs_key[0] = CAIRN_KEY_FS;
     memcpy(fs_key + 1, request->mkfs.name, request->mkfs.namelen);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     if (cairn_fs_find(shared, request->mkfs.name, request->mkfs.namelen)) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         return;
@@ -2758,7 +2758,7 @@ cairn_mkfs(
 
     cairn_fs_attach(shared, request->mkfs.name, request->mkfs.namelen, &record);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2969,12 +2969,12 @@ cairn_rmfs(
         return;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs = cairn_fs_find(shared, request->rmfs.name, request->rmfs.namelen);
 
     if (!fs) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2984,7 +2984,7 @@ cairn_rmfs(
         /* Still mounted.  That is the whole test: umount does not return
          * until every open handle on the mount has been closed and released,
          * so no mount means no close can still land on these records. */
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_EBUSY;
         request->complete(request);
         return;
@@ -2992,7 +2992,7 @@ cairn_rmfs(
 
     DL_DELETE(shared->fs_list, fs);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     cairn_rmfs_delete_tree(shared, fs->root_inum);
 

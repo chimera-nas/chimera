@@ -536,7 +536,7 @@ diskfs_block_buf_wake(
         return;
     }
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     diskfs_block_drain_returned_locked(shard);
     /*
      * Release at most (reclaimable - reserve) waiters: exactly the number that
@@ -565,7 +565,7 @@ diskfs_block_buf_wake(
     if (!shard->buf_wait_head) {
         __atomic_store_n(&shard->buf_wait_pending, 0, __ATOMIC_RELEASE);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     while (list) {
         w    = list;
@@ -603,7 +603,7 @@ diskfs_block_unpin(
     {
         struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
                                                               blk->device_id, blk->device_offset);
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
         diskfs_block_drain_clean_locked(shard);
         if (__atomic_load_n(&blk->pin_count, __ATOMIC_ACQUIRE) == 0) {
             __atomic_sub_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);  /* 1->0 */
@@ -612,7 +612,7 @@ diskfs_block_unpin(
                 diskfs_block_lru_push_tail(shard, blk);
             }
         }
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
 
         /* This produced a CLEAN, unpinned LRU victim -- resume any CoW fork
          * parked waiting for a reclaimable buffer (main's park machinery). */
@@ -632,7 +632,7 @@ diskfs_block_release(
     struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
                                                           blk->device_id, blk->device_offset);
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     diskfs_block_drain_clean_locked(shard);
     if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0) {
         __atomic_sub_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);  /* 1->0 */
@@ -641,7 +641,7 @@ diskfs_block_release(
             diskfs_block_lru_push_tail(shard, blk);
         }
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* Unpinning may have produced an LRU victim a parked CoW fork can reclaim. */
     diskfs_block_buf_wake(thread, shard);
@@ -689,12 +689,12 @@ diskfs_block_cache_create(struct diskfs_shared *shared)
      * so backing buffers are 1:1 with block structs. */
     extra                         = 0;
     cache->buffer_extra_per_shard = extra;
-    pthread_mutex_init(&cache->prealloc_lock, NULL);
+    evpl_mutex_init(&cache->prealloc_lock, NULL);
 
     for (i = 0; i < (int) cache->num_shards; i++) {
         struct diskfs_block_shard *shard = &cache->shards[i];
 
-        pthread_mutex_init(&shard->lock, NULL);
+        evpl_mutex_init(&shard->lock, NULL);
         shard->buckets = calloc(DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD,
                                 sizeof(struct diskfs_block *));
         shard->pool = calloc(cache->shard_cap, sizeof(struct diskfs_block));
@@ -722,9 +722,9 @@ diskfs_block_cache_prealloc(
     struct diskfs_block_cache *cache = shared->block_cache;
     uint32_t                   i, j;
 
-    pthread_mutex_lock(&cache->prealloc_lock);
+    evpl_mutex_lock(&cache->prealloc_lock);
     if (cache->buffers_ready) {
-        pthread_mutex_unlock(&cache->prealloc_lock);
+        evpl_mutex_unlock(&cache->prealloc_lock);
         return;
     }
 
@@ -803,7 +803,7 @@ diskfs_block_cache_prealloc(
     }
 
     cache->buffers_ready = 1;
-    pthread_mutex_unlock(&cache->prealloc_lock);
+    evpl_mutex_unlock(&cache->prealloc_lock);
 } /* diskfs_block_cache_prealloc */
 
 
@@ -843,9 +843,9 @@ diskfs_block_cache_destroy(struct diskfs_shared *shared)
         free(shard->buffers);
         free(shard->pool);
         free(shard->buckets);
-        pthread_mutex_destroy(&shard->lock);
+        evpl_mutex_destroy(&shard->lock);
     }
-    pthread_mutex_destroy(&cache->prealloc_lock);
+    evpl_mutex_destroy(&cache->prealloc_lock);
     free(cache);
     shared->block_cache = NULL;
 } /* diskfs_block_cache_destroy */
@@ -922,7 +922,7 @@ diskfs_block_claim(
     struct diskfs_block_shard *shard  = &cache->shards[sidx];
     struct diskfs_block       *blk;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     diskfs_block_drain_returned_locked(shard);
     diskfs_block_drain_clean_locked(shard);
@@ -979,7 +979,7 @@ diskfs_block_claim(
     if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
         __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     return blk;
 } /* diskfs_block_claim */
@@ -1211,7 +1211,7 @@ diskfs_block_waiter_dispatch(
 {
     struct diskfs_thread *worker = w->thread;
 
-    pthread_mutex_lock(&worker->resume_lock);
+    evpl_mutex_lock(&worker->resume_lock);
     w->next = NULL;
     if (worker->resume_tail) {
         worker->resume_tail->next = w;
@@ -1220,7 +1220,7 @@ diskfs_block_waiter_dispatch(
     }
     worker->resume_tail = w;
     __atomic_store_n(&worker->resume_pending, 1, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&worker->resume_lock);
+    evpl_mutex_unlock(&worker->resume_lock);
 
     if (worker == waker) {
         evpl_defer(worker->evpl, &worker->resume_deferral);
@@ -1255,7 +1255,7 @@ diskfs_block_defer_retry(
     w->resume = resume;
     w->arg    = arg;
     w->next   = NULL;
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     diskfs_block_waiter_dispatch(thread, w);   /* self -> evpl_defer, re-runs */
     return NULL;
 } /* diskfs_block_defer_retry */
@@ -1286,12 +1286,12 @@ diskfs_bt_resume_drain(struct diskfs_thread *thread)
         return;
     }
 
-    pthread_mutex_lock(&thread->resume_lock);
+    evpl_mutex_lock(&thread->resume_lock);
     list                = thread->resume_head;
     thread->resume_head = NULL;
     thread->resume_tail = NULL;
     __atomic_store_n(&thread->resume_pending, 0, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&thread->resume_lock);
+    evpl_mutex_unlock(&thread->resume_lock);
 
     while (list) {
         void  (*resume)(
@@ -1363,12 +1363,12 @@ diskfs_block_load_complete(
     chimera_diskfs_abort_if(status != 0, "block read failed off=%lu status=%d",
                             blk->device_offset, status);
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
     waiters        = blk->wait_head;
     blk->wait_head = NULL;
     blk->wait_tail = NULL;
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_pending_io_add(self, -1);
     free(ld);
@@ -1425,12 +1425,12 @@ diskfs_bt_block_get(
     struct diskfs_block_load  *ld;
     int                        issue = 0;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (blk && blk->state != DISKFS_BLOCK_LOADING) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_bt_op_pin(op, shard, blk);
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return blk;
     }
 
@@ -1476,7 +1476,7 @@ diskfs_bt_block_get(
         }
         blk->wait_tail = w;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     if (issue) {
         diskfs_block_assert_iov(thread, blk);
@@ -1526,7 +1526,7 @@ diskfs_block_claim_async(
     struct diskfs_block_load   *ld;
     int                         issue = 0;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     diskfs_block_drain_returned_locked(shard);
     diskfs_block_drain_clean_locked(shard);
@@ -1545,7 +1545,7 @@ diskfs_block_claim_async(
             blk->wait_head = w;
         }
         blk->wait_tail = w;
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return NULL;
     }
 
@@ -1574,7 +1574,7 @@ diskfs_block_claim_async(
             if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
                 __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
             }
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             return blk;
         }
 
@@ -1611,7 +1611,7 @@ diskfs_block_claim_async(
     }
 
     if (issue) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         diskfs_block_assert_iov(thread, blk);
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
@@ -1629,7 +1629,7 @@ diskfs_block_claim_async(
     if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
         __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     return blk;
 } /* diskfs_block_claim_async */
 

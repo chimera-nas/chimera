@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <jansson.h>
 #include <utlist.h>
 
@@ -52,7 +52,7 @@ struct memkv_entry {
 
 struct memkv_shard {
     struct rb_tree  entries;
-    pthread_mutex_t lock;
+    evpl_mutex_t lock;
 };
 
 struct memkv_shared {
@@ -151,7 +151,7 @@ memkv_init(
 
     for (i = 0; i < shared->num_shards; i++) {
         rb_tree_init(&shared->shards[i].entries);
-        pthread_mutex_init(&shared->shards[i].lock, NULL);
+        evpl_mutex_init(&shared->shards[i].lock, NULL);
     }
 
     return shared;
@@ -165,7 +165,7 @@ memkv_destroy(void *private_data)
 
     for (i = 0; i < shared->num_shards; i++) {
         rb_tree_destroy(&shared->shards[i].entries, memkv_entry_release, NULL);
-        pthread_mutex_destroy(&shared->shards[i].lock);
+        evpl_mutex_destroy(&shared->shards[i].lock);
     }
     free(shared->shards);
     free(shared);
@@ -217,7 +217,7 @@ memkv_put_key(
     shard_idx = hash % shared->num_shards;
     shard     = &shared->shards[shard_idx];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->entries, hash, hash, existing);
 
@@ -233,7 +233,7 @@ memkv_put_key(
         rb_tree_insert(&shard->entries, hash, entry);
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -254,12 +254,12 @@ memkv_get_key(
     shard_idx = hash % shared->num_shards;
     shard     = &shared->shards[shard_idx];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->entries, hash, hash, entry);
 
     if (!entry) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -269,7 +269,7 @@ memkv_get_key(
     request->get_key.r_value     = entry->value;
     request->get_key.r_value_len = entry->value_len;
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -290,12 +290,12 @@ memkv_delete_key(
     shard_idx = hash % shared->num_shards;
     shard     = &shared->shards[shard_idx];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->entries, hash, hash, entry);
 
     if (!entry) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -303,7 +303,7 @@ memkv_delete_key(
 
     rb_tree_remove(&shard->entries, &entry->node);
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     memkv_entry_free(thread, entry);
 
@@ -398,7 +398,7 @@ memkv_search_keys(
     for (i = 0; i < shared->num_shards; i++) {
         shard = &shared->shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         rb_tree_first(&shard->entries, entry);
 
@@ -416,7 +416,7 @@ memkv_search_keys(
                     cap   = cap ? cap * 2 : 16;
                     grown = realloc(items, cap * sizeof(*items));
                     if (!grown) {
-                        pthread_mutex_unlock(&shard->lock);
+                        evpl_mutex_unlock(&shard->lock);
                         status = CHIMERA_VFS_EIO;
                         goto out;
                     }
@@ -432,7 +432,7 @@ memkv_search_keys(
                 if (!item->key || (entry->value_len && !item->value)) {
                     free(item->key);
                     free(item->value);
-                    pthread_mutex_unlock(&shard->lock);
+                    evpl_mutex_unlock(&shard->lock);
                     status = CHIMERA_VFS_EIO;
                     goto out;
                 }
@@ -447,7 +447,7 @@ memkv_search_keys(
             entry = rb_tree_next(&shard->entries, entry);
         }
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
     }
 
     if (n > 1) {

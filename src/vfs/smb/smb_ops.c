@@ -59,7 +59,7 @@ chimera_smb_path_intern(
     unsigned             bucket = (unsigned) (id % CHIMERA_SMB_PATH_BUCKETS);
     struct smb_path_ent *ent;
 
-    pthread_mutex_lock(&server->path_lock);
+    evpl_mutex_lock(&server->path_lock);
 
     for (ent = server->path_buckets[bucket]; ent; ent = ent->next) {
         if (ent->id == id) {
@@ -75,7 +75,7 @@ chimera_smb_path_intern(
                     ent->path_len = path_len;
                 }
             }
-            pthread_mutex_unlock(&server->path_lock);
+            evpl_mutex_unlock(&server->path_lock);
             return id;
         }
     }
@@ -89,7 +89,7 @@ chimera_smb_path_intern(
     ent->next                    = server->path_buckets[bucket];
     server->path_buckets[bucket] = ent;
 
-    pthread_mutex_unlock(&server->path_lock);
+    evpl_mutex_unlock(&server->path_lock);
     return id;
 } /* chimera_smb_path_intern */
 
@@ -103,7 +103,7 @@ chimera_smb_path_resolve(
     struct smb_path_ent *ent;
     const char          *path = NULL;
 
-    pthread_mutex_lock(&server->path_lock);
+    evpl_mutex_lock(&server->path_lock);
     for (ent = server->path_buckets[bucket]; ent; ent = ent->next) {
         if (ent->id == id) {
             path = ent->path;
@@ -113,7 +113,7 @@ chimera_smb_path_resolve(
             break;
         }
     }
-    pthread_mutex_unlock(&server->path_lock);
+    evpl_mutex_unlock(&server->path_lock);
     return path;
 } /* chimera_smb_path_resolve */
 
@@ -122,7 +122,7 @@ chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
 {
     int i;
 
-    pthread_mutex_lock(&server->path_lock);
+    evpl_mutex_lock(&server->path_lock);
     for (i = 0; i < CHIMERA_SMB_PATH_BUCKETS; i++) {
         struct smb_path_ent *ent = server->path_buckets[i];
         while (ent) {
@@ -133,7 +133,7 @@ chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
         }
         server->path_buckets[i] = NULL;
     }
-    pthread_mutex_unlock(&server->path_lock);
+    evpl_mutex_unlock(&server->path_lock);
 } /* chimera_smb_path_table_clear */
 
 /*

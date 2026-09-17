@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
@@ -378,7 +378,7 @@ chimera_smb_client_init(
     (void) cfgdata;
     (void) metrics;
 
-    pthread_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
 
     shared->max_servers  = CHIMERA_SMB_CLIENT_MAX_SERVERS;
     shared->servers      = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -400,12 +400,12 @@ chimera_smb_client_destroy(void *private_data)
                 evpl_endpoint_close(shared->servers[i]->endpoint);
             }
             chimera_smb_path_table_clear(shared->servers[i]);
-            pthread_mutex_destroy(&shared->servers[i]->path_lock);
+            evpl_mutex_destroy(&shared->servers[i]->path_lock);
             free(shared->servers[i]);
         }
     }
 
-    pthread_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->lock);
     free(shared->servers);
     free(shared);
 } /* chimera_smb_client_destroy */

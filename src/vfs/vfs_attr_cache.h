@@ -19,7 +19,7 @@ struct chimera_vfs_attr_cache_entry {
 
 struct chimera_vfs_attr_cache_shard {
     struct chimera_vfs_attr_cache_entry **entries;
-    pthread_mutex_t                       entry_lock;
+    evpl_mutex_t                       entry_lock;
     struct prometheus_counter_instance   *insert;
     struct prometheus_counter_instance   *hit;
     struct prometheus_counter_instance   *miss;
@@ -103,7 +103,7 @@ chimera_vfs_attr_cache_create(
         shard          = &cache->shards[i];
         shard->entries = calloc(cache->num_slots * cache->num_entries, sizeof(struct chimera_vfs_attr_cache_entry *));
 
-        pthread_mutex_init(&shard->entry_lock, NULL);
+        evpl_mutex_init(&shard->entry_lock, NULL);
 
         if (metrics) {
             shard->insert = prometheus_counter_series_create_instance(cache->insert_series);
@@ -146,7 +146,7 @@ chimera_vfs_attr_cache_destroy(struct chimera_vfs_attr_cache *cache)
 
         free(shard->entries);
 
-        pthread_mutex_destroy(&shard->entry_lock);
+        evpl_mutex_destroy(&shard->entry_lock);
     }
 
     chimera_rcu_pool_destroy(&cache->pool);
@@ -294,7 +294,7 @@ chimera_vfs_attr_cache_insert(
 
     urcu_qsbr_read_lock();
 
-    pthread_mutex_lock(&shard->entry_lock);
+    evpl_mutex_lock(&shard->entry_lock);
 
     best_entry = *slot_best;
 
@@ -319,7 +319,7 @@ chimera_vfs_attr_cache_insert(
 
     prometheus_counter_increment(shard->insert);
 
-    pthread_mutex_unlock(&shard->entry_lock);
+    evpl_mutex_unlock(&shard->entry_lock);
 
     urcu_qsbr_read_unlock();
 

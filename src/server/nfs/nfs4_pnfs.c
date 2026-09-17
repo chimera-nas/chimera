@@ -433,14 +433,14 @@ nfs_pnfs_devcache_put(
 {
     uint32_t i;
 
-    pthread_mutex_lock(&cache->lock);
+    evpl_mutex_lock(&cache->lock);
 
     for (i = 0; i < cache->count; i++) {
         if (cache->entries[i].valid &&
             memcmp(cache->entries[i].deviceid, dev->deviceid,
                    CHIMERA_VFS_DEVICEID_SIZE) == 0) {
             cache->entries[i].device = *dev;       /* refresh */
-            pthread_mutex_unlock(&cache->lock);
+            evpl_mutex_unlock(&cache->lock);
             return;
         }
     }
@@ -452,7 +452,7 @@ nfs_pnfs_devcache_put(
         cache->entries[i].valid  = 1;
     }
 
-    pthread_mutex_unlock(&cache->lock);
+    evpl_mutex_unlock(&cache->lock);
 } /* nfs_pnfs_devcache_put */
 
 /* Returns 1 and fills *out on hit, 0 on miss. */
@@ -465,7 +465,7 @@ nfs_pnfs_devcache_find(
     uint32_t i;
     int      found = 0;
 
-    pthread_mutex_lock(&cache->lock);
+    evpl_mutex_lock(&cache->lock);
 
     for (i = 0; i < cache->count; i++) {
         if (cache->entries[i].valid &&
@@ -477,7 +477,7 @@ nfs_pnfs_devcache_find(
         }
     }
 
-    pthread_mutex_unlock(&cache->lock);
+    evpl_mutex_unlock(&cache->lock);
     return found;
 } /* nfs_pnfs_devcache_find */
 

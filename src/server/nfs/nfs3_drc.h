@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -87,7 +87,7 @@ struct nfs3_drc_hydra {
  * NFSv3, which has no client identity of its own; NFSv4.0 does have one and
  * keys its cache per connection instead (nfs4_v40_drc.{c,h}). */
 struct nfs3_drc {
-    pthread_mutex_t        lock;
+    evpl_mutex_t        lock;
     struct nfs3_drc_entry *table;            /* uthash, FIFO eviction order */
     struct nfs3_drc_hydra *hydrated;         /* uthash: addrs hydrated from KV  */
     uint64_t               bytes;

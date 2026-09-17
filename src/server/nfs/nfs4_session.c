@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdio.h>
 #include <string.h>
 #include <uuid/uuid.h>
@@ -91,7 +91,7 @@ nfs4_client_table_init(
     table->nfs4_ct_node_id          = node_id;
     table->nfs4_ct_next_confirm     = 1;
 
-    pthread_mutex_init(&table->nfs4_ct_lock, NULL);
+    evpl_mutex_init(&table->nfs4_ct_lock, NULL);
 } /* nfs4_client_table_init */
 
 void
@@ -155,7 +155,7 @@ nfs4_client_register(
     struct nfs4_client *client;
     uint64_t            id;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, client);
@@ -214,7 +214,7 @@ nfs4_client_register(
 
     id = client->nfs4_client_id;
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     return id;
 } /* nfs4_client_register */
@@ -385,7 +385,7 @@ nfs4_client_exchange_id(
     out->destroy_unified  = NULL;
     out->destroy_unified2 = NULL;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, existing);
@@ -491,7 +491,7 @@ nfs4_client_exchange_id(
     out->clientid = nc->nfs4_client_id;
 
  out_unlock:
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_exchange_id */
 
 /* Caller holds the table lock.  Remove a record that lives in the by-id table
@@ -566,7 +566,7 @@ nfs4_client_setclientid(
     out->destroy_unified = NULL;
     memset(out->confirm, 0, NFS4_VERIFIER_SIZE);
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, existing);
@@ -643,7 +643,7 @@ nfs4_client_setclientid(
     memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
 
  out_unlock:
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_setclientid */
 
 nfsstat4
@@ -659,7 +659,7 @@ nfs4_client_setclientid_confirm(
 
     *destroy_unified = NULL;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &clientid, sizeof(clientid), r);
@@ -740,7 +740,7 @@ nfs4_client_setclientid_confirm(
     status = NFS4_OK;
 
  out_unlock:
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
     return status;
 } /* nfs4_client_setclientid_confirm */
 
@@ -756,7 +756,7 @@ nfs4_client_create_session_classify(
 
     memset(out, 0, sizeof(*out));
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -811,7 +811,7 @@ nfs4_client_create_session_classify(
     }
 
  out_unlock:
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_create_session_classify */
 
 void
@@ -828,7 +828,7 @@ nfs4_client_create_session_cache(
 {
     struct nfs4_client *c;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -853,7 +853,7 @@ nfs4_client_create_session_cache(
         }
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_create_session_cache */
 
 bool
@@ -864,7 +864,7 @@ nfs4_client_mark_reclaim_complete(
     struct nfs4_client *c;
     bool                already = false;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -874,7 +874,7 @@ nfs4_client_mark_reclaim_complete(
         c->nfs4_client_reclaim_complete = 1;
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     return already;
 } /* nfs4_client_mark_reclaim_complete */
@@ -887,7 +887,7 @@ nfs4_client_reclaim_complete(
     struct nfs4_client *c;
     bool                complete = false;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -896,7 +896,7 @@ nfs4_client_reclaim_complete(
         complete = c->nfs4_client_reclaim_complete;
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     return complete;
 } /* nfs4_client_reclaim_complete */
@@ -911,20 +911,20 @@ nfs4_client_destroy_clientid(
     struct nfs4_client *c;
     struct nfs_client  *unified;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
 
     if (!c) {
-        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
         return NFS4ERR_STALE_CLIENTID;
     }
 
     /* RFC 8881 §18.50.3: a client that still owns sessions cannot be
      * destroyed -- the client must DESTROY_SESSION them first. */
     if (nfs4_client_has_session_locked(table, client_id)) {
-        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
         return NFS4ERR_CLIENTID_BUSY;
     }
 
@@ -936,13 +936,13 @@ nfs4_client_destroy_clientid(
      * that DESTROY_SESSIONs and then DESTROY_CLIENTIDs must be refused while
      * it still holds opens. */
     if (nfs4_client_has_leased_state(c)) {
-        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
         return NFS4ERR_CLIENTID_BUSY;
     }
 
     unified = nfs4_client_remove_locked(table, c);
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     if (unified) {
         nfs_client_destroy(unified, state_table, vfs_thread, false);
@@ -961,13 +961,13 @@ nfs4_client_confirm(
 
     *destroy_unified = NULL;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
 
     if (!c) {
-        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
         return false;
     }
 
@@ -1020,7 +1020,7 @@ nfs4_client_confirm(
         c->nfs4_client_in_owner_table = 1;
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
     return true;
 } /* nfs4_client_confirm */
 
@@ -1040,7 +1040,7 @@ nfs4_clients_check_io_denied(
     struct nfs4_client *c, *tmp;
     nfsstat4            status = NFS4_OK;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, c, tmp)
     {
@@ -1054,7 +1054,7 @@ nfs4_clients_check_io_denied(
         }
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
     return status;
 } /* nfs4_clients_check_io_denied */
 
@@ -1072,7 +1072,7 @@ nfs4_clients_have_open_state(
     struct nfs4_client *c, *tmp;
     bool                found = false;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, c, tmp)
     {
@@ -1085,7 +1085,7 @@ nfs4_clients_have_open_state(
         }
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
     return found;
 } /* nfs4_clients_have_open_state */
 
@@ -1111,7 +1111,7 @@ nfs4_client_lookup_lock_owner(
     struct nfs_lock_owner *lo, *lo_tmp;
     bool                   found = false;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &clientid, sizeof(clientid), c);
@@ -1119,7 +1119,7 @@ nfs4_client_lookup_lock_owner(
     if (c && c->unified) {
         struct nfs_client *uc = c->unified;
 
-        pthread_mutex_lock(&uc->lock);
+        evpl_mutex_lock(&uc->lock);
         HASH_ITER(hh, uc->lock_owners_by_str, lo, lo_tmp)
         {
             if (XXH3_64bits(lo->owner, lo->owner_len) == owner_hash) {
@@ -1130,10 +1130,10 @@ nfs4_client_lookup_lock_owner(
                 break;
             }
         }
-        pthread_mutex_unlock(&uc->lock);
+        evpl_mutex_unlock(&uc->lock);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
     return found;
 } /* nfs4_client_lookup_lock_owner */
 
@@ -1186,7 +1186,7 @@ nfs4_client_unregister(
     struct nfs4_client *client;
     struct nfs_client  *unified = NULL;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), client);
@@ -1196,7 +1196,7 @@ nfs4_client_unregister(
         unified = nfs4_client_remove_locked(table, client);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     /* Tear down the unified state hierarchy outside the table lock so
      * nfs_client_destroy can take per-client / per-owner locks without
@@ -1223,7 +1223,7 @@ nfs4_create_session(
     struct nfs4_session *session = NULL;
     char                 session_id_str[80];
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), client);
@@ -1287,7 +1287,7 @@ nfs4_create_session(
 
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     if (!client) {
         return NULL;
@@ -1309,7 +1309,7 @@ nfs4_session_lookup(
 {
     struct nfs4_session *session = NULL;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_session_hh, table->nfs4_ct_sessions,
               sessionid, NFS4_SESSIONID_SIZE, session);
@@ -1321,7 +1321,7 @@ nfs4_session_lookup(
                                   memory_order_acq_rel);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     return session;
 } /* nfs4_session_lookup */
@@ -1334,7 +1334,7 @@ nfs4_session_find_by_clientid(
     struct nfs4_session *session = NULL;
     struct nfs4_session *cur, *tmp;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, cur, tmp)
     {
@@ -1350,7 +1350,7 @@ nfs4_session_find_by_clientid(
                                   memory_order_acq_rel);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     return session;
 } /* nfs4_session_find_by_clientid */
@@ -1367,7 +1367,7 @@ nfs4_destroy_session(
 
     chimera_nfs_info("NFS4 Destroying session %s", session_id_str);
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_session_hh, table->nfs4_ct_sessions, session_id,
               NFS4_SESSIONID_SIZE, session);
@@ -1378,7 +1378,7 @@ nfs4_destroy_session(
                               memory_order_release);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     if (session) {
         /* Drop the hash table's ref.  The session is freed only when the
@@ -1398,7 +1398,7 @@ nfs4_client_table_destroy_unified(
 #ifndef __clang_analyzer__
     struct nfs4_client *cur, *tmp;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
     {
@@ -1408,7 +1408,7 @@ nfs4_client_table_destroy_unified(
         }
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 #endif /* ifndef __clang_analyzer__ */
 } /* nfs4_client_table_destroy_unified */
 
@@ -1988,7 +1988,7 @@ nfs4_cb_path_store(
         addr_len = sizeof(cb->cb_addr) - 1;
     }
 
-    pthread_mutex_lock(&u->lock);
+    evpl_mutex_lock(&u->lock);
 
     cb->cb_program      = cb_program;
     cb->cb_ident        = cb_ident;
@@ -2028,7 +2028,7 @@ nfs4_cb_path_store(
         nfs4_cb_path_teardown(cb, false);
     }
 
-    pthread_mutex_unlock(&u->lock);
+    evpl_mutex_unlock(&u->lock);
 } /* nfs4_cb_path_store */
 
 /*
@@ -2051,7 +2051,7 @@ nfs4_client_set_cb_path(
 {
     struct nfs4_client *c;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -2061,7 +2061,7 @@ nfs4_client_set_cb_path(
                            netid, netid_len, addr, addr_len);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_set_cb_path */
 
 /*
@@ -2088,7 +2088,7 @@ nfs4_client_stage_cb_path(
 {
     struct nfs4_client *c;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -2120,7 +2120,7 @@ nfs4_client_stage_cb_path(
         c->nfs4_client_scid_cb_valid = 1;
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_stage_cb_path */
 
 void
@@ -2130,7 +2130,7 @@ nfs4_client_commit_cb_path(
 {
     struct nfs4_client *c;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
@@ -2149,7 +2149,7 @@ nfs4_client_commit_cb_path(
                            (int) c->nfs4_client_scid_cb_addr_len);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_commit_cb_path */
 
 /*
@@ -2170,26 +2170,26 @@ nfs4_client_set_cb_sec(
     struct nfs4_client *c;
     struct nfs_client  *u;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), c);
 
     if (!c || !c->unified) {
-        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
         return;
     }
 
     u = c->unified;
 
-    pthread_mutex_lock(&u->lock);
+    evpl_mutex_lock(&u->lock);
     if (cb_program) {
         u->cb_path.cb_program = cb_program;
     }
     u->cb_path.cb_sec_flavor = flavor;
     u->cb_path.cb_sec_uid    = uid;
     u->cb_path.cb_sec_gid    = gid;
-    pthread_mutex_unlock(&u->lock);
+    evpl_mutex_unlock(&u->lock);
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_set_cb_sec */

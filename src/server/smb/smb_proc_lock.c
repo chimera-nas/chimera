@@ -400,7 +400,7 @@ chimera_smb_lock_abort_parked(
     if (entry && !chimera_vfs_claim_cancel(vfs_state, &entry->ticket)) {
         struct chimera_smb_request **pp = &thread->lock_resume_head;
 
-        pthread_mutex_lock(&thread->lease_break_lock);
+        evpl_mutex_lock(&thread->lease_break_lock);
         while (*pp) {
             if (*pp == request) {
                 *pp = request->lock.lock_resume_next;
@@ -409,7 +409,7 @@ chimera_smb_lock_abort_parked(
             }
             pp = &(*pp)->lock.lock_resume_next;
         }
-        pthread_mutex_unlock(&thread->lease_break_lock);
+        evpl_mutex_unlock(&thread->lease_break_lock);
 
         /* The ticket did not dequeue because the grant already landed: the VFS
          * range lease IS inserted in the table even though the SMB-side
@@ -462,10 +462,10 @@ chimera_smb_lock_acquire_cb(
      * doorbell and completes the lock there. */
     request->lock.resume_status = status;
 
-    pthread_mutex_lock(&thread->lease_break_lock);
+    evpl_mutex_lock(&thread->lease_break_lock);
     request->lock.lock_resume_next = thread->lock_resume_head;
     thread->lock_resume_head       = request;
-    pthread_mutex_unlock(&thread->lease_break_lock);
+    evpl_mutex_unlock(&thread->lease_break_lock);
 
     evpl_ring_doorbell(&thread->lease_resume_doorbell);
 } /* chimera_smb_lock_acquire_cb */

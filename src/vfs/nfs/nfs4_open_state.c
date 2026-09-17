@@ -55,7 +55,7 @@ chimera_nfs4_open_file_get(
         return 0;
     }
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     HASH_FIND(hh, server->open_files, wire_fh, wire_fh_len, file);
 
@@ -69,7 +69,7 @@ chimera_nfs4_open_file_get(
              * tracks (its CLOSE already retired it, or a fresh open already
              * replaced it and this reply raced past both), or the tracked
              * state itself while its CLOSE is in flight.  Dead either way. */
-            pthread_mutex_unlock(&server->open_state_lock);
+            evpl_mutex_unlock(&server->open_state_lock);
             return -1;
         }
 
@@ -82,7 +82,7 @@ chimera_nfs4_open_file_get(
             file->stateid = *stateid;
         }
 
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return 0;
     }
 
@@ -90,14 +90,14 @@ chimera_nfs4_open_file_get(
         /* An upgrade of a state this client no longer tracks: the file's
          * CLOSE completed between our OPEN's transmit and the server
          * processing it, so the state we coalesced into is gone. */
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return -1;
     }
 
     file = calloc(1, sizeof(*file));
 
     if (!file) {
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return 0;
     }
 
@@ -111,7 +111,7 @@ chimera_nfs4_open_file_get(
 
     HASH_ADD_KEYPTR(hh, server->open_files, file->fh, file->fh_len, file);
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
     return 0;
 } /* chimera_nfs4_open_file_get */
 
@@ -145,12 +145,12 @@ chimera_nfs4_open_file_put(
         return 0;
     }
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     HASH_FIND(hh, server->open_files, wire_fh, wire_fh_len, file);
 
     if (!file || --file->refcnt > 0) {
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return 0;
     }
 
@@ -162,7 +162,7 @@ chimera_nfs4_open_file_put(
 
     *r_stateid = file->stateid;
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
 
     return 1;
 } /* chimera_nfs4_open_file_put */
@@ -194,18 +194,18 @@ chimera_nfs4_open_file_close_done(
         return;
     }
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     HASH_FIND(hh, server->open_files, wire_fh, wire_fh_len, file);
 
     if (file && --file->closing == 0 && file->refcnt == 0) {
         HASH_DEL(server->open_files, file);
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         free(file);
         return;
     }
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
 } /* chimera_nfs4_open_file_close_done */
 
 /*
@@ -221,7 +221,7 @@ chimera_nfs4_open_file_drain(struct chimera_nfs_client_server *server)
 {
     struct chimera_nfs4_open_file *file, *next;
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     /* Take the chain, drop uthash's table in one step, and only then free the
      * entries, walking the insertion-order links with each read taken before
@@ -239,5 +239,5 @@ chimera_nfs4_open_file_drain(struct chimera_nfs_client_server *server)
         file = next;
     }
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
 } /* chimera_nfs4_open_file_drain */
