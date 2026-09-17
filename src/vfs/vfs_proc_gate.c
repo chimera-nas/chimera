@@ -53,6 +53,26 @@ chimera_vfs_gate_fh_getattr(
          * access evaluation, so the type error is not masked as EACCES
          * for callers the backend's own type check never reaches. */
         status = CHIMERA_VFS_ENOTDIR;
+    } else if (ctx->create_attr &&
+               (attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK) &&
+               attr->va_nlink == 0) {
+        /* Creating in a directory that has already been removed is ENOENT,
+         * and that outranks any permission the directory's mode would still
+         * appear to deny.  may_create() has it in that order:
+         *
+         *     if (child->d_inode) return -EEXIST;
+         *     if (IS_DEADDIR(dir)) return -ENOENT;
+         *     return inode_permission(idmap, dir, MAY_WRITE | MAY_EXEC);
+         *
+         * A descriptor keeps the removed directory reachable, so the case is
+         * reachable here too: mkdirat() through a dirfd whose directory was
+         * rmdir'ed answered EACCES, because the gate read a mode that denied
+         * the caller and never asked whether the directory was still there.
+         *
+         * Only the CREATE gates ask this -- ctx->create_attr is their mark.
+         * may_delete() has no such check, reasonably: a victim that exists
+         * proves its parent does. */
+        status = CHIMERA_VFS_ENOENT;
     } else {
         status = chimera_vfs_gate(attr, ctx->cred, ctx->required);
     }
