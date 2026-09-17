@@ -30,6 +30,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
@@ -1290,6 +1291,117 @@ main(
         chimera_vfs_release(ctx.vfs_thread, oh);
     }
     TEST_PASS("WRITE borrows its data; a READ behind it sees what it wrote");
+
+    /* ---- LOCK_TEST probes, LOCK takes ----
+     * Byte-range locks are the first sequence ops whose result is an object
+     * the CALLER owns afterwards rather than a value copied out: the claim
+     * core keeps pointers into the claim struct once it is inserted, so the
+     * struct is the caller's and its address is its identity.  Releasing it is
+     * out of band, exactly as releasing an open handle is. */
+    {
+        struct chimera_vfs_attrs            sattr;
+        struct chimera_vfs_open_handle     *oh;
+        struct chimera_vfs_claim            claim_a, claim_b, probe;
+        struct chimera_vfs_pending_acquire  ticket_a, ticket_b;
+        struct chimera_claim_owner          owner_a, owner_b;
+        struct chimera_vfs_file_state      *fs;
+        int                                 i_open, i_probe, i_lock;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "lk", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 1;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.owner_lo = 2;
+
+        /* Nothing holds the range yet, so the probe says so and the LOCK
+         * behind it takes it -- both in one sequence, which is the point. */
+        chimera_vfs_claim_init_range(&probe, true, false, 0, 16, &owner_a);
+        chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_INFERRED);
+        i_probe = chimera_vfs_compound_add_lock_test(cp, &probe);
+        i_lock  = chimera_vfs_compound_add_lock(cp, &claim_a, &ticket_a, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_probe);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+
+        /* The lock is taken, and its file state came with it: the sequence
+         * hands that over ON GRANTED ONLY, because the caller needs it to
+         * release the lock later. */
+        op = chimera_vfs_compound_op(cp, i_lock);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_lock);
+        assert(fs != NULL);
+
+        chimera_vfs_compound_free(cp);
+    TEST_PASS("LOCK_TEST probes and LOCK takes, in one sequence");
+
+        /* A second owner wanting the same range is refused.  The probe ANSWERS
+         * -- that is all LOCKT and F_GETLK are -- so its op succeeds and the
+         * sequence goes on; the acquire behind it is the one that stops. */
+        chimera_vfs_claim_init_range(&probe, true, false, 0, 16, &owner_b);
+        chimera_vfs_claim_init_range(&claim_b, true, false, 0, 16, &owner_b);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_INFERRED);
+        i_probe = chimera_vfs_compound_add_lock_test(cp, &probe);
+        i_lock  = chimera_vfs_compound_add_lock(cp, &claim_b, &ticket_b, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        op = chimera_vfs_compound_op(cp, i_probe);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result != CHIMERA_CLAIM_GRANTED);
+        /* Who refused, in the caller's own terms. */
+        assert(op->conflict.owner.owner_lo == owner_a.owner_lo);
+
+        op = chimera_vfs_compound_op(cp, i_lock);
+        assert(op->status != CHIMERA_VFS_OK);
+        assert(op->claim_result != CHIMERA_CLAIM_GRANTED);
+        /* Nothing was taken, so nothing is the caller's to put. */
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_lock) == NULL);
+
+        chimera_vfs_compound_free(cp);
+    TEST_PASS("a refused LOCK stops the sequence and names the holder");
+
+        /* Out of band, exactly as a handle release is. */
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread,
+                                         ctx.vfs->vfs_state, fs, &claim_a);
+        chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
 
     /* ---- RENAME and LINK read the SAVED slot, not just the current one ----
      * Every other name-changing op works inside one directory.  These two take

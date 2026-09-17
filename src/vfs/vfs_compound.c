@@ -40,6 +40,7 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
+#include "vfs_claim.h"
 #include "sdk/vfs_access.h"
 #include "common/macros.h"
 
@@ -238,6 +239,13 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
         free(compound->ops[i].new_path);
         free(compound->ops[i].entries);
         free(compound->ops[i].buffer);
+
+        /* A LOCK's file state, on the same terms as its handle above: ours
+         * until the caller takes it. */
+        if (compound->ops[i].lock_file_state) {
+            chimera_vfs_state_put(thread->vfs->vfs_state,
+                                  compound->ops[i].lock_file_state);
+        }
 
         memset(&compound->ops[i], 0, sizeof(compound->ops[i]));
     }
@@ -1219,6 +1227,82 @@ chimera_vfs_compound_add_readdir_stream(
 
     return index;
 } /* chimera_vfs_compound_add_readdir_stream */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_lock_test(
+    struct chimera_vfs_compound *compound,
+    struct chimera_vfs_claim    *claim)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (!claim) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->claim = claim;
+
+    return index;
+} /* chimera_vfs_compound_add_lock_test */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_lock(
+    struct chimera_vfs_compound        *compound,
+    struct chimera_vfs_claim           *claim,
+    struct chimera_vfs_pending_acquire *ticket,
+    unsigned int                        flags)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    /* The ticket is what a parked acquire lives in, so an acquire that may
+     * wait has to have one.  Refusing here rather than at execution keeps the
+     * sequence from being built at all, which build_failed then reports at
+     * submit. */
+    if (!claim || !ticket) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_LOCK, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->claim      = claim;
+    op->ticket     = ticket;
+    op->lock_flags = flags;
+
+    return index;
+} /* chimera_vfs_compound_add_lock */
+
+SYMBOL_EXPORT struct chimera_vfs_file_state *
+chimera_vfs_compound_take_file_state(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index)
+{
+    struct chimera_vfs_file_state *file_state;
+
+    if (index >= compound->num_ops) {
+        return NULL;
+    }
+
+    file_state                           = compound->ops[index].lock_file_state;
+    compound->ops[index].lock_file_state = NULL;
+
+    return file_state;
+} /* chimera_vfs_compound_take_file_state */
 
 SYMBOL_EXPORT int
 chimera_vfs_compound_add_getxattr(
@@ -2856,6 +2940,8 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
             return 0;
         /* COMMIT flushes file data; ALLOCATE changes it; SEEK reads the map
          * that describes it.  All three want the data open. */
+        case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
+        case CHIMERA_VFS_COMPOUND_OP_LOCK:
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
         case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:
         case CHIMERA_VFS_COMPOUND_OP_SEEK:
@@ -2922,6 +3008,51 @@ chimera_vfs_compound_handle_serves(
 
     return ((have ^ want) & CHIMERA_VFS_OPEN_PATH) == 0;
 } /* chimera_vfs_compound_handle_serves */
+
+/* An acquire's answer, which may arrive long after the op was dispatched: a
+ * blocking lock parks until the holder lets go.  The sequence simply does not
+ * advance meanwhile, which is what it already does for a lease break.
+ *
+ * `granted` is the caller's own claim struct handed back, so there is nothing
+ * to copy: on GRANTED it is now inserted and the caller owns it. */
+static void
+chimera_vfs_compound_lock_callback(
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *granted,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) granted;
+
+    op->claim_result = result;
+
+    if (conflict) {
+        op->conflict = *conflict;
+    }
+
+    if (result == CHIMERA_CLAIM_GRANTED) {
+        /* The claim is inserted and the file state goes to the caller with it.
+         * op->lock_file_state already holds it; leaving it there is what makes
+         * take_file_state work. */
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+        return;
+    }
+
+    /* Nothing was taken, so the file state is ours to put. */
+    chimera_vfs_state_put(compound->thread->vfs->vfs_state,
+                          op->lock_file_state);
+    op->lock_file_state = NULL;
+
+    /* A refusal is the op's answer, not a malfunction -- but it still stops the
+     * sequence, because everything behind a lock in a sequence was written on
+     * the assumption the lock was held.  The caller reads claim_result and
+     * conflict to say WHY in its own protocol's terms: NFS4ERR_DENIED, an SMB2
+     * LOCK_NOT_GRANTED, an EAGAIN from fcntl. */
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EAGAIN);
+} /* chimera_vfs_compound_lock_callback */
 
 static void
 chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
@@ -3630,6 +3761,51 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                      chimera_vfs_compound_xattr_change_callback,
                                      compound);
             break;
+
+        case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
+        case CHIMERA_VFS_COMPOUND_OP_LOCK:
+        {
+            struct chimera_vfs_state *vfs_state =
+                compound->thread->vfs->vfs_state;
+
+            /* Locks are arbitrated per FILE, not per open, so the question is
+             * asked of the object the current open refers to. */
+            op->lock_file_state = chimera_vfs_state_get(vfs_state,
+                                                        target->fh,
+                                                        (uint8_t) target->fh_len,
+                                                        target->fh_hash,
+                                                        true);
+
+            if (!op->lock_file_state) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EIO);
+                break;
+            }
+
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_LOCK_TEST) {
+                /* A probe inserts nothing, so it owns nothing afterwards. */
+                op->claim_result = chimera_vfs_claim_test(op->lock_file_state,
+                                                          op->claim,
+                                                          &op->conflict);
+
+                chimera_vfs_state_put(vfs_state, op->lock_file_state);
+                op->lock_file_state = NULL;
+
+                /* Unlike LOCK, a probe that says "denied" has ANSWERED: that is
+                 * the whole of LOCKT and F_GETLK, and the sequence goes on. */
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+                break;
+            }
+
+            chimera_vfs_claim_acquire(
+                compound->thread, vfs_state, op->lock_file_state,
+                op->claim, op->ticket,
+                !!(op->lock_flags & CHIMERA_VFS_COMPOUND_LOCK_WAIT),
+                !!(op->lock_flags & CHIMERA_VFS_COMPOUND_LOCK_WAIT_HARD),
+                chimera_vfs_compound_lock_callback,
+                NULL, /* no park notification yet -- see the header */
+                compound);
+            break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
         case CHIMERA_VFS_COMPOUND_OP_ACCESS:
