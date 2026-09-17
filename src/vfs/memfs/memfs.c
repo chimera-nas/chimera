@@ -4781,14 +4781,32 @@ memfs_copy_range(
         return;
     }
 
-    /* Same file: reject overlap (POSIX copy_file_range semantics) */
+    /* Same file: reject overlap (copy_file_range semantics).
+     *
+     * On the length SHORTENED TO THE SOURCE'S EOF, not the one asked for.
+     * generic_copy_file_checks() clamps before it tests, so a request whose
+     * source offset is already at or past EOF copies zero bytes and cannot
+     * overlap anything -- naming one file at one offset for both ends is then
+     * a 0-byte success, not EINVAL.  (The POSIX client clamps the same way
+     * before it ever dispatches; this arm is what other callers reach.) */
     if (src_inode == dst_inode) {
-        uint64_t s_end = src_offset + length;
-        uint64_t d_end = dst_offset + length;
-        if (src_offset < d_end && dst_offset < s_end) {
-            request->status = CHIMERA_VFS_EINVAL;
-            request->complete(request);
-            return;
+        uint64_t clamped = 0;
+
+        if (src_offset < src_inode->size) {
+            clamped = src_inode->size - src_offset;
+            if (clamped > length) {
+                clamped = length;
+            }
+        }
+
+        if (clamped) {
+            uint64_t s_end = src_offset + clamped;
+            uint64_t d_end = dst_offset + clamped;
+            if (src_offset < d_end && dst_offset < s_end) {
+                request->status = CHIMERA_VFS_EINVAL;
+                request->complete(request);
+                return;
+            }
         }
     }
 
