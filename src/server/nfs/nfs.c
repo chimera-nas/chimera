@@ -5,10 +5,17 @@
 #include "common/thread.h"
 #include <utlist.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "common/platform.h"
 
 #include "nfs.h"
@@ -214,7 +221,9 @@ nfs_server_init(
      * Per-thread provider registration happens in nfs_server_thread_init. */
     shared->gss_enabled = chimera_server_config_get_nfs_kerberos_enabled(config);
     if (shared->gss_enabled) {
-        chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config));
+        chimera_nfs_abort_if(
+            chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config)) != 0,
+            "Unable to initialize the requested Kerberos provider");
         chimera_nfs_gss_set_principal_map(config);
         chimera_nfs_info("RPCSEC_GSS: Kerberos authentication enabled");
     }

@@ -2,17 +2,25 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include "common/platform.h"
 #include "common/thread.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <arpa/inet.h>
-#include <gssapi/gssapi.h>
-#include <gssapi/gssapi_krb5.h>
+#endif
+
 #include <openssl/hmac.h>
 
 
@@ -220,6 +228,9 @@ chimera_smb_server_init(
                                               NULL);
     }
     if (shared->config.auth.kerberos_enabled) {
+#ifndef CHIMERA_HAVE_GSSAPI
+        chimera_smb_abort_if(1, "Kerberos requested but this build has no GSSAPI provider");
+#endif
         chimera_smb_info("SMB Auth: Kerberos enabled (realm: %s, keytab: %s)",
                          shared->config.auth.kerberos_realm[0] ? shared->config.auth.kerberos_realm : "(not set)",
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
@@ -895,7 +906,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         if (rc == 0) {
             netbios_hdr       = evpl_iovec_data(&comp_iov);
-            netbios_hdr->word = __builtin_bswap32(comp_total);
+            netbios_hdr->word = chimera_bswap32(comp_total);
 
             evpl_sendv(evpl, conn->bind, &comp_iov, 1, reply_hdr_len + comp_total,
                        EVPL_SEND_FLAG_TAKE_REF);
@@ -994,7 +1005,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
                 /* The encrypted message length excludes the NetBIOS framing. */
                 netbios_hdr       = evpl_iovec_data(&enc_iov);
-                netbios_hdr->word = __builtin_bswap32(
+                netbios_hdr->word = chimera_bswap32(
                     (int) sizeof(struct smb2_transform_header) + enc_src_len);
 
                 evpl_sendv(evpl, conn->bind, &enc_iov, 1, enc_total, EVPL_SEND_FLAG_TAKE_REF);
@@ -1064,7 +1075,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         }
 
     } else {
-        netbios_hdr->word = __builtin_bswap32(reply_payload_length);
+        netbios_hdr->word = chimera_bswap32(reply_payload_length);
 
         evpl_sendv(evpl, conn->bind, reply_iov, reply_niov, reply_payload_length + reply_hdr_len,
                    EVPL_SEND_FLAG_TAKE_REF);
@@ -2736,7 +2747,7 @@ chimera_smb_server_segment(
         return 0;
     }
 
-    hdr = __builtin_bswap32(hdr);
+    hdr = chimera_bswap32(hdr);
 
     hdr &= 0x00ffffff;
 

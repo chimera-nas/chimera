@@ -37,7 +37,7 @@ add_library(chimera_nfs ${CHIMERA_LIBRARY_TYPE} nfs.c nfs4_session.c nfs4_state.
             nfs4_proc_getxattr.c nfs4_proc_setxattr.c
             nfs4_proc_listxattrs.c nfs4_proc_removexattr.c
             nfs4_pnfs.c nfs4_cb.c nfs4_layout_table.c
-            nfs_gss.c)
+            ${CHIMERA_NFS_GSS_SOURCE})
 
 target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
 target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIB} ${CHIMERA_RCU_COMMON_LIB} ${CHIMERA_GSS_LIB})
