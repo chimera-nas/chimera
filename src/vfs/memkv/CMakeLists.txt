@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_memkv SHARED
+add_library(chimera_vfs_memkv ${CHIMERA_LIBRARY_TYPE}
     memkv.c
 )
 

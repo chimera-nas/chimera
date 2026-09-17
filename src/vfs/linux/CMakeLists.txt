@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_linux SHARED
+add_library(chimera_vfs_linux ${CHIMERA_LIBRARY_TYPE}
     linux.c
 )
 

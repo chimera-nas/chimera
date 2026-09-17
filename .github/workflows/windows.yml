@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+name: Native Windows
+on:
+  push:
+    branches: [main, windows-msvc]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    name: MSVC ${{ matrix.arch }} ${{ matrix.config }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, arch: x64, config: Debug}
+          - {runner: windows-2022, arch: x64, config: Release}
+          - {runner: windows-11-arm, arch: ARM64, config: Debug}
+          - {runner: windows-11-arm, arch: ARM64, config: Release}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/checkout@v5
+        with:
+          repository: microsoft/vcpkg
+          ref: a1cae005c39be7b18ba319fced856b68d7276271
+          path: _vcpkg
+      - uses: actions/cache/restore@v4
+        id: vcpkg-cache
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ matrix.arch }}-
+      - name: Test native runtime
+        shell: pwsh
+        run: |
+          cmake -S src/common/tests/native -B runtime -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build runtime --config ${{ matrix.config }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir runtime -C ${{ matrix.config }} --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install parser generators
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP/winflexbison.zip"
+          Invoke-WebRequest https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135') { throw 'WinFlexBison checksum mismatch' }
+          Expand-Archive $archive "$env:RUNNER_TEMP/winflexbison"
+      - name: Configure native Windows with dependencies
+        shell: pwsh
+        run: |
+          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
+          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" -DOTEL_SQLITE=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/cache/save@v4
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4
+      - name: Test native backends
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --timeout 300 --output-junit results.xml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-${{ matrix.arch }}-${{ matrix.config }}
+          path: |
+            build/results.xml
+            build/Testing/Temporary/
+          if-no-files-found: ignore

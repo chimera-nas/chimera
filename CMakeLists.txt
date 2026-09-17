@@ -28,6 +28,8 @@ project(chimera LANGUAGES C)
 # off there rather than hard-failing configure.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CHIMERA_LINUX TRUE)
+elseif(WIN32)
+    set(CHIMERA_LINUX FALSE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(CHIMERA_LINUX FALSE)
 
@@ -222,7 +224,11 @@ endif()
 
 set(CHIMERA_VERSION "0.1.0")
 
-execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
+if(NOT WIN32)
+    execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
+endif()
+
+include(cmake/Platform.cmake)
 
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 add_definitions(-DCHIMERA_STATE_DIR="${CMAKE_INSTALL_PREFIX}/share/state")
@@ -300,7 +306,11 @@ function(add_test)
     if(_quick)
         _add_test(${_args})
     else()
-        _add_test(${_args} CONFIGURATIONS extended)
+        if(CMAKE_CONFIGURATION_TYPES)
+            _add_test(${_args} CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES})
+        else()
+            _add_test(${_args} CONFIGURATIONS extended)
+        endif()
     endif()
 endfunction()
 
@@ -317,7 +327,7 @@ endif()
 
 include_directories(3rdparty)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(STATUS "Enabling AddressSanitizer")
     add_definitions(-fsanitize=address -fno-omit-frame-pointer
                     -fno-optimize-sibling-calls -fstack-protector-all -DCHIMERA_SANITIZE=1)
@@ -327,7 +337,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DEVPL_IOVEC_TRACE=1)
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
+if(NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
 endif()
 
@@ -355,10 +365,9 @@ endif()
 # frame-pointer-based profilers can unwind call stacks (the cost at -O3 is
 # negligible and the unwind reliability is worth it for production profiling).
 # Mirrors the same setting in the bundled libevpl.
-add_definitions(-fno-omit-frame-pointer)
-
-add_definitions(-g -Wall -Werror -Wno-unused-function)
-add_definitions(-fvisibility=hidden)
+if(NOT MSVC)
+    add_definitions(-fno-omit-frame-pointer -g -Wall -Werror -Wno-unused-function -fvisibility=hidden)
+endif()
 
 # CMAKE_SYSTEM_PROCESSOR spells 64-bit ARM "aarch64" on Linux and "arm64" on
 # Darwin, so match on the family rather than a single string.  CHIMERA_ARCH_ARM64
@@ -382,7 +391,11 @@ else()
     set(CHIMERA_XXH_VECTOR XXH_AVX2)
 endif()
 
-add_definitions(${MARCH_FLAG})
+if(MSVC)
+    set(CHIMERA_XXH_VECTOR XXH_SCALAR)
+else()
+    add_definitions(${MARCH_FLAG})
+endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU")
     add_link_options(-Wl,--no-as-needed)
@@ -406,7 +419,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
                     -Wno-unknown-warning-option -Wno-absolute-value)
 endif()
 
-if(NOT CHIMERA_LINUX)
+if(APPLE)
     # Apple's <stdio.h> marks sprintf(3)/vsprintf(3) __deprecated, which -Werror
     # turns into ~90 hard errors across the S3 and SMB dump paths.  glibc does
     # not, so the Linux build never sees it.  Demote it here rather than let the
@@ -614,12 +627,14 @@ set(LIBEVPL_NETNS_TESTING ${CHIMERA_NETNS_TESTING})
 # Probing the two separately is what lets those tests run in an environment
 # that grants the limits but not CAP_NET_ADMIN: previously the netns probe was
 # the only gate, so no namespace meant no tests, whatever else was available.
+if(CHIMERA_LINUX)
 execute_process(
     COMMAND bash -c "set -e; ulimit -l unlimited; test -w /proc/sys/fs/aio-max-nr"
     RESULT_VARIABLE LIMITS_PROBE_RESULT
     OUTPUT_QUIET
     ERROR_QUIET
 )
+endif()
 
 if(NOT CHIMERA_LINUX)
     # The limits are Linux concepts backing Linux-only modules (io_uring

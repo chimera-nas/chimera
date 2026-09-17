@@ -2,11 +2,15 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-find_package(PkgConfig REQUIRED)
+if(NOT WIN32)
+    find_package(PkgConfig REQUIRED)
+endif()
 find_package(OpenSSL REQUIRED)
-pkg_check_modules(JANSSON REQUIRED jansson)
+if(NOT WIN32)
+    pkg_check_modules(JANSSON REQUIRED jansson)
+endif()
 
-add_library(chimera_rest SHARED
+add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
     rest.c
     rest_users.c
     rest_exports.c
@@ -55,7 +59,7 @@ set(OPENAPI_JSON ${CMAKE_SOURCE_DIR}/docs/openapi.json)
 
 add_custom_command(
     OUTPUT ${SWAGGER_EMBEDDED_C}
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py
             ${SWAGGER_DIR} ${OPENAPI_JSON} ${SWAGGER_EMBEDDED_C}
     DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_io_uring SHARED
+add_library(chimera_vfs_io_uring ${CHIMERA_LIBRARY_TYPE}
     io_uring.c
 )
 

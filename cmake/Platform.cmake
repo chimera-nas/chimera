@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: LGPL-2.1-only
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+find_package(OpenSSL REQUIRED)
+
+if(WIN32)
+    # Backends call the VFS core and protocol modules call the server core.
+    # Static archives let CMake resolve these cycles without unresolved DLL
+    # imports or a second copy of the process-wide state in each module.
+    set(CHIMERA_LIBRARY_TYPE STATIC)
+    set(CHIMERA_RCU_LIB "")
+    set(CHIMERA_RCU_COMMON_LIB "")
+    set(CHIMERA_GSS_LIB "")
+    find_package(jansson CONFIG REQUIRED)
+    if(NOT TARGET jansson)
+        add_library(jansson ALIAS jansson::jansson)
+    endif()
+    find_package(xxHash CONFIG REQUIRED)
+    if(NOT TARGET xxhash)
+        add_library(xxhash ALIAS xxHash::xxhash)
+    endif()
+    if(CAIRN_ENABLED)
+        find_package(RocksDB CONFIG REQUIRED)
+        if(NOT TARGET rocksdb)
+            add_library(rocksdb ALIAS RocksDB::rocksdb)
+        endif()
+    endif()
+else()
+    set(CHIMERA_LIBRARY_TYPE SHARED)
+    set(CHIMERA_RCU_LIB urcu-qsbr)
+    set(CHIMERA_RCU_COMMON_LIB urcu-common)
+    set(CHIMERA_GSS_LIB gssapi_krb5)
+endif()
+
+if(MSVC)
+    add_compile_options(/W3 /WX /experimental:c11atomics /wd4244 /wd4267)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
+                            WIN32_LEAN_AND_MEAN NOMINMAX)
+    set(CHIMERA_GENERATED_C_OPTIONS /wd4101 /wd4189)
+else()
+    set(CHIMERA_GENERATED_C_OPTIONS -Wno-unused)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        list(APPEND CHIMERA_GENERATED_C_OPTIONS -Wno-format-truncation)
+    endif()
+endif()
+
+option(CHIMERA_NATIVE_RCU "Use native QSBR (also testable on Unix)" ${WIN32})
+if(CHIMERA_NATIVE_RCU)
+    add_compile_definitions(CHIMERA_NATIVE_RCU=1)
+    set(CHIMERA_RCU_LIB "")
+    set(CHIMERA_RCU_COMMON_LIB "")
+endif()

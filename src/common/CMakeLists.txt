@@ -2,9 +2,17 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_common SHARED
-    logging.c snprintf.c pthread_create_interpose.c chimera_tracing.c
+add_library(chimera_common ${CHIMERA_LIBRARY_TYPE}
+    logging.c snprintf.c chimera_tracing.c
 )
+
+if(CHIMERA_NATIVE_RCU)
+    target_sources(chimera_common PRIVATE rcu.c)
+endif()
+
+if(NOT WIN32)
+    target_sources(chimera_common PRIVATE pthread_create_interpose.c)
+endif()
 
 target_link_libraries(chimera_common ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS})
 

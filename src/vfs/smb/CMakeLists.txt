@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_smb SHARED
+add_library(chimera_vfs_smb ${CHIMERA_LIBRARY_TYPE}
     smb.c
     smb_mount.c
     smb_umount.c
@@ -12,7 +12,7 @@ add_library(chimera_vfs_smb SHARED
     smb_ntlm.c
 )
 
-target_link_libraries(chimera_vfs_smb chimera_smb_common chimera_common evpl crypto)
+target_link_libraries(chimera_vfs_smb chimera_smb_common chimera_common evpl OpenSSL::Crypto)
 
 install(TARGETS chimera_vfs_smb DESTINATION lib)
 

@@ -32,8 +32,12 @@ set(CHIMERA_TEST_TIER quick)
 #   ctl_run.qnt   the profile
 #   ctlTest.qnt   deterministic self-checks, run as a build gate
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JANSSON REQUIRED jansson)
+if(NOT WIN32)
+    find_package(PkgConfig REQUIRED)
+endif()
+if(NOT WIN32)
+    pkg_check_modules(JANSSON REQUIRED jansson)
+endif()
 
 add_executable(ctl_smoke_probe ctl_smoke_probe.c)
 target_include_directories(ctl_smoke_probe PRIVATE

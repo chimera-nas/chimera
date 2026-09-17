@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_diskfs SHARED
+add_library(chimera_vfs_diskfs ${CHIMERA_LIBRARY_TYPE}
     diskfs.c
     diskfs_attr.c
     diskfs_block.c

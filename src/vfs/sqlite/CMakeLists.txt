@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_sqlite SHARED
+add_library(chimera_vfs_sqlite ${CHIMERA_LIBRARY_TYPE}
     sqlite.c
 )
 
