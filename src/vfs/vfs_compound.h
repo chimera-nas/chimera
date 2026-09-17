@@ -247,6 +247,15 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE,
     CHIMERA_VFS_COMPOUND_OP_WRITE_SAME,
     CHIMERA_VFS_COMPOUND_OP_READ_PLUS,
+    /* Byte-range locks.  Only the two that read or take a claim are ops:
+     * RELEASING A CLAIM IS OUT OF BAND, exactly as releasing an open handle
+     * is.  An op belongs in a sequence when it mutates state the sequence
+     * itself holds -- CLOSE is an op because it empties the current open
+     * cursor -- and dropping a lock touches nothing the sequence owns.  The
+     * caller releases with chimera_vfs_claim_release_ranged() whenever it is
+     * done, which is what every consumer already calls today. */
+    CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
+    CHIMERA_VFS_COMPOUND_OP_LOCK,
     /* Path-addressed.  See the note on ->path. */
     CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH,
     CHIMERA_VFS_COMPOUND_OP_OPEN_PATH,
@@ -592,6 +601,25 @@ struct chimera_vfs_compound_op {
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
     struct chimera_vfs_compound_dirent   *entries;
     uint32_t                              num_entries;
+    /* LOCK_TEST and LOCK.  `claim` and `ticket` are BORROWED and must outlive
+     * the sequence: the claim core keeps pointers INTO the claim once it is
+     * inserted, so its address is its identity and no copy will do.  That is
+     * why they are the caller's memory and not the sequence's.
+     *
+     * `claim_result` is the arbitration answer and `conflict` describes the
+     * holder that refused it (by value, valid whatever the result says).
+     *
+     * `lock_file_state` is the per-file claim state the op had to resolve to
+     * ask the question.  LOCK_TEST puts it back itself.  LOCK hands it to the
+     * caller ON GRANTED ONLY -- the caller needs it to release the lock later
+     * -- and puts it back on any other outcome, so exactly one side owns it in
+     * every case.  Take it with chimera_vfs_compound_take_file_state(). */
+    struct chimera_vfs_claim             *claim;
+    struct chimera_vfs_pending_acquire   *ticket;
+    struct chimera_vfs_file_state        *lock_file_state;
+    struct chimera_vfs_claim_conflict     conflict;
+    enum chimera_vfs_claim_result         claim_result;
+    unsigned int                          lock_flags;
     /* READDIR and LISTXATTRS: whether the enumeration reached the end, and the
      * cookie to resume it from, as the backend reported them when it stopped.
      * r_verifier is the directory's verifier (READDIR only). */
@@ -921,6 +949,51 @@ chimera_vfs_compound_add_open(
     uint64_t                        attr_mask,
     uint64_t                        dir_pre_attr_mask,
     uint64_t                        dir_post_attr_mask);
+
+/* LOCK waits for a conflicting holder to finish breaking rather than failing
+ * the op.  Without it a BREAKING conflict is reported as it stands. */
+#define CHIMERA_VFS_COMPOUND_LOCK_WAIT      (1U << 0)
+/* ... and additionally waits on a HARD conflict -- another owner's incompatible
+ * byte-range lock, which no recall will clear.  This is a blocking lock
+ * (F_SETLKW, an SMB2 LOCK without FAIL_IMMEDIATELY) and it can park for as long
+ * as the holder keeps it, which is the same open-ended wait a lease break
+ * already makes a sequence accept. */
+#define CHIMERA_VFS_COMPOUND_LOCK_WAIT_HARD (1U << 1)
+
+/* Ask whether `claim` WOULD be granted against the current open handle,
+ * changing nothing.  This is NFSv4 LOCKT, F_GETLK, NLM TEST, and SMB2's
+ * FAIL_IMMEDIATELY pre-check.  The answer lands in the op's `claim_result`,
+ * with the refusing holder in `conflict`.
+ *
+ * `claim` is BORROWED but need not outlive the sequence: a probe is never
+ * inserted, so nothing keeps a pointer to it afterwards.
+ *
+ * The caller builds the claim with chimera_vfs_claim_init_range() and shapes
+ * it -- SMB2 stamps op_handle and policy_tag, and carries its grant's lease key
+ * so a lock and its own caching lease do not break each other.  None of that
+ * belongs in a VFS op table: the caller knows what it is asking for, the same
+ * way it knows why it is opening. */
+int
+chimera_vfs_compound_add_lock_test(
+    struct chimera_vfs_compound *compound,
+    struct chimera_vfs_claim    *claim);
+
+/* Take `claim` against the current open handle.
+ *
+ * `claim` and `ticket` are BORROWED and must outlive the sequence AND the lock
+ * -- see the note on the op's fields.  On GRANTED the claim is inserted and the
+ * caller owns it until it releases it; the op's file state comes with it.
+ *
+ * A sequence that aborts before it finishes releases a claim this op inserted,
+ * which is safe in the way a release generally is not: an acquire that is
+ * rolled back blocked other clients for a while and handed them nothing they
+ * could act on, so there is nothing for them to have acted upon. */
+int
+chimera_vfs_compound_add_lock(
+    struct chimera_vfs_compound        *compound,
+    struct chimera_vfs_claim           *claim,
+    struct chimera_vfs_pending_acquire *ticket,
+    unsigned int                        flags);
 
 /* ---- path-addressed operations ----
  *
@@ -1260,6 +1333,14 @@ chimera_vfs_compound_op_set_handle(
  * OPEN, did not run, failed, or has already been taken. */
 struct chimera_vfs_open_handle *
 chimera_vfs_compound_take_handle(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
+
+/* Take ownership of a LOCK's file state: returns it and clears the op's copy,
+ * so the compound will not put it and the caller must.  NULL if that op is not
+ * a LOCK, did not run, was not GRANTED, or has already been taken. */
+struct chimera_vfs_file_state *
+chimera_vfs_compound_take_file_state(
     struct chimera_vfs_compound *compound,
     uint32_t                     index);
 
