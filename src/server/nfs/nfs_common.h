@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include <utlist.h>
 #include "common/rcu.h"
 

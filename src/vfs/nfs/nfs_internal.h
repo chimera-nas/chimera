@@ -4,11 +4,15 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
 #include "common/thread.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "common/platform.h"
 #include <utlist.h>
 #include "vfs/vfs.h"
@@ -31,7 +35,7 @@ static inline uint32_t
 chimera_nfs_hton32(uint32_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap32(value);
+    return chimera_bswap32(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -41,7 +45,7 @@ static inline uint64_t
 chimera_nfs_hton64(uint64_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap64(value);
+    return chimera_bswap64(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -606,7 +610,7 @@ static inline uint32_t
 chimera_nfs_ntoh32(uint32_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap32(value);
+    return chimera_bswap32(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -616,7 +620,7 @@ static inline uint64_t
 chimera_nfs_ntoh64(uint64_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap64(value);
+    return chimera_bswap64(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN

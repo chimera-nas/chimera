@@ -7,7 +7,11 @@
 #include <string.h>
 #undef NDEBUG
 #include <assert.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"

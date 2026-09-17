@@ -3,8 +3,13 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #define _GNU_SOURCE 1
+#include "common/thread.h"
 #include <errno.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "posix_internal.h"
 #include "../client/client_seek.h"

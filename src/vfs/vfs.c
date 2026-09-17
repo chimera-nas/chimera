@@ -4,13 +4,24 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdio.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <utlist.h>
 
 #include "common/platform.h"
@@ -538,6 +549,37 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 #endif
 
 
+/* Native builds resolve built-ins explicitly so archive members are retained.
+ * External modules require a shared Chimera SDK and remain a Unix facility. */
+static struct chimera_vfs_module *
+chimera_vfs_find_module(const char *symbol)
+{
+#ifdef _WIN32
+    extern struct chimera_vfs_module vfs_root, vfs_memfs, vfs_memkv;
+    extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
+#ifdef CHIMERA_HAVE_SQLITE_VFS
+    extern struct chimera_vfs_module vfs_sqlite;
+#endif
+    struct chimera_vfs_module *builtins[] = {
+        &vfs_root, &vfs_memfs, &vfs_memkv, &vfs_nfs, &vfs_smb, &vfs_diskfs,
+#ifdef HAVE_CAIRN
+        &vfs_cairn,
+#endif
+#ifdef CHIMERA_HAVE_SQLITE_VFS
+        &vfs_sqlite,
+#endif
+    };
+    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
+        if (!strncmp(symbol, "vfs_", 4) && !strcmp(symbol + 4, builtins[i]->name)) {
+            return builtins[i];
+        }
+    }
+    return NULL;
+#else
+    return dlsym(RTLD_DEFAULT, symbol);
+#endif
+}
+
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
     int                                  num_sync_delegation_threads,
@@ -554,7 +596,9 @@ chimera_vfs_init(
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
     char                       modsym[80];
+#ifndef _WIN32
     void                      *handle;
+#endif
     const char                *effective_kv_module;
 
     /* Bring up the process-wide TSC clock before any cache/timestamp use. */
@@ -635,10 +679,14 @@ chimera_vfs_init(
         // If a module path is specified, attempt to load the shared object
         if (module_cfgs[i].module_path[0] != '\0') {
             // Check if the symbol is already present (module already loaded)
-            if (dlsym(RTLD_DEFAULT, modsym) != NULL) {
+            if (chimera_vfs_find_module(modsym) != NULL) {
                 chimera_vfs_error("Module %s already loaded, skipping dlopen of %s",
                                   module_cfgs[i].module_name, module_cfgs[i].module_path);
             } else {
+#ifdef _WIN32
+                chimera_vfs_abort_if(1, "External VFS modules require a shared-library build: %s",
+                                     module_cfgs[i].module_path);
+#else
                 // Attempt to load the module shared object
                 handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
                 if (!handle) {
@@ -648,11 +696,12 @@ chimera_vfs_init(
                                          dlerror());
                 }
                 chimera_vfs_info("Module %s loaded from %s", module_cfgs[i].module_name, module_cfgs[i].module_path);
+#endif
             }
         }
 
         // Lookup the module symbol (should be present after dlopen or if statically linked)
-        module = dlsym(RTLD_DEFAULT, modsym);
+        module = chimera_vfs_find_module(modsym);
         chimera_vfs_abort_if(!module,
                              "Module %s symbol %s not found after loading %s",
                              module_cfgs[i].module_name,
@@ -689,7 +738,7 @@ chimera_vfs_init(
             module = &vfs_memkv;
         } else {
             snprintf(modsym, sizeof(modsym), "vfs_%s", effective_kv_module);
-            module = dlsym(RTLD_DEFAULT, modsym);
+            module = chimera_vfs_find_module(modsym);
         }
         chimera_vfs_abort_if(!module,
                              "KV module '%s' not found (symbol vfs_%s)",
@@ -944,7 +993,7 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     evpl_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;
 
-    __sync_synchronize();
+    atomic_thread_fence(memory_order_seq_cst);
 
     evpl_ring_doorbell(&vfs->close_thread.doorbell);
 
@@ -1206,7 +1255,7 @@ static const struct evpl_loop_hooks chimera_vfs_rcu_hooks = {
  * register (and install the loop hooks) exactly once per thread, on the first
  * entry, and tear down on the last.  Thread-local, so no locking is needed.
  */
-static __thread int chimera_vfs_rcu_refs;
+static CHIMERA_THREAD_LOCAL int chimera_vfs_rcu_refs;
 
 SYMBOL_EXPORT struct chimera_vfs_thread *
 chimera_vfs_thread_init(

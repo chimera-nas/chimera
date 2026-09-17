@@ -10,6 +10,9 @@
 
 /* XXX */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <string.h>
 
 #include "vfs/vfs.h"

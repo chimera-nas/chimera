@@ -33,9 +33,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <sys/statvfs.h>     /* struct statvfs for statvfs/fstatvfs */
-#include <sys/uio.h>         /* struct iovec for the vectored read/write ops */
+#ifdef _WIN32
+#include "common/platform.h"
+#else
+#include <sys/uio.h>
+#endif         /* struct iovec for the vectored read/write ops */
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 /* makedev() (block/char device mknod) and struct statfs (statfs/fstatfs) come
  * from common/platform.h below: <sys/sysmacros.h>+<sys/vfs.h> on glibc,
  * <sys/types.h>+<sys/mount.h> on Darwin -- so this file builds on both. */

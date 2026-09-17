@@ -7,7 +7,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <errno.h>
 #include <jansson.h>
 

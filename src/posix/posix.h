@@ -8,10 +8,24 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <sys/statvfs.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "common/platform.h"
 #include "vfs/sdk/vfs_cred.h"

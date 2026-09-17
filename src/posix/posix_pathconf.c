@@ -3,7 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <errno.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <limits.h>
 
 #include "posix_internal.h"

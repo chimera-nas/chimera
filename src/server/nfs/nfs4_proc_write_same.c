@@ -10,6 +10,9 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 /*
  * WRITE_SAME (RFC 7862 15.13) writes an Application Data Block pattern -- a

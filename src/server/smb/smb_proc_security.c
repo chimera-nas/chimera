@@ -15,6 +15,9 @@
 
 #include <stdio.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #include "smb_internal.h"
 #include "smb_procs.h"

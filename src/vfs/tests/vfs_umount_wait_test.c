@@ -28,7 +28,11 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <signal.h>
 #include <stdlib.h>
 #undef NDEBUG

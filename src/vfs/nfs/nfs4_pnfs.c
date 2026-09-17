@@ -19,6 +19,7 @@
  * would otherwise have succeeded.
  */
 
+#include "common/thread.h"
 #include <string.h>
 #include <stdlib.h>
 

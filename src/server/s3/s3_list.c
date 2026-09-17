@@ -5,10 +5,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <time.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "common/format.h"

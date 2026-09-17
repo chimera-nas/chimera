@@ -19,6 +19,7 @@
  * 4.1+ minorversions.
  */
 
+#include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_state.h"
 #include "vfs/vfs_release.h"

@@ -4,7 +4,10 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <sys/stat.h>   /* S_ISBLK / S_ISCHR for the device gate */
+#include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif   /* S_ISBLK / S_ISCHR for the device gate */
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"

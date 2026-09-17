@@ -27,6 +27,7 @@
  * completes the request.
  */
 
+#include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>

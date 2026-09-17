@@ -2,16 +2,28 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <fcntl.h>
 #include <errno.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <jansson.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -48,7 +60,7 @@ signal_handler(int sig)
  * and leave a hung daemon that ignores SIGTERM.  Nothing needs unwinding on
  * a bad config: flush the log buffer so the error reaches the user, then
  * exit without running atexit handlers. */
-static void __attribute__((noreturn))
+static void CHIMERA_NORETURN
 startup_validation_fail(void)
 {
     chimera_log_flush();

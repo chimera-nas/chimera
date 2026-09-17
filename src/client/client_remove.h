@@ -5,6 +5,9 @@
 #pragma once
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #include "client_internal.h"
 #include "client_dispatch.h"

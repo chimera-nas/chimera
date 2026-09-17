@@ -21,6 +21,7 @@
  * two do not conflict (separate parked lists, CANCEL walks both).
  */
 
+#include "common/compiler.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -99,7 +100,7 @@ chimera_smb_async_interim_send(struct chimera_smb_request *request)
     buf[4 + sizeof(*hdr) + 0] = 9;
 
     smb2_len = (int) sizeof(*hdr) + 9;
-    nb       = __builtin_bswap32((uint32_t) smb2_len);
+    nb       = chimera_bswap32((uint32_t) smb2_len);
     memcpy(buf, &nb, 4);
 
     /* Sign or, on an encrypting session, wrap in a TRANSFORM header -- an

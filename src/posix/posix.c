@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdlib.h>
 
 #include "posix_internal.h"
@@ -10,12 +12,12 @@
 
 struct chimera_posix_client     *chimera_posix_global;
 
-__thread int                     chimera_posix_tls_has_cred;
-__thread struct chimera_vfs_cred chimera_posix_tls_cred;
-__thread int                     chimera_posix_tls_has_umask;
-__thread mode_t                  chimera_posix_tls_umask;
-__thread int                     chimera_posix_tls_has_lock_owner;
-__thread uint64_t                chimera_posix_tls_lock_owner;
+CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_cred;
+CHIMERA_THREAD_LOCAL struct chimera_vfs_cred chimera_posix_tls_cred;
+CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_umask;
+CHIMERA_THREAD_LOCAL mode_t                  chimera_posix_tls_umask;
+CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_lock_owner;
+CHIMERA_THREAD_LOCAL uint64_t                chimera_posix_tls_lock_owner;
 
 SYMBOL_EXPORT void
 chimera_posix_set_cred(const struct chimera_vfs_cred *cred)

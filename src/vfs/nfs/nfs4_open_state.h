@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdlib.h>

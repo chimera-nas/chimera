@@ -5,7 +5,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "posix_internal.h"
 #include "../client/client_dup.h"

@@ -5,8 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
+#endif
 
 #include "vfs_idmap.h"
 #include "common/macros.h"
@@ -118,6 +120,7 @@ chimera_idmap_principal_to_who(
     /* Numeric user/group.  Resolve to name@domain when a domain is configured
      * and nsswitch knows the id; otherwise emit the numeric form, which is a
      * valid NFSv4 who string (RFC 8881 section 5.9). */
+#ifndef _WIN32
     if (domain && domain[0]) {
         char tmp[CHIMERA_IDMAP_WHO_MAX];
         char namebuf[512];
@@ -146,6 +149,10 @@ chimera_idmap_principal_to_who(
             }
         }
     }
+
+#else
+    (void) domain;
+#endif
 
     len = snprintf(buf, buflen, "%u", p->id);
     if (len < 0 || len + 1 > buflen) {
@@ -180,7 +187,9 @@ chimera_idmap_who_to_principal(
     struct chimera_principal *p)
 {
     int         special;
+#ifndef _WIN32
     const char *at;
+#endif
 
     if (len <= 0) {
         return -1;
@@ -223,6 +232,7 @@ chimera_idmap_who_to_principal(
         return 0;
     }
 
+#ifndef _WIN32
     /* name@domain: resolve the local part via nsswitch. */
     at = memchr(who, '@', len);
     if (at) {
@@ -255,6 +265,10 @@ chimera_idmap_who_to_principal(
             }
         }
     }
+
+#else
+    (void) domain;
+#endif
 
     return -1;
 } /* chimera_idmap_who_to_principal */

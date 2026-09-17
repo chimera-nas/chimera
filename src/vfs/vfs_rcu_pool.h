@@ -32,11 +32,16 @@
  * depot -> magazine -> in-use -> (grace period) -> depot.
  */
 
+#include "common/compiler.h"
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include "common/rcu.h"
 #include "common/recycle_stack.h"
 
@@ -63,9 +68,9 @@ struct chimera_rcu_node {
 /* One depot stripe per slot (the count is sized to the CPU count, but a stripe
  * is owned by a worker thread, see header comment), each on its own cache line
  * to avoid false sharing of the adjacent pop locks. */
-struct chimera_rcu_depot {
+struct CHIMERA_ALIGNED(64) chimera_rcu_depot {
     chimera_stack stack;
-} __attribute__((aligned(64)));
+};
 
 struct chimera_rcu_pool {
     struct chimera_rcu_depot *depots; /* [n_stripes] */
@@ -96,7 +101,7 @@ chimera_rcu_pool_init(
     int                      id,
     size_t                   entry_size)
 {
-    long     ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    long     ncpu = chimera_cpu_count();
     uint32_t n    = chimera_rcu_round_pow2(ncpu > 0 ? (uint32_t) ncpu : 1);
     uint32_t i;
     size_t   bytes = (size_t) n * sizeof(struct chimera_rcu_depot);
@@ -106,7 +111,7 @@ chimera_rcu_pool_init(
     pool->entry_size  = entry_size;
     pool->id          = id;
 
-    pool->depots = aligned_alloc(64, bytes);
+    pool->depots = chimera_aligned_alloc(64, bytes);
     memset(pool->depots, 0, bytes);
 
     for (i = 0; i < n; i++) {
@@ -218,5 +223,5 @@ chimera_rcu_pool_destroy(struct chimera_rcu_pool *pool)
         chimera_stack_destroy(&pool->depots[i].stack);
     }
 
-    free(pool->depots);
+    chimera_aligned_free(pool->depots);
 } /* chimera_rcu_pool_destroy */

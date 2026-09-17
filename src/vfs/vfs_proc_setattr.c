@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "vfs_procs.h"
 #include "vfs_claim.h"
 #include "vfs_internal.h"

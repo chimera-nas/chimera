@@ -8,8 +8,15 @@
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <errno.h>
 #include <jansson.h>
 #include "client/client.h"

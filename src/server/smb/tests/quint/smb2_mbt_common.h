@@ -46,10 +46,15 @@
 #ifndef SMB2_MBT_COMMON_H
 #define SMB2_MBT_COMMON_H
 
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <stdint.h>
 #include <inttypes.h>
 #include <time.h>
@@ -1410,7 +1415,7 @@ smb2c_set_context(const char *ctx)
  * the reader and the static analyzer know the dereference below it is
  * unreachable with a NULL connection -- otherwise every builder that touches
  * c->sbuf after calling smb2c_begin looks like a null dereference. */
-__attribute__((noreturn))
+CHIMERA_NORETURN
 static inline void
 smb2c_no_conn(uint16_t command)
 {

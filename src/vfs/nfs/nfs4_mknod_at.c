@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #include "nfs_internal.h"
 

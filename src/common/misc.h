@@ -4,15 +4,16 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include "common/logging.h"
 #include "common/platform.h"
 #ifndef likely
-#define likely(x)   __builtin_expect(!!(x), 1)
+#define likely(x)   CHIMERA_EXPECT(!!(x), 1)
 #endif /* ifndef likely */
 
 #ifndef unlikely
-#define unlikely(x) __builtin_expect(!!(x), 0)
+#define unlikely(x) CHIMERA_EXPECT(!!(x), 0)
 #endif /* ifndef unlikely */
 
 

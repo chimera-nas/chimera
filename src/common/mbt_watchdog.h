@@ -29,7 +29,11 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 /* Position the alarm would report, published by the driver as it advances.
  * The trace and tag are string literals or long-lived buffers owned by the

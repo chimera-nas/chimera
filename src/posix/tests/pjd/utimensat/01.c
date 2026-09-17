@@ -12,6 +12,9 @@
 /* Ported from pjdfstest tests/utimensat/01.t: UTIME_NOW sets timestamps to ~now. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 int
 main(
     int    argc,

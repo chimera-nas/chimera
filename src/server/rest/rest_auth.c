@@ -5,16 +5,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
 #include <crypt.h>
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
 #include "common/thread.h"
-#include <unistd.h>    /* crypt(3) */
+#ifdef _WIN32
+#include "common/platform.h"
+#else
+#include <unistd.h>
+#endif    /* crypt(3) */
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
 
 #include <openssl/evp.h>
@@ -252,12 +264,21 @@ chimera_rest_auth_init_secret(
  * crypt(3) is DES-only: without libxcrypt the $-scheme hashes ($6$ SHA-512
  * etc.) never match.
  */
+#ifdef _WIN32
+char *chimera_crypt_sha512(const char *, const char *, char *);
+#endif
+
 static int
 chimera_rest_crypt_match(
     const char *password,
     const char *hash)
 {
-#if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
+#ifdef _WIN32
+    char output[128];
+    char *result = chimera_crypt_sha512(password, hash, output);
+    return result == output && strlen(result) == strlen(hash) &&
+           CRYPTO_memcmp(result, hash, strlen(hash)) == 0;
+#elif defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
     struct crypt_data      cdata;
     char                  *result;
 

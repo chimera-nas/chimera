@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs_internal.h"
 #include "nfs4_open_state.h"
 

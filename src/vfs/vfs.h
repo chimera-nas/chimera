@@ -3,8 +3,13 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/thread.h"
 #include <stdint.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/time.h>
+#endif
 #include <uthash.h>
 #include "sdk/chimera_vfs_sdk.h"
 #include "vfs_dump.h"

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <utlist.h>
 
 #include <sys/mman.h>
@@ -17,10 +18,10 @@ struct diskfs_slab {
     struct diskfs_slab *next;
 };
 
-struct diskfs_element {
+struct CHIMERA_ALIGNED(8) diskfs_element {
     void                  *buffer;
     struct diskfs_element *next;
-} __attribute__((aligned(8)));
+};
 
 struct diskfs_bucket {
     struct diskfs_element *elements;

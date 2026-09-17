@@ -16,6 +16,7 @@
  * That path is exercised by the libsmb2-based integration test.
  */
 
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

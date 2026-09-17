@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <time.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "common/format.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"

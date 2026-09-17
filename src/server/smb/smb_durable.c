@@ -28,6 +28,7 @@
  * global order bucket -> registry -> vfs_state holds with no inversion.
  */
 
+#include "common/thread.h"
 #include "smb_internal.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"

@@ -4,10 +4,22 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include "common/thread.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/socket.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <netinet/in.h>
+#endif
 
 /* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC
  * protocol constants, colliding with <netinet/in.h>'s IPPROTO_* enum-macros.

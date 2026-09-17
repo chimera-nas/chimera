@@ -9,6 +9,7 @@
  * against stale file handles.
  */
 
+#include "common/thread.h"
 #include "diskfs_internal.h"
 
 /* Forward declarations (definitions below, in call-graph order) */

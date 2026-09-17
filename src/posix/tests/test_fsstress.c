@@ -15,7 +15,11 @@
  */
 
 #include <sys/wait.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
 #include <dirent.h>
 #include "posix_test_common.h"
 

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include "common/misc.h"
 #include "smb_internal.h"
 #include "smb_string.h"
@@ -48,6 +49,7 @@
 #define DCE_RPC_DREP_FLOAT_IEEE          0x00
 
 /* 16-byte common header present on every DCE/RPC PDU */
+#pragma pack(push, 1)
 typedef struct {
     uint8_t  ver;            // = 5
     uint8_t  ver_minor;      // = 0
@@ -57,9 +59,11 @@ typedef struct {
     uint16_t frag_len;       // total bytes of this fragment (header + body [+ auth])
     uint16_t auth_len;       // bytes of auth verifier (optional) at end of fragment
     uint32_t call_id;        // matches request/response/bind on a logical RPC call
-} __attribute__((packed)) dce_common_t;
+} dce_common_t;
+#pragma pack(pop)
 
 /* Optional auth verifier trailer (present only if auth_len > 0 and usually 8-byte aligned) */
+#pragma pack(push, 1)
 typedef struct {
     uint8_t  auth_type;      // e.g., 0x0A = NTLMSSP, 0x09 = Kerberos, etc.
     uint8_t  auth_level;     // connect/integrity/privacy
@@ -67,9 +71,11 @@ typedef struct {
     uint8_t  reserved;
     uint32_t context_id;     // security context slot
     uint8_t  auth_value[];   // auth_len bytes total after the header
-} __attribute__((packed)) dce_auth_t;
+} dce_auth_t;
+#pragma pack(pop)
 
 /* DCE/RPC Bind PDU body (immediately follows dce_common_t) */
+#pragma pack(push, 1)
 typedef struct {
     uint16_t max_xmit_frag;   // client transmit frag size (e.g., 4280)
     uint16_t max_recv_frag;   // client receive frag size
@@ -78,9 +84,11 @@ typedef struct {
     uint8_t  _pad;            // must pad so the next is 2-byte aligned
     uint16_t _pad2;           // must pad so the next is 2-byte aligned
     // then: num_ctx_items * p_cont_elem_t
-} __attribute__((packed)) dce_bind_t;
+} dce_bind_t;
+#pragma pack(pop)
 
 /* Presentation context element: which interface UUID/version and transfer syntaxes (e.g., NDR) */
+#pragma pack(push, 1)
 typedef struct {
     uint16_t p_cont_id;       // p_context_id_t is a 16-bit value (DCE C706 12.6.3.1)
     uint8_t  n_transfer_syn;  // usually 1
@@ -89,20 +97,25 @@ typedef struct {
     uint16_t if_vers_major;   // e.g., 0 or 1
     uint16_t if_vers_minor;   // minor
     // then: n_transfer_syn * p_syntax_id_t
-} __attribute__((packed)) p_cont_elem_t;
+} p_cont_elem_t;
+#pragma pack(pop)
 
 /* Transfer syntax (e.g., NDR32 UUID 8a885d04-1ceb-11c9-9fe8-08002b104860 v2.0) */
+#pragma pack(push, 1)
 typedef struct {
     uint8_t  ts_uuid[16];
     uint32_t ts_version;      // major<<16 | minor (e.g., 2<<16 | 0)
-} __attribute__((packed)) p_syntax_id_t;
+} p_syntax_id_t;
+#pragma pack(pop)
 
 /* Interface UUID and version */
+#pragma pack(push, 1)
 typedef struct {
     uint8_t  if_uuid[16];
     uint16_t if_vers_major;
     uint16_t if_vers_minor;
-} __attribute__((packed)) dce_if_uuid_t;
+} dce_if_uuid_t;
+#pragma pack(pop)
 
 
 static const p_syntax_id_t NDR32_SYNTAX = {
@@ -111,6 +124,7 @@ static const p_syntax_id_t NDR32_SYNTAX = {
 };
 
 /* DCE/RPC BindAck PDU body */
+#pragma pack(push, 1)
 typedef struct {
     uint16_t max_xmit_frag;   // server's max xmit
     uint16_t max_recv_frag;   // server's max recv
@@ -124,23 +138,29 @@ typedef struct {
     // followed by:
     // uint32_t num_results;
     // num_results * p_result_t
-} __attribute__((packed)) dce_bind_ack_t;
+} dce_bind_ack_t;
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 typedef struct {
     uint8_t  num_results;
     uint8_t  _pad;
     uint16_t _pad2;
-} __attribute__((packed)) p_result_list_t;
+} p_result_list_t;
+#pragma pack(pop)
 
 /* One presentation result per context offered in the Bind */
+#pragma pack(push, 1)
 typedef struct {
     uint16_t      result;     // 0 = acceptance, 2 = provider rejection, 3 = negotiation failure
     uint16_t      reason;     // 0 = not specified (on accept) or reason code on failure
     p_syntax_id_t transfer_syntax_accepted; // usually NDR
-} __attribute__((packed)) p_result_t;
+} p_result_t;
+#pragma pack(pop)
 
 
 /* ------- REQUEST PDU body (immediately after dce_co_hdr_t) ------- */
+#pragma pack(push, 1)
 typedef struct {
     uint32_t alloc_hint;   /* total stub bytes expected for this call (may exceed this fragment) */
     uint16_t p_cont_id;    /* presentation context id accepted in Bind/Ack */
@@ -151,9 +171,11 @@ typedef struct {
 
     /* Then: NDR-encoded parameters ("stub data"); may be fragmented. */
     /* Then: optional auth verifier trailer (see dce_auth_t) if hdr.auth_len > 0. */
-} __attribute__((packed)) dce_co_request_t;
+} dce_co_request_t;
+#pragma pack(pop)
 
 /* ------- RESPONSE PDU body (immediately after dce_co_hdr_t) ------- */
+#pragma pack(push, 1)
 typedef struct {
     uint32_t alloc_hint;   /* total stub bytes returned (or remaining), advisory */
     uint16_t p_cont_id;    /* echoes request's context id */
@@ -162,7 +184,8 @@ typedef struct {
 
     /* Then: NDR-encoded return values/out parameters ("stub data"). */
     /* Then: optional auth verifier trailer if hdr.auth_len > 0. */
-} __attribute__((packed)) dce_co_response_t;
+} dce_co_response_t;
+#pragma pack(pop)
 
 typedef int (*dce_rpc_handler_t)(
     int                       opnum,

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_common/smb_signing.h"

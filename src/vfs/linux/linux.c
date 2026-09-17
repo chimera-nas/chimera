@@ -3,16 +3,36 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #define _GNU_SOURCE
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <sys/types.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/sysmacros.h>
+#endif
 #include <sys/statvfs.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -434,7 +454,7 @@ chimera_linux_getattr(
      * mode and strips +x over SMB (cthon 'special' could not exec). */
     if ((request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) &&
         (request->getattr.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-        static __thread uint8_t scratch[sizeof(struct chimera_acl) +
+        static CHIMERA_THREAD_LOCAL uint8_t scratch[sizeof(struct chimera_acl) +
                                         8 * sizeof(struct chimera_ace)];
         struct chimera_acl     *dst = (struct chimera_acl *) scratch;
 

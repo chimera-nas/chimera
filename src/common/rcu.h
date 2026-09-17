@@ -14,16 +14,16 @@ struct rcu_head {
     void (*callback)(struct rcu_head *);
 };
 
-void chimera_rcu_register_thread(void);
-void chimera_rcu_unregister_thread(void);
-void chimera_rcu_quiescent_state(void);
-void chimera_rcu_thread_offline(void);
-void chimera_rcu_thread_online(void);
-void chimera_call_rcu(struct rcu_head *, void (*)(struct rcu_head *));
-void chimera_rcu_barrier(void);
-void chimera_synchronize_rcu(void);
-void chimera_rcu_read_lock(void);
-void chimera_rcu_read_unlock(void);
+SYMBOL_EXPORT void chimera_rcu_register_thread(void);
+SYMBOL_EXPORT void chimera_rcu_unregister_thread(void);
+SYMBOL_EXPORT void chimera_rcu_quiescent_state(void);
+SYMBOL_EXPORT void chimera_rcu_thread_offline(void);
+SYMBOL_EXPORT void chimera_rcu_thread_online(void);
+SYMBOL_EXPORT void chimera_call_rcu(struct rcu_head *, void (*)(struct rcu_head *));
+SYMBOL_EXPORT void chimera_rcu_barrier(void);
+SYMBOL_EXPORT void chimera_synchronize_rcu(void);
+SYMBOL_EXPORT void chimera_rcu_read_lock(void);
+SYMBOL_EXPORT void chimera_rcu_read_unlock(void);
 
 #define urcu_qsbr_register_thread chimera_rcu_register_thread
 #define urcu_qsbr_unregister_thread chimera_rcu_unregister_thread

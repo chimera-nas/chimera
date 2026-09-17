@@ -4,7 +4,11 @@
 
 // Test for pread, pwrite, readv, writev, preadv, pwritev, preadv2, pwritev2
 
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
 #include "posix_test_common.h"
 
 #define TEST_DATA     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

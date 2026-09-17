@@ -5,7 +5,11 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
 
 #ifndef IOV_MAX
 #define IOV_MAX 1024

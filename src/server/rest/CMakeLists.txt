@@ -29,7 +29,10 @@ target_include_directories(chimera_rest PRIVATE ${JANSSON_INCLUDE_DIRS})
 # in the crypt(5) $-schemes ($6$ SHA-512 etc.) cannot verify with it.  Use
 # libxcrypt when present (brew install libxcrypt; keg-only, hence the explicit
 # paths) for full scheme support plus the reentrant crypt_r().
-if (CHIMERA_LINUX)
+if(WIN32)
+    target_sources(chimera_rest PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/crypt/crypt_sha512.c)
+    set(CHIMERA_CRYPT_LIB "")
+elseif (CHIMERA_LINUX)
     set(CHIMERA_CRYPT_LIB crypt)
 else()
     find_library(CHIMERA_XCRYPT_LIB crypt

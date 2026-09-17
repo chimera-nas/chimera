@@ -6,7 +6,11 @@
 
 #include <stdlib.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include "common/thread.h"
 #include <xxhash.h>
 #include <uthash.h>

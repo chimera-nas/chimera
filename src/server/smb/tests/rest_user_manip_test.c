@@ -20,9 +20,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <sys/wait.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #define REST_PORT  18080
 #define REST_USER  "restuser"

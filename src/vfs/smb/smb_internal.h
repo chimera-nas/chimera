@@ -4,11 +4,15 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <openssl/evp.h>
 
 #include "vfs/sdk/chimera_vfs_sdk.h"
@@ -122,9 +126,11 @@ smb_wire_set_le64(
 } /* smb_wire_set_le64 */
 
 /* NetBIOS-over-TCP framing prefix (4 bytes: zero + 24-bit big-endian length). */
+#pragma pack(push, 1)
 struct smb_client_netbios_header {
     uint32_t word;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* ---- module state ------------------------------------------------------ */
 

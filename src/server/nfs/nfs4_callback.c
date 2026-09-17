@@ -2,16 +2,33 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/socket.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <netinet/in.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <arpa/inet.h>
+#endif
 #include <xxhash.h>
 
 /* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC

@@ -13,6 +13,9 @@
  * super-user, or anyone with write permission; otherwise EACCES. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 int
 main(
     int    argc,

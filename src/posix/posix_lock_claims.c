@@ -17,7 +17,12 @@
  * The order fd_lock -> file->lock is used consistently (carve, teardown).
  */
 
+#ifdef _WIN32
+#include "common/thread.h"
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "posix_internal.h"
 #include "vfs/sdk/vfs_module.h"

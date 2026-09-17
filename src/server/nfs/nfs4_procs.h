@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "nfs_common.h"
 #include "nfs_internal.h"
 

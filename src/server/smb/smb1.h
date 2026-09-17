@@ -4,8 +4,10 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 
+#pragma pack(push, 1)
 struct smb1_header {
     uint8_t  protocol_id[4];
     uint8_t  command;
@@ -19,4 +21,5 @@ struct smb1_header {
     uint16_t pid_low;
     uint16_t user_id;
     uint16_t multiplex_id;
-} __attribute__((packed));
+};
+#pragma pack(pop)

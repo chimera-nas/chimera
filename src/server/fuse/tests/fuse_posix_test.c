@@ -14,11 +14,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <sys/statvfs.h>
 #include <sys/xattr.h>
 

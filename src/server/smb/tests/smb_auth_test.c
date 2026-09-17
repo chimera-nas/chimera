@@ -20,7 +20,11 @@
 #include <getopt.h>
 #undef NDEBUG
 #include <assert.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <time.h>
 #include "common/rcu.h"
 

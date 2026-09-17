@@ -13,6 +13,7 @@
 
 #define _GNU_SOURCE
 
+#include "common/compiler.h"
 #include "vfs/sdk/vfs_fh.h"
 #include <stdint.h>
 
@@ -28,11 +29,22 @@
 
 #include <time.h>
 
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/time.h>
+#endif
 
 #include <limits.h>
 
@@ -1069,12 +1081,14 @@ struct diskfs_bt_lslot {          /* leaf slot, 24 B */
 
 
 /* Leaf record payloads (stored in the leaf heap). */
+#pragma pack(push, 1)
 struct diskfs_dirent_rec {
     uint64_t inum;
     uint32_t gen;
     uint16_t name_len;
     char     name[];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 
 /* extent_rec.flags bits */
@@ -1088,27 +1102,33 @@ struct diskfs_dirent_rec {
                                     * redirect branch) and a free must decrement
                                     * the refcount instead of releasing space. */
 
+#pragma pack(push, 1)
 struct diskfs_extent_rec {
     uint64_t length;
     uint32_t device_id;
     uint32_t flags;
     uint64_t device_offset;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 
 /* DISKFS_REC_REFCOUNT payload: how many inodes share the device range named by
  * the record's key (device offset).  device_id is folded into the key. */
+#pragma pack(push, 1)
 struct diskfs_refcount_rec {
     uint64_t length;        /* device byte range length (for the free at ref 0) */
     uint64_t refcount;      /* number of inodes sharing this range */
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 
+#pragma pack(push, 1)
 struct diskfs_xattr_rec {
     uint32_t name_len;
     uint32_t value_len;
     char     data[];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 
 #define DISKFS_DIRENT_REC_MAX (sizeof(struct diskfs_dirent_rec) + 256)

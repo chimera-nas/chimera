@@ -13,14 +13,22 @@
 #include <signal.h>
 #include <limits.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include "common/thread.h"
+#ifndef _WIN32
 #include <execinfo.h>
+#endif
 
 #include "evpl/evpl.h"
 
  #define UNW_LOCAL_ONLY
+#ifndef _WIN32
 #include <libunwind.h>
+#endif
 
 #include "common/macros.h"
 #include "common/logging.h"
@@ -224,6 +232,7 @@ chimera_log_flush_signal(int signum)
     chimera_log_flush();
 } /* chimera_log_flush */
 
+#ifndef _WIN32
 static void
 chimera_log_atfork_prepare(void)
 {
@@ -263,6 +272,8 @@ chimera_log_atfork_child(void)
         ChimeraLogBuf[0] = '\0';
     }
 } /* chimera_log_atfork_child */
+#endif
+
 
 static void
 chimera_log_thread_init(void)
@@ -286,6 +297,9 @@ chimera_log_thread_init(void)
     ChimeraLogBuf    = ChimeraLogBuffers[ChimeraLogIndex];
     ChimeraLogBufPtr = ChimeraLogBuf;
 
+#ifdef _WIN32
+    signal(SIGABRT, chimera_log_flush_signal);
+#else
     struct sigaction sa;
     sa.sa_handler = chimera_log_flush_signal;
     sigemptyset(&sa.sa_mask);
@@ -294,6 +308,8 @@ chimera_log_thread_init(void)
 
     pthread_atfork(chimera_log_atfork_prepare, chimera_log_atfork_parent,
                    chimera_log_atfork_child);
+#endif
+
 
     int rc = chimera_pthread_create(&ChimeraLogThread, NULL,
                                     chimera_log_thread, NULL);
@@ -492,6 +508,14 @@ __chimera_abort(
 static void
 chimera_crash_handler(int signum)
 {
+#ifdef _WIN32
+    void *frames[BACKTRACE_SIZE];
+    USHORT count = CaptureStackBackTrace(0, BACKTRACE_SIZE, frames, NULL);
+    chimera_error("core", __FILE__, __LINE__, "Received signal %d.", signum);
+    for (USHORT i = 0; i < count; i++) {
+        chimera_error("core", __FILE__, __LINE__, "frame %u: %p", i, frames[i]);
+    }
+#else
     unw_cursor_t  cursor;
     unw_context_t context;
     unw_word_t    ip, sp, off;
@@ -515,6 +539,8 @@ chimera_crash_handler(int signum)
         }
     }
 
+#endif
+
     chimera_log_flush_signal(signum);
 
     signal(signum, SIG_DFL);
@@ -524,6 +550,11 @@ chimera_crash_handler(int signum)
 SYMBOL_EXPORT void
 chimera_enable_crash_handler(void)
 {
+#ifdef _WIN32
+    signal(SIGSEGV, chimera_crash_handler);
+    signal(SIGFPE, chimera_crash_handler);
+    signal(SIGILL, chimera_crash_handler);
+#else
     struct sigaction sa;
 
     sa.sa_handler = chimera_crash_handler;
@@ -534,4 +565,5 @@ chimera_enable_crash_handler(void)
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
+#endif
 } /* chimera_enable_crash_handler */

@@ -20,8 +20,12 @@ set(CHIMERA_TEST_TIER quick)
 #   diskfs_run.qnt   the profiles (reference depth vs. the deep-tree profile)
 #   diskfsTest.qnt   deterministic self-checks, run as a build gate
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JANSSON REQUIRED jansson)
+if(NOT WIN32)
+    find_package(PkgConfig REQUIRED)
+endif()
+if(NOT WIN32)
+    pkg_check_modules(JANSSON REQUIRED jansson)
+endif()
 
 add_executable(diskfs_mbt_replay diskfs_mbt_replay.c)
 target_include_directories(diskfs_mbt_replay PRIVATE

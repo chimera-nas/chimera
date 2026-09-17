@@ -12,9 +12,13 @@
  * hand-encoded here; flex-files XDR is not in the generated nfs4.x.
  */
 
+#include "common/thread.h"
 #include <inttypes.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #include "nfs4_procs.h"
 #include "nfs4_state.h"

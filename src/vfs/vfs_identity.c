@@ -17,9 +17,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
+#ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "vfs.h"
 #include "vfs_internal.h"
@@ -299,6 +305,7 @@ chimera_vfs_identity_worker(void *arg)
 
 /* ---- default NSS miss handler ------------------------------------------ */
 
+#ifndef _WIN32
 static int
 chimera_vfs_identity_nss_handler(
     enum chimera_vfs_identity_key       key,
@@ -367,6 +374,8 @@ chimera_vfs_identity_nss_handler(
     /* NSS supplies no SID; left empty so the algorithmic idmap is used. */
     return 0;
 } /* chimera_vfs_identity_nss_handler */
+#endif
+
 
 static void
 chimera_vfs_identity_add_handler(
@@ -416,8 +425,10 @@ chimera_vfs_identity_create(
     /* The default local/NSS handler is always present and tried first.
      * (Registered directly on `identity`: vfs->identity is assigned only after
      * this function returns.) */
+#ifndef _WIN32
     chimera_vfs_identity_add_handler(identity, chimera_vfs_identity_nss_handler,
                                      NULL);
+#endif
 
     for (i = 0; i < num_workers; i++) {
         int rc = chimera_pthread_create(&identity->workers[i], NULL,

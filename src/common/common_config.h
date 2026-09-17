@@ -9,7 +9,11 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <jansson.h>
 
 #include "evpl/evpl.h"

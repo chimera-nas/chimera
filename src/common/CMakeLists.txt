@@ -10,6 +10,10 @@ if(CHIMERA_NATIVE_RCU)
     target_sources(chimera_common PRIVATE rcu.c)
 endif()
 
+if(WIN32)
+    target_link_libraries(chimera_common bcrypt)
+endif()
+
 if(NOT WIN32)
     target_sources(chimera_common PRIVATE pthread_create_interpose.c)
 endif()

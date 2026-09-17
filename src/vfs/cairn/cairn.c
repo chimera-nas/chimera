@@ -2,13 +2,21 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include "common/thread.h"
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include "common/platform.h"
 #include <rocksdb/c.h>
 #include "rocksdb_compat.h"
@@ -103,59 +111,77 @@ void rocksdb_flush_wal(
 #define chimera_cairn_abort_if(cond, ...) \
         chimera_abort_if(cond, "cairn", __FILE__, __LINE__, __VA_ARGS__)
 
+#pragma pack(push, 1)
 struct cairn_inode_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_dirent_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t hash;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_symlink_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_extent_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t offset;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_acl_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* Opaque per-file pNFS layout blob (CHIMERA_VFS_ATTR_PNFS_LAYOUT), stored as
  * its own record rather than widened into cairn_inode: only files a metadata
  * server has handed a layout for ever have one, and the inode record is read
  * on every lookup.  Cairn neither produces nor interprets the contents -- the
  * NFS server packs a deviceid plus a backing filehandle in there. */
+#pragma pack(push, 1)
 struct cairn_pnfs_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* Native owner / group SIDs, kept in a record separate from the
  * ACL so "no ACL record" still means "mode-derived DACL". */
+#pragma pack(push, 1)
 struct cairn_sid_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_xattr_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t hash;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_super_key {
     uint8_t keytype;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 struct cairn_super {
     uint64_t fsid;
@@ -163,11 +189,13 @@ struct cairn_super {
 
 /* Named-filesystem record, keyed by { CAIRN_KEY_FS, <name bytes> }.  One per
 * filesystem created with MKFS; loaded into an in-memory cairn_fs at init. */
+#pragma pack(push, 1)
 struct cairn_fs_record {
     uint64_t fsid;
     uint64_t root_inum;
     uint32_t root_gen;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* KV key structure: keytype (1 byte) + key data (variable length) */
 #define CAIRN_KV_KEY_MAX 4096
@@ -188,11 +216,13 @@ struct cairn_symlink_target {
     char data[PATH_MAX];
 };
 
+#pragma pack(push, 1)
 struct cairn_xattr_value {
     uint32_t name_len;
     uint32_t value_len;
     char     data[];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 struct cairn_inode {
     uint64_t        inum;
@@ -912,7 +942,7 @@ cairn_put_acl(
     rocksdb_transaction_t  *txn = cairn_get_meta_txn(thread);
     char                   *err = NULL;
     struct cairn_acl_key    key;
-    static __thread uint8_t buf[CAIRN_ACL_SCRATCH];
+    static CHIMERA_THREAD_LOCAL uint8_t buf[CAIRN_ACL_SCRATCH];
     int                     len;
 
     len = chimera_acl_serialize(acl, buf, sizeof(buf));
@@ -1087,8 +1117,8 @@ cairn_map_sids(
     struct chimera_vfs_attrs *attr,
     const struct cairn_inode *inode)
 {
-    static __thread struct chimera_sid owner_scratch;
-    static __thread struct chimera_sid group_scratch;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid owner_scratch;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid group_scratch;
 
     if (!(attr->va_req_mask & (CHIMERA_VFS_ATTR_OWNER_SID |
                                CHIMERA_VFS_ATTR_GROUP_SID))) {
@@ -1115,7 +1145,7 @@ cairn_map_acl(
     struct chimera_vfs_attrs *attr,
     const struct cairn_inode *inode)
 {
-    static __thread uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
+    static CHIMERA_THREAD_LOCAL uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
     struct chimera_acl     *dst = (struct chimera_acl *) scratch;
 
     /* The SID companions travel with the ACL everywhere it is mapped. */
@@ -1153,7 +1183,7 @@ cairn_inherit_acl(
     const struct chimera_acl *new_acl,
     int                       windows_default)
 {
-    static __thread uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    static CHIMERA_THREAD_LOCAL uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
     struct chimera_acl     *pacl   = (struct chimera_acl *) pbuf;
     int                     is_dir = S_ISDIR(child->mode);
     uint16_t                want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
@@ -2343,8 +2373,8 @@ cairn_setattr(
                 cairn_remove_acl(thread, inode->inum);
             }
         } else if (orig_set_mask & CHIMERA_VFS_ATTR_MODE) {
-            static __thread uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
-            static __thread uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
+            static CHIMERA_THREAD_LOCAL uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
+            static CHIMERA_THREAD_LOCAL uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
             struct chimera_acl     *old_acl = (struct chimera_acl *) old_buf;
             struct chimera_acl     *new_acl = (struct chimera_acl *) new_buf;
 
@@ -3805,7 +3835,7 @@ cairn_inode_access(
     const struct chimera_vfs_cred *cred,
     uint32_t                       requested)
 {
-    static __thread uint8_t  aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    static CHIMERA_THREAD_LOCAL uint8_t  aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
     struct chimera_acl      *acl = (struct chimera_acl *) aclbuf;
     struct chimera_vfs_attrs attr;
 

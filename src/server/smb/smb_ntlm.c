@@ -8,7 +8,11 @@
 #include <ctype.h>
 #include <errno.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>

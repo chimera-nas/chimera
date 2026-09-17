@@ -13,6 +13,9 @@
  * ownership (or super-user); a non-owner gets EPERM even with write permission. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 int
 main(
     int    argc,

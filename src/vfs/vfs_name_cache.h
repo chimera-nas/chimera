@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
 #include "common/rcu.h"

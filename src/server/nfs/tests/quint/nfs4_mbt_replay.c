@@ -32,7 +32,11 @@
 
 #include <getopt.h>
 #include <jansson.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/time.h>
+#endif
 
 #include "nfs3_mbt_common.h"
 #include "common/mbt_trace_dir.h"

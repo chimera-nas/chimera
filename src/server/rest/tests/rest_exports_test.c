@@ -34,7 +34,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #define REST_PORT        18082
 

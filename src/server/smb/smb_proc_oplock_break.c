@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -109,7 +111,7 @@ chimera_smb_send_oplock_break_lease(
     p += SMB2_OPLOCK_BREAK_NOTIFY_LEASE_SIZE;
 
     /* NetBIOS header = big-endian length of everything after it. */
-    nb_len = __builtin_bswap32((uint32_t) (p - (buf + 4)));
+    nb_len = chimera_bswap32((uint32_t) (p - (buf + 4)));
     memcpy(buf, &nb_len, 4);
 
     iov.length = (int) (p - buf);
@@ -149,7 +151,7 @@ chimera_smb_send_oplock_break_legacy(
 
     p += SMB2_OPLOCK_BREAK_NOTIFY_LEGACY_SIZE;
 
-    nb_len = __builtin_bswap32((uint32_t) (p - (buf + 4)));
+    nb_len = chimera_bswap32((uint32_t) (p - (buf + 4)));
     memcpy(buf, &nb_len, 4);
 
     iov.length = (int) (p - buf);

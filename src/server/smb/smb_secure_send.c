@@ -9,6 +9,7 @@
  * client so both sides compute identical keys, nonces and tags.
  */
 
+#include "common/compiler.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -92,7 +93,7 @@ chimera_smb_secure_send(
         /* The NetBIOS framing length excludes itself: TRANSFORM header + ct. */
         enc_total = (int) sizeof(struct smb2_transform_header) + smb2_len;
         nb        = evpl_iovec_data(&enc_iov);
-        nb->word  = __builtin_bswap32((uint32_t) enc_total);
+        nb->word  = chimera_bswap32((uint32_t) enc_total);
 
         evpl_sendv(evpl, conn->bind, &enc_iov, 1,
                    (int) sizeof(struct netbios_header) + enc_total,

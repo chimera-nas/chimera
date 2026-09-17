@@ -5,7 +5,14 @@
 #pragma once
 
 #include <sys/types.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
 
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -394,7 +401,11 @@ chimera_rename(
     chimera_rename_callback_t     callback,
     void                         *private_data);
 
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/time.h>
+#endif
 #include <stdint.h>
 
 struct chimera_stat {

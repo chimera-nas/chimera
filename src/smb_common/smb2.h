@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 
 // Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
@@ -596,6 +597,7 @@ struct smb2_header {
  * field (offset 20) through the end of the header.  The ciphertext follows the
  * header and is original_message_size bytes long.
  */
+#pragma pack(push, 1)
 struct smb2_transform_header {
     uint8_t  protocol_id[4]; /* 0xFD 'S' 'M' 'B' */
     uint8_t  signature[16];  /* AEAD tag */
@@ -604,7 +606,8 @@ struct smb2_transform_header {
     uint16_t reserved;
     uint16_t flags;          /* 3.1.1: encrypted flag; 3.0.x: encryption algorithm */
     uint64_t session_id;     /* AAD ends after this field */
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 _Static_assert(sizeof(struct smb2_transform_header) == 52,
                "SMB2 TRANSFORM_HEADER must be 52 bytes");
@@ -632,23 +635,27 @@ _Static_assert(sizeof(struct smb2_transform_header) == 52,
  * clear), then the compressed segment which decompresses to
  * original_compressed_segment_size bytes.  The full plaintext message is
  * offset + original_compressed_segment_size bytes. */
+#pragma pack(push, 1)
 struct smb2_compression_transform_header {
     uint8_t  protocol_id[4]; /* 0xFC 'S' 'M' 'B' */
     uint32_t original_compressed_segment_size;
     uint16_t compression_algorithm;
     uint16_t flags;          /* SMB2_COMPRESSION_FLAG_NONE for the unchained form */
     uint32_t offset;         /* end-of-header -> start of the compressed segment */
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 _Static_assert(sizeof(struct smb2_compression_transform_header) == 16,
                "SMB2 COMPRESSION_TRANSFORM_HEADER (unchained) must be 16 bytes");
 
 /* Chained (MS-SMB2 §2.2.42.2), 8 bytes, followed by a chain of
  * SMB2_COMPRESSION_CHAINED_PAYLOAD_HEADER structures. */
+#pragma pack(push, 1)
 struct smb2_compression_transform_header_chained {
     uint8_t  protocol_id[4]; /* 0xFC 'S' 'M' 'B' */
     uint32_t original_compressed_segment_size;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 _Static_assert(sizeof(struct smb2_compression_transform_header_chained) == 8,
                "SMB2 COMPRESSION_TRANSFORM_HEADER (chained) must be 8 bytes");
@@ -658,11 +665,13 @@ _Static_assert(sizeof(struct smb2_compression_transform_header_chained) == 8,
  * immediately follows this header; it is absent for NONE and Pattern_V1.
  * `length` counts every byte that follows this 8-byte header for the payload,
  * including the OriginalPayloadSize field when present. */
+#pragma pack(push, 1)
 struct smb2_compression_chained_payload_header {
     uint16_t compression_algorithm;
     uint16_t flags;          /* CHAINED on the first payload, NONE afterward */
     uint32_t length;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 _Static_assert(sizeof(struct smb2_compression_chained_payload_header) == 8,
                "SMB2_COMPRESSION_CHAINED_PAYLOAD_HEADER must be 8 bytes");
@@ -670,12 +679,14 @@ _Static_assert(sizeof(struct smb2_compression_chained_payload_header) == 8,
 /* SMB2_COMPRESSION_PATTERN_PAYLOAD_V1 (MS-SMB2 §2.2.42.2.2), 8 bytes — the
  * payload body for a Pattern_V1 chained entry: `repetitions` copies of the
  * single byte `pattern`. */
+#pragma pack(push, 1)
 struct smb2_compression_pattern_payload_v1 {
     uint8_t  pattern;
     uint8_t  reserved1;
     uint16_t reserved2;
     uint32_t repetitions;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 _Static_assert(sizeof(struct smb2_compression_pattern_payload_v1) == 8,
                "SMB2_COMPRESSION_PATTERN_PAYLOAD_V1 must be 8 bytes");

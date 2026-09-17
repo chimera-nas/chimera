@@ -27,14 +27,25 @@
 #include <fcntl.h>
 #include "common/platform.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <sys/file.h>
 #include <sys/mman.h>
 #ifdef __linux__
 #include <linux/mman.h>
 #endif /* ifdef __linux__ */
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
 #include <stdbool.h>
 #ifdef HAVE_ERR_H
 #include <err.h>

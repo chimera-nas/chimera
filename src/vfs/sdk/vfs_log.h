@@ -3,6 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#ifdef _MSC_VER
+#define CHIMERA_VFS_NORETURN __declspec(noreturn)
+#else
+#define CHIMERA_VFS_NORETURN __attribute__((noreturn))
+#endif
 
 /*
  * Logging entry points for VFS modules.
@@ -41,14 +46,14 @@ void __chimera_error(
     const char *fmt,
     ...);
 
-__attribute__((noreturn)) void __chimera_fatal(
+CHIMERA_VFS_NORETURN void __chimera_fatal(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-__attribute__((noreturn)) void __chimera_abort(
+CHIMERA_VFS_NORETURN void __chimera_abort(
     const char *mod,
     const char *file,
     int         line,

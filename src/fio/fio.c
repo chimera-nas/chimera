@@ -3,9 +3,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #define _GNU_SOURCE
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <errno.h>
 #include <assert.h>
 #include <jansson.h>

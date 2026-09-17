@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "smb_srvsvc.h"
 #include "smb_dcerpc.h"
 #include "srvsvc_ndr.h"

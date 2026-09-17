@@ -2,8 +2,17 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#ifdef _WIN32
+#include "common/thread.h"
+#include "common/platform.h"
+#else
 #include <sys/time.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include "smb_common/smb2.h"
 #include "server/smb/smb_session.h"
 #include "smb_internal.h"

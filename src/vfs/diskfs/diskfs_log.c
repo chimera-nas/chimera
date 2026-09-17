@@ -9,6 +9,7 @@
  * tail-pusher that writes logged blocks home and trims the log.
  */
 
+#include "common/thread.h"
 #include "diskfs_internal.h"
 
 /* Debug: live handle to the intent log + a per-queue CQ dumper (in libevpl),

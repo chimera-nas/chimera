@@ -4,7 +4,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "posix.h"
 #include "posix_internal.h"

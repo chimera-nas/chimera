@@ -22,6 +22,7 @@
  * targets.
  */
 
+#include "common/compiler.h"
 #include <string.h>
 #include <stdlib.h>
 #include "common/thread.h"
@@ -101,7 +102,7 @@ struct nlm_grant_ctx {
 /* The granter thread stashes its ctx here so the doorbell callback (which only
  * gets evpl + doorbell) can reach it.  Set once in init, before the doorbell is
  * armed, and read only on the granter thread. */
-static __thread struct nlm_grant_ctx *nlm_grant_tls_ctx;
+static CHIMERA_THREAD_LOCAL struct nlm_grant_ctx *nlm_grant_tls_ctx;
 
 static void nlm_grant_job_send(
     struct nlm_grant_job *job);

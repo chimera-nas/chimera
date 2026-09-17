@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>

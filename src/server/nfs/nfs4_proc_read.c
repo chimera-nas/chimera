@@ -10,6 +10,9 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 static void
 chimera_nfs4_read_complete(

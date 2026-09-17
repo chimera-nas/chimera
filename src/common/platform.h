@@ -19,12 +19,22 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <stddef.h>
 #include <time.h>
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/random.h>
+#include <unistd.h>
+#endif
 
-#ifdef __APPLE__
+#ifdef _WIN32
+#include "common/windows.h"
+typedef gid_t chimera_grouplist_t;
+#define CHIMERA_STAT_ATIM(st) ((struct timespec) { (st).st_atime, 0 })
+#define CHIMERA_STAT_MTIM(st) ((struct timespec) { (st).st_mtime, 0 })
+#define CHIMERA_STAT_CTIM(st) ((struct timespec) { (st).st_ctime, 0 })
+#elif defined(__APPLE__)
 
 #include <pthread.h>
 #include <libkern/OSByteOrder.h>
@@ -125,7 +135,13 @@ chimera_getrandom(
     void  *buf,
     size_t len)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    if (len > ULONG_MAX || BCryptGenRandom(NULL, buf, (ULONG) len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+#elif defined(__APPLE__)
     return getentropy(buf, len);
 #else  /* ifdef __APPLE__ */
     return getrandom(buf, len, 0) == (ssize_t) len ? 0 : -1;
@@ -143,7 +159,9 @@ chimera_getrandom(
 static inline uint64_t
 chimera_gettid(void)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#elif defined(__APPLE__)
     uint64_t tid = 0;
 
     pthread_threadid_np(NULL, &tid);
@@ -152,3 +170,29 @@ chimera_gettid(void)
     return (uint64_t) syscall(SYS_gettid);
 #endif /* ifdef __APPLE__ */
 } /* chimera_gettid */
+
+static inline unsigned chimera_cpu_count(void)
+{
+#ifdef _WIN32
+    return GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+#else
+    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count > 0 ? (unsigned) count : 1;
+#endif
+}
+static inline void *chimera_aligned_alloc(size_t alignment, size_t bytes)
+{
+#ifdef _WIN32
+    return _aligned_malloc(bytes, alignment);
+#else
+    return aligned_alloc(alignment, bytes);
+#endif
+}
+static inline void chimera_aligned_free(void *ptr)
+{
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}

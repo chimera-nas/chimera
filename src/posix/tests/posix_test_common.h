@@ -3,14 +3,26 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <time.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <errno.h>
 #include <signal.h>
 #include <dirent.h>
@@ -408,7 +420,7 @@ posix_test_emit_ext_module_config(
  * re-initializing the filesystem (cold remount).  Set before posix_test_init
  * / posix_test_configure_diskfs. */
 static const char *posix_test_diskfs_extra_cfg = NULL;
-static int         posix_test_diskfs_reuse_devices __attribute__ ((unused)) = 0;
+static int         posix_test_diskfs_reuse_devices CHIMERA_UNUSED = 0;
 /* Device geometry.  The default 10 x 1 GiB pool is effectively unbounded; a
  * test that needs ENOSPC to be reachable shrinks it (the kvm nfstest_alloc
  * wrapper does the same thing for the same reason). */
@@ -425,7 +437,7 @@ static uint64_t    posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
  * carries a distinct mount_id (its root_fh is encoded from the subdirectory
  * inode rather than copied from the root mount), which is what the VFS
  * read-only gate keys on. */
-static int posix_test_ro_export __attribute__ ((unused)) = 0;
+static int posix_test_ro_export CHIMERA_UNUSED = 0;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
  * creates a SECOND export "/roaccess" of the SAME writable "/share" mount,
@@ -434,7 +446,7 @@ static int posix_test_ro_export __attribute__ ((unused)) = 0;
  * backing mount here stays read-write, so a test using this flag isolates the
  * NFS per-export access enforcement from the VFS-mount read-only gate: any
  * EROFS seen through "/roaccess" can only come from the export policy. */
-static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
+static int posix_test_ro_access_export CHIMERA_UNUSED = 0;
 
 /* Name of the subdirectory (relative to the backend root) that the read-only
  * export is mounted at; the read-write export sees it as "/share/ro". */
@@ -459,14 +471,14 @@ static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
  * Export names are fixed width ("page00", "page01", ...) so no name is a
  * string prefix of another: chimera_nfs_find_export_path matches export names
  * by prefix, the same collision the "roshare" note below avoids. */
-static int posix_test_extra_exports __attribute__ ((unused)) = 0;
+static int posix_test_extra_exports CHIMERA_UNUSED = 0;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server
  * also creates a root export "/" backed by the same "/share" mount.  The
  * NFSv4 namespace root is then the share's real backend directory rather
  * than the synthetic pseudo-root, and the other exports remain reachable as
  * junctions grafted over it at LOOKUP (see nfs4_root_junction_check). */
-static int posix_test_root_export __attribute__ ((unused)) = 0;
+static int posix_test_root_export CHIMERA_UNUSED = 0;
 
 /* Pinned id for the root export, clear of the other pinned ids here. */
 #define POSIX_TEST_ROOT_EXPORT_ID        (POSIX_TEST_EXPORT_ID + 3)
@@ -1088,7 +1100,7 @@ posix_test_cleanup(
     prometheus_metrics_destroy(env->metrics);
 } /* posix_test_cleanup */
 
-__attribute__((noreturn)) static inline void
+CHIMERA_NORETURN static inline void
 posix_test_fail(struct posix_test_env *env)
 {
     fprintf(stderr, "Test failed\n");

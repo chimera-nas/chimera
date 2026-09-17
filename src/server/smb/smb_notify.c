@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -129,7 +131,7 @@ chimera_smb_notify_set_netbios_len(
     uint8_t *buf,
     int      smb2_payload_len)
 {
-    uint32_t nb = __builtin_bswap32((uint32_t) smb2_payload_len);
+    uint32_t nb = chimera_bswap32((uint32_t) smb2_payload_len);
 
     memcpy(buf, &nb, 4);
 } /* chimera_smb_notify_set_netbios_len */

@@ -42,12 +42,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/socket.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/uio.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/sysmacros.h>
+#endif
 #include <linux/fuse.h>
 #include <linux/falloc.h>
 

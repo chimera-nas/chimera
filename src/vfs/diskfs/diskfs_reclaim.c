@@ -9,6 +9,7 @@
  * orphan recovery, and runtime AG-log condensation.
  */
 
+#include "common/thread.h"
 #include "diskfs_internal.h"
 
 /* Forward declarations (definitions below, in call-graph order) */

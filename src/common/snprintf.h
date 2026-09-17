@@ -1565,7 +1565,9 @@ STB_SPRINTF_DECORATE(vsnprintf)(char * buf, int count, char const * fmt, va_list
     return c.length;
 }
 
+#ifndef _WIN32
 __attribute__((visibility("default")))
+#endif
 STBSP__PUBLICDEF int
 STB_SPRINTF_DECORATE(snprintf)(char * buf, int count, char const * fmt, ...)
 {

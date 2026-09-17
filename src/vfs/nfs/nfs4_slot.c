@@ -38,6 +38,7 @@
  * negotiated max_slots) keep every thread alive.
  */
 
+#include "common/thread.h"
 #include <stdlib.h>
 
 #include "nfs_internal.h"

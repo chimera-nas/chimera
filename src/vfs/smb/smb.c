@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -567,7 +568,7 @@ chimera_smb_client_sign_frame_send(
 
         /* Frame the PLAINTEXT length for the gather, then reframe over the
          * ciphertext below; the transform header is transport payload too. */
-        netbios->word = __builtin_bswap32((uint32_t) smb2_len);
+        netbios->word = chimera_bswap32((uint32_t) smb2_len);
         evpl_iovec_set_length(iov, total);
 
         if (chimera_smb_encrypt_compound(
@@ -586,7 +587,7 @@ chimera_smb_client_sign_frame_send(
             struct smb_client_netbios_header *enc_nb    = evpl_iovec_data(&enc_iov);
             int                               enc_total = evpl_iovec_length(&enc_iov);
 
-            enc_nb->word = __builtin_bswap32(
+            enc_nb->word = chimera_bswap32(
                 (uint32_t) (enc_total - (int) sizeof(*enc_nb)));
 
             evpl_sendv(conn->evpl, conn->bind, &enc_iov, 1, enc_total,
@@ -595,7 +596,7 @@ chimera_smb_client_sign_frame_send(
         return;
     }
 
-    netbios->word = __builtin_bswap32((uint32_t) smb2_len);
+    netbios->word = chimera_bswap32((uint32_t) smb2_len);
 
     evpl_iovec_set_length(iov, total);
 
@@ -1113,7 +1114,7 @@ chimera_smb_client_segment(
         return 0;
     }
 
-    hdr  = __builtin_bswap32(hdr);
+    hdr  = chimera_bswap32(hdr);
     hdr &= 0x00ffffff;
 
     return 4 + hdr;

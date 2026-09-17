@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #define _GNU_SOURCE
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -10,7 +11,11 @@
 #include "common/thread.h"
 #include <assert.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "common/rbtree.h"
 #include "common/logging.h"
@@ -101,7 +106,7 @@ sm_ag_size_class(uint64_t length)
     if (blocks <= 1) {
         return 0;
     }
-    c = 63u - (uint32_t) __builtin_clzll(blocks);   /* floor(log2(blocks)) */
+    c = 63u - (uint32_t) chimera_clz64(blocks);   /* floor(log2(blocks)) */
     return c < SM_SIZE_CLASSES ? c : SM_SIZE_CLASSES - 1;
 } /* sm_ag_size_class */
 
@@ -123,7 +128,7 @@ sm_ag_mc_update(struct sm_ag *ag)
         return;     /* pre-wiring (should not happen once initialized) */
     }
     newmax = ag->size_nonempty
-             ? (int) (31u - (uint32_t) __builtin_clz(ag->size_nonempty))
+             ? (int) (31u - (uint32_t) chimera_clz32(ag->size_nonempty))
              : -1;
     if (newmax == ag->maxclass) {
         return;
@@ -287,7 +292,7 @@ sm_ag_alloc_locked(
              ? (ag->size_nonempty & ~((1u << (klass + 1)) - 1u))
              : 0u;
     if (higher) {
-        ext = ag->free_by_size[__builtin_ctz(higher)];
+        ext = ag->free_by_size[chimera_ctz32(higher)];
     } else if (ag->size_nonempty & (1u << klass)) {
         /*
          * No larger extent anywhere in the AG (near-full): the only candidates
@@ -760,7 +765,7 @@ sm_pick_and_alloc(
                 uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
 
                 while (word) {
-                    uint32_t b  = (uint32_t) __builtin_ctzll(word);
+                    uint32_t b  = (uint32_t) chimera_ctz64(word);
                     uint32_t ai = wi * 64u + b;
 
                     word &= ~(1ULL << b);
@@ -1550,7 +1555,7 @@ space_map_reserve_chunk(
                 uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
 
                 while (word) {
-                    uint32_t         b  = (uint32_t) __builtin_ctzll(word);
+                    uint32_t         b  = (uint32_t) chimera_ctz64(word);
                     uint32_t         ai = wi * 64u + b;
                     struct sm_ag    *ag;
                     uint64_t         base, len;

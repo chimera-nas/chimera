@@ -16,6 +16,9 @@
  * upstream type x owner matrix. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #define U 65534   /* the unprivileged actor */
 #define O 65533   /* some other unprivileged owner */

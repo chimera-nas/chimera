@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"

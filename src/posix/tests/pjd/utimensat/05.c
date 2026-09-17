@@ -14,6 +14,9 @@
  * when AT_SYMLINK_NOFOLLOW is given. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <fcntl.h>
 
 int

@@ -21,10 +21,15 @@
  * client overrides chimera_nfs4_cb_layoutrecall() to find and return the layout.
  */
 
+#include "common/thread.h"
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <time.h>
 
 #include "nfs_internal.h"
@@ -58,23 +63,7 @@ chimera_nfs4_cb_find_server(
     return NULL;
 } /* chimera_nfs4_cb_find_server */
 
-/*
- * Handle a CB_LAYOUTRECALL.  Weak default: the client holds no layouts, so
- * report NFS4ERR_NOMATCHING_LAYOUT and let the server stop tracking it.  The
- * pNFS client provides a strong definition that finds the matching layout,
- * fences further DS I/O, and returns it via LAYOUTRETURN.
- */
-nfsstat4 __attribute__((weak))
-chimera_nfs4_cb_layoutrecall(
-    struct chimera_nfs_shared        *shared,
-    struct chimera_nfs_client_server *server,
-    struct CB_LAYOUTRECALL4args      *args)
-{
-    (void) shared;
-    (void) server;
-    (void) args;
-    return NFS4ERR_NOMATCHING_LAYOUT;
-} /* chimera_nfs4_cb_layoutrecall */
+
 
 /*
  * recv_call_CB_COMPOUND: rpc2 dispatches an incoming CB_COMPOUND here (on the

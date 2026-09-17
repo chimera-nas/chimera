@@ -11,7 +11,9 @@
  * to suppress.  This avoids the need for external suppressions files
  * or LSAN_OPTIONS environment variables.
  */
+#ifndef _WIN32
 __attribute__((visibility("default")))
+#endif
 const char *
 __lsan_default_suppressions(void)
 {
@@ -55,3 +57,4 @@ __lsan_default_suppressions(void)
 } /* __lsan_default_suppressions */
 
 #endif /* CHIMERA_SANITIZE */
+

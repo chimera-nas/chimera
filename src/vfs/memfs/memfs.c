@@ -2,15 +2,27 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include "common/thread.h"
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <strings.h>
+#endif
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 #include <jansson.h>
 #include <utlist.h>
 #include "common/rcu.h"
@@ -1218,7 +1230,7 @@ memfs_init(
 
     shared->block_size  = block_size;
     shared->block_mask  = block_size - 1;
-    shared->block_shift = __builtin_ctz(block_size);
+    shared->block_shift = chimera_ctz32(block_size);
 
 
     evpl_mutex_init(&shared->lease_lock, NULL);
@@ -1672,7 +1684,7 @@ memfs_map_attrs(
          * before the (synchronous) completion runs, so we must not hand out the
          * live inode->acl pointer.  The scratch is valid through completion
          * because each memfs thread serves one request at a time. */
-        static __thread uint8_t acl_scratch[
+        static CHIMERA_THREAD_LOCAL uint8_t acl_scratch[
             sizeof(struct chimera_acl) +
             CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
         struct chimera_acl     *dst = (struct chimera_acl *) acl_scratch;
@@ -1691,7 +1703,7 @@ memfs_map_attrs(
      * per-thread scratch for the same lock-release reason as the ACL. */
     if ((attr->va_req_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
         chimera_sid_present(&inode->owner_sid)) {
-        static __thread struct chimera_sid owner_scratch;
+        static CHIMERA_THREAD_LOCAL struct chimera_sid owner_scratch;
 
         owner_scratch      = inode->owner_sid;
         attr->va_owner_sid = &owner_scratch;
@@ -1699,7 +1711,7 @@ memfs_map_attrs(
     }
     if ((attr->va_req_mask & CHIMERA_VFS_ATTR_GROUP_SID) &&
         chimera_sid_present(&inode->group_sid)) {
-        static __thread struct chimera_sid group_scratch;
+        static CHIMERA_THREAD_LOCAL struct chimera_sid group_scratch;
 
         group_scratch      = inode->group_sid;
         attr->va_group_sid = &group_scratch;

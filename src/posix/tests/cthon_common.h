@@ -23,7 +23,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/time.h>
+#endif
 #include <dirent.h>
 
 #include "posix/posix.h"

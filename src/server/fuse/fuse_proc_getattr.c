@@ -3,8 +3,15 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"

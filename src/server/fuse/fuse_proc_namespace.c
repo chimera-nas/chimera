@@ -4,6 +4,9 @@
 
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"

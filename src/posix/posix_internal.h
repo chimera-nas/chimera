@@ -5,6 +5,7 @@
 #ifndef CHIMERA_POSIX_INTERNAL_H
 #define CHIMERA_POSIX_INTERNAL_H
 
+#include "common/compiler.h"
 #include <errno.h>
 #include "common/thread.h"
 #include <stdatomic.h>
@@ -13,7 +14,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 
 #include <dirent.h>
@@ -100,7 +108,7 @@ struct chimera_posix_ofd_lock {
     struct chimera_posix_ofd_lock *next;
 };
 
-struct chimera_posix_fd_entry {
+struct CHIMERA_ALIGNED(64) chimera_posix_fd_entry {
     evpl_mutex_t                 lock;
     evpl_cond_t                  cond;
     struct chimera_vfs_open_handle *handle;
@@ -114,12 +122,12 @@ struct chimera_posix_fd_entry {
     int                             eof_flag;    // For FILE* feof() support
     int                             error_flag;  // For FILE* ferror() support
     int                             ungetc_char; // For FILE* ungetc() support (-1 = none)
-} __attribute__((aligned(64)));
+};
 
 // CHIMERA_FILE is a pointer to an fd_entry for FILE* operations
 typedef struct chimera_posix_fd_entry CHIMERA_FILE;
 
-struct chimera_posix_worker {
+struct CHIMERA_ALIGNED(64) chimera_posix_worker {
     evpl_mutex_t                lock;
     struct chimera_client_request *pending_requests;
     struct evpl_doorbell           doorbell;
@@ -127,9 +135,9 @@ struct chimera_posix_worker {
     struct chimera_posix_client   *parent;
     int                            index;
     struct evpl                   *evpl;
-} __attribute__((aligned(64)));
+};
 
-struct chimera_posix_client {
+struct CHIMERA_ALIGNED(64) chimera_posix_client {
     struct chimera_client         *client;
     struct evpl_threadpool        *pool;
     struct chimera_posix_worker   *workers;
@@ -147,7 +155,7 @@ struct chimera_posix_client {
      * whole-file lock release entirely on the overwhelmingly common path
      * where the process holds no locks at all. */
     atomic_int                     n_range_locks;
-} __attribute__((aligned(64)));
+};
 
 extern struct chimera_posix_client *chimera_posix_global;
 
@@ -161,12 +169,12 @@ extern struct chimera_posix_client *chimera_posix_global;
  * subsequent calls on the same thread; when unset, operations fall back to the
  * client-global credential and apply no umask (matching prior behavior).
  */
-extern __thread int                     chimera_posix_tls_has_cred;
-extern __thread struct chimera_vfs_cred chimera_posix_tls_cred;
-extern __thread int                     chimera_posix_tls_has_umask;
-extern __thread int                     chimera_posix_tls_has_lock_owner;
-extern __thread uint64_t                chimera_posix_tls_lock_owner;
-extern __thread mode_t                  chimera_posix_tls_umask;
+extern CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_cred;
+extern CHIMERA_THREAD_LOCAL struct chimera_vfs_cred chimera_posix_tls_cred;
+extern CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_umask;
+extern CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_lock_owner;
+extern CHIMERA_THREAD_LOCAL uint64_t                chimera_posix_tls_lock_owner;
+extern CHIMERA_THREAD_LOCAL mode_t                  chimera_posix_tls_umask;
 
 static FORCE_INLINE const struct chimera_vfs_cred *
 chimera_posix_effective_cred(void)

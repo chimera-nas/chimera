@@ -9,6 +9,8 @@
  * and pNFS block layouts.
  */
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include "diskfs_internal.h"
 
 /* Forward declarations (definitions below, in call-graph order) */
@@ -310,7 +312,7 @@ diskfs_acl_decode_into(
     int                       len,
     uint32_t                  mode)
 {
-    static __thread uint8_t scratch[sizeof(struct chimera_acl) +
+    static CHIMERA_THREAD_LOCAL uint8_t scratch[sizeof(struct chimera_acl) +
                                     CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
     struct chimera_acl     *dst = (struct chimera_acl *) scratch;
 
@@ -403,8 +405,8 @@ diskfs_sid_decode_into(
     const uint8_t            *serial,
     uint32_t                  len)
 {
-    static __thread struct chimera_sid owner;
-    static __thread struct chimera_sid group;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid owner;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid group;
 
     chimera_sid_pair_decode(serial, (int) len, &owner, &group);
 
@@ -451,9 +453,9 @@ diskfs_inherit_acl_async(
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
     /* Per-thread scratch: an ACE now carries an inline SID, so these are
      * too large to keep on the stack. */
-    static __thread uint8_t   abuf[sizeof(struct chimera_acl) +
+    static CHIMERA_THREAD_LOCAL uint8_t   abuf[sizeof(struct chimera_acl) +
                                    DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-    static __thread uint8_t   pbuf[sizeof(struct chimera_acl) +
+    static CHIMERA_THREAD_LOCAL uint8_t   pbuf[sizeof(struct chimera_acl) +
                                    DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
     const struct chimera_acl *store       = NULL;
     int                       derive_mode = 0;
@@ -1076,9 +1078,9 @@ diskfs_setattr_acl(struct chimera_vfs_request *request)
         }
         return;
     } else if ((mask & CHIMERA_VFS_ATTR_MODE) && inode->acl_serial) {
-        static __thread uint8_t obuf[sizeof(struct chimera_acl) +
+        static CHIMERA_THREAD_LOCAL uint8_t obuf[sizeof(struct chimera_acl) +
                                      DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        static __thread uint8_t nbuf[sizeof(struct chimera_acl) +
+        static CHIMERA_THREAD_LOCAL uint8_t nbuf[sizeof(struct chimera_acl) +
                                      DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
         struct chimera_acl     *old_acl = (struct chimera_acl *) obuf;
         struct chimera_acl     *new_acl = (struct chimera_acl *) nbuf;

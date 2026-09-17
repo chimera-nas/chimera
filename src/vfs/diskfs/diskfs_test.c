@@ -8,9 +8,14 @@
  * structures; exported (SYMBOL_EXPORT) for the model-based-test harness to link.
  */
 
+#include "common/thread.h"
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 #include <time.h>
 

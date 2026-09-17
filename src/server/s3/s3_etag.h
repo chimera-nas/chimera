@@ -4,17 +4,22 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include "vfs/vfs.h"
 
+#pragma pack(push, 1)
 struct chimera_s3_etag_key {
     uint64_t        size;
     struct timespec mtime;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct chimera_s3_etag_ctx {
     struct chimera_s3_etag_key key;
     uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 static inline void
 chimera_s3_compute_etag(

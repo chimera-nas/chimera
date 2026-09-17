@@ -33,7 +33,14 @@
 #include <dirent.h>
 #include "common/thread.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/sysmacros.h>
+#endif
 
 struct chimera_vfs_fsid_ent {
     uint64_t devkey;   /* (major << 32) | minor */

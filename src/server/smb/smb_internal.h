@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -11,7 +13,11 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <utlist.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <netinet/in.h>
+#endif
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_krb5.h>
 #include "evpl/evpl.h"
@@ -276,9 +282,11 @@ struct chimera_smb_config {
     struct chimera_smb_auth_config auth;
 };
 
+#pragma pack(push, 1)
 struct netbios_header {
     uint32_t word;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 struct chimera_smb_share {
     /* References keeping this share alive: one for its place on

@@ -8,6 +8,8 @@
  * cross-thread waiter dispatch (doorbell/deferral) machinery.
  */
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <execinfo.h>
 #include "diskfs_internal.h"
 
@@ -460,7 +462,7 @@ diskfs_block_cow_swap(
  */
 /* Unused under the block-swap CoW model (CoW swaps whole blocks via
  * diskfs_block_cow_swap, never buffers); kept for reference, remove later. */
-__attribute__((unused))
+CHIMERA_UNUSED
 static struct diskfs_block_buf *
 diskfs_block_buf_reclaim_locked(
     struct diskfs_thread      *thread,

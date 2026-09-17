@@ -9,6 +9,7 @@
  * metrics registration.
  */
 
+#include "common/thread.h"
 #include "diskfs_internal.h"
 
 

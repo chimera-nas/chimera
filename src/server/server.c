@@ -5,13 +5,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <unistd.h>
+#endif
 #include "common/thread.h"
 #include <sys/resource.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <sys/socket.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <netdb.h>
+#endif
+#ifdef _WIN32
+#include "common/platform.h"
+#else
 #include <arpa/inet.h>
+#endif
 #include <errno.h>
 
 #include "evpl/evpl.h"
