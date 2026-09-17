@@ -9,7 +9,7 @@
 #include <string.h>
 #include "common/thread.h"
 #include <time.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 #include "sdk/vfs_cred.h"
 #include "vfs_internal.h"

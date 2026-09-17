@@ -5,7 +5,7 @@
 #pragma once
 
 #include <utlist.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 #include "nfs.h"
 #include "nfs_fh_wrap.h"

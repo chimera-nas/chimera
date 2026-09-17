@@ -25,7 +25,7 @@ void rocksdb_flush_wal(
 #include <jansson.h>
 #include <limits.h>
 #include <utlist.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 
 #include "vfs/sdk/vfs_varint.h"

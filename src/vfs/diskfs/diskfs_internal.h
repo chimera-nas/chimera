@@ -40,7 +40,7 @@
 
 #include <utlist.h>
 
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 #include <xxhash.h>     /* XXH_INLINE_ALL set in CMakeLists; header-only */
 

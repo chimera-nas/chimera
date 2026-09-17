@@ -19,7 +19,7 @@
  *     to that stripe.  So an entry's whole recycle lifecycle stays on its owner
  *     thread's stripe even though the worker migrates across CPUs and the
  *     reclaim worker runs on an unrelated CPU -- contention-free in the common
- *     case, and crucially no stranding.  Retire pushes with cds_wfs_push
+ *     case, and crucially no stranding.  Retire pushes with chimera_stack_push
  *     (wait-free, no lock).
  *   - Each VFS worker thread keeps a thread-local magazine (a plain LIFO, no
  *     atomics).  Alloc pops from the magazine; on a miss it refills up to
@@ -37,8 +37,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-#include <urcu/urcu-qsbr.h>
-#include <urcu/wfstack.h>
+#include "common/rcu.h"
+#include "common/recycle_stack.h"
 
 #include "vfs/vfs.h" /* enum chimera_rcu_pool_id, struct chimera_rcu_magazine */
 
@@ -55,7 +55,7 @@ struct chimera_rcu_node {
     struct chimera_rcu_pool *pool;  /* pool this entry returns to */
     uint32_t                 home_stripe; /* depot stripe of the allocating thread */
     union {
-        struct cds_wfs_node      wfs;      /* linked on a depot stripe */
+        chimera_stack_node      wfs;      /* linked on a depot stripe */
         struct chimera_rcu_node *mag_next; /* linked on a thread magazine */
     };
 };
@@ -64,7 +64,7 @@ struct chimera_rcu_node {
  * is owned by a worker thread, see header comment), each on its own cache line
  * to avoid false sharing of the adjacent pop locks. */
 struct chimera_rcu_depot {
-    struct cds_wfs_stack stack;
+    chimera_stack stack;
 } __attribute__((aligned(64)));
 
 struct chimera_rcu_pool {
@@ -110,7 +110,7 @@ chimera_rcu_pool_init(
     memset(pool->depots, 0, bytes);
 
     for (i = 0; i < n; i++) {
-        cds_wfs_init(&pool->depots[i].stack);
+        chimera_stack_init(&pool->depots[i].stack);
     }
 } /* chimera_rcu_pool_init */
 
@@ -129,8 +129,8 @@ chimera_rcu_pool_retire(struct rcu_head *head)
 {
     struct chimera_rcu_node *node = caa_container_of(head, struct chimera_rcu_node, rcu);
 
-    cds_wfs_node_init(&node->wfs);
-    cds_wfs_push(&node->pool->depots[node->home_stripe].stack, &node->wfs);
+    chimera_stack_node_init(&node->wfs);
+    chimera_stack_push(&node->pool->depots[node->home_stripe].stack, &node->wfs);
 } /* chimera_rcu_pool_retire */
 
 /*
@@ -148,12 +148,12 @@ chimera_rcu_pool_alloc(
     if (!mag->head) {
         /* Refill up to the cap from this THREAD's stable stripe under one
          * pop-lock acquisition.  Bounded work -- we never walk the whole stack. */
-        struct cds_wfs_stack *depot = &pool->depots[stripe].stack;
-        struct cds_wfs_node  *wn;
+        chimera_stack *depot = &pool->depots[stripe].stack;
+        chimera_stack_node  *wn;
 
-        cds_wfs_pop_lock(depot);
+        chimera_stack_pop_lock(depot);
         while (mag->count < CHIMERA_RCU_MAGAZINE_CAP) {
-            wn = __cds_wfs_pop_blocking(depot);
+            wn = chimera_stack_pop_locked(depot);
             if (!wn) {
                 break;
             }
@@ -162,7 +162,7 @@ chimera_rcu_pool_alloc(
             mag->head      = node;
             mag->count++;
         }
-        cds_wfs_pop_unlock(depot);
+        chimera_stack_pop_unlock(depot);
     }
 
     if (mag->head) {
@@ -187,8 +187,8 @@ chimera_rcu_magazine_drain(struct chimera_rcu_magazine *mag)
     while (mag->head) {
         node      = mag->head;
         mag->head = node->mag_next;
-        cds_wfs_node_init(&node->wfs);
-        cds_wfs_push(&node->pool->depots[node->home_stripe].stack, &node->wfs);
+        chimera_stack_node_init(&node->wfs);
+        chimera_stack_push(&node->pool->depots[node->home_stripe].stack, &node->wfs);
     }
     mag->count = 0;
 } /* chimera_rcu_magazine_drain */
@@ -201,21 +201,21 @@ chimera_rcu_magazine_drain(struct chimera_rcu_magazine *mag)
 static inline void
 chimera_rcu_pool_destroy(struct chimera_rcu_pool *pool)
 {
-    struct cds_wfs_head     *batch;
-    struct cds_wfs_node     *wn, *wn_safe;
+    chimera_stack_batch     *batch;
+    chimera_stack_node     *wn, *wn_safe;
     struct chimera_rcu_node *node;
     uint32_t                 i;
 
     for (i = 0; i < pool->n_stripes; i++) {
-        batch = cds_wfs_pop_all_blocking(&pool->depots[i].stack);
+        batch = chimera_stack_pop_all(&pool->depots[i].stack);
         if (batch) {
-            cds_wfs_for_each_blocking_safe(batch, wn, wn_safe)
+            chimera_stack_for_each_safe(batch, wn, wn_safe)
             {
                 node = caa_container_of(wn, struct chimera_rcu_node, wfs);
                 free(node);
             }
         }
-        cds_wfs_destroy(&pool->depots[i].stack);
+        chimera_stack_destroy(&pool->depots[i].stack);
     }
 
     free(pool->depots);

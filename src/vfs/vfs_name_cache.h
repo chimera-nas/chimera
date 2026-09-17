@@ -6,7 +6,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 struct chimera_vfs_name_cache_entry {
     struct chimera_rcu_node rnode; /* must be first: aliases the entry pointer */

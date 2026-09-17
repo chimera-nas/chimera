@@ -11,7 +11,7 @@
 #include <openssl/hmac.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 #include "evpl/evpl_http.h"
 #include "s3_auth.h"

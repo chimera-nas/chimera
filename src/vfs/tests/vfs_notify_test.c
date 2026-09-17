@@ -27,7 +27,7 @@
 #include "vfs/vfs_rpl_cache.h"
 #include "common/logging.h"
 
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 static int passed = 0;
 static int failed = 0;

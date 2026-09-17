@@ -8,7 +8,7 @@
 #undef NDEBUG
 #include <assert.h>
 #include <unistd.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 #include "vfs/vfs_user_cache.h"
 

@@ -6,7 +6,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 #include "prometheus-c.h"
 
 struct chimera_vfs_attr_cache_entry {

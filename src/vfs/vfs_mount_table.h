@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_fh.h"
 

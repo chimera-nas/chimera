@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: LGPL-2.1-only
+cmake_minimum_required(VERSION 3.22)
+project(chimera_native_runtime C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+enable_testing()
+get_filename_component(CHIMERA_SOURCE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+add_executable(native_rcu_test ../rcu_test.c ../../rcu.c)
+target_include_directories(native_rcu_test PRIVATE
+    "${CHIMERA_SOURCE_ROOT}/src" "${CHIMERA_SOURCE_ROOT}/ext/libevpl/include")
+target_compile_definitions(native_rcu_test PRIVATE CHIMERA_NATIVE_RCU=1)
+if(MSVC)
+    target_compile_options(native_rcu_test PRIVATE /W4 /WX /experimental:c11atomics /UNDEBUG)
+else()
+    target_compile_options(native_rcu_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    find_package(Threads REQUIRED)
+    target_link_libraries(native_rcu_test PRIVATE Threads::Threads)
+endif()
+add_test(NAME chimera/native/rcu COMMAND native_rcu_test)
+set_tests_properties(chimera/native/rcu PROPERTIES TIMEOUT 60)

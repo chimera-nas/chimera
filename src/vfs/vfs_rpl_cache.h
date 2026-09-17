@@ -8,7 +8,7 @@
 #include "vfs/vfs_rcu_pool.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 /*
  * RPL (Reverse Path Lookup) Cache

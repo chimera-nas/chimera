@@ -484,6 +484,13 @@ chimera_vfs_spawn_delegation_pool(
  * Best-effort throughout: any failure leaves liburcu's single default worker in
  * place, which is correct, just slower to reclaim.
  */
+#if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU)
+static void
+chimera_vfs_create_call_rcu_workers(int nworkers)
+{
+    (void) nworkers; /* The native backend has one process-wide reclaim worker. */
+}
+#else
 static void
 chimera_vfs_create_call_rcu_workers(int nworkers)
 {
@@ -528,6 +535,8 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 
     free(workers);
 } /* chimera_vfs_create_call_rcu_workers */
+#endif
+
 
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
@@ -787,6 +796,13 @@ chimera_vfs_module_capabilities(
 
 /* Upper bound on the helper threads used to tear the per-CPU call_rcu workers
  * down in parallel (see chimera_vfs_free_all_cpu_call_rcu_data_parallel). */
+#if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU)
+static void
+chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
+{
+    rcu_barrier();
+}
+#else
 #define CHIMERA_RCU_TEARDOWN_MAX_THREADS 64
 
 struct chimera_rcu_teardown_ctx {
@@ -916,6 +932,8 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
     free(ctx);
     free(crdps);
 } /* chimera_vfs_free_all_cpu_call_rcu_data_parallel */
+#endif
+
 
 SYMBOL_EXPORT void
 chimera_vfs_destroy(struct chimera_vfs *vfs)

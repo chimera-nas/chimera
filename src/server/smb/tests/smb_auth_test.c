@@ -22,7 +22,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <time.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/rcu.h"
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_user_cache.h"
