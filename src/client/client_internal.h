@@ -76,6 +76,10 @@ typedef void (*chimera_client_request_callback)(
 
 struct CHIMERA_ALIGNED(64) chimera_client_request {
     enum chimera_client_request_opcode opcode;
+    /* The op a sequence's gate judges, when one does.  The *at() stat family
+     * uses it to check that its directory descriptor is still a directory
+     * before resolving a path through it -- see chimera_dispatch_stat. */
+    int                                gate_index;
     struct chimera_client_thread      *thread;
     struct chimera_client_request     *prev;
     struct chimera_client_request     *next;

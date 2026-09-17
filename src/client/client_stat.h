@@ -89,6 +89,36 @@ chimera_stat_sequence_complete(
     chimera_stat_lookup_complete(status, &attr, private_data);
 } /* chimera_stat_sequence_complete */
 
+/*
+ * A directory descriptor has to BE a directory, and that has to be answered
+ * from the descriptor itself rather than from how the walk behind it failed:
+ * resolving a path through a regular file surfaces as ENOTDIR on some backends
+ * and ENOENT on others (the SMB proxy), and POSIX owes fstatat() ENOTDIR
+ * either way.  The gate asks the question of the GETATTR the sequence already
+ * ran, so it costs no extra round trip.
+ */
+static void
+chimera_stat_dircheck_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_client_request        *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+
+    if (*status != CHIMERA_VFS_OK || (int) index != request->gate_index) {
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound, index);
+
+    if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(op->attr.va_mode)) {
+        *status = CHIMERA_VFS_ENOTDIR;
+    }
+} /* chimera_stat_dircheck_gate */
+
 static inline void
 chimera_dispatch_stat(
     struct chimera_client_thread  *thread,
@@ -96,18 +126,34 @@ chimera_dispatch_stat(
 {
     struct chimera_vfs_compound *compound;
 
-    compound = chimera_client_compound_at_root(thread, request);
+    /* `handle`, when set, is the *at() family's directory descriptor: the walk
+     * starts from that open directory and the path is relative to it.  NULL is
+     * AT_FDCWD (and any absolute path), which starts at the export root.
+     *
+     * chimera_fstatat() is the entry point that sets it -- an earlier version
+     * of this function assumed chimera_stat() was the only caller, resolved
+     * every path from the root, and so answered fstatat(dfd, "b") for the
+     * WRONG directory whenever dfd was not the root. */
+    if (request->stat.handle) {
+        compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                              chimera_client_req_cred(request));
+        request->compound = compound;
+
+        chimera_vfs_compound_add_putfh(compound,
+                                       request->stat.handle->fh,
+                                       (int) request->stat.handle->fh_len);
+
+        request->gate_index =
+            chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+        chimera_vfs_compound_set_gate(compound, chimera_stat_dircheck_gate,
+                                      request);
+    } else {
+        compound = chimera_client_compound_at_root(thread, request);
+    }
 
     /* One op for the whole path: the lookup returns the attributes with it, so
      * there is no open and no getattr -- which is also what makes this work on
-     * a path-only mount, where the resolved child has no re-openable handle.
-     *
-     * Resolution starts at the export root, not at request->stat.handle.  That
-     * field is vestigial here: chimera_stat() is the only entry point and sets
-     * it NULL, so the dirfd branch this replaced -- and the ENOTDIR dircheck
-     * that guarded it, which asked the descriptor's live inode whether it was
-     * still a directory -- could not be reached.  Wiring an *at() entry point
-     * means restoring both, against a sequence that starts at the handle. */
+     * a path-only mount, where the resolved child has no re-openable handle. */
     chimera_vfs_compound_add_lookup_path(compound,
                                          request->stat.path,
                                          request->stat.path_len,

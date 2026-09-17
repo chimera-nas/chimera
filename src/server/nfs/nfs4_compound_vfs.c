@@ -222,6 +222,12 @@ struct nfs4_vfs_compound_ctx {
      * completion, including the ways where the OPEN never ran. */
     /* A SECINFO that succeeded has taken the current filehandle away. */
     int                      fh_consumed;
+    /* A 4.0 SECINFO leaves the current filehandle alone, but the VFS work it
+     * runs is a LOOKUP, and a LOOKUP moves the sequence's current object to
+     * what it resolved.  So the handle the COMPOUND must be left holding is
+     * recorded when the op is built and put back after the fills. */
+    uint8_t                  secinfo_fh[NFS4_FHSIZE];
+    int                      secinfo_fhlen;
 
     int                      open_present;
     uint32_t                 open_res_index;
@@ -321,10 +327,13 @@ nfs4_vfs_op_stages_early(uint32_t argop)
 static int
 nfs4_vfs_op_ends_run(uint32_t argop)
 {
-    /* SECINFO joins OPEN, for the opposite reason: it CONSUMES the current
-     * filehandle (RFC 7530 §16.31.3), so every op behind it must fail
+    /* SECINFO joins OPEN, for a related reason: on 4.1 it CONSUMES the current
+     * filehandle (RFC 8881 §18.29.3), so every op behind it must fail
      * NFS4ERR_NOFILEHANDLE -- and a sequence whose current object has been
-     * taken away has nothing left to address. */
+     * taken away has nothing left to address.  On 4.0 the handle survives
+     * (RFC 7530 §16.31.3), so ending the run there is merely conservative:
+     * what follows is dispatched op by op against a filehandle that is still
+     * good. */
     return argop == OP_OPEN || argop == OP_SECINFO;
 } /* nfs4_vfs_op_ends_run */
 
@@ -829,11 +838,20 @@ nfs4_vfs_op_fill(
                 export ? export->sec_allowed : 0,
                 req->thread->shared->gss_enabled);
 
-            /* RFC 7530 §16.31.3 / RFC 8881 §18.29.3: SECINFO consumes the
-            * current filehandle on success.  Recorded rather than applied,
-            * because the sequence sets req->fh from its last op after every
-            * result has been filled -- see nfs4_vfs_compound_complete. */
-            ctx->fh_consumed = 1;
+            /* RFC 8881 §18.29.3: SECINFO consumes the current filehandle on
+             * success -- and that is a 4.1 rule.  RFC 7530 §16.31.3 describes
+             * the same operation without it and leaves the handle in place,
+             * which is what a 4.0 client is entitled to rely on, and what both
+             * NFS-Ganesha and the Linux server do.  The per-op path gates this
+             * on the minor version (nfs4_proc_secinfo.c); this path did not,
+             * which put the same consumption back for 4.0 compounds.
+             *
+             * Recorded rather than applied, because the sequence sets req->fh
+             * from its last op after every result has been filled -- see
+             * nfs4_vfs_compound_complete. */
+            if (req->minorversion >= 1) {
+                ctx->fh_consumed = 1;
+            }
 
             sires->status = NFS4_OK;
             return NFS4_OK;
@@ -1400,6 +1418,11 @@ nfs4_vfs_compound_complete(
      * -- the name it looked up -- is not what the COMPOUND is left holding. */
     if (ctx->fh_consumed) {
         req->fhlen = 0;
+    } else if (ctx->secinfo_fhlen > 0) {
+        /* A 4.0 SECINFO: the name it resolved is not what the COMPOUND holds
+         * afterwards -- the directory it resolved the name IN is. */
+        memcpy(req->fh, ctx->secinfo_fh, ctx->secinfo_fhlen);
+        req->fhlen = ctx->secinfo_fhlen;
     }
 
     /* Point req->index at the operation whose status the compound carries, so
@@ -3211,6 +3234,13 @@ chimera_nfs4_compound_try_vfs(
                 if (nfs4_vfs_open_for(compound, &cur_open_flags,
                                       NFS4_VFS_OPEN_DIR) < 0) {
                     goto refuse;
+                }
+
+                /* Only 4.1 consumes the handle; on 4.0 it survives, so keep
+                 * a copy of it to undo the LOOKUP's move. */
+                if (req->minorversion < 1 && cur_fhlen > 0) {
+                    memcpy(ctx->secinfo_fh, cur_fh, cur_fhlen);
+                    ctx->secinfo_fhlen = cur_fhlen;
                 }
 
                 idx = chimera_vfs_compound_add_lookup(
