@@ -363,8 +363,7 @@ chimera_vfs_claim_mark_break_notified(
     const uint8_t            *fh,
     uint8_t                   fh_len,
     uint64_t                  fh_hash,
-    const uint8_t            *lease_key,
-    uint64_t                  client_key)
+    const uint8_t            *lease_key)
 {
     struct chimera_vfs_file_state *file;
     struct chimera_vfs_claim      *cur;
@@ -380,11 +379,7 @@ chimera_vfs_claim_mark_break_notified(
 
     pthread_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
-        /* (client, key) -- the same LeaseKey from two clients names two
-         * different leases (MS-SMB2 3.3.5.9.8), and both can be mid-break on
-         * one file, so marking on the key alone could mark the wrong one. */
         if (cur->break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
-            cur->owner.client_key == client_key &&
             memcmp(cur->owner.key, lease_key, 16) == 0) {
             cur->break_notified = 1;
             break;
@@ -550,7 +545,7 @@ chimera_vfs_claim_trigger_row(
     bool same_owner = actor &&
         chimera_claim_owner_equal(&victim->owner, &actor->owner);
     bool same_key = actor &&
-        chimera_claim_owner_same_lease(&victim->owner, &actor->owner);
+        chimera_claim_owner_same_key(&victim->owner, &actor->owner);
     bool same_handle = actor && actor->op_handle &&
         victim->op_handle == actor->op_handle;
 
