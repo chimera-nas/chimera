@@ -11,7 +11,9 @@
 #include <unistd.h>
 #endif
 #include "common/thread.h"
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
@@ -2799,7 +2801,9 @@ chimera_server_init(
 {
     struct chimera_server *server;
     int                    i;
+#ifndef _WIN32
     struct rlimit          rl;
+#endif
 
     if (!config) {
         config = chimera_server_config_init();
@@ -2807,6 +2811,7 @@ chimera_server_init(
 
     chimera_log_init();
 
+#ifndef _WIN32
     /* Need to set the filedescriptor limits */
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         if (rl.rlim_cur < config->max_open_files) {
@@ -2826,6 +2831,8 @@ chimera_server_init(
     } else {
         chimera_server_error("Failed to get file descriptor limit: %s", strerror(errno));
     }
+
+#endif
 
     server = calloc(1, sizeof(*server));
 

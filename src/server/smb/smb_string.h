@@ -4,26 +4,43 @@
 
 #pragma once
 
+#ifdef _WIN32
+#include <evpl/evpl_platform.h>
+#include <limits.h>
+#else
 #include <iconv.h>
+#endif
 #include <stdint.h>
 
 struct chimera_smb_iconv_ctx {
+#ifdef _WIN32
+    int unused;
+#else
     iconv_t utf16le_to_utf8;
     iconv_t utf8_to_utf16le;
+#endif
 };
 
 static void
 chimera_smb_iconv_init(struct chimera_smb_iconv_ctx *ctx)
 {
+#ifdef _WIN32
+    ctx->unused = 0;
+#else
     ctx->utf16le_to_utf8 = iconv_open("UTF-8", "UTF-16LE");
     ctx->utf8_to_utf16le = iconv_open("UTF-16LE", "UTF-8");
+#endif
 } /* chimera_smb_iconv_init */
 
 static void
 chimera_smb_iconv_destroy(struct chimera_smb_iconv_ctx *ctx)
 {
+#ifdef _WIN32
+    (void) ctx;
+#else
     iconv_close(ctx->utf16le_to_utf8);
     iconv_close(ctx->utf8_to_utf16le);
+#endif
 } /* chimera_smb_iconv_destroy */
 
 static inline int
@@ -64,11 +81,36 @@ chimera_smb_utf16le_to_utf8(
     char                         *dst,
     size_t                        dstmaxlen)
 {
+#ifdef _WIN32
+    int count;
+    (void) ctx;
+    if ((srclen & 1) || srclen / 2 > INT_MAX || !dstmaxlen || dstmaxlen > INT_MAX) {
+        return -1;
+    }
+    if (!srclen) {
+        dst[0] = 0;
+        return 0;
+    }
+    if (dstmaxlen <= 1) {
+        return -1;
+    }
+    count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, (const WCHAR *) src,
+                                (int) (srclen / 2), dst, (int) dstmaxlen - 1, NULL, NULL);
+    if (!count) {
+        return -1;
+    }
+    dst[count] = 0;
+    return count;
+#else
     int    rc;
-    size_t srcleft = srclen, dstleft = dstmaxlen;
+    size_t srcleft = srclen, dstleft;
     char  *dstleftp = dst;
     char  *srcleftp = (char *) src;
 
+    if (!dstmaxlen) {
+        return -1;
+    }
+    dstleft = dstmaxlen - 1;
     rc = iconv(ctx->utf16le_to_utf8, &srcleftp, &srcleft, &dstleftp, &dstleft);
 
     if (rc != 0) {
@@ -78,6 +120,7 @@ chimera_smb_utf16le_to_utf8(
     *dstleftp = '\0';
 
     return dstleftp - dst;
+#endif
 } /* smb_utf16le_to_utf8 */
 
 static inline int
@@ -88,6 +131,22 @@ chimera_smb_utf8_to_utf16le(
     uint16_t                     *dst,
     size_t                        dstmaxlen)
 {
+#ifdef _WIN32
+    int count;
+    (void) ctx;
+    if (srclen > INT_MAX || dstmaxlen > INT_MAX) {
+        return -1;
+    }
+    if (!srclen) {
+        return 0;
+    }
+    if (dstmaxlen < 2) {
+        return -1;
+    }
+    count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, src, (int) srclen,
+                                (WCHAR *) dst, (int) (dstmaxlen / 2));
+    return count ? count * 2 : -1;
+#else
     int    rc;
     size_t dstlen, srcleft = srclen, dstleft = dstmaxlen;
     char  *dstleftp = (char *) dst;
@@ -102,4 +161,5 @@ chimera_smb_utf8_to_utf16le(
     dstlen = dstmaxlen - dstleft;
 
     return dstlen;
+#endif
 } /* chimera_smb_utf8_to_utf16le */

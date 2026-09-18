@@ -5,7 +5,7 @@
 #include "common/thread.h"
 #include <stdio.h>
 #include <string.h>
-#include <uuid/uuid.h>
+#include "common/uuid.h"
 #include <xxhash.h>
 #include "prometheus-c.h"
 #include "nfs4_session.h"
@@ -1246,7 +1246,8 @@ nfs4_create_session(
             memcpy(session->nfs4_session_id, restore_sessionid,
                    NFS4_SESSIONID_SIZE);
         } else {
-            uuid_generate(session->nfs4_session_id);
+            chimera_nfs_abort_if(chimera_uuid_generate(session->nfs4_session_id),
+                                 "Unable to generate NFS session identifier");
         }
 
         session->nfs4_session_implicit = implicit;
@@ -1293,7 +1294,7 @@ nfs4_create_session(
         return NULL;
     }
 
-    uuid_unparse(session->nfs4_session_id, session_id_str);
+    chimera_uuid_unparse(session->nfs4_session_id, session_id_str);
 
     chimera_nfs_info("NFS4 Created new session %s for client %lu",
                      session_id_str, client_id);
@@ -1363,7 +1364,7 @@ nfs4_destroy_session(
     struct nfs4_session *session = NULL;
     char                 session_id_str[80];
 
-    uuid_unparse(session_id, session_id_str);
+    chimera_uuid_unparse(session_id, session_id_str);
 
     chimera_nfs_info("NFS4 Destroying session %s", session_id_str);
 

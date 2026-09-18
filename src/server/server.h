@@ -11,7 +11,9 @@
 #include <unistd.h>
 #endif
 #include "common/thread.h"
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 
 #include "evpl/evpl.h"
 #include "server_internal.h"

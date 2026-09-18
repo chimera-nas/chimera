@@ -7,7 +7,7 @@
 #include "common/compiler.h"
 #include <utlist.h>
 
-#include <sys/mman.h>
+
 
 #include "evpl/evpl.h"
 
@@ -101,7 +101,7 @@ slab_allocator_alloc_new_chunk(
         LL_PREPEND(allocator->slabs, slab);
     }
 
-    ptr         = slab->buffer + slab->used;
+    ptr         = (char *) slab->buffer + slab->used;
     slab->used += size;
 
     return ptr;
@@ -164,7 +164,7 @@ slab_allocator_alloc_perm(
         pad = 0;
     }
 
-    ptr         = slab->buffer + slab->used + pad;
+    ptr         = (char *) slab->buffer + slab->used + pad;
     slab->used += size + pad;
 
     return ptr;
