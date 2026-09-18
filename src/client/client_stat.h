@@ -139,9 +139,16 @@ chimera_dispatch_stat(
                                               chimera_client_req_cred(request));
         request->compound = compound;
 
-        chimera_vfs_compound_add_putfh(compound,
-                                       request->stat.handle->fh,
-                                       (int) request->stat.handle->fh_len);
+        /* PUTHANDLE, not PUTFH: the descriptor is a handle we already hold,
+         * and the GETATTR below has to ask the LIVE inode.  Naming it by
+         * filehandle instead would make the executor re-open it, which a
+         * path-only backend cannot do at all -- only the mount root is
+         * re-openable over the SMB proxy -- and which would answer from a
+         * re-resolved name even where it works, so a directory unlinked while
+         * the fd stayed open would look like ENOENT instead of the directory
+         * it still is. */
+        chimera_vfs_compound_add_puthandle(compound, request->stat.handle,
+                                           CHIMERA_VFS_OPEN_INFERRED);
 
         request->gate_index =
             chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
