@@ -119,12 +119,7 @@ smb_lock_ranges_overlap(
     uint64_t b_off,
     uint64_t b_len)
 {
-    __uint128_t a_end = (a_len == UINT64_MAX)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
-    __uint128_t b_end = (b_len == UINT64_MAX)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
-
-    return a_off < b_end && b_off < a_end;
+    return chimera_vfs_claim_range_overlap_i(a_off, a_len, b_off, b_len);
 } /* smb_lock_ranges_overlap */
 
 /* One held byte-range, owned by the open_file.  Released on UNLOCK or
@@ -677,7 +672,7 @@ chimera_smb_lock_multi(
             chimera_smb_lock_multi_complete(request, open_file, SMB2_STATUS_INVALID_PARAMETER);
             return;
         }
-        if ((__uint128_t) off + len > ((__uint128_t) 1 << 64)) {
+        if (len && off > UINT64_MAX - (len - 1)) {
             chimera_smb_lock_multi_complete(request, open_file, SMB2_STATUS_INVALID_LOCK_RANGE);
             return;
         }
@@ -830,8 +825,8 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * §3.3.5.14.{1,2}): reject it with INVALID_LOCK_RANGE before touching the
      * lock table.  A range that ends exactly at 2^64 (e.g. offset=2^64-1,
      * length=1, the last byte) is valid; length 0 is a zero-byte range. */
-    if ((__uint128_t) request->lock.l_offset + request->lock.l_length >
-        ((__uint128_t) 1 << 64)) {
+    if (request->lock.l_length && request->lock.l_offset >
+        UINT64_MAX - (request->lock.l_length - 1)) {
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_LOCK_RANGE);
         return;

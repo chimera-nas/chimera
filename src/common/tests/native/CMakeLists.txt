@@ -19,3 +19,12 @@ else()
 endif()
 add_test(NAME chimera/native/rcu COMMAND native_rcu_test)
 set_tests_properties(chimera/native/rcu PROPERTIES TIMEOUT 60)
+
+add_executable(native_password_test ../password_test.c
+    ${CHIMERA_SOURCE_ROOT}/3rdparty/crypt/crypt_sha512.c)
+if(MSVC)
+    target_compile_definitions(native_password_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(native_password_test PRIVATE /W3 /WX /wd4244 /wd4267)
+endif()
+add_test(NAME chimera/native/password_hash COMMAND native_password_test)
+set_tests_properties(chimera/native/password_hash PROPERTIES TIMEOUT 60)

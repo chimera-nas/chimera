@@ -454,12 +454,7 @@ chimera_vfs_claim_range_overlap(
     uint64_t b_off,
     uint64_t b_len)
 {
-    __uint128_t a_end = (a_len == UINT64_MAX)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
-    __uint128_t b_end = (b_len == UINT64_MAX)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
-
-    return a_off < b_end && b_off < a_end;
+    return chimera_vfs_claim_range_overlap_i(a_off, a_len, b_off, b_len);
 } /* chimera_vfs_claim_range_overlap */
 
 static inline bool

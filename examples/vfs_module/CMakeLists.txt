@@ -14,6 +14,7 @@ else()
     add_library(vfs_example MODULE vfs_example.c)
 endif()
 set_target_properties(vfs_example PROPERTIES PREFIX "")
+target_link_libraries(vfs_example PRIVATE xxhash)
 
 target_include_directories(vfs_example PRIVATE
     ${CMAKE_SOURCE_DIR}/src/vfs/sdk

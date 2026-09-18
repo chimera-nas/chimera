@@ -67,7 +67,9 @@ jobs:
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
-      - name: Build
+      - name: Build server
+        run: cmake --build build --target chimera --config ${{ matrix.config }} --parallel 4
+      - name: Build tests and SDK example
         run: cmake --build build --config ${{ matrix.config }} --parallel 4
       - name: Test native backends
         run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --timeout 300 --output-junit results.xml
