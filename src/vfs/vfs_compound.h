@@ -499,6 +499,59 @@ struct chimera_vfs_compound_op {
      * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
      * name has been resolved. */
     struct chimera_vfs_attrs              set_attr;
+
+    /* ---- the name-op knobs: exempt handle, lease skip, match fh ----
+     * Set by chimera_vfs_compound_op_set_remove_match / _set_rename_opts /
+     * _set_link_opts after the adder, because only SMB and a few NFSv4 paths
+     * supply any of them and every other caller would carry arguments it
+     * never uses.  The file handles and the lease key are COPIED -- they are
+     * values, and a caller assembling them in a stack buffer should not have
+     * to keep it alive across the submission.  The handle is BORROWED on the
+     * in_handle terms. */
+    /* REMOVE: the doomed object's fh.  With `child_fh_match` the name is
+     * unlinked only while it still resolves to this object
+     * (remove_at_match_fh): a name that now belongs to something else is left
+     * alone and the op reports OK, because the caller's object is already
+     * gone.  Without it the fh is the recall target remove_at would otherwise
+     * resolve for itself.  child_fh_len 0 is a plain remove_at. */
+    uint8_t                               child_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              child_fh_len;
+    uint8_t                               child_fh_match;
+    /* RENAME, REMOVE, LINK: the directory lease to spare from the break the
+     * op raises -- the operating open's own ParentLeaseKey, so a client does
+     * not break the lease it holds on the directory it is changing.  Valid
+     * only when parent_lease_skip_valid is set; the executor passes NULL
+     * otherwise, which breaks every directory lease as NFS and S3 do. */
+    uint8_t                               parent_lease_skip[16];
+    uint8_t                               parent_lease_skip_valid;
+    /* RENAME, LINK: the operating handle whose own file lease the source
+     * recall must not break -- renaming a file one holds a lease on is not
+     * a reason to lose the lease.  BORROWED; NULL exempts nothing. */
+    struct chimera_vfs_open_handle       *op_exempt_handle;
+    /* RENAME: the fh of the object already at the destination name, when the
+     * caller has resolved it; target_fh_len 0 leaves rename_at to resolve
+     * it.  And CHIMERA_VFS_RENAME_SRC_IS_DIR, which the executor ORs into the
+     * word it hands rename_at beside remove_flags: the open is the only layer
+     * that knows the renamed object's type, and the notify filters want it. */
+    uint8_t                               target_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              target_fh_len;
+    unsigned int                          rename_flags;
+    /* LINK: clobber an existing destination name -- linkat(2) never does, an
+     * SMB rename-via-link with ReplaceIfExists and an S3 publish both do. */
+    uint8_t                               link_replace;
+
+    /* OPEN, OPEN_PATH: an opaque record to persist atomically with the open
+     * (CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE) -- an SMB durable or persistent
+     * handle's reconnect record.  BORROWED, and it must outlive the run: the
+     * per-op call keeps the pointer until the backend has stored it.  NULL is
+     * a plain open.  Set by chimera_vfs_compound_op_set_handle_state, where
+     * what a backend WITHOUT the capability does with it is spelled out. */
+    struct chimera_vfs_handle_state      *handle_state;
+
+    /* CREATE_PATH of a directory: create the interior components too and
+     * accept the ones already there -- mkdir -p.  See the adder. */
+    uint8_t                               path_intermediates;
+
     /* A PATH-ADDRESSED op resolves this, relative to the sequence's current
      * file handle, instead of addressing the current object.  Owned by the
      * compound and copied by the adder.
@@ -1167,7 +1220,18 @@ chimera_vfs_compound_add_open_path(
     uint64_t                        attr_mask);
 
 /* `create_type` is a CHIMERA_VFS_COMPOUND_CREATE_*, as for the name-based
- * CREATE; `target` is the symlink target and read only for a symlink. */
+ * CREATE; `target` is the symlink target and read only for a symlink.
+ *
+ * `intermediates` is mkdir -p, and only the DIR create type honours it: the
+ * path's interior components are created as they are walked and a component
+ * already there is not an error -- for the S3 "make the object's parent
+ * chain" and REST paths, which walk chimera_vfs_create's loop by hand today.
+ * That loop is what runs here, so its rule is the rule: a LEAF that already
+ * exists is accepted too (a second run of the same op is not an error), which
+ * is what mkdir -p means and what the consumers rely on.  A caller that wants
+ * the leaf's EEXIST leaves this clear and gets the single-level mkdir, which
+ * fails ENOENT on a missing parent as it always has.  The attributes are
+ * applied to every component the walk creates. */
 int
 chimera_vfs_compound_add_create_path(
     struct chimera_vfs_compound    *compound,
@@ -1177,7 +1241,8 @@ chimera_vfs_compound_add_create_path(
     const char                     *target,
     int                             targetlen,
     const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask);
+    uint64_t                        attr_mask,
+    uint8_t                         intermediates);
 
 int
 chimera_vfs_compound_add_remove_path(
@@ -1397,6 +1462,100 @@ chimera_vfs_compound_op_set_handle(
     struct chimera_vfs_compound    *compound,
     uint32_t                        index,
     struct chimera_vfs_open_handle *handle);
+
+/* ---- the name-op setters ----
+ *
+ * Each is applied to the op at `index` after its adder returned, on the same
+ * reasoning as op_set_handle: the knobs are SMB's and a few NFSv4 paths', and
+ * the common caller pays no argument it never uses.  The index must name an
+ * op of the right type -- anything else is a caller bug and aborts, because a
+ * knob silently applied to the wrong op is a sequence that quietly does
+ * something other than what was written.  An index past the end is ignored,
+ * as op_use_handle ignores one: the adder already reported the failure.
+ *
+ * File handles and the lease key are COPIED; the exempt handle and the
+ * handle-state record are BORROWED, on the in_handle terms. */
+
+/* REMOVE: with `match` set, unlink `name` only while it still resolves to
+ * `child_fh` (remove_at_match_fh) -- so an asynchronous delete-on-close cannot
+ * destroy an unrelated object that has since taken the name.  A name that no
+ * longer resolves to it is left intact and the op reports OK: the caller's
+ * object is already gone, which is the outcome it wanted.  `match` therefore
+ * requires a child_fh.  Without `match`, a non-NULL child_fh is the recall
+ * target remove_at would otherwise resolve for itself, and the op's
+ * remove_flags apply as usual; with it, remove_at_match_fh takes no flags, so
+ * the type assertion and the recall request are the caller's to have already
+ * made -- which every match caller (SMB delete-on-close, the durable reap)
+ * has.  `parent_lease_skip` is the 16-byte directory lease key to spare, or
+ * NULL to spare none. */
+void
+chimera_vfs_compound_op_set_remove_match(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    const uint8_t               *child_fh,
+    uint32_t                     child_fh_len,
+    int                          match,
+    const uint8_t               *parent_lease_skip);
+
+/* RENAME: `target_fh` is the object already at the destination name when the
+ * caller resolved it (NULL / 0 leaves rename_at to resolve it), `op_exempt_
+ * handle` the operating open whose own file lease the source recall spares,
+ * `parent_lease_skip` the directory lease to spare (16 bytes or NULL), and
+ * `flags` is CHIMERA_VFS_RENAME_SRC_IS_DIR or 0, which the executor ORs into
+ * the word rename_at takes beside the adder's remove_flags. */
+void
+chimera_vfs_compound_op_set_rename_opts(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    const uint8_t                  *target_fh,
+    uint32_t                        target_fh_len,
+    struct chimera_vfs_open_handle *op_exempt_handle,
+    const uint8_t                  *parent_lease_skip,
+    unsigned int                    flags);
+
+/* LINK: `replace` clobbers an existing destination name (the SMB
+ * ReplaceIfExists rename-via-link and the S3 publish; link(2) never does),
+ * and the other two are as for RENAME. */
+void
+chimera_vfs_compound_op_set_link_opts(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    int                             replace,
+    const uint8_t                  *parent_lease_skip,
+    struct chimera_vfs_open_handle *op_exempt_handle);
+
+/* OPEN, OPEN_PATH: persist `handle_state` with the open.  BORROWED, and it
+ * must outlive the run.  NULL is a plain open.
+ *
+ * What "with" means depends on the backend, and the caller decides whether
+ * that is good enough BEFORE building the sequence, with
+ * chimera_vfs_can_persist_handle_state -- exactly as the SMB create path
+ * does today:
+ *
+ *   CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE  the backend stores the record in
+ *     the same transaction as the open (cairn).
+ *
+ *   no capability, a named OPEN  the VFS core stores the record in the
+ *     default KV AFTER the open has succeeded, keyed by the new object's fh
+ *     -- a second, non-atomic write that only the in-memory and passthrough
+ *     backends ever take.  It is best-effort: a KV failure is logged and the
+ *     open still succeeds, without its record.  With no default KV configured
+ *     the record is not stored at all and nothing says so.
+ *
+ *   no capability, an unnamed OPEN (a re-open of the current object by fh)
+ *     the record is handed to the backend and, lacking the capability, the
+ *     backend ignores it: open_fh has no default-KV fallback.  A caller that
+ *     needs the record on such a backend opens by name.
+ *
+ *   OPEN_PATH  there is no path-addressed open that takes a record, so an
+ *     OPEN_PATH carrying one fails ENOTSUP at execution rather than opening
+ *     without it.  No consumer needs the combination: SMB, the one caller of
+ *     handle state, opens by name through a directory it holds open. */
+void
+chimera_vfs_compound_op_set_handle_state(
+    struct chimera_vfs_compound     *compound,
+    uint32_t                         index,
+    struct chimera_vfs_handle_state *handle_state);
 
 /* Take ownership of an OPEN's handle: returns it and clears out_handle, so the
  * compound will not release it and the caller must.  NULL if that op is not an

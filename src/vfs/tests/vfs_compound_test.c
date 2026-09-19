@@ -295,6 +295,48 @@ remote_release_main(void *arg)
     return NULL;
 } /* remote_release_main */
 
+/* A KV range search that keeps the one value it went looking for, so a test
+ * can see whether an OPEN's handle-state record reached the default KV. */
+struct kv_probe {
+    struct test_ctx *ctx;
+    int              found;
+    char             value[64];
+    uint32_t         value_len;
+};
+
+static int
+kv_probe_entry(
+    const void *key,
+    uint32_t    key_len,
+    const void *value,
+    uint32_t    value_len,
+    void       *private_data)
+{
+    struct kv_probe *p = private_data;
+
+    (void) key;
+    (void) key_len;
+
+    if (value_len < sizeof(p->value)) {
+        memcpy(p->value, value, value_len);
+        p->value_len = value_len;
+    }
+    p->found++;
+
+    return 0;
+} /* kv_probe_entry */
+
+static void
+kv_probe_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct kv_probe *p = private_data;
+
+    p->ctx->status = error_code;
+    p->ctx->done   = 1;
+} /* kv_probe_complete */
+
 int
 main(
     int    argc,
@@ -2284,16 +2326,16 @@ main(
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_cd = chimera_vfs_compound_add_create_path(
             cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "pd", 2, NULL, 0, &sattr,
-            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT);
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0);
         i_fh = chimera_vfs_compound_add_getfh(cp);
         i_cs = chimera_vfs_compound_add_create_path(
             cp, CHIMERA_VFS_COMPOUND_CREATE_SYMLINK, "pl", 2, "..", 2, NULL,
-            CHIMERA_VFS_ATTR_MASK_STAT);
+            CHIMERA_VFS_ATTR_MASK_STAT, 0);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         sattr.va_mode = S_IFIFO | 0600;
         i_cn          = chimera_vfs_compound_add_create_path(
             cp, CHIMERA_VFS_COMPOUND_CREATE_NODE, "pn", 2, NULL, 0, &sattr,
-            CHIMERA_VFS_ATTR_MASK_STAT);
+            CHIMERA_VFS_ATTR_MASK_STAT, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -2651,6 +2693,550 @@ main(
         chimera_vfs_release(ctx.vfs_thread, oh);
     }
     TEST_PASS("a LOCK granted from another thread completes on the submitting one");
+
+    /* ---- REMOVE that matches its victim ----
+     * The name-op setters ride behind the adder, so a caller that has no lease
+     * to spare and no object to match pays nothing.  The match is the one
+     * with a visible answer: a guarded REMOVE unlinks the name while it still
+     * resolves to the object the caller had in hand, and leaves it alone once
+     * something else has taken the name -- reporting OK either way, because
+     * the caller's object is gone either way.  That OK is the whole contract:
+     * an SMB delete-on-close firing late must not destroy the file another
+     * opener has since created under the same name. */
+    {
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  v1_fh[CHIMERA_VFS_FH_SIZE], v2_fh[CHIMERA_VFS_FH_SIZE];
+        uint8_t                  v2b_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 v1_fh_len, v2_fh_len, v2b_fh_len;
+        uint8_t                  lease_key[16];
+        int                      i_o1, i_o2, i_rm, i_lk, i;
+
+        for (i = 0; i < 16; i++) {
+            lease_key[i] = (uint8_t) (0xA0 + i);
+        }
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_o1 = chimera_vfs_compound_add_open(cp, "rm1", 3,
+                                             CHIMERA_VFS_OPEN_CREATE |
+                                             CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                             0, &sattr, 0, 0, 0);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_o2 = chimera_vfs_compound_add_open(cp, "rm2", 3,
+                                             CHIMERA_VFS_OPEN_CREATE |
+                                             CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                             0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        /* An OPEN's op->fh is the object it opened. */
+        op = chimera_vfs_compound_op(cp, i_o1);
+        memcpy(v1_fh, op->fh, op->fh_len);
+        v1_fh_len = op->fh_len;
+        op        = chimera_vfs_compound_op(cp, i_o2);
+        memcpy(v2_fh, op->fh, op->fh_len);
+        v2_fh_len = op->fh_len;
+        chimera_vfs_compound_free(cp);
+
+        /* The right fh: the name goes. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_rm = chimera_vfs_compound_add_remove(cp, "rm1", 3, 0, 0,
+                                               CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_set_remove_match(cp, (uint32_t) i_rm,
+                                                 v1_fh, v1_fh_len, 1, NULL);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "rm1", 3, 0, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_rm);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->child_fh_match);
+        assert(!op->parent_lease_skip_valid);
+        /* Still the parent, and it still reports the directory pair. */
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        assert(op->fh_len == root_fh_len);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+
+        /* rm2 is removed and re-created, so the fh the caller kept is now
+         * stale: a different object answers to the name. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_remove(cp, "rm2", 3, 0, 0, 0);
+        i_o2 = chimera_vfs_compound_add_open(cp, "rm2", 3,
+                                             CHIMERA_VFS_OPEN_CREATE |
+                                             CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                             0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_o2);
+        memcpy(v2b_fh, op->fh, op->fh_len);
+        v2b_fh_len = op->fh_len;
+        assert(v2b_fh_len != v2_fh_len || memcmp(v2b_fh, v2_fh, v2_fh_len) != 0);
+        chimera_vfs_compound_free(cp);
+
+        /* The stale fh: the op reports OK -- what remove_at_match_fh says of a
+         * mismatch, on every backend -- and the name is still there, still
+         * resolving to the replacement.  The lease key rode along, copied. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_rm = chimera_vfs_compound_add_remove(cp, "rm2", 3, 0, 0, 0);
+        chimera_vfs_compound_op_set_remove_match(cp, (uint32_t) i_rm,
+                                                 v2_fh, v2_fh_len, 1,
+                                                 lease_key);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "rm2", 3,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rm);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->parent_lease_skip_valid);
+        assert(memcmp(op->parent_lease_skip, lease_key, 16) == 0);
+        assert(op->child_fh_len == v2_fh_len);
+        assert(memcmp(op->child_fh, v2_fh, v2_fh_len) == 0);
+        op = chimera_vfs_compound_op(cp, i_lk);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == v2b_fh_len);
+        assert(memcmp(op->fh, v2b_fh, v2b_fh_len) == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* Without the match, the same stale fh is only the recall target and
+         * the name goes -- which is what the plain remove_at does with one. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_rm = chimera_vfs_compound_add_remove(cp, "rm2", 3, 0, 0, 0);
+        chimera_vfs_compound_op_set_remove_match(cp, (uint32_t) i_rm,
+                                                 v2_fh, v2_fh_len, 0, NULL);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "rm2", 3, 0, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_rm)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+
+        /* A match with nothing to match is a build failure, reported by
+         * submit rather than run as an unconditional remove. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_rm = chimera_vfs_compound_add_remove(cp, "rm2", 3, 0, 0, 0);
+        chimera_vfs_compound_op_set_remove_match(cp, (uint32_t) i_rm,
+                                                 NULL, 0, 1, NULL);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_num_completed(cp) == 0);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("a matched REMOVE unlinks its own object and spares a replacement");
+
+    /* ---- LINK with replace ----
+     * link(2) never clobbers, and neither does the op by default.  With the
+     * setter's `replace` the destination name is taken over -- the S3 publish
+     * of an unlinked object, and SMB's rename-via-link with ReplaceIfExists. */
+    {
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  la_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 la_fh_len;
+        int                      i_oa, i_link, i_lk;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_oa = chimera_vfs_compound_add_open(cp, "lk_a", 4,
+                                             CHIMERA_VFS_OPEN_CREATE |
+                                             CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                             0, &sattr, 0, 0, 0);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_open(cp, "lk_b", 4,
+                                      CHIMERA_VFS_OPEN_CREATE |
+                                      CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                      0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_oa);
+        memcpy(la_fh, op->fh, op->fh_len);
+        la_fh_len = op->fh_len;
+        chimera_vfs_compound_free(cp);
+
+        /* Over an existing name, without replace: EEXIST. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, la_fh, (int) la_fh_len);
+        chimera_vfs_compound_add_savefh(cp);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_link = chimera_vfs_compound_add_link(cp, "lk_b", 4, 0, 0, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_op(cp, i_link)->status == CHIMERA_VFS_EEXIST);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EEXIST);
+        chimera_vfs_compound_free(cp);
+
+        /* With it: the name now belongs to lk_a's object. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, la_fh, (int) la_fh_len);
+        chimera_vfs_compound_add_savefh(cp);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_link = chimera_vfs_compound_add_link(cp, "lk_b", 4,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0, 0);
+        chimera_vfs_compound_op_set_link_opts(cp, (uint32_t) i_link, 1, NULL, NULL);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "lk_b", 4,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_link);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->link_replace);
+        op = chimera_vfs_compound_op(cp, i_lk);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->attr.va_nlink == 2);
+        assert(op->fh_len == la_fh_len);
+        assert(memcmp(op->fh, la_fh, la_fh_len) == 0);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("LINK clobbers an existing name only with replace");
+
+    /* ---- RENAME of a directory, saying so ----
+     * SRC_IS_DIR is the caller's word on the renamed object's type, which the
+     * notify filters want and only the open can supply; it rides in with the
+     * setter beside the adder's remove-side flags, and a known target fh with
+     * it.  Renaming onto an empty directory is the shape that exercises both. */
+    {
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  d1_fh[CHIMERA_VFS_FH_SIZE], d3_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 d1_fh_len, d3_fh_len;
+        int                      i_d1, i_d3, i_ren, i_lk, i_lk2;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0755;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_d1 = chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "rd1", 3, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT, 0, 0);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_d3 = chimera_vfs_compound_add_create(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "rd3", 3, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_d1);
+        memcpy(d1_fh, op->fh, op->fh_len);
+        d1_fh_len = op->fh_len;
+        op        = chimera_vfs_compound_op(cp, i_d3);
+        memcpy(d3_fh, op->fh, op->fh_len);
+        d3_fh_len = op->fh_len;
+        chimera_vfs_compound_free(cp);
+
+        /* rd1 -> rd2, a directory, no target. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_savefh(cp);
+        i_ren = chimera_vfs_compound_add_rename(cp, "rd1", 3, "rd2", 3,
+                                                CHIMERA_VFS_REMOVE_ISDIR, 0, 0);
+        chimera_vfs_compound_op_set_rename_opts(cp, (uint32_t) i_ren, NULL, 0,
+                                                NULL, NULL,
+                                                CHIMERA_VFS_RENAME_SRC_IS_DIR);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "rd2", 3,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_ren);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->rename_flags == CHIMERA_VFS_RENAME_SRC_IS_DIR);
+        assert(op->remove_flags == CHIMERA_VFS_REMOVE_ISDIR);
+        assert(op->target_fh_len == 0);
+        assert(op->from_dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE);
+        op = chimera_vfs_compound_op(cp, i_lk);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(S_ISDIR(op->attr.va_mode));
+        assert(op->fh_len == d1_fh_len);
+        assert(memcmp(op->fh, d1_fh, d1_fh_len) == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* rd2 -> rd3, onto the empty directory whose fh the caller knows. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_savefh(cp);
+        i_ren = chimera_vfs_compound_add_rename(cp, "rd2", 3, "rd3", 3, 0, 0, 0);
+        chimera_vfs_compound_op_set_rename_opts(cp, (uint32_t) i_ren,
+                                                d3_fh, d3_fh_len, NULL, NULL,
+                                                CHIMERA_VFS_RENAME_SRC_IS_DIR);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "rd3", 3,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lk2         = chimera_vfs_compound_add_lookup(cp, "rd2", 3, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_ren);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->target_fh_len == d3_fh_len);
+        assert(memcmp(op->target_fh, d3_fh, d3_fh_len) == 0);
+        op = chimera_vfs_compound_op(cp, i_lk);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == d1_fh_len);
+        assert(memcmp(op->fh, d1_fh, d1_fh_len) == 0);
+        assert(chimera_vfs_compound_op(cp, i_lk2)->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("RENAME carries SRC_IS_DIR and a known target fh");
+
+    /* ---- CREATE_PATH with intermediates: mkdir -p ----
+     * The chain is made in one op, a second run of the same op is not an
+     * error, and without the flag a missing parent is the ENOENT it always
+     * was.  Only the DIR shape honours it. */
+    {
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  c_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 c_fh_len;
+        int                      i_cp, i_fh, i_lp;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0755;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_cp = chimera_vfs_compound_add_create_path(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "mp/a/b/c", 8, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 1);
+        i_fh = chimera_vfs_compound_add_getfh(cp);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cp);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->path_intermediates);
+        assert(S_ISDIR(op->attr.va_mode));
+        /* The leaf became current, as for the single-level create. */
+        assert(op->fh_len > 0);
+        assert(chimera_vfs_compound_op(cp, i_fh)->fh_len == op->fh_len);
+        memcpy(c_fh, op->fh, op->fh_len);
+        c_fh_len = op->fh_len;
+        chimera_vfs_compound_free(cp);
+
+        /* Every component is there, and the leaf is the object reported. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lp = chimera_vfs_compound_add_lookup_path(
+            cp, "mp/a/b/c", 8, CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_lp);
+        assert(S_ISDIR(op->attr.va_mode));
+        assert(op->fh_len == c_fh_len);
+        assert(memcmp(op->fh, c_fh, c_fh_len) == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* Again: not an error, and the same object. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_cp = chimera_vfs_compound_add_create_path(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "mp/a/b/c", 8, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 1);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cp);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == c_fh_len);
+        assert(memcmp(op->fh, c_fh, c_fh_len) == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* Without the flag, a missing parent is ENOENT. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_cp = chimera_vfs_compound_add_create_path(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_DIR, "mp2/x", 5, NULL, 0,
+            &sattr, CHIMERA_VFS_ATTR_FH, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_cp)->status == CHIMERA_VFS_ENOENT);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+
+        /* And so is a symlink asked for one: the flag is the DIR shape's. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_cp = chimera_vfs_compound_add_create_path(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_SYMLINK, "mp3/l", 5, "..", 2,
+            NULL, CHIMERA_VFS_ATTR_FH, 1);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        op = chimera_vfs_compound_op(cp, i_cp);
+        assert(!op->path_intermediates);
+        assert(op->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("CREATE_PATH with intermediates makes the chain; without, ENOENT");
+
+    /* ---- handle state on an OPEN ----
+     * memfs has no CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE, so this is the setter's
+     * "no capability" arms: a named OPEN's record lands in the default KV
+     * after the open, keyed by the new object's fh; an unnamed OPEN's record
+     * goes to the backend, which ignores it; an OPEN_PATH refuses one. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_handle_state hs, hs2;
+        struct kv_probe                 probe;
+        uint8_t                         h_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        h_fh_len;
+        int                             i_open, i_op;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        hs.key       = "durable";
+        hs.key_len   = 7;
+        hs.value     = "rec1";
+        hs.value_len = 4;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "hs1", 3,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0, 0);
+        chimera_vfs_compound_op_set_handle_state(cp, (uint32_t) i_open, &hs);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->created);
+        assert(op->handle_state == &hs);
+        assert(op->out_handle != NULL);
+        memcpy(h_fh, op->fh, op->fh_len);
+        h_fh_len = op->fh_len;
+        chimera_vfs_compound_free(cp);
+
+        /* The record is in the default KV, on the same route put_key_at
+         * took: search by the fh it was keyed under. */
+        memset(&probe, 0, sizeof(probe));
+        probe.ctx = &ctx;
+        chimera_vfs_search_keys_at(ctx.vfs_thread, &cred, h_fh, (int) h_fh_len,
+                                   "durable", 7, "durable\xff", 8, 0,
+                                   kv_probe_entry, kv_probe_complete, &probe);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        assert(probe.found == 1);
+        assert(probe.value_len == 4);
+        assert(memcmp(probe.value, "rec1", 4) == 0);
+
+        /* An unnamed OPEN: the op succeeds and, this backend lacking the
+        * capability, nothing is stored -- open_fh has no KV fallback. */
+        hs2         = hs;
+        hs2.key     = "durable2";
+        hs2.key_len = 8;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, h_fh, (int) h_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, NULL, 0,
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, NULL, 0, 0, 0);
+        chimera_vfs_compound_op_set_handle_state(cp, (uint32_t) i_open, &hs2);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_open)->out_handle != NULL);
+        chimera_vfs_compound_free(cp);
+
+        memset(&probe, 0, sizeof(probe));
+        probe.ctx = &ctx;
+        chimera_vfs_search_keys_at(ctx.vfs_thread, &cred, h_fh, (int) h_fh_len,
+                                   "durable2", 8, "durable2\xff", 9, 0,
+                                   kv_probe_entry, kv_probe_complete, &probe);
+        wait_done(&ctx);
+        assert(probe.found == 0);
+
+        /* An OPEN_PATH carrying a record is refused, and opens nothing. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_op = chimera_vfs_compound_add_open_path(
+            cp, "hs2", 3,
+            CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_CREATE_REGULAR |
+            CHIMERA_VFS_OPEN_WRITE_ONLY,
+            &sattr, CHIMERA_VFS_ATTR_FH);
+        chimera_vfs_compound_op_set_handle_state(cp, (uint32_t) i_op, &hs);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_op);
+        assert(op->status == CHIMERA_VFS_ENOTSUP);
+        assert(op->out_handle == NULL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTSUP);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_op          = chimera_vfs_compound_add_lookup(cp, "hs2", 3, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_op)->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("handle state persists with a named OPEN; the other shapes say what they do");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);

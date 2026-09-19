@@ -1004,7 +1004,8 @@ chimera_vfs_compound_add_create_path(
     const char                     *target,
     int                             targetlen,
     const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask)
+    uint64_t                        attr_mask,
+    uint8_t                         intermediates)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1048,6 +1049,11 @@ chimera_vfs_compound_add_create_path(
 
     op->create_type = create_type;
     op->attr_mask   = attr_mask;
+
+    /* Only a directory create walks a chain; recorded only there so the
+     * dispatch of the other two never has to ask. */
+    op->path_intermediates =
+        (create_type == CHIMERA_VFS_COMPOUND_CREATE_DIR) && intermediates;
 
     if (set_attr) {
         op->set_attr = *set_attr;
@@ -1164,6 +1170,168 @@ chimera_vfs_compound_op_use_handle(
 
     compound->ops[index].handle_from = (int) from;
 } /* chimera_vfs_compound_op_use_handle */
+
+/*
+ * The name-op setters.  Each names an op that already exists and must be of
+ * the type the knob belongs to: a knob on the wrong op is a caller bug, and a
+ * sequence that quietly ran without it would be the worst way to find out.
+ * An index past the end is the adder's failure, already reported through its
+ * return value, and is ignored here as op_use_handle ignores one.
+ */
+static struct chimera_vfs_compound_op *
+chimera_vfs_compound_op_of_type(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    uint8_t                      type_a,
+    uint8_t                      type_b)
+{
+    struct chimera_vfs_compound_op *op;
+
+    if (index >= compound->num_ops) {
+        return NULL;
+    }
+
+    op = &compound->ops[index];
+
+    chimera_vfs_abort_if(op->type != type_a && op->type != type_b,
+                         "compound: setter applied to op %u of type %u",
+                         index, op->type);
+
+    return op;
+} /* chimera_vfs_compound_op_of_type */
+
+/* The 16-byte directory lease key, copied; NULL clears it. */
+static void
+chimera_vfs_compound_op_set_lease_skip(
+    struct chimera_vfs_compound_op *op,
+    const uint8_t                  *parent_lease_skip)
+{
+    if (parent_lease_skip) {
+        memcpy(op->parent_lease_skip, parent_lease_skip,
+               sizeof(op->parent_lease_skip));
+        op->parent_lease_skip_valid = 1;
+    } else {
+        op->parent_lease_skip_valid = 0;
+    }
+} /* chimera_vfs_compound_op_set_lease_skip */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_remove_match(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    const uint8_t               *child_fh,
+    uint32_t                     child_fh_len,
+    int                          match,
+    const uint8_t               *parent_lease_skip)
+{
+    struct chimera_vfs_compound_op *op;
+
+    op = chimera_vfs_compound_op_of_type(compound, index,
+                                         CHIMERA_VFS_COMPOUND_OP_REMOVE,
+                                         CHIMERA_VFS_COMPOUND_OP_REMOVE);
+
+    if (!op) {
+        return;
+    }
+
+    /* A match with nothing to match against, or an fh that cannot be one,
+     * is refused the way an adder refuses a malformed argument: the op stays
+     * in the sequence and submit reports the build failure, rather than an
+     * unconditional remove running where a guarded one was written. */
+    if (child_fh_len > CHIMERA_VFS_FH_SIZE ||
+        (child_fh_len > 0 && !child_fh) ||
+        (match && child_fh_len == 0)) {
+        compound->build_failed = 1;
+        return;
+    }
+
+    if (child_fh_len) {
+        memcpy(op->child_fh, child_fh, child_fh_len);
+    }
+    op->child_fh_len   = child_fh_len;
+    op->child_fh_match = match ? 1 : 0;
+
+    chimera_vfs_compound_op_set_lease_skip(op, parent_lease_skip);
+} /* chimera_vfs_compound_op_set_remove_match */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_rename_opts(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    const uint8_t                  *target_fh,
+    uint32_t                        target_fh_len,
+    struct chimera_vfs_open_handle *op_exempt_handle,
+    const uint8_t                  *parent_lease_skip,
+    unsigned int                    flags)
+{
+    struct chimera_vfs_compound_op *op;
+
+    op = chimera_vfs_compound_op_of_type(compound, index,
+                                         CHIMERA_VFS_COMPOUND_OP_RENAME,
+                                         CHIMERA_VFS_COMPOUND_OP_RENAME);
+
+    if (!op) {
+        return;
+    }
+
+    if (target_fh_len > CHIMERA_VFS_FH_SIZE ||
+        (target_fh_len > 0 && !target_fh)) {
+        compound->build_failed = 1;
+        return;
+    }
+
+    if (target_fh_len) {
+        memcpy(op->target_fh, target_fh, target_fh_len);
+    }
+    op->target_fh_len    = target_fh_len;
+    op->op_exempt_handle = op_exempt_handle;
+    op->rename_flags     = flags;
+
+    chimera_vfs_compound_op_set_lease_skip(op, parent_lease_skip);
+} /* chimera_vfs_compound_op_set_rename_opts */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_link_opts(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    int                             replace,
+    const uint8_t                  *parent_lease_skip,
+    struct chimera_vfs_open_handle *op_exempt_handle)
+{
+    struct chimera_vfs_compound_op *op;
+
+    op = chimera_vfs_compound_op_of_type(compound, index,
+                                         CHIMERA_VFS_COMPOUND_OP_LINK,
+                                         CHIMERA_VFS_COMPOUND_OP_LINK);
+
+    if (!op) {
+        return;
+    }
+
+    op->link_replace     = replace ? 1 : 0;
+    op->op_exempt_handle = op_exempt_handle;
+
+    chimera_vfs_compound_op_set_lease_skip(op, parent_lease_skip);
+} /* chimera_vfs_compound_op_set_link_opts */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_handle_state(
+    struct chimera_vfs_compound     *compound,
+    uint32_t                         index,
+    struct chimera_vfs_handle_state *handle_state)
+{
+    struct chimera_vfs_compound_op *op;
+
+    op = chimera_vfs_compound_op_of_type(compound, index,
+                                         CHIMERA_VFS_COMPOUND_OP_OPEN,
+                                         CHIMERA_VFS_COMPOUND_OP_OPEN_PATH);
+
+    if (!op) {
+        return;
+    }
+
+    op->handle_state = handle_state;
+} /* chimera_vfs_compound_op_set_handle_state */
 
 SYMBOL_EXPORT int
 chimera_vfs_compound_add_readdir(
@@ -3389,16 +3557,19 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
 
         case CHIMERA_VFS_COMPOUND_OP_OPEN:
             if (op->name_len == 0) {
-                /* Re-open the current object by handle. */
+                /* Re-open the current object by handle.  The _hs entry is the
+                 * same call with the record attached -- what the backend does
+                 * with it is on the setter. */
                 if (compound->fh_len == 0) {
                     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                     break;
                 }
-                chimera_vfs_open_fh(compound->thread, compound->cred,
-                                    compound->fh, (int) compound->fh_len,
-                                    op->open_flags,
-                                    chimera_vfs_compound_open_fh_callback,
-                                    compound);
+                chimera_vfs_open_fh_hs(compound->thread, compound->cred,
+                                       compound->fh, (int) compound->fh_len,
+                                       op->open_flags,
+                                       op->handle_state,
+                                       chimera_vfs_compound_open_fh_callback,
+                                       compound);
                 break;
             }
 
@@ -3416,16 +3587,20 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 break;
             }
 
-            chimera_vfs_open_at(compound->thread, compound->cred,
-                                target,
-                                op->name, op->name_len,
-                                op->open_flags,
-                                &op->set_attr,
-                                op->attr_mask | CHIMERA_VFS_ATTR_FH,
-                                op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
-                                op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
-                                chimera_vfs_compound_open_at_callback,
-                                compound);
+            /* open_at_hs with a NULL record IS open_at; the EXCLUSIVE_RETRY
+             * re-open in the callback stays a plain open_at, because it
+             * exists to look and persists nothing. */
+            chimera_vfs_open_at_hs(compound->thread, compound->cred,
+                                   target,
+                                   op->name, op->name_len,
+                                   op->open_flags,
+                                   &op->set_attr,
+                                   op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                   op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                   op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                                   op->handle_state,
+                                   chimera_vfs_compound_open_at_callback,
+                                   compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_CREATE:
@@ -3548,13 +3723,32 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_REMOVE:
+            /* Guarded or plain, per the setter.  remove_at_match_fh takes no
+             * flags word -- the type assertion and the recall request are the
+             * match caller's to have made already -- so remove_flags travel
+             * only on the plain call. */
+            if (op->child_fh_match) {
+                chimera_vfs_remove_at_match_fh(
+                    compound->thread, compound->cred,
+                    compound->handle,
+                    op->name, op->name_len,
+                    op->child_fh, (int) op->child_fh_len,
+                    op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                    op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
+                    op->parent_lease_skip_valid ? op->parent_lease_skip : NULL,
+                    chimera_vfs_compound_remove_callback,
+                    compound);
+                break;
+            }
             chimera_vfs_remove_at(compound->thread, compound->cred,
                                   compound->handle,
                                   op->name, op->name_len,
-                                  NULL, 0, op->remove_flags,
+                                  op->child_fh_len ? op->child_fh : NULL,
+                                  (int) op->child_fh_len,
+                                  op->remove_flags,
                                   op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                   op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
-                                  NULL,
+                                  op->parent_lease_skip_valid ? op->parent_lease_skip : NULL,
                                   chimera_vfs_compound_remove_callback,
                                   compound);
             break;
@@ -3571,15 +3765,21 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                 break;
             }
+            /* rename_at takes ONE flags word for the remove-side assertions
+             * and RENAME's own SRC_IS_DIR; the adder's and the setter's are
+             * ORed into it, each on its own bits. */
             chimera_vfs_rename_at(compound->thread, compound->cred,
                                   compound->saved_fh, compound->saved_fh_len,
                                   op->name, op->name_len,
                                   compound->fh, compound->fh_len,
                                   op->new_name, op->new_name_len,
-                                  NULL, 0, op->remove_flags,
+                                  op->target_fh_len ? op->target_fh : NULL,
+                                  (int) op->target_fh_len,
+                                  op->remove_flags | op->rename_flags,
                                   op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                   op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
-                                  NULL, NULL,
+                                  op->parent_lease_skip_valid ? op->parent_lease_skip : NULL,
+                                  op->op_exempt_handle,
                                   chimera_vfs_compound_rename_callback,
                                   compound);
             break;
@@ -3593,10 +3793,11 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                 compound->saved_fh, compound->saved_fh_len,
                                 compound->fh, compound->fh_len,
                                 op->name, op->name_len,
-                                0, op->attr_mask,
+                                op->link_replace, op->attr_mask,
                                 op->dir_pre_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
                                 op->dir_attr_mask | CHIMERA_VFS_COMPOUND_DIR_FLOOR,
-                                NULL, NULL,
+                                op->parent_lease_skip_valid ? op->parent_lease_skip : NULL,
+                                op->op_exempt_handle,
                                 chimera_vfs_compound_link_callback,
                                 compound);
             break;
@@ -3814,6 +4015,14 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_OPEN_PATH:
+            /* No path-addressed open takes a handle-state record; opening
+             * without the record a caller asked to persist would be a durable
+             * handle with nothing behind it, so the op refuses instead.  See
+             * the setter. */
+            if (op->handle_state) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOTSUP);
+                break;
+            }
             chimera_vfs_open(compound->thread, compound->cred,
                              compound->fh, (int) compound->fh_len,
                              op->path, (int) op->path_len,
@@ -3827,6 +4036,21 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         case CHIMERA_VFS_COMPOUND_OP_CREATE_PATH:
             switch (op->create_type) {
                 case CHIMERA_VFS_COMPOUND_CREATE_DIR:
+                    /* mkdir -p is chimera_vfs_create's component walk, which
+                     * accepts an existing component -- the leaf included --
+                     * and answers with the same (status, attr) pair a
+                     * single-level mkdir does, so the two share a completion
+                     * and the object it made or found becomes current on the
+                     * same terms. */
+                    if (op->path_intermediates) {
+                        chimera_vfs_create(compound->thread, compound->cred,
+                                           compound->fh, (int) compound->fh_len,
+                                           op->path, (int) op->path_len,
+                                           &op->set_attr, op->attr_mask,
+                                           chimera_vfs_compound_path_attr_callback,
+                                           compound);
+                        break;
+                    }
                     chimera_vfs_mkdir(compound->thread, compound->cred,
                                       compound->fh, (int) compound->fh_len,
                                       op->path, (int) op->path_len,

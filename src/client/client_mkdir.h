@@ -69,7 +69,7 @@ chimera_dispatch_mkdir(
                                          request->mkdir.path,
                                          request->mkdir.path_len,
                                          NULL, 0,
-                                         &request->mkdir.set_attr, 0);
+                                         &request->mkdir.set_attr, 0, 0);
 
     chimera_vfs_compound_submit(compound, chimera_mkdir_sequence_complete,
                                 request);

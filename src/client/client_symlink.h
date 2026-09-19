@@ -72,7 +72,7 @@ chimera_dispatch_symlink(
                                          request->symlink.target,
                                          request->symlink.target_len,
                                          &request->symlink.set_attr,
-                                         CHIMERA_VFS_ATTR_FH);
+                                         CHIMERA_VFS_ATTR_FH, 0);
 
     chimera_vfs_compound_submit(compound, chimera_symlink_sequence_complete,
                                 request);
