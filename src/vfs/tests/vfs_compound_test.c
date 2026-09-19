@@ -1940,8 +1940,8 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_INFERRED);
-        i_probe = chimera_vfs_compound_add_lock_test(cp, &probe);
-        i_lock  = chimera_vfs_compound_add_lock(cp, &claim_a, &ticket_a, 0);
+        i_probe = chimera_vfs_compound_add_claim_test(cp, &probe, 0);
+        i_lock  = chimera_vfs_compound_add_claim(cp, &claim_a, &ticket_a, 0, 0, 0, 0, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -1974,8 +1974,8 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_INFERRED);
-        i_probe = chimera_vfs_compound_add_lock_test(cp, &probe);
-        i_lock  = chimera_vfs_compound_add_lock(cp, &claim_b, &ticket_b, 0);
+        i_probe = chimera_vfs_compound_add_claim_test(cp, &probe, 0);
+        i_lock  = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b, 0, 0, 0, 0, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -2912,7 +2912,7 @@ main(
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
-        i_lock = chimera_vfs_compound_add_lock(cp, &claim_a, &ticket_a, 0);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_a, &ticket_a, 0, 0, 0, 0, 0);
         i_lk   = chimera_vfs_compound_add_lookup(cp, "x", 1, 0, 0);
 
         ctx.callbacks = 0;
@@ -2937,8 +2937,8 @@ main(
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
-        i_probe = chimera_vfs_compound_add_lock_test(cp, &probe);
-        i_lock  = chimera_vfs_compound_add_lock(cp, &claim_b, &ticket_b, 0);
+        i_probe = chimera_vfs_compound_add_claim_test(cp, &probe, 0);
+        i_lock  = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b, 0, 0, 0, 0, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -2970,7 +2970,7 @@ main(
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
-        i_lock = chimera_vfs_compound_add_lock(cp, &claim_a, &ticket_a, 0);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_a, &ticket_a, 0, 0, 0, 0, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -2990,7 +2990,7 @@ main(
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
-        i_probe       = chimera_vfs_compound_add_lock_test(cp, &probe);
+        i_probe       = chimera_vfs_compound_add_claim_test(cp, &probe, 0);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -3054,7 +3054,7 @@ main(
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
-        i_lock = chimera_vfs_compound_add_lock(cp, &claim_a, &ticket_a, 0);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_a, &ticket_a, 0, 0, 0, 0, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -3075,9 +3075,10 @@ main(
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
-        i_lock = chimera_vfs_compound_add_lock(cp, &claim_b, &ticket_b,
-                                               CHIMERA_VFS_COMPOUND_LOCK_WAIT |
-                                               CHIMERA_VFS_COMPOUND_LOCK_WAIT_HARD);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b,
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                0, 0, 0, 0);
         i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
 
         ctx.callbacks = 0;
@@ -4524,6 +4525,936 @@ main(
     }
     TEST_PASS("RECALL answers at once with nothing held, NOWAIT reports a holder "
               "without parking, and the parking form resumes on the submitting thread");
+
+    /* ---- CLAIM takes any claim kind: shares, and the abort release ----
+     * A share reservation is a claim like a range: GRANTED it is inserted
+     * and the caller's, DENIED it stops the run and names the holder, and a
+     * run that fails after it releases it the way its consumer would
+     * (chimera_vfs_claim_release), so the next opener finds the file free. */
+    {
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           share_a, share_b;
+        struct chimera_vfs_pending_acquire ticket_a, ticket_b;
+        struct chimera_claim_owner         owner_a, owner_b;
+        struct chimera_vfs_file_state     *fs;
+        int                                i_open, i_cl, i_ga, i_lk;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "sh", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.client_key = 0xA1;
+        owner_a.owner_lo   = 31;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.client_key = 0xA2;
+        owner_b.owner_lo   = 32;
+
+        /* A opens for read+write, denying write to others. */
+        chimera_vfs_claim_init_nfs4_open(&share_a,
+                                         CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
+                                         CHIMERA_CLAIM_W, &owner_a);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share_a, &ticket_a,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        assert(op->claim_grant == NULL);
+        /* A share claim is never stamped: the handle is a shared cache
+         * entry, and stamping would fold every open-owner using it into
+         * one holder. */
+        assert(share_a.op_handle == NULL);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* B wants write: refused, and the run stops there. */
+        chimera_vfs_claim_init_nfs4_open(&share_b, CHIMERA_CLAIM_W, 0, &owner_b);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share_b, &ticket_b,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EAGAIN);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_EAGAIN);
+        assert(op->claim_result == CHIMERA_CLAIM_DENIED);
+        assert(op->conflict.construct == CHIMERA_CONSTRUCT_NFS4_OPEN);
+        assert(op->conflict.owner.owner_lo == owner_a.owner_lo);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* A's share is the caller's; released out of band as its consumer
+         * does. */
+        chimera_vfs_claim_release(ctx.vfs->vfs_state, fs, &share_a);
+        chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
+
+        /* The abort release for a share: A GRANTED, then the LOOKUP behind it
+         * fails (a data handle cannot serve one), and the share goes with the
+         * failure -- so B's write open, refused a moment ago, is GRANTED. */
+        chimera_vfs_claim_init_nfs4_open(&share_a,
+                                         CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
+                                         CHIMERA_CLAIM_W, &owner_a);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share_a, &ticket_a,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "x", 1, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_EINVAL);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_init_nfs4_open(&share_b, CHIMERA_CLAIM_W, 0, &owner_b);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share_b, &ticket_b,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_cl)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release(ctx.vfs->vfs_state, fs, &share_b);
+        chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
+
+        /* Malformed flag words are refused at build. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        assert(chimera_vfs_compound_add_claim(cp, &share_a, &ticket_a,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY |
+                                              CHIMERA_VFS_COMPOUND_CLAIM_WAIT,
+                                              0, 0, 0, 0) == -1);
+        assert(chimera_vfs_compound_add_claim(cp, &share_a, &ticket_a,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND,
+                                              0, 0, 0, 0) == -1);
+        assert(chimera_vfs_compound_add_claim_test(cp, &share_a,
+                                                   CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL)
+               == -1);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("CLAIM takes a share, refuses a conflicting one, and the abort "
+              "release frees it");
+
+    /* ---- OPTIONAL: a refused claim is an answer, not a failure ----
+     * A delegation is opportunistic: NONE is a valid outcome, and a run that
+     * grants a share and then fails to earn a delegation must not throw the
+     * share away.  A delegation is also the single-holder cache the executor
+     * stamps op_handle on, and one the abort release covers. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           deleg, peer;
+        struct chimera_vfs_pending_acquire ticket;
+        struct chimera_claim_owner         owner_d, owner_x;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_file_state     *fs, *fs_peer;
+        int                                i_open, i_cl, i_ga, i_lk;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "dg", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        memset(&owner_d, 0, sizeof(owner_d));
+        owner_d.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_d.client_key = 0xD2;
+        owner_d.owner_lo   = oh->fh_hash;
+        memset(&owner_x, 0, sizeof(owner_x));
+        owner_x.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_x.client_key = 0xD3;
+        owner_x.owner_lo   = 41;
+
+        /* Another client's open denies everyone else read and write, which
+         * a delegation's data bits collide with -- a hard refusal. */
+        fs_peer = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                        oh->fh_hash, true);
+        assert(fs_peer != NULL);
+        chimera_vfs_claim_init_nfs4_open(&peer, CHIMERA_CLAIM_R,
+                                         CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
+                                         &owner_x);
+        assert(chimera_vfs_claim_try_acquire(state, fs_peer, &peer, &conflict)
+               == CHIMERA_CLAIM_GRANTED);
+
+        chimera_vfs_claim_init_delegation(&deleg, true, &owner_d);
+        deleg.break_cb = break_rec_cb;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &deleg, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY |
+                                              CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL,
+                                              0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        /* The run finished OK and went on past the refusal... */
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        /* ...with the refusal recorded on the op. */
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_DENIED);
+        assert(op->conflict.construct == CHIMERA_CONSTRUCT_NFS4_OPEN);
+        assert(op->conflict.owner.owner_lo == owner_x.owner_lo);
+        /* Nothing inserted, nothing owned. */
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        assert(deleg.file == NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release(state, fs_peer, &peer);
+
+        /* Clear now: GRANTED, stamped with the handle it ran against, and
+         * then released by the abort when the LOOKUP behind it fails. */
+        chimera_vfs_claim_init_delegation(&deleg, true, &owner_d);
+        deleg.break_cb = break_rec_cb;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &deleg, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "x", 1, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_EINVAL);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        assert(deleg.op_handle == oh);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        assert(deleg.file == NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* Proof it was released: the peer's deny-everything open is GRANTED
+         * again, which a standing write delegation would have refused. */
+        chimera_vfs_claim_init_nfs4_open(&peer, CHIMERA_CLAIM_R,
+                                         CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
+                                         &owner_x);
+        assert(chimera_vfs_claim_try_acquire(state, fs_peer, &peer, &conflict)
+               == CHIMERA_CLAIM_GRANTED);
+        chimera_vfs_claim_release(state, fs_peer, &peer);
+
+        /* And a run that finishes OK hands it over. */
+        chimera_vfs_claim_init_delegation(&deleg, true, &owner_d);
+        deleg.break_cb = break_rec_cb;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &deleg, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY |
+                                              CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL,
+                                              0, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_cl)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release(state, fs, &deleg);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_state_put(state, fs_peer);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("an OPTIONAL CLAIM that is refused completes OK and the run goes on; "
+              "a delegation is stamped, released by the abort, or handed over");
+
+    /* ---- coalition grants settle in the core ----
+     * An RqLs lease or oplock is not inserted as the caller's claim: the
+     * claim is a TEMPLATE, and what stands is a core-allocated grant that N
+     * opens share.  One CLAIM does what SMB's create path did by hand:
+     * coalesce, cap to what breaks nobody, acquire, settle. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           tmpl, tmpl2, oplock_ii, legacy;
+        struct chimera_vfs_pending_acquire ticket, ticket2;
+        struct chimera_claim_owner         owner_l, owner_p, owner_o;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_claim_grant    *grant, *grant2;
+        struct chimera_vfs_file_state     *fs, *fs2, *fs_peer;
+        struct break_rec                   rec, rec_peer;
+        int                                seed_a, seed_b;
+        int                                i_open, i_cl, i_cl2, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "gs", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* An RqLs owner: the lease key is the identity, its halves in lo/hi
+         * as SMB stamps them. */
+        memset(&owner_l, 0, sizeof(owner_l));
+        owner_l.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_l.client_key = 0x51;
+        owner_l.key[0]     = 0xEE;
+        owner_l.key[15]    = 0x01;
+        memcpy(&owner_l.owner_lo, owner_l.key, 8);
+        memcpy(&owner_l.owner_hi, owner_l.key + 8, 8);
+        /* A peer client's legacy oplock, and a legacy oplock of the lease
+         * holder's own client (a file id, no key). */
+        memset(&owner_p, 0, sizeof(owner_p));
+        owner_p.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_p.client_key = 0x52;
+        owner_p.owner_lo   = 7;
+        memset(&owner_o, 0, sizeof(owner_o));
+        owner_o.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_o.client_key = 0x51;
+        owner_o.owner_lo   = 8;
+
+        /* A clean file grants the full RWH, seeded with the member. */
+        chimera_vfs_claim_init_rqls(&tmpl,
+                                    CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                    CHIMERA_CLAIM_H, &owner_l);
+        memset(&rec, 0, sizeof(rec));
+        tmpl.break_cb   = break_rec_cb;
+        tmpl.cb_private = &rec;
+        tmpl.policy_tag = 77;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &tmpl, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY |
+                                              CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL,
+                                              0, 0, 0, 0);
+        chimera_vfs_compound_op_set_claim_grant_opts(cp, (uint32_t) i_cl,
+                                                     1 /* v2 */, 0, &seed_a);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        /* Always answered inside the call. */
+        assert(ctx.callbacks == 1);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        grant = op->claim_grant;
+        assert(grant != NULL);
+        assert(grant->claim.used == (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                     CHIMERA_CLAIM_H));
+        assert(grant->claim.construct == CHIMERA_CONSTRUCT_RQLS);
+        assert(grant->is_v2 == 1);
+        assert(grant->refcount == 1);
+        /* The seed became the fresh grant's member head, and the template's
+         * shape travelled: the break callback, the tag, and the handle the
+         * op stamped for it. */
+        assert(op->claim_member_seeded == 1);
+        assert(grant->members == &seed_a);
+        assert(grant->claim.break_cb == break_rec_cb);
+        assert(grant->claim.policy_tag == 77);
+        assert(grant->claim.op_handle == oh);
+        assert(tmpl.op_handle == oh);
+        /* The template itself was never inserted. */
+        assert(tmpl.file == NULL);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* A second open under the same lease key coalesces: the same grant,
+         * one more reference, and the seed is NOT consumed -- the caller
+         * registers its member on the grant it got back, as before. */
+        chimera_vfs_claim_init_rqls(&tmpl2, CHIMERA_CLAIM_CR, &owner_l);
+        tmpl2.break_cb   = break_rec_cb;
+        tmpl2.cb_private = &rec;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl2 = chimera_vfs_compound_add_claim(cp, &tmpl2, &ticket2,
+                                               CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                               0, 0, 0, 0);
+        chimera_vfs_compound_op_set_claim_grant_opts(cp, (uint32_t) i_cl2,
+                                                     1, 0, &seed_b);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl2);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        grant2 = op->claim_grant;
+        assert(grant2 == grant);
+        assert(grant->refcount == 2);
+        assert(op->claim_member_seeded == 0);
+        assert(grant->members == &seed_a);
+        /* Fewer bits requested keeps the lease at its state (3.3.5.9.8). */
+        assert(grant->claim.used == (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                     CHIMERA_CLAIM_H));
+        fs2 = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl2);
+        assert(fs2 != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* A legacy oplock request by the lease holder's own client, behind
+        * its own H lease, asks for nothing: the policy the core now reads
+        * from claim state.  DENIED with a ZERO conflict -- capped to
+        * nothing, no holder to name -- and OPTIONAL carries the run on. */
+        chimera_vfs_claim_init_oplock(&legacy,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                      CHIMERA_CLAIM_H, &owner_o);
+        legacy.break_cb = break_rec_cb;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &legacy, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY |
+                                              CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL,
+                                              0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_DENIED);
+        assert(op->conflict.construct == CHIMERA_CONSTRUCT_NONE);
+        assert(op->claim_grant == NULL);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        /* Nobody was broken for it. */
+        assert(rec.fired == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* Both references dropped: the coalition is gone. */
+        chimera_vfs_claim_grant_release(state, grant2, true);
+        chimera_vfs_state_put(state, fs2);
+        chimera_vfs_claim_grant_release(state, grant, true);
+        chimera_vfs_state_put(state, fs);
+
+        /* Behind a peer's shared read cache (LEVEL_II), a full RWH request
+         * caps to what coexists -- R|H -- and breaks nobody: the step is
+         * reported as the grant's mode, not as a refusal. */
+        fs_peer = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                        oh->fh_hash, true);
+        assert(fs_peer != NULL);
+        chimera_vfs_claim_init_oplock(&oplock_ii, CHIMERA_CLAIM_CR, &owner_p);
+        memset(&rec_peer, 0, sizeof(rec_peer));
+        oplock_ii.break_cb   = break_rec_cb;
+        oplock_ii.cb_private = &rec_peer;
+        assert(chimera_vfs_claim_try_acquire(state, fs_peer, &oplock_ii,
+                                             &conflict) == CHIMERA_CLAIM_GRANTED);
+
+        chimera_vfs_claim_init_rqls(&tmpl,
+                                    CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                    CHIMERA_CLAIM_H, &owner_l);
+        tmpl.break_cb   = break_rec_cb;
+        tmpl.cb_private = &rec;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &tmpl, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY |
+                                              CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL,
+                                              0, 0, 0, 0);
+        chimera_vfs_compound_op_set_claim_grant_opts(cp, (uint32_t) i_cl,
+                                                     0, 0, &seed_a);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        grant = op->claim_grant;
+        assert(grant != NULL);
+        assert(grant->claim.used == (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H));
+        assert(rec_peer.fired == 0);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* The abort release for a grant: a fresh coalition granted in a run
+         * that then fails is dropped, and the file is left as it was found. */
+        chimera_vfs_claim_grant_release(state, grant, true);
+        chimera_vfs_state_put(state, fs);
+
+        chimera_vfs_claim_init_rqls(&tmpl, CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H,
+                                    &owner_l);
+        tmpl.break_cb   = break_rec_cb;
+        tmpl.cb_private = &rec;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &tmpl, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        chimera_vfs_compound_add_lookup(cp, "x", 1, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        assert(op->claim_grant == NULL);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        chimera_vfs_compound_free(cp);
+        /* Only the peer's oplock is left on the file. */
+        assert(fs_peer->grants == NULL);
+        assert(fs_peer->claims[CHIMERA_CLAIM_CLASS_CACHE] == &oplock_ii);
+        assert(oplock_ii.next == NULL);
+
+        chimera_vfs_claim_release(state, fs_peer, &oplock_ii);
+        chimera_vfs_state_put(state, fs_peer);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("a coalition grant settles in the core: full on a clean file, "
+              "coalesced on re-open, capped behind a peer, none behind its own "
+              "lease, and dropped by the abort");
+
+    /* ---- the trigger words ----
+     * `pre` breaks before admission is asked (SMB's phase-1 handle break),
+     * `post` after the grant (the phase-2 write-cache break), `deny` on a
+     * refusal answered on the spot.  Observed through another client's
+     * caching claim, which the test holds directly. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           batch, ex, peer_share, share;
+        struct chimera_vfs_pending_acquire ticket;
+        struct chimera_claim_owner         owner_h, owner_s;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_file_state     *fs, *fs_h;
+        struct break_rec                   rec;
+        int                                i_open, i_cl;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "tr", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        memset(&owner_h, 0, sizeof(owner_h));
+        owner_h.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_h.client_key = 0x61;
+        owner_h.owner_lo   = 1;
+        memset(&owner_s, 0, sizeof(owner_s));
+        owner_s.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_s.client_key = 0x62;
+        owner_s.owner_lo   = 2;
+
+        fs_h = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                     oh->fh_hash, true);
+        assert(fs_h != NULL);
+
+        /* pre: a batch oplock holder loses its handle cache before the
+         * opener's share is even asked for; the share itself is GRANTED. */
+        chimera_vfs_claim_init_oplock(&batch,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                      CHIMERA_CLAIM_H, &owner_h);
+        memset(&rec, 0, sizeof(rec));
+        batch.break_cb   = break_rec_cb;
+        batch.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs_h, &batch, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        chimera_vfs_claim_init_smb_open(&share, CHIMERA_CLAIM_R, 0, &owner_s);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              CHIMERA_TRIGGER_OPEN_H,
+                                              CHIMERA_CLAIM_CR, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_cl)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        assert(rec.fired == 1);
+        assert(batch.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_ack(&batch, CHIMERA_CLAIM_CR);
+        chimera_vfs_claim_release(state, fs, &share);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_claim_release(state, fs_h, &batch);
+
+        /* post: an exclusive holder's write cache is broken once the
+         * opener's share is granted, not before. */
+        chimera_vfs_claim_init_oplock(&ex, CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                                      &owner_h);
+        memset(&rec, 0, sizeof(rec));
+        ex.break_cb   = break_rec_cb;
+        ex.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs_h, &ex, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        chimera_vfs_claim_init_smb_open(&share, CHIMERA_CLAIM_R, 0, &owner_s);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        chimera_vfs_compound_op_set_claim_post(cp, (uint32_t) i_cl,
+                                               CHIMERA_TRIGGER_OPEN_W,
+                                               CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_cl)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        assert(rec.fired == 1);
+        assert(ex.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_ack(&ex, CHIMERA_CLAIM_CR);
+        chimera_vfs_claim_release(state, fs, &share);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_claim_release(state, fs_h, &ex);
+
+        /* deny: the holder's open denies write; the opener's write share is
+         * refused on the spot, and the forced handle break strips the
+         * holder's H (break_twice).  Not OPTIONAL, so the run stops. */
+        chimera_vfs_claim_init_smb_open(&peer_share, CHIMERA_CLAIM_R,
+                                        CHIMERA_CLAIM_W, &owner_h);
+        assert(chimera_vfs_claim_try_acquire(state, fs_h, &peer_share,
+                                             &conflict) == CHIMERA_CLAIM_GRANTED);
+        chimera_vfs_claim_init_oplock(&batch,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                      CHIMERA_CLAIM_H, &owner_h);
+        memset(&rec, 0, sizeof(rec));
+        batch.break_cb   = break_rec_cb;
+        batch.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs_h, &batch, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        chimera_vfs_claim_init_smb_open(&share, CHIMERA_CLAIM_W, 0, &owner_s);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &share, &ticket,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0,
+                                              CHIMERA_TRIGGER_OPEN_H_FORCE,
+                                              CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EAGAIN);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->claim_result == CHIMERA_CLAIM_DENIED);
+        assert(op->conflict.construct == CHIMERA_CONSTRUCT_SMB_OPEN);
+        assert(rec.fired == 1);
+        assert(batch.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl) == NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_ack(&batch, CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW);
+        chimera_vfs_claim_release(state, fs_h, &batch);
+        chimera_vfs_claim_release(state, fs_h, &peer_share);
+        chimera_vfs_state_put(state, fs_h);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("pre fires before admission, post after the grant, deny on a "
+              "synchronous refusal");
+
+    /* ---- CLAIM_TEST with TEST_BACKEND, and the PATH open ----
+     * memfs arbitrates no byte ranges, so the projection has nowhere to go
+     * and the local answer stands, answered inside submit.  A probe uses
+     * only the fh, so it wants a PATH open: through a FIFO's fh it must not
+     * open the FIFO for data (which blocks on a real backend), and a lent
+     * PATH handle serves it where a data want would be refused. */
+    {
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh, *oh_path;
+        struct chimera_vfs_claim           probe, claim_a;
+        struct chimera_vfs_pending_acquire ticket_a;
+        struct chimera_claim_owner         owner_a, owner_b;
+        struct chimera_vfs_file_state     *fs;
+        uint8_t                            fifo_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                           fifo_fh_len;
+        int                                i_open, i_cn, i_probe, i_cl, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "tb", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 51;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.owner_lo = 52;
+
+        chimera_vfs_claim_init_range(&probe, true, false, 0, 16, &owner_b);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_probe = chimera_vfs_compound_add_claim_test(
+            cp, &probe, CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        assert(ctx.callbacks == 1);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_probe)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        /* A probe is never stamped. */
+        assert(probe.op_handle == NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* A local holder is found before any projection is considered. */
+        chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_cl = chimera_vfs_compound_add_claim(cp, &claim_a, &ticket_a,
+                                              CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                              0, 0, 0, 0);
+        i_probe = chimera_vfs_compound_add_claim_test(
+            cp, &probe, CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_probe);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result != CHIMERA_CLAIM_GRANTED);
+        assert(op->conflict.owner.owner_lo == owner_a.owner_lo);
+        /* A range claim is never stamped either. */
+        assert(claim_a.op_handle == NULL);
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, ctx.vfs->vfs_state,
+                                         fs, &claim_a);
+        chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+
+        /* A FIFO, probed and claimed through its fh: the executor's own open
+         * of it is a PATH open. */
+        sattr.va_mode = S_IFIFO | 0600;
+        cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_cn = chimera_vfs_compound_add_create_path(
+            cp, CHIMERA_VFS_COMPOUND_CREATE_NODE, "cfifo", 5, NULL, 0, &sattr,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cn);
+        assert(S_ISFIFO(op->attr.va_mode));
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        memcpy(fifo_fh, op->attr.va_fh, op->attr.va_fh_len);
+        fifo_fh_len = op->attr.va_fh_len;
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_init_range(&probe, true, false, 0, 16, &owner_b);
+        chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, fifo_fh, (int) fifo_fh_len);
+        i_probe = chimera_vfs_compound_add_claim_test(cp, &probe, 0);
+        i_cl    = chimera_vfs_compound_add_claim(cp, &claim_a, &ticket_a,
+                                                 CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                                 0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_probe)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        assert(chimera_vfs_compound_op(cp, i_cl)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        assert(S_ISFIFO(chimera_vfs_compound_op(cp, i_ga)->attr.va_mode));
+        fs = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_cl);
+        assert(fs != NULL);
+        chimera_vfs_compound_free(cp);
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, ctx.vfs->vfs_state,
+                                         fs, &claim_a);
+        chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
+
+        /* A lent PATH handle serves the probe -- a data want through it
+         * would be EINVAL (the lent-handle rule), so this is what says the
+         * want is PATH. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "cfifo", 5,
+                                               CHIMERA_VFS_OPEN_PATH,
+                                               0, NULL, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh_path = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh_path != NULL);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh_path, CHIMERA_VFS_OPEN_PATH);
+        i_probe       = chimera_vfs_compound_add_claim_test(cp, &probe, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_probe)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_probe)->claim_result ==
+               CHIMERA_CLAIM_GRANTED);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_release(ctx.vfs_thread, oh_path);
+    }
+    TEST_PASS("CLAIM_TEST with TEST_BACKEND falls back to the local answer on "
+              "memfs, and a claim through a FIFO takes a PATH open");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
