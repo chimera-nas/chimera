@@ -53,6 +53,12 @@
  * would never reach the SETXATTR, this path already has.  So an NFSv4 op that
  * mutates is encoded only when nothing that could fail on an NFSv4-side check
  * precedes it in the same sequence.
+ *
+ * The dispatcher's reply-buffer headroom test (NFS4ERR_RESOURCE) is one more
+ * check that this path can only apply after the fact, and it gets the same
+ * treatment from the other side: a run that mutates is built only when the
+ * buffer is roomy enough that the test cannot fire on it at all -- see the
+ * headroom rule in chimera_nfs4_compound_try_vfs.
  */
 
 #include <stdlib.h>
@@ -224,10 +230,11 @@ struct nfs4_vfs_compound_ctx {
     int                      fh_consumed;
     /* A 4.0 SECINFO leaves the current filehandle alone, but the VFS work it
      * runs is a LOOKUP, and a LOOKUP moves the sequence's current object to
-     * what it resolved.  So the handle the COMPOUND must be left holding is
-     * recorded when the op is built and put back after the fills. */
-    uint8_t                  secinfo_fh[NFS4_FHSIZE];
-    int                      secinfo_fhlen;
+     * what it resolved.  This is that LOOKUP's VFS op index, so the completion
+     * can put back what the op before it left current.  0 when the sequence
+     * carries no 4.0 SECINFO: index 0 is the seed PUTFH's and can never be a
+     * LOOKUP's. */
+    int                      secinfo_lookup;
 
     int                      open_present;
     uint32_t                 open_res_index;
@@ -312,6 +319,46 @@ nfs4_vfs_op_stages_early(uint32_t argop)
 } /* nfs4_vfs_op_stages_early */
 
 /*
+ * Does this op change the filesystem?
+ *
+ * What the answer decides is when the reply-buffer headroom test may run.  The
+ * per-op dispatcher refuses an op with NFS4ERR_RESOURCE BEFORE running it when
+ * the reply buffer is within 8192 bytes of full; this path can apply the same
+ * test only as each result is filled, which is after every op in the run has
+ * executed.  For an op that only reads the difference is invisible -- the reply
+ * is truncated at the same op either way -- but for one of these it would
+ * report RESOURCE for a change that has already been applied, and an OPEN that
+ * created would leave the file behind.  See chimera_nfs4_compound_try_vfs for
+ * the rule this feeds.
+ *
+ * An OPEN counts only when it creates: an open of what is already there
+ * changes nothing that a refusal before the fill does not undo (the handle is
+ * released with the sequence, and no state was installed).
+ */
+static int
+nfs4_vfs_op_mutates(const struct nfs_argop4 *argop)
+{
+    switch (argop->argop) {
+        case OP_CREATE:
+        case OP_REMOVE:
+        case OP_RENAME:
+        case OP_LINK:
+        case OP_SETATTR:
+        case OP_WRITE:
+        case OP_SETXATTR:
+        case OP_REMOVEXATTR:
+        case OP_ALLOCATE:
+        case OP_DEALLOCATE:
+        case OP_WRITE_SAME:
+            return 1;
+        case OP_OPEN:
+            return argop->opopen.openhow.opentype == OPEN4_CREATE;
+        default:
+            return 0;
+    } /* switch */
+} /* nfs4_vfs_op_mutates */
+
+/*
  * Does this op end the encodable run, whatever follows it?
  *
  * OPEN does.  Everything the OPEN still owes once the object is open --
@@ -359,7 +406,10 @@ nfs4_vfs_xattr_name_ok(uint32_t wire_len)
  * An upper bound on the reply-buffer space one op can consume, staged or
  * filled.  Deliberately generous: it exists only to decide whether the buffer
  * is roomy enough that no size decision anywhere in the sequence can be
- * affected by how the two paths interleave their allocations.
+ * affected by how the two paths interleave their allocations -- and, for a run
+ * that mutates, that no fill can reach the dispatcher's RESOURCE floor (see
+ * nfs4_vfs_op_mutates).  Every allocation the build, the run or a fill makes
+ * from the reply buffer has to be covered here, or the second use is unsound.
  */
 static uint64_t
 nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
@@ -377,6 +427,15 @@ nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
             return 4096 + slack;
         case OP_GETFH:
             return CHIMERA_NFS_FH_MAX + slack;
+        case OP_READ:
+            /* The iovec array the data lands in, allocated from the reply
+             * buffer when the sequence is BUILT -- the per-op path reserves
+             * the same array, at op time. */
+            return sizeof(struct evpl_iovec) * NFS4_VFS_READ_MAX_IOV + slack;
+        case OP_LOCKT:
+            /* A denied answer copies the holder's owner string into the reply
+             * (nfs4_fill_denied_owner), up to the protocol's opaque limit. */
+            return NFS4_OPAQUE_LIMIT + slack;
         case OP_READDIR:
             /* Entries are charged against maxcount, plus one entry's worth for
              * the candidate that is allocated and rolled back when it does not
@@ -1359,7 +1418,11 @@ nfs4_vfs_compound_complete(
         resop->resop = argop->argop;
 
         /* The same reply-buffer headroom gate the per-op dispatcher applies
-         * before it runs an operation. */
+         * before it runs an operation -- applied here after the whole run has
+         * executed, which is only acceptable because a run that mutates is
+         * admitted solely when this cannot fire (the headroom rule in
+         * chimera_nfs4_compound_try_vfs).  On a run that only reads it
+         * truncates the reply at the same op the dispatcher would have. */
         if (req->encoding->dbuf->size - req->encoding->dbuf->used < 8192) {
             nfs4_fail_undispatched_op(thread, argop, resop, NFS4ERR_RESOURCE);
             status   = NFS4ERR_RESOURCE;
@@ -1418,11 +1481,32 @@ nfs4_vfs_compound_complete(
      * -- the name it looked up -- is not what the COMPOUND is left holding. */
     if (ctx->fh_consumed) {
         req->fhlen = 0;
-    } else if (ctx->secinfo_fhlen > 0) {
-        /* A 4.0 SECINFO: the name it resolved is not what the COMPOUND holds
-         * afterwards -- the directory it resolved the name IN is. */
-        memcpy(req->fh, ctx->secinfo_fh, ctx->secinfo_fhlen);
-        req->fhlen = ctx->secinfo_fhlen;
+    } else if (ctx->secinfo_lookup > 0) {
+        /* A 4.0 SECINFO whose name resolved: the name is not what the
+         * COMPOUND holds afterwards -- the directory it resolved the name IN
+         * is (RFC 7530 §16.31.3).  That directory is whatever was current
+         * immediately before the LOOKUP, which is exactly what the VFS op in
+         * front of it recorded as its own fh: every op stamps the current
+         * object as it finishes (op->fh, vfs_compound.h), and there is always
+         * an op in front, because the seed PUTFH is op 0 and the LOOKUP is
+         * never it.  Read from the run rather than from a copy taken when the
+         * sequence was built, because the current object can have moved
+         * between the seed and the SECINFO and a build-time copy only ever
+         * knew the seed.  A LOOKUP that failed needs nothing: it did not move
+         * the current object, and the rule above already left the directory.
+         */
+        vop = chimera_vfs_compound_op(compound,
+                                      (uint32_t) ctx->secinfo_lookup);
+
+        if (vop && vop->status == CHIMERA_VFS_OK) {
+            vop = chimera_vfs_compound_op(
+                compound, (uint32_t) ctx->secinfo_lookup - 1);
+
+            if (vop && vop->fh_len) {
+                memcpy(req->fh, vop->fh, vop->fh_len);
+                req->fhlen = (int) vop->fh_len;
+            }
+        }
     }
 
     /* Point req->index at the operation whose status the compound carries, so
@@ -2018,6 +2102,9 @@ chimera_nfs4_compound_try_vfs(
     int                             lead_putfh, have_lookup = 0, have_getattr = 0;
     int                             have_lookupp = 0, have_saved = 0;
     int                             cur_moved = 0, stages_early = 0;
+    /* Whether any op the run carries changes the filesystem -- see
+     * nfs4_vfs_op_mutates and the headroom rule below. */
+    int                             mutates = 0;
     /* What the sequence's current open handle carries, as it is built.  Zero
      * means nothing is open on the current object -- see nfs4_vfs_open_for. */
     unsigned int                    cur_open_flags = 0;
@@ -2103,9 +2190,6 @@ chimera_nfs4_compound_try_vfs(
             nenc = i;
             break;
         }
-
-        reply_bound  += nfs4_vfs_op_reply_bound(argop);
-        stages_early |= nfs4_vfs_op_stages_early(argop->argop);
 
         /* An upper bound on the VFS ops one NFSv4 op encodes to.  Counted up
          * front: a sequence discovered to be too long only once it was half
@@ -2924,7 +3008,18 @@ chimera_nfs4_compound_try_vfs(
                 break;
         } /* switch */
 
-        if (stop || nfs4_vfs_op_ends_run(argop->argop)) {
+        if (stop) {
+            break;
+        }
+
+        /* Counted only for an op the run actually carries: one the scan just
+         * declined is dispatched op by op, where the dispatcher sizes its
+         * answer and applies its own headroom test to it. */
+        reply_bound  += nfs4_vfs_op_reply_bound(argop);
+        stages_early |= nfs4_vfs_op_stages_early(argop->argop);
+        mutates      |= nfs4_vfs_op_mutates(argop);
+
+        if (nfs4_vfs_op_ends_run(argop->argop)) {
             break;
         }
     }
@@ -2947,8 +3042,25 @@ chimera_nfs4_compound_try_vfs(
      * is free now, then each of those ops saturates its own cap in both paths
      * and neither path can reach the floor.  Same sizes, same statuses, same
      * entries -- whatever order the allocations happen in.
+     *
+     * The same test guards a run that MUTATES, for a different reason.  The
+     * dispatcher refuses an op with NFS4ERR_RESOURCE before running it once the
+     * buffer is within 8192 bytes of full; this path can only ask that as each
+     * result is filled, after every op in the run has executed.  On a run that
+     * only reads a late refusal is the same reply, truncated at the same op.
+     * On a run with a CREATE, REMOVE, RENAME, LINK, SETATTR, WRITE, an xattr
+     * write, an allocate, or an OPEN that creates, it would report RESOURCE
+     * for a change that has already been made -- and the created file would be
+     * left behind.  So the rule is: A RUN THAT CARRIES A MUTATING OP IS BUILT
+     * ONLY WHEN THE WHOLE RUN'S WORST-CASE REPLY CONSUMPTION, PLUS THE 8192-BYTE
+     * FLOOR, FITS IN WHAT IS FREE NOW.  The whole run, not the ops in front of
+     * the mutation: what the build stages and what a READDIR marshals while the
+     * sequence runs are consumed before any fill, wherever they sit in the
+     * order.  Under the bound no fill can reach the floor, so the late test
+     * (nfs4_vfs_compound_complete) never fires on such a run; a run it refuses
+     * goes to the per-op path, which pre-checks each op itself.
      */
-    if (stages_early && reply_bound + 8192 > avail) {
+    if ((stages_early || mutates) && reply_bound + 8192 > avail) {
         return 0;
     }
 
@@ -3236,18 +3348,21 @@ chimera_nfs4_compound_try_vfs(
                     goto refuse;
                 }
 
-                /* Only 4.1 consumes the handle; on 4.0 it survives, so keep
-                 * a copy of it to undo the LOOKUP's move. */
-                if (req->minorversion < 1 && cur_fhlen > 0) {
-                    memcpy(ctx->secinfo_fh, cur_fh, cur_fhlen);
-                    ctx->secinfo_fhlen = cur_fhlen;
-                }
-
                 idx = chimera_vfs_compound_add_lookup(
                     compound,
                     (const char *) argop->opsecinfo.name.data,
                     (int) argop->opsecinfo.name.len, 0, 0);
                 map->vfs_res = idx;
+
+                /* Only 4.1 consumes the handle; on 4.0 it survives the LOOKUP's
+                 * move, and the completion undoes that move from the run
+                 * itself -- see nfs4_vfs_compound_complete.  Not from cur_fh:
+                 * that is the SEED, and a LOOKUP, LOOKUPP, CREATE, RESTOREFH
+                 * or later PUTFH in front of this op has moved the current
+                 * object since without touching it. */
+                if (req->minorversion < 1) {
+                    ctx->secinfo_lookup = idx;
+                }
 
                 cur_open_flags = 0;
                 break;
@@ -3324,7 +3439,21 @@ chimera_nfs4_compound_try_vfs(
                     /* Ownership of the payload moves off the RPC2 message, so
                      * that freeing the message does not release iovecs this
                      * sequence is about to hand to the backend.  A no-op unless
-                     * the data arrived in an RDMA read chunk. */
+                     * the data arrived in an RDMA read chunk.
+                     *
+                     * Taken here, before the build is certain to submit, and
+                     * that is safe: a later `goto refuse` re-dispatches this
+                     * WRITE per-op, and chimera_nfs4_write takes the chunk
+                     * again -- but evpl_rpc2_encoding_take_read_chunk
+                     * (ext/libevpl/include/evpl/evpl_rpc2_program.h) does
+                     * nothing but zero read_chunk->niov, so a second take is
+                     * idempotent, and the iovecs themselves are still
+                     * referenced from opwrite.data, which every path that
+                     * fails the WRITE without running it releases
+                     * (nfs4_fail_undispatched_op, the sweep in
+                     * chimera_nfs4_compound_complete).  The one thing a take
+                     * must never be followed by is the RPC layer's own
+                     * release, and zeroing niov is exactly what prevents it. */
                     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL,
                                                        NULL);
 
