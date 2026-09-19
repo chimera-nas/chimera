@@ -64,12 +64,14 @@ chimera_dispatch_fstat(
                                                    chimera_client_req_cred(request));
 
     /* The caller's handle becomes the current open handle; GETATTR reads it.
-     * The flags say what the following op needs rather than what the handle
-     * is, so the sequence accepts it instead of opening one of its own. */
+     * The flags are what the handle was REALLY opened with -- PUTHANDLE's
+     * contract -- and it is the executor's job to decide whether that serves
+     * the GETATTR.  An earlier version claimed INFERRED | PATH here, whatever
+     * the open had been, to make the sequence accept the handle; that told
+     * the executor a data descriptor was an O_PATH one. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->fstat.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED |
-                                       CHIMERA_VFS_OPEN_PATH);
+                                       request->fstat.open_flags);
     chimera_vfs_compound_add_getattr(request->compound,
                                      CHIMERA_VFS_ATTR_MASK_STAT);
 

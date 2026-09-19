@@ -66,8 +66,7 @@ chimera_dispatch_fstatfs(
     /* See chimera_dispatch_fstat on the flags. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->fstatfs.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED |
-                                       CHIMERA_VFS_OPEN_PATH);
+                                       request->fstatfs.open_flags);
     chimera_vfs_compound_add_getattr(request->compound,
                                      CHIMERA_VFS_ATTR_MASK_STATFS);
 

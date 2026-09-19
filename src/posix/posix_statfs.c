@@ -160,6 +160,7 @@ chimera_posix_fstatfs(
 
     req.opcode               = CHIMERA_CLIENT_OP_FSTATFS;
     req.fstatfs.handle       = entry->handle;
+    req.fstatfs.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fstatfs.callback     = chimera_posix_fstatfs_callback;
     req.fstatfs.private_data = &comp;
 
@@ -254,6 +255,7 @@ chimera_posix_fstatvfs(
 
     req.opcode               = CHIMERA_CLIENT_OP_FSTATFS;
     req.fstatfs.handle       = entry->handle;
+    req.fstatfs.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fstatfs.callback     = chimera_posix_fstatfs_callback;
     req.fstatfs.private_data = &comp;
 

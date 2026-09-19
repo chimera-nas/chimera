@@ -54,6 +54,7 @@ chimera_posix_fstat(
 
     req.opcode             = CHIMERA_CLIENT_OP_FSTAT;
     req.fstat.handle       = entry->handle;
+    req.fstat.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fstat.callback     = chimera_posix_fstat_callback;
     req.fstat.private_data = &comp;
 

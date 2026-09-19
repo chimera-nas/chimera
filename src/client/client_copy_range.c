@@ -28,6 +28,13 @@ chimera_copy_range(
     request->copy_range.dst_offset   = dst_offset;
     request->copy_range.length       = length;
     request->copy_range.r_length     = 0;
+    /* A plain copy: the SDK call has no way to ask for hole preservation.
+     * The request is recycled unzeroed, so an unset word here would be the
+     * previous op's. */
+    request->copy_range.flags = 0;
+
+    request->copy_range.src_open_flags = chimera_client_handle_open_flags(src_handle);
+    request->copy_range.dst_open_flags = chimera_client_handle_open_flags(dst_handle);
 
     chimera_dispatch_copy_range(thread, request);
 } /* chimera_copy_range */

@@ -53,11 +53,12 @@ chimera_dispatch_fsetattr(
     /* Descriptor-originated: WRITE_DATA-only mutations (ftruncate,
      * futimens-to-now) ride the descriptor's open-time grant, which is what a
      * SETATTR against a borrowed handle does -- the executor reaches for
-     * chimera_vfs_fsetattr exactly when one is supplied. */
+     * chimera_vfs_fsetattr exactly when one is supplied.  The PUTHANDLE
+     * carries what the handle was really opened with -- see open_flags on
+     * the request. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->fsetattr.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED |
-                                       CHIMERA_VFS_OPEN_PATH);
+                                       request->fsetattr.open_flags);
     /* The handle stays on the op as well: SETATTR reaches for
      * chimera_vfs_fsetattr only when one is supplied, and addressing the
      * cursor instead would quietly become chimera_vfs_setattr -- truncate(2)

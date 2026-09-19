@@ -67,8 +67,11 @@ chimera_posix_openat(
 
     chimera_posix_completion_init(&comp, &req);
 
-    // Handle AT_FDCWD case
-    if (dirfd == AT_FDCWD) {
+    /* An absolute path ignores dirfd entirely (POSIX), so it takes the
+     * path-based route whatever dirfd holds; only a relative path walks from
+     * the descriptor.  Handing an absolute path to the *_at form would have
+     * it rejected as a name containing '/'. */
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
         // For AT_FDCWD with relative path, prepend "/"
         // For absolute path, use as-is
         if (pathname[0] == '/') {

@@ -62,11 +62,11 @@ chimera_dispatch_copy_range(
     /* See chimera_dispatch_clone_range on the cursor shape. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->copy_range.src_handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->copy_range.src_open_flags);
     chimera_vfs_compound_add_savehandle(request->compound);
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->copy_range.dst_handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->copy_range.dst_open_flags);
     chimera_vfs_compound_add_copy_range(request->compound,
                                         request->copy_range.src_handle,
                                         request->copy_range.src_offset,

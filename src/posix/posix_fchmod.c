@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -49,6 +49,7 @@ chimera_posix_fchmod(
 
     req.opcode                = CHIMERA_CLIENT_OP_FSETATTR;
     req.fsetattr.handle       = entry->handle;
+    req.fsetattr.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fsetattr.callback     = chimera_posix_fchmod_callback;
     req.fsetattr.private_data = &comp;
 

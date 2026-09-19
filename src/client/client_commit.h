@@ -49,10 +49,12 @@ chimera_dispatch_commit(
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* COMMIT flushes data, so it wants the data open the caller already has. */
+    /* COMMIT flushes data, so it wants the data open the caller already has.
+     * The PUTHANDLE carries what that handle was really opened with -- see
+     * open_flags on the request. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->commit.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->commit.open_flags);
     chimera_vfs_compound_add_commit(request->compound, 0, 0, 0, 0);
 
     chimera_vfs_compound_submit(request->compound,

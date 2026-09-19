@@ -130,6 +130,7 @@ chimera_posix_futimens(
 
     req.opcode                = CHIMERA_CLIENT_OP_FSETATTR;
     req.fsetattr.handle       = entry->handle;
+    req.fsetattr.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fsetattr.callback     = chimera_posix_futimens_callback;
     req.fsetattr.private_data = &comp;
 

@@ -60,6 +60,7 @@ chimera_posix_write_same(
 
     req.opcode                    = CHIMERA_CLIENT_OP_WRITE_SAME;
     req.write_same.handle         = entry->handle;
+    req.write_same.open_flags     = chimera_posix_fd_open_flags(entry);
     req.write_same.offset         = (uint64_t) offset;
     req.write_same.block_size     = block_size;
     req.write_same.block_count    = block_count;
