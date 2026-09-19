@@ -144,6 +144,9 @@ chimera_posix_copy_file_range(
     req.copy_range.callback     = chimera_posix_copy_file_range_callback;
     req.copy_range.private_data = &st;
 
+    req.copy_range.src_open_flags = chimera_posix_fd_open_flags(in_entry);
+    req.copy_range.dst_open_flags = chimera_posix_fd_open_flags(out_entry);
+
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_copy_file_range_exec);
 
     int err = chimera_posix_wait(&st.comp);

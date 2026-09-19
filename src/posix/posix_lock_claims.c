@@ -368,7 +368,7 @@ chimera_posix_lock_claim_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    struct chimera_posix_lock_claim_ctx *ctx = request->lock.private_data;
+    struct chimera_posix_lock_claim_ctx *ctx = request->lock_probe_private;
 
     chimera_vfs_claim_acquire(thread->vfs_thread,
                               chimera_posix_vfs_state(ctx->posix),
@@ -405,10 +405,12 @@ chimera_posix_lock_claim_acquire(
      * its backend confirm deferred to the projection service thread. */
     if (chimera_vfs_claim_backend_range_capable(state)) {
         /* A grant here may need confirming with the backend, which requires
-         * a VFS thread: marshal onto a worker and wait for it there. */
-        ctx.request.opcode            = CHIMERA_CLIENT_OP_LOCK;
-        ctx.request.heap_allocated    = 0;
-        ctx.request.lock.private_data = &ctx;
+         * a VFS thread: marshal onto a worker and wait for it there.  The
+         * request is only the vehicle -- the worker calls the exec callback
+         * and never looks at an opcode -- so it carries its context the way
+         * the other lock probes do. */
+        ctx.request.heap_allocated     = 0;
+        ctx.request.lock_probe_private = &ctx;
 
         chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
                                      &ctx.request,

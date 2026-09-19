@@ -85,6 +85,7 @@ chimera_posix_fstatat(
     }
 
     req.stat.handle       = dir_entry ? dir_entry->handle : NULL;
+    req.stat.open_flags   = dir_entry ? chimera_posix_fd_open_flags(dir_entry) : 0;
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_fstatat_callback;
     req.stat.private_data = &comp;

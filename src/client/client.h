@@ -540,15 +540,6 @@ typedef void (*chimera_seek_callback_t)(
     uint64_t                      offset,
     void                         *private_data);
 
-typedef void (*chimera_lock_callback_t)(
-    struct chimera_client_thread *client,
-    enum chimera_vfs_error        status,
-    uint32_t                      conflict_type,
-    uint64_t                      conflict_offset,
-    uint64_t                      conflict_length,
-    pid_t                         conflict_pid,
-    void                         *private_data);
-
 // Filesystem statistics
 struct chimera_statvfs {
     uint64_t f_bsize;    // Filesystem block size

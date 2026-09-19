@@ -28,5 +28,8 @@ chimera_clone_range(
     request->clone_range.dst_offset   = dst_offset;
     request->clone_range.length       = length;
 
+    request->clone_range.src_open_flags = chimera_client_handle_open_flags(src_handle);
+    request->clone_range.dst_open_flags = chimera_client_handle_open_flags(dst_handle);
+
     chimera_dispatch_clone_range(thread, request);
 } /* chimera_clone_range */

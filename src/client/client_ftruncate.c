@@ -23,6 +23,7 @@ chimera_ftruncate(
 
     request->opcode                = CHIMERA_CLIENT_OP_FSETATTR;
     request->fsetattr.handle       = handle;
+    request->fsetattr.open_flags   = chimera_client_handle_open_flags(handle);
     request->fsetattr.callback     = callback;
     request->fsetattr.private_data = private_data;
 

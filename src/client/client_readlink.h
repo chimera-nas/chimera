@@ -6,72 +6,6 @@
 
 #include "client_internal.h"
 
-static void chimera_readlink_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data);
-
-static void
-chimera_readlink_complete(
-    enum chimera_vfs_error    error_code,
-    int                       targetlen,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request  *request        = private_data;
-    struct chimera_client_thread   *thread         = request->thread;
-    struct chimera_vfs_open_handle *handle         = request->readlink.handle;
-    chimera_readlink_callback_t     callback       = request->readlink.callback;
-    void                           *callback_arg   = request->readlink.private_data;
-    char                           *target         = request->readlink.target;
-    int                             heap_allocated = request->heap_allocated;
-
-    if (heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
-
-    chimera_vfs_release(thread->vfs_thread, handle);
-
-    callback(thread, error_code, target, targetlen, callback_arg);
-
-} /* chimera_readlink_complete */
-
-static void
-chimera_readlink_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    (void) attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_readlink_callback_t   callback     = request->readlink.callback;
-        void                         *callback_arg = request->readlink.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, 0, callback_arg);
-        return;
-    }
-
-    request->readlink.handle = oh;
-
-    chimera_vfs_readlink(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        request->readlink.target,
-        request->readlink.target_maxlength,
-        0,
-        chimera_readlink_complete,
-        request);
-
-} /* chimera_readlink_open_complete */
-
 static void
 chimera_readlink_sequence_complete(
     struct chimera_vfs_compound *compound,
@@ -106,9 +40,8 @@ chimera_readlink_sequence_complete(
         }
     }
 
-    /* Written out rather than routed through chimera_readlink_complete, which
-     * releases the handle the per-op path opened: the sequence owns that one
-     * and frees it below, and chimera_vfs_release does not take a NULL. */
+    /* The sequence owns the handle its OPEN produced and releases it in the
+     * free below; nothing here releases anything. */
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }

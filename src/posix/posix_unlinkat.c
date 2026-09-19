@@ -57,8 +57,8 @@ chimera_posix_unlinkat(
 
     chimera_posix_completion_init(&comp, &req);
 
-    // Handle AT_FDCWD case
-    if (dirfd == AT_FDCWD) {
+    /* An absolute path ignores dirfd entirely (POSIX) -- see openat. */
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
         if (pathname[0] == '/') {
             path_len = strlen(pathname);
             memcpy(req.remove.path, pathname, path_len);

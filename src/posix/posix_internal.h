@@ -646,6 +646,18 @@ chimera_posix_to_chimera_flags(int flags)
     return out;
 } // chimera_posix_to_chimera_flags
 
+/* The CHIMERA_VFS_OPEN_* word a descriptor's handle was opened with, for a
+ * request that lends the handle to a sequence: PUTHANDLE promises the
+ * executor what the caller opened it with, and this is the only place that
+ * knows.  The open file description keeps the open(2) flags for every
+ * duplicate of it (F_SETFL touches only the status bits), so the answer is
+ * the same through dup(2) and fdopen(3). */
+static FORCE_INLINE unsigned int
+chimera_posix_fd_open_flags(const struct chimera_posix_fd_entry *entry)
+{
+    return chimera_posix_to_chimera_flags((int) entry->ofd->oflags);
+} // chimera_posix_fd_open_flags
+
 /* Initialize a create-path set_attr to request the given creation mode, with
  * the calling thread's umask applied to the permission bits.  umask is masked
  * to 0777, so file-type and special bits in `mode` (e.g. for mknod) survive. */

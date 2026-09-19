@@ -79,6 +79,9 @@ chimera_posix_clone_file_range(
     req.clone_range.callback     = chimera_posix_clone_file_range_callback;
     req.clone_range.private_data = &comp;
 
+    req.clone_range.src_open_flags = chimera_posix_fd_open_flags(src_entry);
+    req.clone_range.dst_open_flags = chimera_posix_fd_open_flags(dst_entry);
+
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_clone_file_range_exec);
 
     int err = chimera_posix_wait(&comp);

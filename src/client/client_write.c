@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -22,6 +22,7 @@ chimera_write(
     request->write.callback     = callback;
     request->write.private_data = private_data;
     request->write.handle       = handle;
+    request->write.open_flags   = chimera_client_handle_open_flags(handle);
     request->write.offset       = offset;
     request->write.length       = length;
     request->write.buf          = buf;

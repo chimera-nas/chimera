@@ -60,7 +60,6 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_STATFS,
     CHIMERA_CLIENT_OP_FSTATFS,
     CHIMERA_CLIENT_OP_MKNOD,
-    CHIMERA_CLIENT_OP_LOCK,
     CHIMERA_CLIENT_OP_COPY_RANGE,
     CHIMERA_CLIENT_OP_CLONE_RANGE,
     CHIMERA_CLIENT_OP_ALLOCATE,
@@ -115,6 +114,18 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
     uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
 
+    /* NOTHING BELOW IS ZEROED.  A heap request is recycled onto the thread's
+     * free list as it was, and a stack request (most of src/posix) is whatever
+     * the stack held.  Every `open_flags` and every flag word in the union is
+     * therefore set explicitly by every entry point whose dispatcher reads it;
+     * a blanket memset would clear ~20KB of iovec and path arrays per call to
+     * save a handful of stores.
+     *
+     * `open_flags`, wherever it appears, is the CHIMERA_VFS_OPEN_* word the
+     * accompanying `handle` was REALLY opened with -- what PUTHANDLE promises
+     * the sequence.  The POSIX layer fills it from the descriptor's open file
+     * description; an SDK entry point, handed a bare handle, fills it with
+     * chimera_client_handle_open_flags(). */
     union {
         /* Synchronous handle close routed to a worker thread (see
          * chimera_posix_close_on_worker). */
@@ -187,6 +198,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             uint32_t                        result_count;
@@ -218,6 +230,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         /* For chimera_write - caller provides a simple buffer */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             int                             niov;
@@ -321,17 +334,18 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         } rename;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            chimera_readlink_callback_t     callback;
-            void                           *private_data;
-            uint32_t                        target_maxlength;
-            char                           *target;
-            int                             path_len;
-            char                            path[CHIMERA_VFS_PATH_MAX];
+            chimera_readlink_callback_t callback;
+            void                       *private_data;
+            uint32_t                    target_maxlength;
+            char                       *target;
+            int                         path_len;
+            char                        path[CHIMERA_VFS_PATH_MAX];
         } readlink;
 
         struct {
+            /* The *at() family's directory descriptor, or NULL. */
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_stat_callback_t         callback;
             void                           *private_data;
             uint32_t                        flags;  /* CHIMERA_VFS_LOOKUP_FOLLOW for stat, 0 for lstat */
@@ -341,6 +355,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_fstat_callback_t        callback;
             void                           *private_data;
         } fstat;
@@ -366,6 +381,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_fsetattr_callback_t     callback;
             void                           *private_data;
             struct chimera_vfs_attrs        set_attr;
@@ -373,12 +389,14 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_commit_callback_t       callback;
             void                           *private_data;
         } commit;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint64_t                        length;
             uint32_t                        flags;
@@ -388,6 +406,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        what;   /* 0 = SEEK_DATA, 1 = SEEK_HOLE */
             chimera_seek_callback_t         callback;
@@ -395,38 +414,24 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         } seek;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            chimera_statfs_callback_t       callback;
-            void                           *private_data;
-            int                             path_len;
-            char                            path[CHIMERA_VFS_PATH_MAX];
+            chimera_statfs_callback_t callback;
+            void                     *private_data;
+            int                       path_len;
+            char                      path[CHIMERA_VFS_PATH_MAX];
         } statfs;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_fstatfs_callback_t      callback;
             void                           *private_data;
         } fstatfs;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            uint64_t                        offset;
-            uint64_t                        length;
-            uint32_t                        lock_type;    /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
-            uint32_t                        flags;        /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
-            int32_t                         whence;       /* SEEK_SET or SEEK_END */
-            chimera_lock_callback_t         callback;
-            void                           *private_data;
-            /* Result fields populated by VFS callback */
-            uint32_t                        r_conflict_type;
-            uint64_t                        r_conflict_offset;
-            uint64_t                        r_conflict_length;
-            pid_t                           r_conflict_pid;
-        } lock;
-
-        struct {
             struct chimera_vfs_open_handle *src_handle;
             struct chimera_vfs_open_handle *dst_handle;
+            unsigned int                    src_open_flags;
+            unsigned int                    dst_open_flags;
             uint64_t                        src_offset;
             uint64_t                        dst_offset;
             uint64_t                        length;
@@ -439,6 +444,8 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         struct {
             struct chimera_vfs_open_handle *src_handle;
             struct chimera_vfs_open_handle *dst_handle;
+            unsigned int                    src_open_flags;
+            unsigned int                    dst_open_flags;
             uint64_t                        src_offset;
             uint64_t                        dst_offset;
             uint64_t                        length;
@@ -464,6 +471,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        block_size;
             uint64_t                        block_count;
@@ -524,6 +532,38 @@ chimera_client_req_cred(const struct chimera_client_request *request)
 {
     return request->has_cred ? &request->req_cred : &request->thread->client->cred;
 } /* chimera_client_req_cred */
+
+/*
+ * What an open handle records of the flags it was opened with.
+ *
+ * The SDK hands out bare open handles, so an entry point that takes one back
+ * (chimera_fstat, chimera_commit, ...) has nothing but the handle to say how it
+ * was opened -- and a handle keeps only two things of its open: which cache it
+ * lives in, which says whether it was a PATH open, and its access mode, which
+ * says whether it was read-only.  Those two are reported; nothing else is
+ * claimed, because nothing else is known.  In particular INFERRED is never
+ * reported: it marks an open the VFS core made for its own traversal, and a
+ * caller's open is by definition not one of those.
+ *
+ * A caller that knows the real word -- the POSIX layer, whose open file
+ * description keeps the open(2) flags -- fills the request's open_flags itself
+ * and does not come through here.
+ */
+static inline unsigned int
+chimera_client_handle_open_flags(const struct chimera_vfs_open_handle *handle)
+{
+    unsigned int flags = 0;
+
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        flags |= CHIMERA_VFS_OPEN_PATH;
+    }
+
+    if (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RO) {
+        flags |= CHIMERA_VFS_OPEN_READ_ONLY;
+    }
+
+    return flags;
+} /* chimera_client_handle_open_flags */
 
 /*
  * Start a sequence at the export root.

@@ -86,6 +86,7 @@ chimera_posix_read(
     req.read.callback     = chimera_posix_read_callback;
     req.read.private_data = &comp;
     req.read.handle       = entry->handle;
+    req.read.open_flags   = chimera_posix_fd_open_flags(entry);
     req.read.offset       = entry->ofd->offset;
     req.read.length       = count;
     req.read.buf          = buf;

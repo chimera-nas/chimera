@@ -5,7 +5,6 @@
 #pragma once
 
 #include "client_internal.h"
-#include "vfs/vfs_procs.h"
 
 static void
 chimera_write_same_complete(
@@ -65,10 +64,12 @@ chimera_dispatch_write_same(
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* Handle and pattern are both the caller's, borrowed for the sequence. */
+    /* Handle and pattern are both the caller's, borrowed for the sequence.
+     * The PUTHANDLE carries what the handle was really opened with -- see
+     * open_flags on the request. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->write_same.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->write_same.open_flags);
     chimera_vfs_compound_add_write_same(request->compound,
                                         NULL,
                                         request->write_same.offset,

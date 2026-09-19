@@ -147,10 +147,12 @@ chimera_dispatch_write(
                                                    chimera_client_req_cred(request));
 
     /* Handle and payload are both the request's, borrowed for the sequence;
-     * the payload is released by chimera_write_complete. */
+     * the payload is released by chimera_write_complete.  The PUTHANDLE says
+     * what the handle was really opened with -- see open_flags on the
+     * request. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->write.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->write.open_flags);
     /* The handle stays on the op too -- see chimera_dispatch_read. */
     chimera_vfs_compound_add_write(request->compound,
                                    request->write.handle,

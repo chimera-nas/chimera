@@ -146,9 +146,10 @@ chimera_dispatch_stat(
          * re-openable over the SMB proxy -- and which would answer from a
          * re-resolved name even where it works, so a directory unlinked while
          * the fd stayed open would look like ENOENT instead of the directory
-         * it still is. */
+         * it still is.  The flags are what the descriptor was really opened
+         * with -- see open_flags on the request. */
         chimera_vfs_compound_add_puthandle(compound, request->stat.handle,
-                                           CHIMERA_VFS_OPEN_INFERRED);
+                                           request->stat.open_flags);
 
         request->gate_index =
             chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
@@ -159,8 +160,8 @@ chimera_dispatch_stat(
     }
 
     /* One op for the whole path: the lookup returns the attributes with it, so
-     * there is no open and no getattr -- which is also what makes this work on
-     * a path-only mount, where the resolved child has no re-openable handle. */
+    * there is no open and no getattr -- which is also what makes this work on
+    * a path-only mount, where the resolved child has no re-openable handle. */
     chimera_vfs_compound_add_lookup_path(compound,
                                          request->stat.path,
                                          request->stat.path_len,

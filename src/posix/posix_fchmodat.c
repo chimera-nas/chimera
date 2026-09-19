@@ -136,8 +136,9 @@ chimera_posix_fchmodat(
 
     chimera_posix_completion_init(&ctx.comp, &req);
 
-    // Handle AT_FDCWD case - use simple path-based setattr
-    if (dirfd == AT_FDCWD) {
+    /* AT_FDCWD, and an absolute path whatever dirfd holds (POSIX -- see
+     * openat): the simple path-based setattr. */
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
         if (pathname[0] == '/') {
             path_len = strlen(pathname);
             memcpy(req.setattr.path, pathname, path_len);

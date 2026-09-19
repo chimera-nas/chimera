@@ -60,6 +60,9 @@ chimera_posix_getacl(
 
     chimera_posix_completion_init(&comp, &req);
 
+    /* There is no GETACL opcode: an ACL is an attribute fetched by path,
+     * which is STAT's shape (setacl likewise rides SETATTR), and nothing
+     * dispatches on the opcode -- the exec callback does. */
     req.opcode              = CHIMERA_CLIENT_OP_STAT;
     req.getacl.callback     = chimera_posix_getacl_callback;
     req.getacl.private_data = &comp;

@@ -58,10 +58,12 @@ chimera_dispatch_seek(
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
 
-    /* SEEK reads the allocation map, which wants the data open. */
+    /* SEEK reads the allocation map, which wants the data open.  The
+     * PUTHANDLE carries what the handle was really opened with -- see
+     * open_flags on the request. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->seek.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->seek.open_flags);
     chimera_vfs_compound_add_seek(request->compound, NULL,
                                   request->seek.offset, request->seek.what);
 

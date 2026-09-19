@@ -51,14 +51,16 @@ chimera_dispatch_clone_range(
 
     /* Source into the saved open slot, destination into the current one --
      * the shape the range ops read in the cursor model.  The handles stay on
-     * the op until the dispatch reads the cursors instead. */
+     * the op until the dispatch reads the cursors instead.  Each PUTHANDLE
+     * carries what its handle was really opened with -- see open_flags on the
+     * request. */
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->clone_range.src_handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->clone_range.src_open_flags);
     chimera_vfs_compound_add_savehandle(request->compound);
     chimera_vfs_compound_add_puthandle(request->compound,
                                        request->clone_range.dst_handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->clone_range.dst_open_flags);
     chimera_vfs_compound_add_clone_range(request->compound,
                                          request->clone_range.src_handle,
                                          request->clone_range.src_offset,

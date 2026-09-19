@@ -53,8 +53,8 @@ chimera_posix_mkdirat(
 
     chimera_posix_completion_init(&comp, &req);
 
-    // Handle AT_FDCWD case
-    if (dirfd == AT_FDCWD) {
+    /* An absolute path ignores dirfd entirely (POSIX) -- see openat. */
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
         if (pathname[0] == '/') {
             path_len = strlen(pathname);
             memcpy(req.mkdir.path, pathname, path_len);

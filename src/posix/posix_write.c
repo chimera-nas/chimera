@@ -72,6 +72,7 @@ chimera_posix_fd_eof(
 
     req.opcode             = CHIMERA_CLIENT_OP_FSTAT;
     req.fstat.handle       = entry->handle;
+    req.fstat.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fstat.callback     = chimera_posix_fd_eof_callback;
     req.fstat.private_data = &comp;
 
@@ -134,6 +135,7 @@ chimera_posix_write(
     req.write.callback     = chimera_posix_write_callback;
     req.write.private_data = &comp;
     req.write.handle       = entry->handle;
+    req.write.open_flags   = chimera_posix_fd_open_flags(entry);
     req.write.offset       = write_offset;
     req.write.length       = count;
     req.write.buf          = buf;
