@@ -18,7 +18,7 @@
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "common/format.h"
 #include "s3_internal.h"
 #include "s3_procs.h"
@@ -32,14 +32,20 @@
 /*
  * S3 object listing (ListObjects V1 + ListObjectsV2 + ListObjectVersions).
  *
- * The VFS `find` walks the bucket subtree depth-first, invoking our filter to
- * decide descent and our callback for every entry. We collect the matching
- * objects and rolled-up CommonPrefixes into an in-memory array, sort it
- * lexicographically (S3 mandates sorted keys), apply the requested page window
- * (marker / continuation-token / start-after + max-keys), and render the V1 or
- * V2 response shape. There is no server-side cursor: each page re-walks and
- * re-sorts, then slices past the caller's token. This is O(n) per page but
- * correct and stateless.
+ * One sequence walks the bucket subtree -- PUTFH(bucket), OPEN_CURRENT as a
+ * directory, FIND -- invoking our filter to decide descent and our append for
+ * every entry. We collect the matching objects and rolled-up CommonPrefixes
+ * into an in-memory array, sort it lexicographically (S3 mandates sorted
+ * keys), apply the requested page window (marker / continuation-token /
+ * start-after + max-keys), and render the V1 or V2 response shape once the
+ * sequence has finished. There is no server-side cursor: each page re-walks
+ * and re-sorts, then slices past the caller's token. This is O(n) per page
+ * but correct and stateless.
+ *
+ * The append is REVERSIBLE on the streaming contract: it stages into the
+ * request-local array and nothing else, so the reset the executor runs before
+ * every execution of the FIND has only that array to truncate, and no XML is
+ * rendered until the completion.
  *
  * chimera has no object versioning: every object is its own single, latest,
  * "null" version. ListObjectVersions therefore reuses the same collection/sort/
@@ -480,12 +486,33 @@ chimera_s3_list_key(
 } /* chimera_s3_list_key */
 
 /* ---------------------------------------------------------------------------
-* VFS find filter (descent control) and callback (collection)
+* FIND filter (descent control), append (collection) and reset
 * ------------------------------------------------------------------------- */
+
+/* The reversibility half of the streaming contract: everything the append
+ * below staged is dropped, so a re-run of the walk starts from an empty
+ * array.  The array's capacity is kept -- it is the request's, and a re-run
+ * will want about as much of it. */
+static void
+chimera_s3_list_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct chimera_s3_request *request = private_data;
+    int                        i;
+
+    for (i = 0; i < request->list.n_entries; i++) {
+        free(request->list.entries[i].key);
+    }
+    request->list.n_entries = 0;
+} /* chimera_s3_list_reset */
 
 /* Returns non-zero to PRUNE (do not descend into this directory). */
 static int
 chimera_s3_list_filter(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
     const char                     *path,
     int                             pathlen,
     const struct chimera_vfs_attrs *attr,
@@ -514,8 +541,13 @@ chimera_s3_list_filter(
     return (memcmp(k, p, klen) == 0 && p[klen] == '/') ? 0 : 1;
 } /* chimera_s3_list_filter */
 
+/* Stage one entry.  Always takes it (returns 0): the page window is applied
+ * after the sort, so no entry can be refused here without losing a key that
+ * sorts before one already staged. */
 static int
-chimera_s3_list_find_callback(
+chimera_s3_list_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
     const char                     *path,
     int                             pathlen,
     const struct chimera_vfs_attrs *attr,
@@ -620,7 +652,7 @@ chimera_s3_list_find_callback(
         }
         return 0;
     }
-} /* chimera_s3_list_find_callback */
+} /* chimera_s3_list_append */
 
 /* ---------------------------------------------------------------------------
 * Sort, page, render
@@ -637,15 +669,16 @@ chimera_s3_list_cmp(
     return strcmp(ea->key, eb->key);
 } /* chimera_s3_list_cmp */
 
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_list_find_complete,
-                            (enum chimera_vfs_error error_code,
-                             void *private_data),
-                            (error_code, private_data))
+/* The walk is over: sort, page and render what it staged.  The sequence's
+ * own status is not consulted, exactly as the per-op find's completion status
+ * never was: the bucket was resolved by the dispatcher, and what a failed walk
+ * leaves staged is rendered as the listing it amounts to. */
+static void
+chimera_s3_list_render(struct chimera_s3_request *request)
 {
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
-    struct chimera_s3_list_entry    *ents    = request->list.entries;
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct evpl                     *evpl   = thread->evpl;
+    struct chimera_s3_list_entry    *ents   = request->list.entries;
     struct chimera_s3_out            out;
     int                              n = request->list.n_entries;
     int                              w, r, i;
@@ -901,7 +934,23 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_list_find_complete,
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
-} /* chimera_s3_list_find_complete */
+} /* chimera_s3_list_render */
+
+static void
+chimera_s3_list_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    CHIMERA_S3_HOLD_REQUEST(private_data);
+    struct chimera_s3_request *request = private_data;
+
+    /* Nothing of the sequence's is read back: the staged entries are the
+     * request's own, and the directory open belonged to the sequence and
+     * goes with it. */
+    chimera_vfs_compound_free(compound);
+
+    chimera_s3_list_render(request);
+} /* chimera_s3_list_sequence_complete */
 
 void
 chimera_s3_list(
@@ -909,17 +958,28 @@ chimera_s3_list(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    /* One reference for the whole find: the per-entry callback runs many
+    struct chimera_vfs_compound *compound;
+
+    /* One reference for the whole sequence: the per-entry append runs many
      * times, the completion exactly once, so the completion is what drops
      * it. */
     chimera_s3_request_get(request);
 
-    chimera_vfs_find(thread->vfs, &request->cred,
-                     request->bucket_fh,
-                     request->bucket_fhlen,
-                     CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                     chimera_s3_list_filter,
-                     chimera_s3_list_find_callback,
-                     chimera_s3_list_find_complete,
-                     request);
+    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
+
+    chimera_vfs_compound_add_putfh(compound, request->bucket_fh,
+                                   request->bucket_fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    chimera_vfs_compound_add_find(compound,
+                                  CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                                  chimera_s3_list_filter,
+                                  chimera_s3_list_append,
+                                  chimera_s3_list_reset,
+                                  request);
+
+    chimera_vfs_compound_submit(compound, chimera_s3_list_sequence_complete,
+                                request);
 } /* chimera_s3_list */
