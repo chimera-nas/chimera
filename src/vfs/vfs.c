@@ -215,6 +215,10 @@ chimera_vfs_close_thread_sweep(
     return count;
 } /* chimera_vfs_close_thread_sweep */
 
+static uint64_t
+chimera_vfs_close_sweep_min_age_ns(
+    void);
+
 static void
 chimera_vfs_close_thread_wake_shutdown(
     struct evpl          *evpl,
@@ -224,7 +228,7 @@ chimera_vfs_close_thread_wake_shutdown(
     int                              shutdown     = close_thread->shutdown;
     uint64_t                         min_age, count;
 
-    min_age = shutdown ? 0 : 100000000UL;
+    min_age = shutdown ? 0 : chimera_vfs_close_sweep_min_age_ns();
 
     /* Sweep OUTSIDE close_thread->lock.  A close can re-enter this thread's
      * event loop -- diskfs commit drains its submission queue with a nested
@@ -261,6 +265,33 @@ chimera_vfs_close_thread_wake_shutdown(
 
 } /* chimera_vfs_close_thread_wake_shutdown */
 
+/* Idle age a cached-but-unreferenced open handle must reach before the sweep
+ * closes it.  Default 100 ms; overridable via CHIMERA_CLOSE_SWEEP_MIN_AGE_MS
+ * so tests can drive the removed-but-held reclaim deterministically (0 =
+ * reclaim on the very next sweep). */
+static uint64_t
+chimera_vfs_close_sweep_min_age_ns(void)
+{
+    static uint64_t cached_ns = UINT64_MAX;
+
+    if (cached_ns != UINT64_MAX) {
+        return cached_ns;
+    }
+
+    const char     *env = getenv("CHIMERA_CLOSE_SWEEP_MIN_AGE_MS");
+    if (env && *env) {
+        char              *endp = NULL;
+        unsigned long long ms   = strtoull(env, &endp, 10);
+        if (endp && endp != env && *endp == '\0' && ms <= 60000) {
+            cached_ns = (uint64_t) ms * 1000000ULL;
+            return cached_ns;
+        }
+    }
+
+    cached_ns = 100000000UL;
+    return cached_ns;
+} /* chimera_vfs_close_sweep_min_age_ns */
+
 static void
 chimera_vfs_close_thread_wake_timer(
     struct evpl       *evpl,
@@ -269,7 +300,7 @@ chimera_vfs_close_thread_wake_timer(
     struct chimera_vfs_close_thread *close_thread = container_of(timer, struct chimera_vfs_close_thread, timer);
     uint64_t                         min_age;
 
-    min_age = 100000000UL;
+    min_age = chimera_vfs_close_sweep_min_age_ns();
 
     /* No lock: the periodic sweep touches only this thread's state (num_pending)
      * and the open caches (guarded by their own per-shard locks).  Holding
