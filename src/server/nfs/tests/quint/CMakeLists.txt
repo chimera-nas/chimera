@@ -208,6 +208,21 @@ foreach(dback memfs diskfs cairn linux io_uring)
         LABELS "quint;nfsdrc_mbt;${dback}"
         SKIP_RETURN_CODE 77
         TIMEOUT 120)
+
+    # Same probe, but with the idle close sweep set to retire a cached handle
+    # the instant it goes unreferenced (min_age 0, sweep every 10 ms).  That
+    # is the worst case the merge queue hit under load: a removed-but-held
+    # object's handle-cache pin is reclaimed between the op that cached it and
+    # the next op on its handle.  Running it deterministically here keeps the
+    # removed-but-held answers (STALE-or-model, per check_status_or_stale)
+    # honest in the quick tier instead of only flaking in CI.
+    add_test(NAME chimera/server/nfs/mbtdrc/probe_${dback}_reclaim_race
+        COMMAND $<TARGET_FILE:nfs_drc_probe> ${_drc_probe_args})
+    set_tests_properties(chimera/server/nfs/mbtdrc/probe_${dback}_reclaim_race PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_${dback}_reclaim_race;CHIMERA_CLOSE_SWEEP_MIN_AGE_MS=0;CHIMERA_CLOSE_SWEEP_INTERVAL_MS=10"
+        LABELS "quint;nfsdrc_mbt;${dback}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120)
 endforeach()
 
 # Delegation policy probe: pins the deterministic grant/recall behavior the
