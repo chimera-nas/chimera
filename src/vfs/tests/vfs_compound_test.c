@@ -295,6 +295,163 @@ remote_release_main(void *arg)
     return NULL;
 } /* remote_release_main */
 
+/* A FIND's three callbacks, staging into a request-local array the way the
+* S3 consumers do: `reset` truncates it (and counts itself), `filter` prunes
+* one named subtree, `append` copies each path in -- or refuses the Nth. */
+#define FIND_CTX_MAX 16
+
+struct find_ctx {
+    int         resets;
+    int         filter_calls;
+    int         appended;
+    int         stop_at;     /* refuse this append (1-based); 0 never */
+    const char *prune;       /* the directory whose subtree is pruned */
+    int         count;
+    char        paths[FIND_CTX_MAX][64];
+};
+
+static void
+find_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct find_ctx *f = private_data;
+
+    (void) compound;
+    (void) index;
+
+    f->resets++;
+    f->appended = 0;
+    f->count    = 0;
+} /* find_reset */
+
+static int
+find_filter(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data)
+{
+    struct find_ctx                      *f  = private_data;
+    const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, index);
+
+    /* Only directories are put to the filter, with what the walk needs. */
+    assert(op->type == CHIMERA_VFS_COMPOUND_OP_FIND);
+    assert(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE);
+    assert(attr->va_set_mask & CHIMERA_VFS_ATTR_FH);
+    assert(S_ISDIR(attr->va_mode));
+    assert(attr->va_acl == NULL);
+
+    f->filter_calls++;
+
+    return (f->prune && (int) strlen(f->prune) == pathlen &&
+            memcmp(path, f->prune, pathlen) == 0) ? 1 : 0;
+} /* find_filter */
+
+static int
+find_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data)
+{
+    struct find_ctx                      *f  = private_data;
+    const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, index);
+
+    assert(op->type == CHIMERA_VFS_COMPOUND_OP_FIND);
+    assert(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE);
+    assert(attr->va_set_mask & CHIMERA_VFS_ATTR_FH);
+    assert(attr->va_acl == NULL);
+    assert(pathlen > 1 && path[0] == '/');
+    assert(pathlen < (int) sizeof(f->paths[0]));
+
+    if (f->stop_at && f->appended + 1 == f->stop_at) {
+        return -1;
+    }
+
+    assert(f->count < FIND_CTX_MAX);
+    memcpy(f->paths[f->count], path, pathlen);
+    f->paths[f->count][pathlen] = '\0';
+    f->count++;
+    f->appended++;
+
+    return 0;
+} /* find_append */
+
+static int
+find_has(
+    const struct find_ctx *f,
+    const char            *path)
+{
+    int i;
+
+    for (i = 0; i < f->count; i++) {
+        if (strcmp(f->paths[i], path) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+} /* find_has */
+
+/* A caching holder's break callback: counts, and records the mode it was
+ * asked to fall to.  It must touch nothing else -- it fires inside the
+ * recall, on the submitting thread. */
+struct break_rec {
+    int     fired;
+    uint8_t needed;
+};
+
+static void
+break_rec_cb(
+    struct chimera_vfs_claim *claim,
+    uint8_t                   needed_mode,
+    void                     *priv)
+{
+    struct break_rec *r = priv;
+
+    (void) claim;
+
+    r->fired++;
+    r->needed = needed_mode;
+} /* break_rec_cb */
+
+/* A second VFS thread that acks a broken caching claim, so the drain that
+ * resumes a parked RECALL is posted from a thread that is not the one that
+ * submitted the sequence.  Records itself so the test can prove the
+ * completion did NOT run here. */
+struct remote_ack {
+    struct chimera_vfs       *vfs;
+    struct chimera_vfs_claim *claim;
+    uint8_t                   resulting;
+    pthread_t                 self;
+};
+
+static void *
+remote_ack_main(void *arg)
+{
+    struct remote_ack         *ra = arg;
+    struct evpl               *evpl;
+    struct chimera_vfs_thread *thread;
+
+    evpl   = evpl_create(NULL);
+    thread = chimera_vfs_thread_init(evpl, ra->vfs);
+
+    ra->self = pthread_self();
+
+    chimera_vfs_claim_ack(ra->claim, ra->resulting);
+
+    chimera_vfs_thread_destroy(thread);
+    evpl_destroy(evpl);
+
+    return NULL;
+} /* remote_ack_main */
+
 /* A KV range search that keeps the one value it went looking for, so a test
  * can see whether an OPEN's handle-state record reached the default KV. */
 struct kv_probe {
@@ -3673,6 +3830,430 @@ main(
         }
     }
     TEST_PASS("READ with dest_iov lands in the caller's buffers, which it keeps");
+
+    /* ---- FIND: the recursive walk, streamed ----
+     * A small tree under /mem/ft: a/, a/b/, skip/, and a file in each.  The
+     * filter prunes skip/ -- its own entry still arrives, nothing below it
+     * does -- and append stages every path into a request-local array that
+     * reset truncates, so a second execution of the same op starts empty.
+     * What the executor owes: reset before every execution, the root's fh on
+     * the op before the walk, entries with the fh and mode the walk descends
+     * on and no ACL, a refusal that ends the op with eof clear, and ENOTDIR
+     * for a FIND through a regular file. */
+    {
+        struct find_ctx          f;
+        struct chimera_vfs_attrs sattr;
+        uint8_t                  ft_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 ft_fh_len;
+        uint8_t                  f1_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 f1_fh_len;
+        uint8_t                  sub_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 sub_fh_len;
+        const char              *files[] = { "ft/f1", "ft/a/f2", "ft/a/b/f3", "ft/skip/f4" };
+        int                      i_find, i_ga, total, i;
+
+        mkdir_under(&ctx, &cred, root_fh, root_fh_len, "ft");
+        memcpy(ft_fh, ctx.fh, ctx.fh_len);
+        ft_fh_len = ctx.fh_len;
+        mkdir_under(&ctx, &cred, ft_fh, ft_fh_len, "a");
+        memcpy(sub_fh, ctx.fh, ctx.fh_len);
+        sub_fh_len = ctx.fh_len;
+        mkdir_under(&ctx, &cred, sub_fh, sub_fh_len, "b");
+        mkdir_under(&ctx, &cred, ft_fh, ft_fh_len, "skip");
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0644;
+
+        for (i = 0; i < 4; i++) {
+            chimera_vfs_open(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
+                             files[i], (int) strlen(files[i]),
+                             CHIMERA_VFS_OPEN_CREATE |
+                             CHIMERA_VFS_OPEN_CREATE_REGULAR,
+                             &sattr,
+                             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                             open_cb, &ctx);
+            wait_done(&ctx);
+            assert(ctx.status == CHIMERA_VFS_OK);
+            if (i == 0) {
+                memcpy(f1_fh, ctx.fh, ctx.fh_len);
+                f1_fh_len = ctx.fh_len;
+            }
+        }
+
+        memset(&f, 0, sizeof(f));
+        f.prune = "/skip";
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, ft_fh, (int) ft_fh_len);
+        i_find = chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                               find_filter, find_append,
+                                               find_reset, &f);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        assert(i_find >= 0 && i_ga >= 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_find);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->eof);
+        /* Streamed, never staged. */
+        assert(op->entries == NULL && op->num_entries == 0);
+        /* The root, recorded before the walk. */
+        assert(op->fh_len == ft_fh_len && memcmp(op->fh, ft_fh, ft_fh_len) == 0);
+        assert(f.resets == 1);
+        /* Every directory was put to the filter: a, a/b, skip. */
+        assert(f.filter_calls == 3);
+        /* Everything but the pruned subtree's contents, the pruned directory
+         * itself included; "." and ".." never. */
+        assert(f.count == 6);
+        assert(find_has(&f, "/a"));
+        assert(find_has(&f, "/a/b"));
+        assert(find_has(&f, "/a/b/f3"));
+        assert(find_has(&f, "/a/f2"));
+        assert(find_has(&f, "/f1"));
+        assert(find_has(&f, "/skip"));
+        assert(!find_has(&f, "/skip/f4"));
+        total = f.count;
+        /* A FIND does not move the current object. */
+        op = chimera_vfs_compound_op(cp, i_ga);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(S_ISDIR(op->attr.va_mode));
+        chimera_vfs_compound_free(cp);
+
+        /* The same context again, un-cleared: reset is what empties it, so
+         * the count is the tree's and not twice the tree's. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, ft_fh, (int) ft_fh_len);
+        chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                      find_filter, find_append, find_reset, &f);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(f.resets == 2);
+        assert(f.count == total);
+        chimera_vfs_compound_free(cp);
+
+        /* Refuse the second entry: the op ends there, OK with eof clear, and
+         * nothing after the refusal was staged. */
+        f.stop_at = 2;
+        cp        = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, ft_fh, (int) ft_fh_len);
+        i_find = chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                               find_filter, find_append,
+                                               find_reset, &f);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_find);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(!op->eof);
+        assert(f.resets == 3);
+        assert(f.count == 1);
+        chimera_vfs_compound_free(cp);
+
+        /* Through a regular file: opened as a directory first, so ENOTDIR,
+         * and reset ran (before the execution) while append never did. */
+        f.stop_at = 0;
+        cp        = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, f1_fh, (int) f1_fh_len);
+        i_find = chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                               find_filter, find_append,
+                                               find_reset, &f);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
+        op = chimera_vfs_compound_op(cp, i_find);
+        assert(op->status == CHIMERA_VFS_ENOTDIR);
+        assert(f.count == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* A walk missing any of its callbacks does not build. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        assert(chimera_vfs_compound_add_find(cp, 0, NULL, find_append,
+                                             find_reset, &f) == -1);
+        assert(chimera_vfs_compound_add_find(cp, 0, find_filter, NULL,
+                                             find_reset, &f) == -1);
+        assert(chimera_vfs_compound_add_find(cp, 0, find_filter, find_append,
+                                             NULL, &f) == -1);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        chimera_vfs_compound_free(cp);
+
+        /* ---- GET_LAYOUT on a backend that does not source layouts ----
+         * memfs is orchestrated (CAP_LAYOUT), not a source, so the per-op
+         * call answers ENOTSUP and the op passes it through: the sequence
+         * stops there, and the copies stay empty. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, f1_fh, (int) f1_fh_len);
+        i_find = chimera_vfs_compound_add_get_layout(
+            cp, 0, UINT64_MAX, 1, CHIMERA_VFS_LAYOUT_CLASS_FLEX,
+            CHIMERA_VFS_LAYOUT_MAX_SEGMENTS);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        assert(i_find >= 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTSUP);
+        op = chimera_vfs_compound_op(cp, i_find);
+        assert(op->status == CHIMERA_VFS_ENOTSUP);
+        assert(op->layout_num_segments == 0 && op->layout_segments == NULL);
+        assert(op->layout_num_devices == 0 && op->layout_devices == NULL);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("FIND streams the tree, prunes on the filter, stops on append; "
+              "GET_LAYOUT is ENOTSUP off a non-source backend");
+
+    /* ---- RECALL ----
+     * The caching leases are held straight through the claim core, the way
+     * vfs_claim_test does, so the test owns the holder: it sees the break
+     * arrive, acks it from another thread, and releases it.  Three shapes:
+     * nothing held (both forms answer at once, still_open 0); a delegation
+     * held by another owner (NOWAIT kicks the recall, does not park, and
+     * reports the holder still in the way); and a batch oplock held by
+     * another owner (the parking form parks, the break fires, and the ack
+     * from a second VFS thread resumes the sequence on the submitting one). */
+    {
+        struct chimera_vfs_state         *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_file_state    *fs;
+        struct chimera_vfs_attrs          sattr;
+        struct chimera_vfs_open_handle   *oh;
+        struct chimera_vfs_claim          deleg, oplock;
+        struct chimera_claim_owner        owner_n, owner_s;
+        struct chimera_vfs_claim_conflict conflict;
+        struct break_rec                  rec;
+        struct remote_ack                 ra;
+        pthread_t                         self = pthread_self();
+        pthread_t                         tid;
+        uint8_t                           too_long[CHIMERA_VFS_FH_SIZE + 1];
+        int                               i_open, i_rc, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "rc", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* Nothing held: the parking form has nothing to wait for, through
+         * the lent handle (spared), through the current fh, and by the op's
+         * own fh with no current object at all. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_rc = chimera_vfs_compound_add_recall(cp, NULL, 0, CHIMERA_CLAIM_CR, 0);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        assert(i_rc >= 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rc);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->recall_still_open == 0);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, oh->fh, (int) oh->fh_len);
+        i_rc          = chimera_vfs_compound_add_recall(cp, NULL, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_rc)->recall_still_open == 0);
+        chimera_vfs_compound_free(cp);
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_rc = chimera_vfs_compound_add_recall(cp, oh->fh, oh->fh_len, 0,
+                                               CHIMERA_VFS_COMPOUND_RECALL_NOWAIT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_rc)->recall_still_open == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* A recall with no object at all is the caller's bug. */
+        cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_rc          = chimera_vfs_compound_add_recall(cp, NULL, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        chimera_vfs_compound_free(cp);
+
+        /* Malformed: an fh that cannot be one, a NOWAIT with a floor. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        assert(chimera_vfs_compound_add_recall(cp, too_long, sizeof(too_long),
+                                               0, 0) == -1);
+        assert(chimera_vfs_compound_add_recall(cp, NULL, 4, 0, 0) == -1);
+        assert(chimera_vfs_compound_add_recall(cp, NULL, 0, CHIMERA_CLAIM_CR,
+                                               CHIMERA_VFS_COMPOUND_RECALL_NOWAIT)
+               == -1);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        /* Another client's write delegation.  NOWAIT kicks the full recall
+        * -- the holder's break fires inside the op -- and answers at once
+        * with the holder still in the way, which is the NFS4ERR_DELAY
+        * shape.  Once the holder returns it, the same op finds nothing. */
+        memset(&owner_n, 0, sizeof(owner_n));
+        owner_n.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_n.client_key = 0xD1;
+        owner_n.owner_lo   = 1;
+        chimera_vfs_claim_init_delegation(&deleg, true, &owner_n);
+        memset(&rec, 0, sizeof(rec));
+        deleg.break_cb   = break_rec_cb;
+        deleg.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs, &deleg, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        /* The op's own fh is an argument and moves no cursor; the GETATTR
+         * behind it wants a current object of its own. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, oh->fh, (int) oh->fh_len);
+        i_rc = chimera_vfs_compound_add_recall(cp, oh->fh, oh->fh_len, 0,
+                                               CHIMERA_VFS_COMPOUND_RECALL_NOWAIT);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        /* Answered inside submit: no park. */
+        assert(ctx.callbacks == 1);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rc);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->recall_still_open == 1);
+        assert(rec.fired == 1);
+        assert(deleg.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+        /* The sequence went on regardless: the caller maps the boolean. */
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release(state, fs, &deleg);
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_rc = chimera_vfs_compound_add_recall(cp, oh->fh, oh->fh_len, 0,
+                                               CHIMERA_VFS_COMPOUND_RECALL_NOWAIT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_rc)->recall_still_open == 0);
+        assert(rec.fired == 1);
+        chimera_vfs_compound_free(cp);
+
+        /* Another client's batch oplock (RWH).  The parking form with the
+         * rename floor (RW) breaks the handle cache once and parks; the
+         * holder's ack, from a second VFS thread, is what resumes it -- on
+         * the submitting thread, with the GETATTR behind it run there. */
+        memset(&owner_s, 0, sizeof(owner_s));
+        owner_s.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_s.client_key = 0x51;
+        owner_s.owner_lo   = 2;
+        chimera_vfs_claim_init_oplock(&oplock,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                      CHIMERA_CLAIM_H,
+                                      &owner_s);
+        memset(&rec, 0, sizeof(rec));
+        oplock.break_cb   = break_rec_cb;
+        oplock.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs, &oplock, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, oh->fh, (int) oh->fh_len);
+        i_rc = chimera_vfs_compound_add_recall(cp, NULL, 0,
+                                               CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                                               0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+
+        /* Parked: the break went out, and submit returned with nothing to
+         * report. */
+        assert(ctx.callbacks == 0);
+        assert(!ctx.done);
+        assert(rec.fired == 1);
+        assert(rec.needed == (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW));
+        assert(oplock.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+
+        /* The holder acks down to RW, from elsewhere. */
+        ra.vfs       = ctx.vfs;
+        ra.claim     = &oplock;
+        ra.resulting = CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW;
+        assert(pthread_create(&tid, NULL, remote_ack_main, &ra) == 0);
+
+        wait_done(&ctx);
+        assert(pthread_join(tid, NULL) == 0);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rc);
+        assert(op->status == CHIMERA_VFS_OK);
+        /* No share holder kept the file open: the oplock is a cache claim. */
+        assert(op->recall_still_open == 0);
+        op = chimera_vfs_compound_op(cp, i_ga);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(S_ISREG(op->attr.va_mode));
+        /* On the submitting thread, not the acking one. */
+        assert(pthread_equal(ctx.cb_thread, self));
+        assert(!pthread_equal(ctx.cb_thread, ra.self));
+        /* The holder kept what the floor left it. */
+        assert(oplock.used == (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW));
+        chimera_vfs_compound_free(cp);
+
+        /* Already at the floor: nothing to break, nothing to wait for. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, oh->fh, (int) oh->fh_len);
+        i_rc = chimera_vfs_compound_add_recall(cp, NULL, 0,
+                                               CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                                               0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        assert(ctx.callbacks == 1);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(rec.fired == 1);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release(state, fs, &oplock);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("RECALL answers at once with nothing held, NOWAIT reports a holder "
+              "without parking, and the parking form resumes on the submitting thread");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);

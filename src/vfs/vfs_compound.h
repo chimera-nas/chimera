@@ -364,6 +364,43 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM,
     CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS,
     CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM,
+    /* pNFS: where the current object's data lives.  Asks the backend for up
+     * to `layout_max_segments` segments covering [layout_offset, +length)
+     * at `layout_iomode`, in `layout_class`, and COPIES what comes back --
+     * the segments and the devices they name -- into arrays the compound
+     * owns (layout_segments / layout_devices, freed with the compound),
+     * because the backend's are valid only while its callback runs.  The
+     * object is opened for data, as LAYOUTGET opens it today.
+     *
+     * Only a backend that SOURCES layouts (CHIMERA_VFS_CAP_LAYOUT_SOURCE --
+     * diskfs) can answer; one that is merely orchestrated under a layout
+     * (CAP_LAYOUT -- memfs) never sees the op and the per-op call reports
+     * ENOTSUP for it, which the op passes through.  The NFS server routes
+     * on that distinction before it asks, so a caller that wants the
+     * orchestrated flex-files layout asks a GETATTR for
+     * CHIMERA_VFS_ATTR_PNFS_LAYOUT instead. */
+    CHIMERA_VFS_COMPOUND_OP_GET_LAYOUT,
+    /* Recursive streaming walk of the directory tree rooted at the current
+     * object, which is opened as a directory the way READDIR opens it and,
+     * before that, established to BE one: a FIND through anything else is
+     * ENOTDIR on every backend, rather than the empty walk a backend whose
+     * PATH open does not check the type would otherwise produce (the
+     * walker swallows its readdir's refusal).  Every entry below the root
+     * reaches `find_append` as it is found; every DIRECTORY entry is first
+     * put to `find_filter`, which answers 0 to descend into it and non-zero
+     * to prune it.  Both callbacks are REVERSIBLE on READDIR's terms, and
+     * `find_reset` runs before every execution -- see the typedefs.  The
+     * state machine is chimera_vfs_find's; a caller never grows its own,
+     * and nothing is ever staged. */
+    CHIMERA_VFS_COMPOUND_OP_FIND,
+    /* Recall the caching leases on an object -- the current one, or the
+     * bare fh set on the op -- and by default PARK until the recall drains:
+     * an op with no backend mutation, the recall_handle_lease /
+     * recall_caching_fh pair unified.  With CHIMERA_VFS_COMPOUND_RECALL_
+     * NOWAIT it kicks the recall and reports without parking.  Either way
+     * the op reports `recall_still_open`: a holder still stands in the way
+     * when the op answers.  See the adder for what each shape is. */
+    CHIMERA_VFS_COMPOUND_OP_RECALL,
     /* Path-addressed.  See the note on ->path. */
     CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH,
     CHIMERA_VFS_COMPOUND_OP_OPEN_PATH,
@@ -488,6 +525,50 @@ typedef int (*chimera_vfs_compound_readdir_append_t)(
     const char                     *name,
     int                             namelen,
     const struct chimera_vfs_attrs *attrs,
+    void                           *private_data);
+
+/*
+ * Streaming FIND: the recursive walk, on the same terms as the streaming
+ * READDIR above -- `reset` before every execution, `append` per entry,
+ * append must not emit and reset must take back everything it did.
+ *
+ * WHAT THE WALK HANDS OVER.  Both callbacks receive the entry's path RELATIVE
+ * TO THE ROOT, as chimera_vfs_find reports it: each component preceded by a
+ * '/', so the root's own children are "/name" and their children
+ * "/name/child"; the root itself is never an entry, and neither is "." or
+ * "..".  The attributes are what the caller's attr_mask asked for, with the
+ * fh and the mode always present (the walk needs both to descend), and the
+ * ACL stripped as every result here strips it.  Entries arrive in the
+ * backend's readdir order, a directory's own entry BEFORE anything below it.
+ *
+ * `filter` is asked only for a DIRECTORY entry, before that entry's own
+ * append: 0 descends into it, non-zero prunes the subtree below it.  The
+ * directory entry itself is still appended either way -- pruning is about
+ * what is walked, not what is reported, and the S3 consumers decide per entry
+ * whether a directory is an object or pure traversal.
+ *
+ * `append` returns 0 to take the entry and -1 to stop.  chimera_vfs_find has
+ * no way to abandon a walk in flight, so a stop is expressed on this side:
+ * from that entry on, nothing more is appended and every filter prunes, and
+ * the walker drains what it had already dispatched.  The op then reports OK
+ * with `eof` CLEAR, exactly as a refused READDIR entry leaves the page; a walk
+ * that ran out of entries reports eof SET.  What a refusal bounds is what the
+ * caller stages, not what the backend reads.
+ */
+typedef int (*chimera_vfs_compound_find_filter_t)(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data);
+
+typedef int (*chimera_vfs_compound_find_append_t)(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
     void                           *private_data);
 
 struct chimera_vfs_compound_dirent {
@@ -642,6 +723,34 @@ struct chimera_vfs_compound_op {
      * sequence and releases them afterwards.  NULL / 0 is an ordinary READ. */
     struct evpl_iovec                    *dest_iov;
     int                                   dest_niov;
+
+    /* ---- GET_LAYOUT ---- */
+    uint64_t                              layout_offset;
+    uint64_t                              layout_length;
+    uint32_t                              layout_iomode;
+    uint32_t                              layout_class;
+    uint32_t                              layout_max_segments;
+
+    /* ---- FIND: the walk's three callbacks -- see the typedefs.  `reset`
+     * is READDIR's: the reversibility contract is the same one, and a
+     * caller that stages into request-local arrays gives a reset that
+     * truncates them. */
+    chimera_vfs_compound_find_filter_t    find_filter;
+    chimera_vfs_compound_find_append_t    find_append;
+    chimera_vfs_compound_readdir_reset_t  find_reset;
+    void                                 *find_private;
+    /* Executor scratch: append refused an entry and the walk is being
+     * drained -- see the FIND typedefs.  Cleared before every execution. */
+    uint8_t                               find_stopped;
+
+    /* ---- RECALL: the object, when it is not the current one (COPIED;
+     * recall_fh_len 0 means the current object), the CHIMERA_CLAIM_* floor
+     * the parking recall leaves each holder at, and CHIMERA_VFS_COMPOUND_
+     * RECALL_*.  See the adder. */
+    uint8_t                               recall_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              recall_fh_len;
+    uint8_t                               recall_retain;
+    unsigned int                          recall_flags;
 
     /* A PATH-ADDRESSED op resolves this, relative to the sequence's current
      * file handle, instead of addressing the current object.  Owned by the
@@ -833,6 +942,26 @@ struct chimera_vfs_compound_op {
     void                               *buffer;
     uint32_t                            buffer_len;
     uint32_t                            buffer_count;   /* LISTXATTRS, LIST_STREAMS: entries */
+
+    /* GET_LAYOUT: the backend's answer, COPIED out of its callback into
+     * arrays the compound owns and frees -- the backend's own are valid only
+     * while that callback runs.  layout_returned_class is the class the
+     * backend actually produced; a caller that asked for another treats the
+     * mismatch as it would on the per-op path.  Both counts are 0 and both
+     * arrays NULL until the op has run OK. */
+    uint32_t                            layout_num_segments;
+    struct chimera_vfs_layout_segment  *layout_segments;
+    uint32_t                            layout_num_devices;
+    struct chimera_vfs_layout_device   *layout_devices;
+    uint32_t                            layout_returned_class;
+
+    /* RECALL: a holder still stands in the way when the op answers.  For the
+     * parking shape that is a live share holder left after the recall
+     * drained -- a client that acked the break but kept the file open, the
+     * one thing recall_caching_fh reports; for NOWAIT it is a holder whose
+     * break is still outstanding, the boolean NFSv4 turns into
+     * NFS4ERR_DELAY.  0 is the same answer in both: nothing in the way. */
+    uint8_t                             recall_still_open;
 };
 
 /*
@@ -1188,6 +1317,91 @@ chimera_vfs_compound_add_remove_stream(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen);
+
+/* Where the data of the object the op addresses lives: up to `max_segments`
+ * segments (capped at CHIMERA_VFS_LAYOUT_MAX_SEGMENTS, as the per-op call
+ * caps it) covering [offset, offset + length) at `iomode`, in
+ * `layout_class` (a CHIMERA_VFS_LAYOUT_CLASS_*).  The answer is copied into
+ * the op's layout_* arrays -- see the results.  Only a CAP_LAYOUT_SOURCE
+ * backend answers; the rest report ENOTSUP, which stops the sequence as any
+ * failing op does. */
+int
+chimera_vfs_compound_add_get_layout(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     offset,
+    uint64_t                     length,
+    uint32_t                     iomode,
+    uint32_t                     layout_class,
+    uint32_t                     max_segments);
+
+/* Walk the tree below the current object -- see the FIND op and the
+ * typedefs.  `attr_mask` is fetched for every entry; the fh and the mode are
+ * added to it because the walk descends on them.  All three callbacks are
+ * required: a walk that stages nothing has nowhere to put an entry but
+ * `append`, and a walk that cannot be reset cannot be re-run. */
+int
+chimera_vfs_compound_add_find(
+    struct chimera_vfs_compound         *compound,
+    uint64_t                             attr_mask,
+    chimera_vfs_compound_find_filter_t   filter,
+    chimera_vfs_compound_find_append_t   append,
+    chimera_vfs_compound_readdir_reset_t reset,
+    void                                *private_data);
+
+/* RECALL kicks the recall and answers at once instead of parking: the
+ * chimera_vfs_claim_break_caching shape, a FULL recall (every caching
+ * holder broken all the way down, which is why `retain` does not apply to
+ * it) whose answer is whether a holder's break is still outstanding.  NFSv4
+ * turns that boolean into NFS4ERR_DELAY and lets the client retry; the
+ * retry finds the recall drained. */
+#define CHIMERA_VFS_COMPOUND_RECALL_NOWAIT (1U << 0)
+
+/* Recall the caching leases on `fh`, or -- with fh NULL / fh_len 0 -- on the
+ * object the op addresses: an in_handle, a use_handle target, the current
+ * open, or else the current file handle, which needs nothing opened.  The
+ * fh is copied.
+ *
+ * WITHOUT NOWAIT the op parks until the recall drains, and what is drained
+ * is what recall_handle_lease and recall_caching_fh drain today, the two
+ * being one shape with two arguments:
+ *
+ *   the SPARED handle.  When the op addresses a handle, that handle's own
+ *   lease is spared -- the operating open must not break the lease it
+ *   holds on the file it is changing (recall_handle_lease, the SMB
+ *   delete-on-close SetInfo, which lends the open with PUTHANDLE).  A
+ *   recall by bare fh spares nothing: every holder is broken
+ *   (recall_caching_fh, the SMB directory-rename recall of each contained
+ *   child).  A handle the executor opened for an earlier op holds no lease
+ *   and sparing it changes nothing.
+ *
+ *   the RETAIN floor.  Each holder is broken ONCE, down to `retain` and no
+ *   further -- CHIMERA_CLAIM_CR for the delete-on-close recall (RH -> R),
+ *   CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW for the rename recall (RWH -> RW:
+ *   a rename invalidates a contained open's cached handle, not its data),
+ *   0 to break every caching mode.  A holder already at or below the floor
+ *   is not broken at all.
+ *
+ * The op then parks while any holder it broke is still BREAKING, and
+ * answers when the last ack (or a deadline revoke) lands -- on the
+ * submitting thread, because the claim core resumes a parked recall through
+ * the owning thread's doorbell before it runs anything of the request's.
+ * `recall_still_open` is then whether a live share holder remains.
+ *
+ * WITH NOWAIT `retain` must be 0 (a non-zero floor is refused at build,
+ * because the full recall has no floor to honour), the op never parks, and
+ * `recall_still_open` is the break-outstanding boolean.
+ *
+ * A parking RECALL is a PARKING op: nothing behind it runs until the recall
+ * drains, and the sequence cannot yet be told it parked nor be cancelled
+ * while it is -- the park callback and chimera_vfs_compound_cancel arrive
+ * with the CLAIM op, and this op is where they attach. */
+int
+chimera_vfs_compound_add_recall(
+    struct chimera_vfs_compound *compound,
+    const uint8_t               *fh,
+    uint32_t                     fh_len,
+    uint8_t                      retain,
+    unsigned int                 flags);
 
 /* Open, and with CHIMERA_VFS_OPEN_CREATE create, `name` in the current object;
  * the opened object becomes current.  A NULL (or empty) `name` opens the
