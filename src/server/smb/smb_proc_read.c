@@ -11,6 +11,24 @@
 #include "vfs/vfs_claim.h"
 #include "vfs/vfs_compound.h"
 
+/* Map a VFS read error to the SMB2 status a client expects.  Every failure used
+ * to collapse to INTERNAL_ERROR; the cases here are the ones the other
+ * data-path handlers (FLUSH, SET_INFO) already tell apart. */
+static inline uint32_t
+chimera_smb_read_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:  return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_EISDIR: return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+        case CHIMERA_VFS_EINVAL: return SMB2_STATUS_INVALID_PARAMETER;
+        case CHIMERA_VFS_ESTALE: return SMB2_STATUS_FILE_CLOSED;
+        case CHIMERA_VFS_EIO:    return SMB2_STATUS_IO_DEVICE_ERROR;
+        default:                 return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_read_error_status */
+
 /*
  * Completion for one SMB2_CHANNEL_RDMA_V1 read transfer (RDMA Write to a client
  * buffer descriptor).  evpl invokes this once per evpl_rdma_write issued by
@@ -128,7 +146,7 @@ chimera_smb_read_callback(
      * instead, so those iovecs must be released here to avoid a leak. */
     if (error_code) {
         evpl_iovecs_release(evpl, request->read.iov, niov);
-        chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(private_data, chimera_smb_read_error_status(error_code));
         return;
     }
 

@@ -28,25 +28,46 @@ chimera_smb_query_directory_status(enum chimera_vfs_error error_code)
 
 static void
 chimera_smb_query_directory_readdir_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
+    enum chimera_vfs_error error_code,
+    uint64_t               cookie,
+    uint64_t               verifier,
+    uint32_t               eof,
+    void                  *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
     /* Drop the extra handle reference taken in chimera_smb_query_directory.  Do
      * this before releasing the open_file: once the readdir is done with the
-     * handle it is safe to let a racing CLOSE finish tearing it down. */
-    if (handle && handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
-        chimera_vfs_release(request->compound->thread->vfs_thread, handle);
+     * handle it is safe to let a racing CLOSE finish tearing it down.
+     *
+     * The pointer is the one captured at the dup, not open_file->handle: that
+     * same racing CLOSE NULLs the open's handle whether or not this reference
+     * is outstanding, and reading it here would skip the release and leak the
+     * reference the dup exists to hold. */
+    if (request->query_directory.handle) {
+        chimera_vfs_release(request->compound->thread->vfs_thread,
+                            request->query_directory.handle);
+        request->query_directory.handle = NULL;
     }
 
     if (request->query_directory.last_file_offset) {
         *request->query_directory.last_file_offset = 0;
+    }
+
+    /* The enumeration ran off the end of the directory: mark the open fully
+     * enumerated so the trailing QUERY_DIRECTORY every client sends to collect
+     * STATUS_NO_MORE_FILES is answered from the sentinel check at the top of
+     * chimera_smb_query_directory rather than by another backend readdir.
+     * When it stopped short instead -- the reply buffer filled, or
+     * RETURN_SINGLE_ENTRY -- the cursor stays at the last entry marshalled,
+     * which the entry callback set; `cookie` is the entry that was refused
+     * and would be skipped if the next page resumed from it. */
+    if (error_code == CHIMERA_VFS_OK) {
+        request->query_directory.eof = eof ? 1 : 0;
+
+        if (eof) {
+            request->query_directory.open_file->position = UINT64_MAX;
+        }
     }
 
     chimera_smb_open_file_release(request, request->query_directory.open_file);
@@ -364,9 +385,9 @@ chimera_smb_query_directory_reset(
     struct chimera_smb_request *request = private_data;
 
     request->query_directory.output_length       = 0;
-    request->query_directory.last_file_offset     = NULL;
-    request->query_directory.flags                = request->query_directory.wire_flags;
-    request->query_directory.open_file->position  = request->query_directory.start_position;
+    request->query_directory.last_file_offset    = NULL;
+    request->query_directory.flags               = request->query_directory.wire_flags;
+    request->query_directory.open_file->position = request->query_directory.start_position;
 } /* chimera_smb_query_directory_reset */
 
 static int
@@ -390,21 +411,30 @@ chimera_smb_query_directory_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    struct chimera_smb_request     *request = private_data;
-    enum chimera_vfs_error          status;
-    struct chimera_vfs_open_handle *handle;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              cookie = 0, verifier = 0;
+    uint32_t                              eof = 0;
 
+    /* Everything the completion needs comes out of the sequence before it is
+     * freed: a freed sequence is recycled and reset.  The READDIR is the last
+     * op, and its page results are what the backend reported when it stopped. */
     status = chimera_vfs_compound_status(compound);
 
-    /* The reference taken before the sequence, handed back so the completion
-     * below drops it on exactly the terms it always has.  The sequence borrowed
-     * the handle and never owned it. */
-    handle = request->query_directory.open_file->handle;
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
+        cookie   = op->r_cookie;
+        verifier = op->r_verifier;
+        eof      = op->eof;
+    }
 
     chimera_vfs_compound_free(compound);
     request->vfs_compound = NULL;
 
-    chimera_smb_query_directory_readdir_complete(status, handle, 0, 0, 0, NULL,
+    chimera_smb_query_directory_readdir_complete(status, cookie, verifier, eof,
                                                  request);
 } /* chimera_smb_query_directory_sequence_complete */
 
@@ -536,9 +566,15 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
      * second open of the same fh, which the file-creation path does to the
      * parent directory) -- closes the backend handle immediately, tearing down
      * the directory inode while the readdir is still iterating it.  The matching
-     * release is in chimera_smb_query_directory_readdir_complete. */
+     * release is in chimera_smb_query_directory_readdir_complete, which
+     * releases the pointer captured here -- the CLOSE that this reference
+     * defends against also NULLs open_file->handle, so it cannot be re-read
+     * once the sequence has finished. */
     if (request->query_directory.open_file->handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
         chimera_vfs_dup_handle(thread->vfs_thread, request->query_directory.open_file->handle);
+        request->query_directory.handle = request->query_directory.open_file->handle;
+    } else {
+        request->query_directory.handle = NULL;
     }
 
     uint64_t readdir_mask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME;

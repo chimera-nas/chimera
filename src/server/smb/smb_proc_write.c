@@ -19,6 +19,28 @@ chimera_smb_write_pre_attr_mask(const struct chimera_smb_open_file *open_file)
            ? CHIMERA_VFS_ATTR_MTIME : 0;
 } /* chimera_smb_write_pre_attr_mask */
 
+/* Map a VFS write error to the SMB2 status a client expects.  Every failure
+ * used to collapse to INTERNAL_ERROR, which hid the one a client acts on --
+ * DISK_FULL -- behind a status it retries; the cases here are the ones FLUSH
+ * and SET_INFO already tell apart. */
+static inline uint32_t
+chimera_smb_write_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_ENOSPC:
+        case CHIMERA_VFS_EDQUOT: return SMB2_STATUS_DISK_FULL;
+        case CHIMERA_VFS_EROFS:  return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:  return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_EISDIR: return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+        case CHIMERA_VFS_EINVAL: return SMB2_STATUS_INVALID_PARAMETER;
+        case CHIMERA_VFS_ESTALE: return SMB2_STATUS_FILE_CLOSED;
+        case CHIMERA_VFS_EIO:    return SMB2_STATUS_IO_DEVICE_ERROR;
+        default:                 return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_write_error_status */
+
 /* Completion for the mtime-restore setattr issued after a write through a
  * write-time-sticky handle.  The write itself already succeeded; a failed
  * restore leaves a slightly-advanced write time but is not worth failing the
@@ -83,7 +105,16 @@ chimera_smb_write_callback(
 
     /* A handle that explicitly set its write time has "taken control" of it:
      * the backend bumped mtime as a side effect of this write, so restore it to
-     * the pre-write value (reported in pre_attr) to keep it frozen. */
+     * the pre-write value (reported in pre_attr) to keep it frozen.
+     *
+     * This stays a separate setattr after the sequence rather than a SETATTR
+     * op in it: the value restored is the mtime the WRITE itself sampled, which
+     * exists only once the WRITE has run, and nothing lets a later op in the
+     * same sequence be filled in from an earlier op's result yet.
+     *
+     * It acts on the handle the sequence borrowed, captured before submission;
+     * open_file->handle is not re-read here because a pipelined CLOSE on the
+     * same FileId NULLs it whether or not a write is in flight. */
     if (!error_code &&
         (request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
         (pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
@@ -94,7 +125,7 @@ chimera_smb_write_callback(
 
         chimera_vfs_setattr(thread->vfs_thread,
                             &request->session_handle->session->cred,
-                            request->write.open_file->handle,
+                            request->write.handle,
                             &request->write.restore_attrs,
                             0,
                             0,
@@ -104,7 +135,7 @@ chimera_smb_write_callback(
     }
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
-    chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(private_data, chimera_smb_write_error_status(error_code));
 } /* chimera_smb_write_callback */
 
 static void
@@ -147,12 +178,17 @@ chimera_smb_write_submit(
     struct chimera_server_smb_thread *thread,
     const struct chimera_claim_actor *io_owner)
 {
+    /* The handle this write runs on, captured once so everything after the
+     * sequence -- the sticky-mtime restore -- acts on the same one the
+     * sequence borrowed. */
+    request->write.handle = request->write.open_file->handle;
+
     request->vfs_compound = chimera_vfs_compound_alloc(
         thread->vfs_thread,
         &request->session_handle->session->cred);
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
-                                       request->write.open_file->handle,
+                                       request->write.handle,
                                        CHIMERA_VFS_OPEN_INFERRED);
 
     chimera_vfs_compound_add_write(
