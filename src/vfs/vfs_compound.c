@@ -43,6 +43,7 @@
 #include "vfs_release.h"
 #include "vfs_claim.h"
 #include "sdk/vfs_access.h"
+#include "sdk/vfs_acl.h"
 #include "common/macros.h"
 
 struct chimera_vfs_compound {
@@ -161,6 +162,28 @@ struct chimera_vfs_compound {
 static void chimera_vfs_compound_step(
     struct chimera_vfs_compound *compound);
 
+/*
+ * Release the by-value ACL and SIDs an attribute RESULT slot carries.
+ *
+ * The rule that makes this safe to call blind: a non-NULL va_acl,
+ * va_owner_sid or va_group_sid in any of an op's result slots (attr,
+ * pre_attr, the four dir_* slots) is heap memory the compound allocated in
+ * chimera_vfs_compound_store_attr_to, and nothing else ever writes those
+ * pointers there.  The op's set_attr is NOT a result slot -- its pointers are
+ * the caller's, BORROWED, and are never passed through here.
+ */
+static void
+chimera_vfs_compound_attr_release(struct chimera_vfs_attrs *attr)
+{
+    free(attr->va_acl);
+    free(attr->va_owner_sid);
+    free(attr->va_group_sid);
+
+    attr->va_acl       = NULL;
+    attr->va_owner_sid = NULL;
+    attr->va_group_sid = NULL;
+} /* chimera_vfs_compound_attr_release */
+
 SYMBOL_EXPORT struct chimera_vfs_compound *
 chimera_vfs_compound_alloc(
     struct chimera_vfs_thread     *thread,
@@ -271,6 +294,15 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
         /* A GET_LAYOUT's copies of the backend's segments and devices. */
         free(compound->ops[i].layout_segments);
         free(compound->ops[i].layout_devices);
+        /* The by-value ACL and SID copies in every attribute result slot --
+         * see chimera_vfs_compound_store_attr_to.  set_attr is not one of
+         * them: what it points at is the caller's. */
+        chimera_vfs_compound_attr_release(&compound->ops[i].attr);
+        chimera_vfs_compound_attr_release(&compound->ops[i].pre_attr);
+        chimera_vfs_compound_attr_release(&compound->ops[i].dir_pre_attr);
+        chimera_vfs_compound_attr_release(&compound->ops[i].dir_post_attr);
+        chimera_vfs_compound_attr_release(&compound->ops[i].from_dir_pre_attr);
+        chimera_vfs_compound_attr_release(&compound->ops[i].from_dir_post_attr);
 
         /* A LOCK's file state, on the same terms as its handle above: ours
          * until the caller takes it.  PUT, never released: a file state still
@@ -2335,35 +2367,89 @@ chimera_vfs_compound_open_callback(
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_open_callback */
 
-/* Copy a backend's attrs into an op result.
- *
- * va_acl is dropped rather than copied.  A backend reports the ACL by pointing
- * va_acl at its own live inode state (memfs: attr.va_acl = inode->acl), valid
- * only for the duration of its completion -- so a struct copy that survives
- * the callback carries a pointer to memory the caller must not read.  Storing
- * it would leave every consumer one dereference away from a use-after-free
- * that no test would reliably catch.
- *
- * So the sequence does not offer ACLs: the bit is cleared with the pointer, a
- * caller that asks for one sees it absent rather than dangling, and a caller
- * that needs one issues the getattr itself.  Anything computed FROM the ACL
- * while it was live -- ACCESS's granted mask -- is unaffected. */
 /* The executor asks for these on a directory it changes whatever the caller
  * wanted, because NFSv4's change_info4 is built from them.  A caller's own
  * directory masks are added to this, never substituted for it. */
 #define CHIMERA_VFS_COMPOUND_DIR_FLOOR \
         (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME)
 
+/* A SID the backend reported, copied into a heap SID the slot owns; NULL and
+* the bit cleared when it reported none.  A SID that fails the SDK's presence
+* check is "none": the bound is chimera_sid_present's, not the reporter's. */
+static struct chimera_sid *
+chimera_vfs_compound_store_sid(
+    struct chimera_vfs_attrs *dst,
+    const struct chimera_sid *sid,
+    uint64_t                  bit)
+{
+    struct chimera_sid *copy;
+
+    if (!(dst->va_set_mask & bit) || !chimera_sid_present(sid)) {
+        dst->va_set_mask &= ~bit;
+        return NULL;
+    }
+
+    copy = malloc(sizeof(*copy));
+
+    *copy = *sid;
+
+    return copy;
+} /* chimera_vfs_compound_store_sid */
+
+/*
+ * Copy a backend's attrs into an op result slot -- BY VALUE, the ACL and the
+ * SIDs included.
+ *
+ * A backend reports the ACL by pointing va_acl at storage valid only for the
+ * duration of its completion (memfs: a per-thread scratch it fills from the
+ * inode; the SDK contract on va_acl says exactly this), and va_owner_sid /
+ * va_group_sid share that contract.  So the struct copy is followed by a deep
+ * copy of each of the three into heap memory the slot owns, and the pointers
+ * are re-aimed at the copies; the bits stay set.  The ACL is a flat header
+ * plus an array of 88-byte ACEs with no pointers in it, so a memcpy of
+ * chimera_acl_size(num_aces) bytes IS the copy -- the storage serializer
+ * (chimera_acl_serialize) would only repack the same bytes and unpack them
+ * again.  Cost: one malloc per ACL-bearing slot (~4 + 88 * num_aces bytes;
+ * a mode-synthesized ACL is 3 to 5 ACEs) and one 72-byte malloc per SID the
+ * backend actually has, which is rare.
+ *
+ * A slot is written once per execution and a retry writes it again, so the
+ * previous copy is released first -- the GET_LAYOUT rule.  Everything ends up
+ * freed by reset, through chimera_vfs_compound_attr_release, on the strength
+ * of the invariant stated there.
+ */
 static void
 chimera_vfs_compound_store_attr_to(
     struct chimera_vfs_attrs       *dst,
     const struct chimera_vfs_attrs *attr)
 {
+    const struct chimera_acl *acl;
+    size_t                    size;
+
+    chimera_vfs_compound_attr_release(dst);
+
     *dst = *attr;
 
     dst->va_acl       = NULL;
-    dst->va_req_mask &= ~CHIMERA_VFS_ATTR_ACL;
-    dst->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    dst->va_owner_sid = NULL;
+    dst->va_group_sid = NULL;
+
+    acl = attr->va_acl;
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && acl &&
+        acl->num_aces <= CHIMERA_ACL_MAX_ACES) {
+        size = chimera_acl_size(acl->num_aces);
+
+        dst->va_acl = malloc(size);
+        memcpy(dst->va_acl, acl, size);
+    } else {
+        dst->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    }
+
+    dst->va_owner_sid = chimera_vfs_compound_store_sid(
+        dst, attr->va_owner_sid, CHIMERA_VFS_ATTR_OWNER_SID);
+    dst->va_group_sid = chimera_vfs_compound_store_sid(
+        dst, attr->va_group_sid, CHIMERA_VFS_ATTR_GROUP_SID);
 } /* chimera_vfs_compound_store_attr_to */
 
 static void
@@ -2522,11 +2608,22 @@ chimera_vfs_compound_readdir_entry(
     dirent->name[namelen] = '\0';
 
     dirent->attr = *attrs;
-    /* Same rule as every other attribute result here: the backend owns the ACL
-     * only while this callback runs. */
+    /* The one attribute result that is NOT by value: a staged entry is a
+     * fixed-size record by design (see the READDIR page note in the header),
+     * and an ACL is not -- up to CHIMERA_ACL_MAX_ACES of 88 bytes, times a
+     * page of up to 512 entries.  The backend owns the ACL and the SIDs only
+     * while this callback runs, so they are dropped here, bits and pointers
+     * together; a caller that wants per-entry ACLs streams (readdir_append is
+     * handed the live attrs) as every consumer that marshals them does. */
     dirent->attr.va_acl       = NULL;
-    dirent->attr.va_req_mask &= ~CHIMERA_VFS_ATTR_ACL;
-    dirent->attr.va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    dirent->attr.va_owner_sid = NULL;
+    dirent->attr.va_group_sid = NULL;
+    dirent->attr.va_req_mask &= ~(CHIMERA_VFS_ATTR_ACL |
+                                  CHIMERA_VFS_ATTR_OWNER_SID |
+                                  CHIMERA_VFS_ATTR_GROUP_SID);
+    dirent->attr.va_set_mask &= ~(CHIMERA_VFS_ATTR_ACL |
+                                  CHIMERA_VFS_ATTR_OWNER_SID |
+                                  CHIMERA_VFS_ATTR_GROUP_SID);
 
     op->num_entries++;
 
@@ -2754,9 +2851,15 @@ chimera_vfs_compound_open_at_callback(
     }
 
     chimera_vfs_compound_store_attr(op, attr);
-    op->dir_pre_attr  = *dir_pre_attr;
-    op->dir_post_attr = *dir_post_attr;
-    op->created       = handle->r_created;
+    /* Through the by-value copy like every other slot: a raw struct copy
+     * would carry the backend's live ACL pointer past its completion. */
+    if (dir_pre_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_pre_attr, dir_pre_attr);
+    }
+    if (dir_post_attr) {
+        chimera_vfs_compound_store_attr_to(&op->dir_post_attr, dir_post_attr);
+    }
+    op->created = handle->r_created;
 
     /* The opened object becomes current.  set_current releases the handle we
      * were holding on the PARENT, which is what we want; the handle this op
@@ -3108,9 +3211,11 @@ chimera_vfs_compound_get_layout_callback(
 /*
  * The FIND bridges.  chimera_vfs_find's callbacks take a private pointer and
  * no op, so each of these looks the op up through the compound and re-issues
- * the call in the caller's shape, with the ACL stripped from the attributes
- * as every other result strips it.  The walk cannot be abandoned once it is
- * dispatched (see the typedefs), so a refused append sets find_stopped and
+ * the call in the caller's shape.  The attributes go through as the walker
+ * hands them over -- nothing is staged, so nothing needs copying, and an ACL
+ * in them is the backend's, live for the duration of the callback exactly as
+ * a streaming READDIR's append sees it.  The walk cannot be abandoned once it
+ * is dispatched (see the typedefs), so a refused append sets find_stopped and
  * the two bridges below then drop entries and prune every directory until
  * the walker has drained.
  */
@@ -3123,15 +3228,12 @@ chimera_vfs_compound_find_filter(
 {
     struct chimera_vfs_compound    *compound = arg;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
-    struct chimera_vfs_attrs        copy;
 
     if (op->find_stopped) {
         return 1;
     }
 
-    chimera_vfs_compound_store_attr_to(&copy, attr);
-
-    return op->find_filter(compound, compound->index, path, pathlen, &copy,
+    return op->find_filter(compound, compound->index, path, pathlen, attr,
                            op->find_private);
 } /* chimera_vfs_compound_find_filter */
 
@@ -3144,15 +3246,12 @@ chimera_vfs_compound_find_entry(
 {
     struct chimera_vfs_compound    *compound = arg;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
-    struct chimera_vfs_attrs        copy;
 
     if (op->find_stopped) {
         return 0;
     }
 
-    chimera_vfs_compound_store_attr_to(&copy, attr);
-
-    if (op->find_append(compound, compound->index, path, pathlen, &copy,
+    if (op->find_append(compound, compound->index, path, pathlen, attr,
                         op->find_private) != 0) {
         op->find_stopped = 1;
     }
