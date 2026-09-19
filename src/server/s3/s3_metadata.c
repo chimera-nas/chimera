@@ -5,10 +5,14 @@
 /*
  * S3 object metadata <-> VFS extended attribute bridge.
  *
- * See s3_metadata.h for the namespace mapping. The store and attach helpers
- * here drive a sequential async state machine (one xattr op outstanding at a
- * time) over a heap-allocated context so that an arbitrary number of headers
- * can be persisted/read without blocking the event loop.
+ * See s3_metadata.h for the namespace mapping.  Every xattr operation here
+ * runs as a VFS sequence.  A store is a run of SETXATTR ops, chunked at the
+ * sequence limit; a read is a LISTXATTRS (issued by the caller, in the same
+ * sequence as its open) whose names fan out into GETXATTR ops as a following
+ * sequence, because how many there are is the list's answer.  A copy is the
+ * three in a row -- list the source, read a chunk of values, write them to
+ * the destination -- since a SETXATTR's value has to be in hand when the op
+ * is built and a GETXATTR's only arrives when its sequence is over.
  */
 
 #include <stdio.h>
@@ -17,7 +21,7 @@
 #include <ctype.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "s3_internal.h"
 #include "s3_metadata.h"
 
@@ -53,10 +57,14 @@ struct chimera_s3_meta_kv {
     int   value_len;
 };
 
-#define CHIMERA_S3_META_MAX 256
+#define CHIMERA_S3_META_MAX       256
+#define CHIMERA_S3_META_VALUE_MAX 16384
 
-/* Context for the store (header -> xattr) state machine. */
-struct chimera_s3_meta_store_ctx {
+/* The captured headers, and the cursor over which of them have been appended
+ * to a sequence.  The request/handle/done triple is set when the store is
+ * driven, which not every store is: a PUT folds what fits into its own setup
+ * sequence and drives only the remainder. */
+struct chimera_s3_meta_store {
     struct chimera_s3_request      *request;
     struct chimera_vfs_open_handle *handle;
     chimera_s3_metadata_done_t      done;
@@ -67,7 +75,7 @@ struct chimera_s3_meta_store_ctx {
     struct chimera_s3_meta_kv       kv[CHIMERA_S3_META_MAX];
 };
 
-/* Context for the attach (xattr -> response header) state machine. */
+/* Context for the attach (xattr -> response header) fan-out. */
 struct chimera_s3_meta_attach_ctx {
     struct chimera_s3_request      *request;
     struct chimera_vfs_open_handle *handle;
@@ -75,10 +83,10 @@ struct chimera_s3_meta_attach_ctx {
     void                           *private_data;
     int                             count;
     int                             cur;
+    int                             chunk_n;
     char                           *names[CHIMERA_S3_META_MAX];
     int                             name_lens[CHIMERA_S3_META_MAX];
-    char                            list_buf[16384];
-    char                            value[16384];
+    char                            value[CHIMERA_S3_META_VALUE_MAX];
 };
 
 /* ---------- header capture ---------- */
@@ -97,16 +105,16 @@ chimera_s3_meta_dup(
 
 static void
 chimera_s3_meta_add_kv(
-    struct chimera_s3_meta_store_ctx *ctx,
-    const char                       *suffix,
-    int                               suffix_len,
-    const char                       *value)
+    struct chimera_s3_meta_store *store,
+    const char                   *suffix,
+    int                           suffix_len,
+    const char                   *value)
 {
     struct chimera_s3_meta_kv *kv;
     char                       name[512];
     int                        name_len;
 
-    if (ctx->count >= CHIMERA_S3_META_MAX) {
+    if (store->count >= CHIMERA_S3_META_MAX) {
         return;
     }
 
@@ -117,7 +125,7 @@ chimera_s3_meta_add_kv(
         return;
     }
 
-    kv            = &ctx->kv[ctx->count++];
+    kv            = &store->kv[store->count++];
     kv->name      = chimera_s3_meta_dup(name, name_len);
     kv->name_len  = name_len;
     kv->value     = chimera_s3_meta_dup(value, strlen(value));
@@ -135,10 +143,10 @@ chimera_s3_meta_capture_user_cb(
     const char *value,
     void       *private_data)
 {
-    struct chimera_s3_meta_store_ctx *ctx = private_data;
-    char                              suffix[512];
-    const char                       *key;
-    int                               key_len, suffix_len, i;
+    struct chimera_s3_meta_store *store = private_data;
+    char                          suffix[512];
+    const char                   *key;
+    int                           key_len, suffix_len, i;
 
     if (strncasecmp(name, "x-amz-meta-", 11) != 0) {
         return;
@@ -161,96 +169,171 @@ chimera_s3_meta_capture_user_cb(
     }
     suffix[suffix_len] = '\0';
 
-    chimera_s3_meta_add_kv(ctx, suffix, suffix_len, value);
+    chimera_s3_meta_add_kv(store, suffix, suffix_len, value);
 } /* chimera_s3_meta_capture_user_cb */
 
-static void
-chimera_s3_meta_capture(struct chimera_s3_meta_store_ctx *ctx)
+struct chimera_s3_meta_store *
+chimera_s3_metadata_capture(struct chimera_s3_request *request)
 {
-    const char *value;
-    int         i;
+    struct chimera_s3_meta_store *store;
+    const char                   *value;
+    int                           i;
+
+    store = calloc(1, sizeof(*store));
 
     for (i = 0; i < CHIMERA_S3_META_SYS_COUNT; i++) {
-        value = evpl_http_request_header(ctx->request->http_request,
+        value = evpl_http_request_header(request->http_request,
                                          chimera_s3_meta_sys_headers[i].header);
         if (value) {
-            chimera_s3_meta_add_kv(ctx,
+            chimera_s3_meta_add_kv(store,
                                    chimera_s3_meta_sys_headers[i].suffix,
                                    strlen(chimera_s3_meta_sys_headers[i].suffix),
                                    value);
         }
     }
 
-    evpl_http_request_header_iterate(ctx->request->http_request,
-                                     chimera_s3_meta_capture_user_cb, ctx);
-} /* chimera_s3_meta_capture */
+    evpl_http_request_header_iterate(request->http_request,
+                                     chimera_s3_meta_capture_user_cb, store);
 
-/* ---------- store state machine ---------- */
+    if (store->count == 0) {
+        free(store);
+        return NULL;
+    }
+
+    return store;
+} /* chimera_s3_metadata_capture */
+
+void
+chimera_s3_metadata_store_free(struct chimera_s3_meta_store *store)
+{
+    int i;
+
+    if (!store) {
+        return;
+    }
+
+    for (i = 0; i < store->count; i++) {
+        free(store->kv[i].name);
+        free(store->kv[i].value);
+    }
+    free(store);
+} /* chimera_s3_metadata_store_free */
+
+int
+chimera_s3_metadata_add_ops(
+    struct chimera_s3_meta_store   *store,
+    struct chimera_vfs_compound    *compound,
+    int                             handle_from,
+    struct chimera_vfs_open_handle *handle,
+    int                             budget)
+{
+    struct chimera_s3_meta_kv *kv;
+    int                        n = 0;
+    int                        index;
+
+    while (store->cur < store->count && n < budget) {
+        kv = &store->kv[store->cur];
+
+        index = chimera_vfs_compound_add_setxattr(compound,
+                                                  CHIMERA_VFS_XATTR_EITHER,
+                                                  kv->name, kv->name_len,
+                                                  kv->value, kv->value_len);
+        if (index < 0) {
+            break;
+        }
+
+        if (handle) {
+            chimera_vfs_compound_op_set_handle(compound, index, handle);
+        } else if (handle_from >= 0) {
+            chimera_vfs_compound_op_use_handle(compound, index, handle_from);
+        }
+
+        store->cur++;
+        n++;
+    }
+
+    return n;
+} /* chimera_s3_metadata_add_ops */
+
+/* ---------- store driver: the remaining headers, a sequence at a time ---------- */
 
 static void chimera_s3_meta_store_next(
-    struct chimera_s3_meta_store_ctx *ctx);
+    struct chimera_s3_meta_store *store);
 
 static void
-chimera_s3_meta_store_finish(struct chimera_s3_meta_store_ctx *ctx)
+chimera_s3_meta_store_finish(struct chimera_s3_meta_store *store)
 {
-    struct chimera_s3_request *request = ctx->request;
-    chimera_s3_metadata_done_t done    = ctx->done;
-    void                      *pd      = ctx->private_data;
-    int                        error   = ctx->error;
-    int                        i;
+    struct chimera_s3_request *request = store->request;
+    chimera_s3_metadata_done_t done    = store->done;
+    void                      *pd      = store->private_data;
+    int                        error   = store->error;
 
-    for (i = 0; i < ctx->count; i++) {
-        free(ctx->kv[i].name);
-        free(ctx->kv[i].value);
-    }
-    chimera_s3_request_drop(ctx->request);
-    free(ctx);
+    chimera_s3_metadata_store_free(store);
+    chimera_s3_request_drop(request);
 
     done(request, error, pd);
 } /* chimera_s3_meta_store_finish */
 
 static void
-chimera_s3_meta_store_set_callback(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+chimera_s3_meta_store_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_s3_meta_store_ctx *ctx = private_data;
+    struct chimera_s3_meta_store *store = private_data;
 
-    if (error_code) {
-        ctx->error = 1;
-        chimera_s3_meta_store_finish(ctx);
+    if (chimera_vfs_compound_status(compound) != CHIMERA_VFS_OK) {
+        store->error = 1;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    if (store->error) {
+        chimera_s3_meta_store_finish(store);
         return;
     }
 
-    ctx->cur++;
-    chimera_s3_meta_store_next(ctx);
-} /* chimera_s3_meta_store_set_callback */
+    chimera_s3_meta_store_next(store);
+} /* chimera_s3_meta_store_sequence_complete */
 
 static void
-chimera_s3_meta_store_next(struct chimera_s3_meta_store_ctx *ctx)
+chimera_s3_meta_store_next(struct chimera_s3_meta_store *store)
 {
-    struct chimera_server_s3_thread *thread = ctx->request->thread;
-    struct chimera_s3_meta_kv       *kv;
+    struct chimera_server_s3_thread *thread = store->request->thread;
+    struct chimera_vfs_compound     *compound;
 
-    if (ctx->cur >= ctx->count) {
-        chimera_s3_meta_store_finish(ctx);
+    if (store->cur >= store->count) {
+        chimera_s3_meta_store_finish(store);
         return;
     }
 
-    kv = &ctx->kv[ctx->cur];
+    compound = chimera_vfs_compound_alloc(thread->vfs, &store->request->cred);
 
-    chimera_vfs_set_xattr(thread->vfs, &ctx->request->cred,
-                          ctx->handle,
-                          CHIMERA_VFS_XATTR_EITHER,
-                          kv->name,
-                          kv->name_len,
-                          kv->value,
-                          kv->value_len,
-                          chimera_s3_meta_store_set_callback,
-                          ctx);
+    chimera_s3_metadata_add_ops(store, compound, -1, store->handle,
+                                CHIMERA_VFS_COMPOUND_MAX_OPS);
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_s3_meta_store_sequence_complete, store);
 } /* chimera_s3_meta_store_next */
+
+void
+chimera_s3_metadata_store_drive(
+    struct chimera_s3_meta_store   *store,
+    struct chimera_s3_request      *request,
+    struct chimera_vfs_open_handle *handle,
+    chimera_s3_metadata_done_t      done,
+    void                           *private_data)
+{
+    store->request      = request;
+    store->handle       = handle;
+    store->done         = done;
+    store->private_data = private_data;
+
+    /* The store outlives the call that drives it: its completion callbacks
+     * dereference the request, so it holds a reference of its own. */
+    chimera_s3_request_get(request);
+
+    chimera_s3_meta_store_next(store);
+} /* chimera_s3_metadata_store_drive */
 
 void
 chimera_s3_metadata_store_from_headers(
@@ -259,18 +342,16 @@ chimera_s3_metadata_store_from_headers(
     chimera_s3_metadata_done_t      done,
     void                           *private_data)
 {
-    struct chimera_s3_meta_store_ctx *ctx;
+    struct chimera_s3_meta_store *store;
 
-    ctx          = calloc(1, sizeof(*ctx));
-    ctx->request = request;
-    chimera_s3_request_get(request);
-    ctx->handle       = handle;
-    ctx->done         = done;
-    ctx->private_data = private_data;
+    store = chimera_s3_metadata_capture(request);
 
-    chimera_s3_meta_capture(ctx);
+    if (!store) {
+        done(request, 0, private_data);
+        return;
+    }
 
-    chimera_s3_meta_store_next(ctx);
+    chimera_s3_metadata_store_drive(store, request, handle, done, private_data);
 } /* chimera_s3_metadata_store_from_headers */
 
 /* ---------- attach (read xattrs -> response headers) ---------- */
@@ -342,96 +423,121 @@ chimera_s3_meta_emit_header(
     }
 } /* chimera_s3_meta_emit_header */
 
+/*
+ * One chunk of GETXATTRs is over.  Every op that ran OK is emitted; an op
+ * that failed is skipped -- a name that vanished between the list and the
+ * read is not an error worth a header -- and the fan-out resumes from the
+ * op after it, since the sequence stopped there.
+ */
 static void
-chimera_s3_meta_attach_get_callback(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
+chimera_s3_meta_attach_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_s3_meta_attach_ctx *ctx = private_data;
+    struct chimera_s3_meta_attach_ctx    *ctx = private_data;
+    const struct chimera_vfs_compound_op *op;
+    uint32_t                              ran, i, value_len;
 
-    if (error_code == CHIMERA_VFS_OK) {
+    ran = chimera_vfs_compound_num_completed(compound);
+
+    for (i = 0; i < ran; i++) {
+        op = chimera_vfs_compound_op(compound, i);
+
+        if (op->status != CHIMERA_VFS_OK) {
+            continue;
+        }
+
+        value_len = op->buffer_len;
         if (value_len >= sizeof(ctx->value)) {
             value_len = sizeof(ctx->value) - 1;
         }
+        memcpy(ctx->value, op->buffer, value_len);
         ctx->value[value_len] = '\0';
-        chimera_s3_meta_emit_header(ctx->request,
-                                    ctx->names[ctx->cur],
+
+        chimera_s3_meta_emit_header(ctx->request, ctx->names[ctx->cur + i],
                                     ctx->value);
     }
 
-    ctx->cur++;
+    chimera_vfs_compound_free(compound);
+
+    ctx->cur += ran;
+
     chimera_s3_meta_attach_next(ctx);
-} /* chimera_s3_meta_attach_get_callback */
+} /* chimera_s3_meta_attach_sequence_complete */
 
 static void
 chimera_s3_meta_attach_next(struct chimera_s3_meta_attach_ctx *ctx)
 {
     struct chimera_server_s3_thread *thread = ctx->request->thread;
+    struct chimera_vfs_compound     *compound;
+    int                              i, index;
 
     if (ctx->cur >= ctx->count) {
         chimera_s3_meta_attach_finish(ctx);
         return;
     }
 
-    chimera_vfs_get_xattr(thread->vfs, &ctx->request->cred,
-                          ctx->handle,
-                          ctx->names[ctx->cur],
-                          ctx->name_lens[ctx->cur],
-                          ctx->value,
-                          sizeof(ctx->value) - 1,
-                          chimera_s3_meta_attach_get_callback,
-                          ctx);
-} /* chimera_s3_meta_attach_next */
+    compound = chimera_vfs_compound_alloc(thread->vfs, &ctx->request->cred);
 
-static void
-chimera_s3_meta_attach_list_callback(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
-{
-    struct chimera_s3_meta_attach_ctx *ctx = private_data;
-    uint32_t                           off = 0;
+    ctx->chunk_n = 0;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        /* No xattrs (ENODATA/ENOTSUP) or read error: leave defaults. */
-        chimera_s3_meta_attach_finish(ctx);
-        return;
+    for (i = ctx->cur; i < ctx->count &&
+         ctx->chunk_n < CHIMERA_VFS_COMPOUND_MAX_OPS; i++) {
+        index = chimera_vfs_compound_add_getxattr(compound,
+                                                  ctx->names[i],
+                                                  ctx->name_lens[i],
+                                                  sizeof(ctx->value) - 1);
+        if (index < 0) {
+            break;
+        }
+        chimera_vfs_compound_op_set_handle(compound, index, ctx->handle);
+        ctx->chunk_n++;
     }
 
-    /* names is a back-to-back NUL-terminated list of full xattr names. Keep the
-     * ones in our namespace; the per-name value fetches happen next. */
-    while (off < names_len && ctx->count < CHIMERA_S3_META_MAX) {
+    chimera_vfs_compound_submit(compound,
+                                chimera_s3_meta_attach_sequence_complete, ctx);
+} /* chimera_s3_meta_attach_next */
+
+/* Keep the names in our namespace out of a LISTXATTRS page (back-to-back
+ * NUL-terminated); the per-name value fetches follow. */
+static int
+chimera_s3_meta_collect_names(
+    const char *names,
+    uint32_t    names_len,
+    char      **out_names,
+    int        *out_lens)
+{
+    uint32_t off   = 0;
+    int      count = 0;
+
+    while (off < names_len && count < CHIMERA_S3_META_MAX) {
         const char *name = names + off;
-        int         len  = strlen(name);
+        int         len  = strnlen(name, names_len - off);
 
         if (len > 0 &&
             strncmp(name, CHIMERA_S3_XATTR_PREFIX,
                     CHIMERA_S3_XATTR_PREFIX_LEN) == 0) {
-            ctx->names[ctx->count]     = chimera_s3_meta_dup(name, len);
-            ctx->name_lens[ctx->count] = len;
-            ctx->count++;
+            out_names[count] = chimera_s3_meta_dup(name, len);
+            out_lens[count]  = len;
+            count++;
         }
 
         off += len + 1;
     }
 
-    chimera_s3_meta_attach_next(ctx);
-} /* chimera_s3_meta_attach_list_callback */
+    return count;
+} /* chimera_s3_meta_collect_names */
 
 void
-chimera_s3_metadata_attach_headers(
+chimera_s3_metadata_attach_from_list(
     struct chimera_s3_request      *request,
     struct chimera_vfs_open_handle *handle,
+    const char                     *names,
+    uint32_t                        names_len,
     chimera_s3_metadata_done_t      done,
     void                           *private_data)
 {
     struct chimera_s3_meta_attach_ctx *ctx;
-    struct chimera_server_s3_thread   *thread = request->thread;
 
     ctx          = calloc(1, sizeof(*ctx));
     ctx->request = request;
@@ -440,14 +546,11 @@ chimera_s3_metadata_attach_headers(
     ctx->done         = done;
     ctx->private_data = private_data;
 
-    chimera_vfs_list_xattrs(thread->vfs, &request->cred,
-                            handle,
-                            0,
-                            ctx->list_buf,
-                            sizeof(ctx->list_buf),
-                            chimera_s3_meta_attach_list_callback,
-                            ctx);
-} /* chimera_s3_metadata_attach_headers */
+    ctx->count = chimera_s3_meta_collect_names(names, names_len,
+                                               ctx->names, ctx->name_lens);
+
+    chimera_s3_meta_attach_next(ctx);
+} /* chimera_s3_metadata_attach_from_list */
 
 /* ---------- copy (src xattrs -> dst xattrs) ---------- */
 
@@ -462,13 +565,28 @@ struct chimera_s3_meta_copy_ctx {
     int                             error;
     char                           *names[CHIMERA_S3_META_MAX];
     int                             name_lens[CHIMERA_S3_META_MAX];
-    char                            list_buf[16384];
-    char                            value[16384];
-    int                             value_len;
+    /* The chunk in flight: how many names its GETXATTR sequence ran over,
+     * and the values it brought back (NULL for a name whose read failed,
+     * which is skipped as the per-op copy skipped it). */
+    int                             chunk_ran;
+    char                           *values[CHIMERA_VFS_COMPOUND_MAX_OPS];
+    uint32_t                        value_lens[CHIMERA_VFS_COMPOUND_MAX_OPS];
 };
 
 static void chimera_s3_meta_copy_next(
     struct chimera_s3_meta_copy_ctx *ctx);
+
+static void
+chimera_s3_meta_copy_release_values(struct chimera_s3_meta_copy_ctx *ctx)
+{
+    int i;
+
+    for (i = 0; i < ctx->chunk_ran; i++) {
+        free(ctx->values[i]);
+        ctx->values[i] = NULL;
+    }
+    ctx->chunk_ran = 0;
+} /* chimera_s3_meta_copy_release_values */
 
 static void
 chimera_s3_meta_copy_finish(struct chimera_s3_meta_copy_ctx *ctx)
@@ -479,6 +597,8 @@ chimera_s3_meta_copy_finish(struct chimera_s3_meta_copy_ctx *ctx)
     int                        error   = ctx->error;
     int                        i;
 
+    chimera_s3_meta_copy_release_values(ctx);
+
     for (i = 0; i < ctx->count; i++) {
         free(ctx->names[i]);
     }
@@ -488,108 +608,149 @@ chimera_s3_meta_copy_finish(struct chimera_s3_meta_copy_ctx *ctx)
     done(request, error, pd);
 } /* chimera_s3_meta_copy_finish */
 
+/* The SETXATTR chunk landed on the destination.  A failure stops the copy,
+ * as it did one xattr at a time. */
 static void
-chimera_s3_meta_copy_set_callback(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+chimera_s3_meta_copy_set_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_s3_meta_copy_ctx *ctx = private_data;
 
-    if (error_code) {
+    if (chimera_vfs_compound_status(compound) != CHIMERA_VFS_OK) {
         ctx->error = 1;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    ctx->cur += ctx->chunk_ran;
+    chimera_s3_meta_copy_release_values(ctx);
+
+    if (ctx->error) {
         chimera_s3_meta_copy_finish(ctx);
         return;
     }
 
-    ctx->cur++;
     chimera_s3_meta_copy_next(ctx);
-} /* chimera_s3_meta_copy_set_callback */
+} /* chimera_s3_meta_copy_set_complete */
 
+/* The GETXATTR chunk answered; write what it brought back to the destination
+ * as the following sequence.  A name whose read failed is skipped, and the
+ * names behind a failure (which did not run) are picked up by the next
+ * chunk. */
 static void
-chimera_s3_meta_copy_get_callback(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
+chimera_s3_meta_copy_get_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_s3_meta_copy_ctx *ctx    = private_data;
-    struct chimera_server_s3_thread *thread = ctx->request->thread;
+    struct chimera_s3_meta_copy_ctx      *ctx    = private_data;
+    struct chimera_server_s3_thread      *thread = ctx->request->thread;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_compound          *set;
+    uint32_t                              ran, i;
+    int                                   index, n = 0;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        /* Source xattr vanished between list and get; skip it. */
-        ctx->cur++;
+    ran = chimera_vfs_compound_num_completed(compound);
+
+    for (i = 0; i < ran; i++) {
+        op = chimera_vfs_compound_op(compound, i);
+
+        if (op->status != CHIMERA_VFS_OK) {
+            ctx->values[i] = NULL;
+            continue;
+        }
+
+        ctx->values[i] = malloc(op->buffer_len ? op->buffer_len : 1);
+        memcpy(ctx->values[i], op->buffer, op->buffer_len);
+        ctx->value_lens[i] = op->buffer_len;
+    }
+
+    ctx->chunk_ran = ran;
+
+    chimera_vfs_compound_free(compound);
+
+    set = chimera_vfs_compound_alloc(thread->vfs, &ctx->request->cred);
+
+    for (i = 0; i < ran; i++) {
+        if (!ctx->values[i]) {
+            continue;
+        }
+        index = chimera_vfs_compound_add_setxattr(set,
+                                                  CHIMERA_VFS_XATTR_EITHER,
+                                                  ctx->names[ctx->cur + i],
+                                                  ctx->name_lens[ctx->cur + i],
+                                                  ctx->values[i],
+                                                  ctx->value_lens[i]);
+        chimera_vfs_compound_op_set_handle(set, index, ctx->dst_handle);
+        n++;
+    }
+
+    if (n == 0) {
+        /* Nothing readable in this chunk: advance past it. */
+        chimera_vfs_compound_free(set);
+        ctx->cur += ran;
+        chimera_s3_meta_copy_release_values(ctx);
         chimera_s3_meta_copy_next(ctx);
         return;
     }
 
-    chimera_vfs_set_xattr(thread->vfs, &ctx->request->cred,
-                          ctx->dst_handle,
-                          CHIMERA_VFS_XATTR_EITHER,
-                          ctx->names[ctx->cur],
-                          ctx->name_lens[ctx->cur],
-                          ctx->value,
-                          value_len,
-                          chimera_s3_meta_copy_set_callback,
-                          ctx);
-} /* chimera_s3_meta_copy_get_callback */
+    chimera_vfs_compound_submit(set, chimera_s3_meta_copy_set_complete, ctx);
+} /* chimera_s3_meta_copy_get_complete */
 
 static void
 chimera_s3_meta_copy_next(struct chimera_s3_meta_copy_ctx *ctx)
 {
     struct chimera_server_s3_thread *thread = ctx->request->thread;
+    struct chimera_vfs_compound     *compound;
+    int                              i, n = 0, index;
 
     if (ctx->cur >= ctx->count) {
         chimera_s3_meta_copy_finish(ctx);
         return;
     }
 
-    chimera_vfs_get_xattr(thread->vfs, &ctx->request->cred,
-                          ctx->src_handle,
-                          ctx->names[ctx->cur],
-                          ctx->name_lens[ctx->cur],
-                          ctx->value,
-                          sizeof(ctx->value),
-                          chimera_s3_meta_copy_get_callback,
-                          ctx);
+    compound = chimera_vfs_compound_alloc(thread->vfs, &ctx->request->cred);
+
+    for (i = ctx->cur; i < ctx->count && n < CHIMERA_VFS_COMPOUND_MAX_OPS; i++) {
+        index = chimera_vfs_compound_add_getxattr(compound,
+                                                  ctx->names[i],
+                                                  ctx->name_lens[i],
+                                                  CHIMERA_S3_META_VALUE_MAX);
+        if (index < 0) {
+            break;
+        }
+        chimera_vfs_compound_op_set_handle(compound, index, ctx->src_handle);
+        n++;
+    }
+
+    chimera_vfs_compound_submit(compound, chimera_s3_meta_copy_get_complete,
+                                ctx);
 } /* chimera_s3_meta_copy_next */
 
 static void
-chimera_s3_meta_copy_list_callback(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
+chimera_s3_meta_copy_list_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_s3_meta_copy_ctx *ctx = private_data;
-    uint32_t                         off = 0;
+    struct chimera_s3_meta_copy_ctx      *ctx = private_data;
+    const struct chimera_vfs_compound_op *op;
 
-    if (error_code != CHIMERA_VFS_OK) {
+    if (chimera_vfs_compound_status(compound) != CHIMERA_VFS_OK) {
         /* Nothing to copy. */
+        chimera_vfs_compound_free(compound);
         chimera_s3_meta_copy_finish(ctx);
         return;
     }
 
-    while (off < names_len && ctx->count < CHIMERA_S3_META_MAX) {
-        const char *name = names + off;
-        int         len  = strlen(name);
+    op = chimera_vfs_compound_op(compound, 0);
 
-        if (len > 0 &&
-            strncmp(name, CHIMERA_S3_XATTR_PREFIX,
-                    CHIMERA_S3_XATTR_PREFIX_LEN) == 0) {
-            ctx->names[ctx->count]     = chimera_s3_meta_dup(name, len);
-            ctx->name_lens[ctx->count] = len;
-            ctx->count++;
-        }
+    ctx->count = chimera_s3_meta_collect_names(op->buffer, op->buffer_len,
+                                               ctx->names, ctx->name_lens);
 
-        off += len + 1;
-    }
+    chimera_vfs_compound_free(compound);
 
     chimera_s3_meta_copy_next(ctx);
-} /* chimera_s3_meta_copy_list_callback */
+} /* chimera_s3_meta_copy_list_complete */
 
 void
 chimera_s3_metadata_copy(
@@ -601,6 +762,8 @@ chimera_s3_metadata_copy(
 {
     struct chimera_s3_meta_copy_ctx *ctx;
     struct chimera_server_s3_thread *thread = request->thread;
+    struct chimera_vfs_compound     *compound;
+    int                              index;
 
     ctx          = calloc(1, sizeof(*ctx));
     ctx->request = request;
@@ -610,11 +773,12 @@ chimera_s3_metadata_copy(
     ctx->done         = done;
     ctx->private_data = private_data;
 
-    chimera_vfs_list_xattrs(thread->vfs, &request->cred,
-                            src_handle,
-                            0,
-                            ctx->list_buf,
-                            sizeof(ctx->list_buf),
-                            chimera_s3_meta_copy_list_callback,
-                            ctx);
+    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
+
+    index = chimera_vfs_compound_add_listxattrs(compound, 0,
+                                                CHIMERA_S3_META_VALUE_MAX);
+    chimera_vfs_compound_op_set_handle(compound, index, src_handle);
+
+    chimera_vfs_compound_submit(compound, chimera_s3_meta_copy_list_complete,
+                                ctx);
 } /* chimera_s3_metadata_copy */

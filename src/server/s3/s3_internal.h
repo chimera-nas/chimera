@@ -57,6 +57,7 @@ struct chimera_server_s3_thread;
 struct chimera_s3_multipart_table;
 struct chimera_s3_multipart_upload;
 struct chimera_s3_tagging_ctx;
+struct chimera_s3_meta_store;
 
 /* One <Object> entry from a DeleteObjects (POST /bucket?delete) request.
  * key points into the accumulated request body (unescaped in place). */
@@ -206,7 +207,7 @@ struct chimera_s3_request {
 
     union {
         struct {
-            int                      tmp_name_len;
+            int                           tmp_name_len;
             /* The publish (rename/link of the staged file into place) must
              * fire exactly once, when the body is fully written AND the
              * metadata xattr chain is done.  Body drain and the xattr chain
@@ -214,10 +215,20 @@ struct chimera_s3_request {
              * completion and the metadata-done callback can observe the
              * finished state: meta_pending gates the publish until the
              * xattrs land and published latches the first fire. */
-            int                      meta_pending;
-            int                      published;
-            struct chimera_vfs_attrs set_attr;
-            char                     tmp_name[64];
+            int                           meta_pending;
+            int                           published;
+            /* The metadata headers captured before the setup sequence was
+             * built: what fit rides in that sequence as SETXATTR ops, and
+             * the store drives the remainder once the object exists.  NULL
+             * when the PUT carries no metadata. */
+            struct chimera_s3_meta_store *meta;
+            /* Where the setup sequence put the directory's GETHANDLE and the
+             * object's CREATE_UNLINKED / OPEN, so their handles can be taken
+             * from the finished sequence. */
+            int                           dir_index;
+            int                           create_index;
+            struct chimera_vfs_attrs      set_attr;
+            char                          tmp_name[64];
         } put;
 
         struct {
