@@ -1486,9 +1486,13 @@ chimera_vfs_claim_try_acquire(
                     chimera_vfs_claim_backend_reeval(file->state, file);
                 }
             } else if (do_break) {
+                /* one_shot: a range lock (temporal asymmetry) or a break that
+                 * strips the holder's read cache collapses to its floor in one
+                 * notification rather than stepping (chimera_vfs_claim_break_collapses). */
                 chimera_vfs_claim_begin_break_ex(
                     state, conflict, floor, deadline_ms,
-                    claim->klass == CHIMERA_CLAIM_CLASS_RANGE /* one_shot */);
+                    claim->klass == CHIMERA_CLAIM_CLASS_RANGE ||
+                    chimera_vfs_claim_break_collapses(conflict, floor) /* one_shot */);
                 began_live_break = true;
             } else if (do_wait) {
                 /* Mid-break, deadline pending: the caller waits. */

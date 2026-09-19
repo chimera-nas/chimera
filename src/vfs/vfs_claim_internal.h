@@ -148,6 +148,24 @@ chimera_vfs_claim_contended_floor(
     const struct chimera_vfs_claim *probe,
     const struct chimera_vfs_claim *holder);
 
+/*
+ * A break whose floor strips the holder's read cache must be delivered as a
+ * SINGLE collapse to that floor, not the incremental CW->H->CR step: the
+ * intermediate R|H the step would advertise carries a read cache the acquiring
+ * write / truncate is already invalidating.  smb2.lease.breaking2 opens RWH and
+ * then a truncating OVERWRITE and expects one RWH->NONE break, not RWH->RH.  A
+ * downgrade that KEEPS the read cache (a plain conflicting open -- floor retains
+ * CR, e.g. smb2.lease.v2_epoch2's single RWH->RH) still steps.  Used by both
+ * the acquire-side (try_acquire) and io-side (drive_breaks) break loops, whose
+ * one_shot argument this computes. */
+static inline bool
+chimera_vfs_claim_break_collapses(
+    const struct chimera_vfs_claim *holder,
+    uint8_t                         floor)
+{
+    return (holder->used & CHIMERA_CLAIM_CR) && !(floor & CHIMERA_CLAIM_CR);
+} /* chimera_vfs_claim_break_collapses */
+
 /* Insert / remove a claim on its file class list; caller holds file->lock. */
 void
 chimera_vfs_claim_link_locked(

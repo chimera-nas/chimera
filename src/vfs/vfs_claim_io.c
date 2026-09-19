@@ -125,10 +125,18 @@ chimera_vfs_claim_drive_breaks(
                 (conflict->owner.proto == CHIMERA_CLAIM_PROTO_NFSV4)
                 ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
 
+            uint8_t io_floor =
+                chimera_vfs_claim_contended_floor(probe, conflict);
+
+            /* one_shot when the break strips the holder's read cache: an
+             * owned write / truncating setattr driving this loop collapses the
+             * victim straight to its floor, rather than the incremental step
+             * that would first advertise a read cache the write is invalidating
+             * (smb2.lease.breaking2's truncating OVERWRITE reaches this loop via
+             * the deferred-truncate setattr). */
             chimera_vfs_claim_begin_break_ex(
-                state, conflict,
-                chimera_vfs_claim_contended_floor(probe, conflict),
-                deadline_ms, false);
+                state, conflict, io_floor, deadline_ms,
+                chimera_vfs_claim_break_collapses(conflict, io_floor));
         } else if (chimera_vfs_claim_deadline_passed(conflict)) {
             chimera_vfs_claim_revoke(conflict);
         } else {
