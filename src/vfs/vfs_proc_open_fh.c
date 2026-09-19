@@ -22,6 +22,40 @@ chimera_vfs_open_fh_complete(struct chimera_vfs_request *request)
         if (request->open_fh.r_stream) {
             handle->flags |= CHIMERA_VFS_OPEN_HANDLE_STREAM;
         }
+    } else if (request->status == CHIMERA_VFS_ESTALE &&
+               (request->open_fh.flags & CHIMERA_VFS_OPEN_PATH) &&
+               (request->open_fh.flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        /* A path / validation open (INFERRED|PATH -- e.g. NFSv4 PUTFH
+         * validation, or a metadata op resolving a bare filehandle) that the
+         * backend refused as ESTALE may still name a live object.  On a
+         * handle-resolving backend (linux, io_uring) open_by_handle_at cannot
+         * resolve an inode whose last name is gone, yet that object is a
+         * valid, resolvable handle for as long as an open descriptor pins it
+         * -- which is exactly what read-after-unlink depends on.  The pin
+         * lives in the file cache (a data open is a real open there since
+         * 6f8f7f22); the two caches age independently, so the idle close
+         * sweep can retire this path handle while the data handle still
+         * holds the object open.  Reuse that live pin rather than propagating
+         * a STALE it disproves.  chimera_vfs_release routes the returned
+         * handle back to its own cache by cache_id, so handing a file-cache
+         * handle to a path-open caller is safe. */
+        struct chimera_vfs_open_handle *pinned;
+        uint64_t                        fh_hash;
+
+        fh_hash = chimera_vfs_hash(handle->fh, handle->fh_len);
+
+        pinned = chimera_vfs_open_cache_lookup_ref(
+            thread->vfs->vfs_open_file_cache,
+            handle->fh, handle->fh_len, fh_hash);
+
+        chimera_vfs_release_failed(thread, handle, request->status);
+
+        if (pinned) {
+            request->status = CHIMERA_VFS_OK;
+            handle          = pinned;
+        } else {
+            handle = NULL;
+        }
     } else {
         chimera_vfs_release_failed(thread, handle, request->status);
         handle = NULL;
