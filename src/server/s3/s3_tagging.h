@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <stdint.h>
+#include "vfs/vfs_compound.h"
+
 struct evpl;
 struct chimera_s3_request;
 struct chimera_server_s3_thread;
@@ -33,24 +36,19 @@ struct chimera_s3_tagging_ctx {
     /* Parsed tag set. */
     struct chimera_s3_tag           tags[CHIMERA_S3_TAG_MAX_TAGS];
     int                             n_tags;
-    /* Sequential cursor over xattr ops (set/remove/get). */
+    /* Sequential cursor over the xattr fan-outs: a byte offset into `names`
+     * while walking the listed names (remove / get), a tag index while
+     * writing the parsed set. */
     int                             cur;
-    int                             prev_cur;
-    int                             total;
     /* Which subresource operation is in flight (enum chimera_s3_tagging_op). */
     int                             op;
-    /* The composed xattr name of the set currently in flight.  It must
-     * live here, not on a caller's stack: chimera_vfs_set_xattr keeps the
-     * caller's pointer until the completion callback, and an asynchronous
-     * backend (cairn's delegation thread) reads it after the caller has
-     * returned. */
-    char                            set_name[CHIMERA_S3_TAG_PREFIX_LEN +
-                                             CHIMERA_S3_TAG_MAX_KEY_LEN + 1];
-    /* Names returned by list_xattrs (for GET/DELETE), staged here. */
+    /* Names returned by LISTXATTRS (for GET/PUT/DELETE), staged here. */
     char                           *names;
     int                             names_len;
-    /* Scratch buffer for a single xattr value read (GET). */
-    char                           *valbuf;
+    /* For each op of the fan-out sequence in flight over `names`: the byte
+     * offset just past the name it addresses, so the cursor can resume after
+     * however many of them the sequence ran. */
+    int                             op_next[CHIMERA_VFS_COMPOUND_MAX_OPS];
     /* Response (<Tagging>) builder. */
     char                           *resp_buf;
     int                             resp_len;
@@ -91,19 +89,14 @@ chimera_s3_put_tagging_body_done(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
 
-/* HEAD object: count the object's tag xattrs, add the x-amz-tagging-count
- * response header, then invoke done_cb to finish the request. The object FH is
- * supplied directly (already resolved by the HEAD lookup). */
-void
-chimera_s3_tagging_count_for_head(
-    struct evpl                     *evpl,
-    struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request       *request,
-    const void                      *fh,
-    int                              fh_len,
-    void (                          *done_cb )(
-        struct evpl               *evpl,
-        struct chimera_s3_request *request));
+/* HEAD object: how many of the names in a LISTXATTRS page (back-to-back
+ * NUL-terminated, `names_len` bytes) are tag xattrs -- the value of the
+ * x-amz-tagging-count header.  The HEAD's own head sequence lists the names
+ * alongside its open, so no second open is made for the count. */
+int
+chimera_s3_tagging_count_names(
+    const char *names,
+    uint32_t    names_len);
 
 /* Subresource entry points (?tagging on an object). */
 void
