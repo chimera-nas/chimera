@@ -198,12 +198,15 @@ chimera_smb_copychunk_error_with_body(
 } /* chimera_smb_copychunk_error_with_body */
 
 /* Build the byte-range-lock actor identity for an open exactly as the WRITE/READ
- * paths do, so a copy-chunk's own locks don't conflict with its I/O. */
+ * paths do, so a copy-chunk's own locks don't conflict with its I/O.  `handle`
+ * is the open's VFS handle as captured when the copy began (see
+ * cc_src_handle / cc_dst_handle), not re-read from the open. */
 static inline void
 chimera_smb_copychunk_io_owner(
-    struct chimera_smb_request   *request,
-    struct chimera_smb_open_file *open_file,
-    struct chimera_claim_actor   *actor)
+    struct chimera_smb_request     *request,
+    struct chimera_smb_open_file   *open_file,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_claim_actor     *actor)
 {
     memset(actor, 0, sizeof(*actor));
     actor->owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
@@ -214,7 +217,7 @@ chimera_smb_copychunk_io_owner(
         actor->owner.owner_lo = open_file->file_id.pid;
         actor->owner.owner_hi = open_file->file_id.vid;
     }
-    actor->op_handle = open_file->handle;
+    actor->op_handle = handle;
 } /* chimera_smb_copychunk_io_owner */
 
 /* Issue the next pending chunk, or finish if all are done. */
@@ -247,12 +250,12 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
      * (smb2.ioctl.copy_chunk_src_lock / copy_chunk_dest_lock).  The response body
      * reports zero chunks written. */
     chimera_smb_copychunk_io_owner(request, request->ioctl.cc_src_open_file,
-                                   &io_owner);
+                                   request->ioctl.cc_src_handle, &io_owner);
     if (chimera_vfs_claim_io_denied(
             vfs_state,
-            request->ioctl.cc_src_open_file->handle->fh,
-            request->ioctl.cc_src_open_file->handle->fh_len,
-            request->ioctl.cc_src_open_file->handle->fh_hash,
+            request->ioctl.cc_src_handle->fh,
+            request->ioctl.cc_src_handle->fh_len,
+            request->ioctl.cc_src_handle->fh_hash,
             request->ioctl.cc_chunks[i].src_offset,
             request->ioctl.cc_chunks[i].length,
             false /* read */, &io_owner)) {
@@ -262,12 +265,12 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
     }
 
     chimera_smb_copychunk_io_owner(request, request->ioctl.cc_dst_open_file,
-                                   &io_owner);
+                                   request->ioctl.cc_dst_handle, &io_owner);
     if (chimera_vfs_claim_io_denied(
             vfs_state,
-            request->ioctl.cc_dst_open_file->handle->fh,
-            request->ioctl.cc_dst_open_file->handle->fh_len,
-            request->ioctl.cc_dst_open_file->handle->fh_hash,
+            request->ioctl.cc_dst_handle->fh,
+            request->ioctl.cc_dst_handle->fh_len,
+            request->ioctl.cc_dst_handle->fh_hash,
             request->ioctl.cc_chunks[i].dst_offset,
             request->ioctl.cc_chunks[i].length,
             true /* write */, &io_owner)) {
@@ -280,13 +283,13 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
         vfs_thread, &request->session_handle->session->cred);
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
-                                       request->ioctl.cc_src_open_file->handle,
+                                       request->ioctl.cc_src_handle,
                                        CHIMERA_VFS_OPEN_INFERRED |
                                        CHIMERA_VFS_OPEN_READ_ONLY);
     chimera_vfs_compound_add_savehandle(request->vfs_compound);
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
-                                       request->ioctl.cc_dst_open_file->handle,
+                                       request->ioctl.cc_dst_handle,
                                        CHIMERA_VFS_OPEN_INFERRED);
 
     chimera_vfs_compound_add_copy_range(request->vfs_compound,
@@ -335,6 +338,8 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
 
     request->ioctl.cc_src_open_file  = NULL;
     request->ioctl.cc_dst_open_file  = NULL;
+    request->ioctl.cc_src_handle     = NULL;
+    request->ioctl.cc_dst_handle     = NULL;
     request->ioctl.cc_chunk_idx      = 0;
     request->ioctl.cc_chunks_written = 0;
     request->ioctl.cc_chunk_bytes    = 0;
@@ -425,12 +430,19 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
     request->ioctl.cc_dst_open_file = dst_open_file;
     request->ioctl.cc_src_open_file = src_open_file;
 
+    /* Capture both VFS handles now, once: the copy is one sequence per chunk,
+     * built after the previous chunk's sequence has completed, and a pipelined
+     * CLOSE on either FileId NULLs open_file->handle between them.  Every
+     * chunk addresses the handles the copy started with. */
+    request->ioctl.cc_src_handle = src_open_file->handle;
+    request->ioctl.cc_dst_handle = dst_open_file->handle;
+
     /* Fetch the source size first so a chunk reading past EOF can be rejected
      * with STATUS_INVALID_VIEW_SIZE before any data is copied. */
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
-        src_open_file->handle,
+        request->ioctl.cc_src_handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_copychunk_src_getattr_cb,
         request);
