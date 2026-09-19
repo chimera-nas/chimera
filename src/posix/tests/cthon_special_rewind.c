@@ -22,7 +22,7 @@ main(
     int                   size = 8192;
     int                   fd;
     int                   i;
-    off_t                 off;
+    chimera_off_t                 off;
 
     cthon_Myname = "cthon_special_rewind";
 
@@ -65,7 +65,7 @@ main(
     }
 
     // Rewind to beginning
-    off = chimera_posix_lseek(fd, (off_t) 0, SEEK_SET);
+    off = chimera_posix_lseek(fd, (chimera_off_t) 0, SEEK_SET);
     if (off != 0) {
         fprintf(stderr, "\tfile offset=%ld after rewind, expected 0\n", (long) off);
         chimera_posix_close(fd);

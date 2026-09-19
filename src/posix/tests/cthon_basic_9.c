@@ -10,7 +10,7 @@
 
 #include "cthon_common.h"
 #include "common/platform.h"
-#include <sys/statvfs.h>
+#include "posix/posix_types.h"
 
 static int Tflag = 0;
 static int Fflag = 0;

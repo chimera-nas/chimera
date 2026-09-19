@@ -31,7 +31,7 @@
 #else
 #include <sys/time.h>
 #endif
-#include <dirent.h>
+#include "common/dirent.h"
 
 #include "posix/posix.h"
 #include "posix_test_common.h"

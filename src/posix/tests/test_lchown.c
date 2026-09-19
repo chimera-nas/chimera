@@ -12,8 +12,8 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           file_st;
-    struct stat           link_st;
+    chimera_posix_stat_t           file_st;
+    chimera_posix_stat_t           link_st;
 
     posix_test_init(&env, argv, argc);
 
@@ -79,7 +79,7 @@ main(
     }
 
     // Get stats after lchown
-    struct stat file_st2, link_st2;
+    chimera_posix_stat_t file_st2, link_st2;
 
     rc = chimera_posix_lstat("/test/lchown_file", &file_st2);
 

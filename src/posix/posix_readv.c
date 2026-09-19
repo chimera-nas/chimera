@@ -86,7 +86,7 @@ chimera_posix_readv_internal(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset,
+    chimera_off_t               offset,
     int                 use_fd_offset)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
@@ -168,7 +168,7 @@ chimera_posix_preadv(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset)
+    chimera_off_t               offset)
 {
     return chimera_posix_readv_internal(fd, iov, iovcnt, offset, 0);
 } /* chimera_posix_preadv */
@@ -180,7 +180,7 @@ chimera_posix_preadv64(
     int                 iovcnt,
     int64_t             offset)
 {
-    return chimera_posix_readv_internal(fd, iov, iovcnt, (off_t) offset, 0);
+    return chimera_posix_readv_internal(fd, iov, iovcnt, (chimera_off_t) offset, 0);
 } /* chimera_posix_preadv64 */
 
 SYMBOL_EXPORT ssize_t
@@ -188,7 +188,7 @@ chimera_posix_preadv2(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset,
+    chimera_off_t               offset,
     int                 flags)
 {
     // Ignore RWF_HIPRI and RWF_NOWAIT for now - just behave as preadv
@@ -205,5 +205,5 @@ chimera_posix_preadv64v2(
     int                 flags)
 {
     (void) flags;
-    return chimera_posix_readv_internal(fd, iov, iovcnt, (off_t) offset, 0);
+    return chimera_posix_readv_internal(fd, iov, iovcnt, (chimera_off_t) offset, 0);
 } /* chimera_posix_preadv64v2 */

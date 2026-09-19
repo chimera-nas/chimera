@@ -25,7 +25,7 @@
 #endif
 #include <errno.h>
 #include <signal.h>
-#include <dirent.h>
+#include "common/dirent.h"
 #include <execinfo.h>
 #include <jansson.h>
 #include "posix/posix.h"
@@ -545,7 +545,7 @@ posix_test_configure_diskfs(
             exit(EXIT_FAILURE);
         }
 
-        rc = ftruncate(fd, (off_t) posix_test_diskfs_device_bytes);
+        rc = ftruncate(fd, (chimera_off_t) posix_test_diskfs_device_bytes);
 
         if (rc < 0) {
             fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));

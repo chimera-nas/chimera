@@ -12,7 +12,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           st;
+    chimera_posix_stat_t           st;
     const char           *test_data = "Hello, World! This is test data.";
     size_t                data_len;
 

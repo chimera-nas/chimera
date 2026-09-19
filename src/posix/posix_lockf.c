@@ -41,7 +41,7 @@ SYMBOL_EXPORT int
 chimera_posix_lockf(
     int   fd,
     int   cmd,
-    off_t len)
+    chimera_off_t len)
 {
     struct chimera_posix_client   *posix = chimera_posix_get_global();
     struct chimera_posix_fd_entry *entry;

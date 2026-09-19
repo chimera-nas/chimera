@@ -82,7 +82,7 @@
 /* fsx drives the file through chimera's POSIX shim, whose Linux-shaped
  * fallocate-with-mode entry point stands in for the fallocate(2) that only
  * Linux declares; loff_t likewise. */
-typedef off_t loff_t;
+typedef chimera_off_t loff_t;
 #define fallocate(fd, mode, offset, length) \
         chimera_posix_fallocate_mode(fd, mode, offset, length)
 #endif /* ifndef __linux__ */
@@ -205,8 +205,8 @@ int                           dirpath = 0;                /* -P flag */
 int                           fd;                         /* fd for our test file */
 
 blksize_t                     block_size = 0;
-off_t                         file_size  = 0;
-off_t                         biggest    = 0;
+chimera_off_t                         file_size  = 0;
+chimera_off_t                         biggest    = 0;
 long long                     testcalls  = 0;             /* calls to function "test" */
 
 long long                     simulatedopcount     = 0; /* -b flag */
@@ -753,10 +753,10 @@ logdump(void)
 void
 save_buffer(
     char *buffer,
-    off_t bufferlength,
+    chimera_off_t bufferlength,
     int   local_fd)
 {
-    off_t   ret;
+    chimera_off_t   ret;
     ssize_t byteswritten;
 
     /* Note: this function operates on local file descriptors (fsxgoodfd),
@@ -770,8 +770,8 @@ save_buffer(
         exit(67);
     }
     if (lite) {
-        off_t size_by_seek = lseek(local_fd, (off_t) 0, SEEK_END);
-        if (size_by_seek == (off_t) -1) {
+        chimera_off_t size_by_seek = lseek(local_fd, (chimera_off_t) 0, SEEK_END);
+        if (size_by_seek == (chimera_off_t) -1) {
             prterr("save_buffer: lseek eof");
         } else if (bufferlength > size_by_seek) {
             warn("save_buffer: .fsxgood file too short... will save 0x%llx bytes instead of 0x%llx\n", (unsigned long
@@ -782,8 +782,8 @@ save_buffer(
         }
     }
 
-    ret = lseek(local_fd, (off_t) 0, SEEK_SET);
-    if (ret == (off_t) -1) {
+    ret = lseek(local_fd, (chimera_off_t) 0, SEEK_SET);
+    if (ret == (chimera_off_t) -1) {
         prterr("save_buffer: lseek 0");
     }
 
@@ -911,14 +911,14 @@ check_buffers(
 void
 check_size(void)
 {
-    struct stat statbuf;
-    off_t       size_by_seek;
+    chimera_posix_stat_t statbuf;
+    chimera_off_t       size_by_seek;
 
     if (chimera_posix_fstat(fd, &statbuf)) {
         prterr("check_size: fstat");
         statbuf.st_size = -1;
     }
-    size_by_seek = chimera_posix_lseek(fd, (off_t) 0, SEEK_END);
+    size_by_seek = chimera_posix_lseek(fd, (chimera_off_t) 0, SEEK_END);
     if (file_size != statbuf.st_size || file_size != size_by_seek) {
         prt("Size error: expected 0x%llx stat 0x%llx seek 0x%llx\n",
             (unsigned long long) file_size,
@@ -932,8 +932,8 @@ check_size(void)
 void
 check_trunc_hack(void)
 {
-    struct stat statbuf;
-    off_t       offset = file_size + (off_t) 100000;
+    chimera_posix_stat_t statbuf;
+    chimera_off_t       offset = file_size + (chimera_off_t) 100000;
 
     if (chimera_posix_ftruncate(fd, file_size)) {
         goto ftruncate_err;
@@ -973,7 +973,7 @@ doflush(
 
     if ((p = (char *) mmap(0, map_size, PROT_READ | PROT_WRITE,
                            MAP_FILE | MAP_SHARED, fd,
-                           (off_t) (offset - pg_offset))) == (char *) -1) {
+                           (chimera_off_t) (offset - pg_offset))) == (char *) -1) {
         prterr("doflush: mmap");
         report_failure(202);
     }
@@ -1176,7 +1176,7 @@ domapread(
     map_size  = pg_offset + size;
 
     if ((p = (char *) mmap(0, map_size, PROT_READ, MAP_SHARED, fd,
-                           (off_t) (offset - pg_offset))) == (char *) -1) {
+                           (chimera_off_t) (offset - pg_offset))) == (char *) -1) {
         prterr("domapread: mmap");
         report_failure(190);
     }
@@ -1256,7 +1256,7 @@ pollute_eofpage(unsigned int maxoff)
 
     if ((p = (char *) mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE,
                            MAP_FILE | MAP_SHARED, fd,
-                           (off_t) (offset - pg_offset))) == MAP_FAILED) {
+                           (chimera_off_t) (offset - pg_offset))) == MAP_FAILED) {
         prterr("pollute_eofpage: mmap");
         return;
     }
@@ -1420,7 +1420,7 @@ domapwrite(
 {
     unsigned pg_offset;
     unsigned map_size;
-    off_t    cur_filesize;
+    chimera_off_t    cur_filesize;
     char    *p;
 
     offset -= offset % writebdy;
@@ -1469,7 +1469,7 @@ domapwrite(
 
     if ((p = (char *) mmap(0, map_size, PROT_READ | PROT_WRITE,
                            MAP_FILE | MAP_SHARED, fd,
-                           (off_t) (offset - pg_offset))) == (char *) -1) {
+                           (chimera_off_t) (offset - pg_offset))) == (char *) -1) {
         prterr("domapwrite: mmap");
         report_failure(202);
     }
@@ -1519,7 +1519,7 @@ dotruncate(unsigned size)
         prt("%lld trunc\tfrom 0x%x to 0x%x\n", testcalls, oldsize,
             size);
     }
-    if (chimera_posix_ftruncate(fd, (off_t) size) == -1) {
+    if (chimera_posix_ftruncate(fd, (chimera_off_t) size) == -1) {
         prt("ftruncate1: %x\n", size);
         prterr("dotruncate: ftruncate");
         report_failure(160);
@@ -2004,7 +2004,7 @@ int
 test_dedupe_range(void)
 {
     struct file_dedupe_range *fdr;
-    off_t                     new_len;
+    chimera_off_t                     new_len;
     int                       error;
     int                       ret = 1;
 
@@ -2379,12 +2379,12 @@ writefileimage()
 {
     ssize_t iret;
 
-    if (chimera_posix_lseek(fd, (off_t) 0, SEEK_SET) == (off_t) -1) {
+    if (chimera_posix_lseek(fd, (chimera_off_t) 0, SEEK_SET) == (chimera_off_t) -1) {
         prterr("writefileimage: lseek");
         report_failure(171);
     }
     iret = chimera_posix_write(fd, good_buf, file_size);
-    if ((off_t) iret != file_size) {
+    if ((chimera_off_t) iret != file_size) {
         if (iret == -1) {
             prterr("writefileimage: write");
         } else {
@@ -3571,7 +3571,7 @@ main(
     int         i, style, ch;
     char       *endp, *tmp;
     char        logfile[PATH_MAX];
-    struct stat statbuf;
+    chimera_posix_stat_t statbuf;
     int         o_flags = O_RDWR | O_CREAT | O_TRUNC;
     long long   duration;
 
@@ -3969,7 +3969,7 @@ main(
          * /build/test, else a temp root for hosts without a /build. */
         const char *test_root = getenv("CHIMERA_TEST_ROOT");
         if (test_root == NULL) {
-            struct stat root_st;
+            chimera_posix_stat_t root_st;
             test_root = (stat("/build", &root_st) == 0 &&
                          S_ISDIR(root_st.st_mode)) ? "/build/test"
                                                    : "/tmp/chimera_test";
@@ -4371,15 +4371,15 @@ main(
 #endif /* ifdef URING */
 
     if (!(o_flags & O_TRUNC)) {
-        off_t ret;
-        file_size = maxfilelen = biggest = chimera_posix_lseek(fd, (off_t) 0, SEEK_END);
-        if (file_size == (off_t) -1) {
+        chimera_off_t ret;
+        file_size = maxfilelen = biggest = chimera_posix_lseek(fd, (chimera_off_t) 0, SEEK_END);
+        if (file_size == (chimera_off_t) -1) {
             prterr(fname);
             warn("main: lseek eof");
             exit(94);
         }
-        ret = chimera_posix_lseek(fd, (off_t) 0, SEEK_SET);
-        if (ret == (off_t) -1) {
+        ret = chimera_posix_lseek(fd, (chimera_off_t) 0, SEEK_SET);
+        if (ret == (chimera_off_t) -1) {
             prterr(fname);
             warn("main: lseek 0");
             exit(95);
@@ -4404,7 +4404,7 @@ main(
         }
     } else {
         ssize_t ret, len = file_size;
-        off_t   off = 0;
+        chimera_off_t   off = 0;
 
         while (len > 0) {
             ret = chimera_posix_read(fd, good_buf + off, len);

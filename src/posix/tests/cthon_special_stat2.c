@@ -23,7 +23,7 @@ main(
     int                   pass, filenum;
     char                  dirname[MAXPATHLEN];
     char                  name[MAXPATHLEN];
-    struct stat           statb;
+    chimera_posix_stat_t           statb;
     int                   stats = 0;
     int                   fd;
 

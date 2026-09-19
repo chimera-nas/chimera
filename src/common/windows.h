@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdint.h>
+#include <limits.h>
 #include <string.h>
 #include <malloc.h>
 #include "common/compiler.h"
@@ -102,3 +103,31 @@ static inline struct tm *localtime_r(const time_t *t, struct tm *out)
 #define le16toh(x) ((uint16_t)(x))
 #define le32toh(x) ((uint32_t)(x))
 #define le64toh(x) ((uint64_t)(x))
+
+/* Virtual special-device identifiers retain the complete major/minor pair. */
+#define makedev(major_value, minor_value) (((uint64_t)(major_value) << 32) | (uint32_t)(minor_value))
+#define major(device) ((uint32_t)((uint64_t)(device) >> 32))
+#define minor(device) ((uint32_t)(device))
+#ifndef SSIZE_MAX
+#define SSIZE_MAX INTPTR_MAX
+#endif
+
+static inline char *strndup(const char *source, size_t limit)
+{
+    size_t len = strnlen(source, limit);
+    char *copy = malloc(len + 1);
+    if (copy) {
+        memcpy(copy, source, len);
+        copy[len] = 0;
+    }
+    return copy;
+}
+static inline int ftruncate(int fd, int64_t length)
+{
+    errno_t error = _chsize_s(fd, length);
+    if (error) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}

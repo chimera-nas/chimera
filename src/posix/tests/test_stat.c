@@ -12,7 +12,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           st;
+    chimera_posix_stat_t           st;
     const char           *test_data = "Hello, World!";
     ssize_t               written;
 
@@ -56,7 +56,7 @@ main(
     fprintf(stderr, "  st_gid: %lu\n", (unsigned long) st.st_gid);
     fprintf(stderr, "  st_size: %lu\n", (unsigned long) st.st_size);
 
-    if (st.st_size != (off_t) strlen(test_data)) {
+    if (st.st_size != (chimera_off_t) strlen(test_data)) {
         fprintf(stderr, "Wrong file size: expected %zu, got %lu\n",
                 strlen(test_data), (unsigned long) st.st_size);
         posix_test_fail(&env);

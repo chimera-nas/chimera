@@ -45,7 +45,7 @@ SYMBOL_EXPORT int
 chimera_posix_fstatat(
     int          dirfd,
     const char  *pathname,
-    struct stat *statbuf,
+    chimera_posix_stat_t *statbuf,
     int          flags)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();

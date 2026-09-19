@@ -545,7 +545,7 @@ remove_entries(
     int         i;
     char        buf[1024];
     char        path[2048];
-    struct stat statb;
+    chimera_posix_stat_t statb;
     int         error;
 
     for (i = 0; i < nfiles; i++) {

@@ -37,7 +37,7 @@ chimera_posix_write_same_exec(
 SYMBOL_EXPORT ssize_t
 chimera_posix_write_same(
     int         fd,
-    off_t       offset,
+    chimera_off_t       offset,
     uint32_t    block_size,
     uint64_t    block_count,
     const void *pattern,

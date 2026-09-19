@@ -21,7 +21,7 @@ main(
     float                 elapsed;
     int                   count;
     int                   i;
-    struct stat           statb;
+    chimera_posix_stat_t           statb;
     char                  testfile[MAXPATHLEN];
     int                   fd;
 

@@ -79,7 +79,7 @@ main(
 static void
 statit(const char *name)
 {
-    struct stat    statb;
+    chimera_posix_stat_t    statb;
     struct dirent *di;
     CHIMERA_DIR   *dirp;
     char           fullpath[MAXPATHLEN];

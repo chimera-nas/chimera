@@ -14,7 +14,7 @@
  */
 
 #include "posix_test_common.h"
-#include <dirent.h>
+#include "common/dirent.h"
 
 /*
  * Number of files we add to the test directory after calling opendir()

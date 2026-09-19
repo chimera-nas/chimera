@@ -20,7 +20,7 @@
 #else
 #include <sys/uio.h>
 #endif
-#include <dirent.h>
+#include "common/dirent.h"
 #include "posix_test_common.h"
 
 /* Operation types */
@@ -515,8 +515,8 @@ read_f(
     pathname_t  path;
     int         fd;
     char        buf[FILELEN_MAX];
-    struct stat statb;
-    off_t       off;
+    chimera_posix_stat_t statb;
+    chimera_off_t       off;
     ssize_t     len;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
@@ -640,7 +640,7 @@ stat_f(
 {
     fent_t     *fent;
     pathname_t  path;
-    struct stat statb;
+    chimera_posix_stat_t statb;
     int         ft;
 
     ft = random() % FT_NTYPE;
@@ -691,8 +691,8 @@ truncate_f(
 {
     fent_t     *fent;
     pathname_t  path;
-    off_t       len;
-    struct stat statb;
+    chimera_off_t       len;
+    chimera_posix_stat_t statb;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
         return;
@@ -771,7 +771,7 @@ write_f(
     pathname_t path;
     int        fd;
     char       buf[FILELEN_MAX];
-    off_t      off;
+    chimera_off_t      off;
     size_t     len;
     ssize_t    ret;
 
@@ -859,7 +859,7 @@ do_cleanup(void)
     CHIMERA_DIR   *dir;
     struct dirent *de;
     char           path[PATH_MAX_LEN];
-    struct stat    statb;
+    chimera_posix_stat_t    statb;
 
     dir = chimera_posix_opendir(homedir);
     if (dir) {

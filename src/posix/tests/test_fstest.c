@@ -18,7 +18,7 @@
 
 #include <sys/wait.h>
 #include "posix_test_common.h"
-#include <dirent.h>
+#include "common/dirent.h"
 
 /* Test parameters (settable on the command line) */
 static int   loop_count = 10;
@@ -244,7 +244,7 @@ traverse(
 
     while ((de = chimera_posix_readdir(d))) {
         char        fname[2048];
-        struct stat st;
+        chimera_posix_stat_t st;
 
         if (strcmp(de->d_name, ".") == 0) {
             continue;
@@ -272,7 +272,7 @@ traverse(
 static int
 remove_file(const char *path)
 {
-    struct stat st;
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(path, &st) == 0) {
         if (S_ISDIR(st.st_mode)) {

@@ -34,7 +34,7 @@ main(
         int         fd = pjd_open(n1, O_WRONLY, 0);
         PJD_CHECK(fd >= 0, "open n1 O_WRONLY");
         chimera_posix_write(fd, "x", 1);
-        struct stat stbuf;
+        chimera_posix_stat_t stbuf;
         chimera_posix_fstat(fd, &stbuf);
         EXPECT_EQ(1, (long) stbuf.st_size);
         chimera_posix_close(fd);

@@ -15,7 +15,7 @@
  * disk.
  */
 
-#include <dirent.h>
+#include "common/dirent.h"
 
 #include "posix_test_common.h"
 
@@ -42,7 +42,7 @@ evict_sweep(
     int                    removed_stride)
 {
     char        path[128];
-    struct stat st;
+    chimera_posix_stat_t st;
     int         i, rc;
     long        expect_files = 0, found_files = 0;
 

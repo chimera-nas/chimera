@@ -25,8 +25,8 @@ open_fallocate(
     const char *name,
     int         flags,
     mode_t      mode,
-    off_t       offset,
-    off_t       len)
+    chimera_off_t       offset,
+    chimera_off_t       len)
 {
     int fd = pjd_open(name, flags, mode);
     int rc;

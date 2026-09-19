@@ -31,9 +31,9 @@
 #ifdef _WIN32
 #include "common/windows.h"
 typedef gid_t chimera_grouplist_t;
-#define CHIMERA_STAT_ATIM(st) ((struct timespec) { (st).st_atime, 0 })
-#define CHIMERA_STAT_MTIM(st) ((struct timespec) { (st).st_mtime, 0 })
-#define CHIMERA_STAT_CTIM(st) ((struct timespec) { (st).st_ctime, 0 })
+#define CHIMERA_STAT_ATIM(st) ((st).st_atim)
+#define CHIMERA_STAT_MTIM(st) ((st).st_mtim)
+#define CHIMERA_STAT_CTIM(st) ((st).st_ctim)
 #elif defined(__APPLE__)
 
 #include <pthread.h>
@@ -196,3 +196,11 @@ static inline void chimera_aligned_free(void *ptr)
     free(ptr);
 #endif
 }
+
+#ifdef _WIN32
+typedef int64_t chimera_off_t;
+typedef uint64_t chimera_dev_t;
+#else
+typedef off_t chimera_off_t;
+typedef dev_t chimera_dev_t;
+#endif

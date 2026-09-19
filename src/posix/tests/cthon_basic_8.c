@@ -32,7 +32,7 @@ main(
     int                   ct;
     char                 *fname = CTHON_FNAME;
     char                 *sname = SNAME;
-    struct stat           statb;
+    chimera_posix_stat_t           statb;
     struct timeval        time;
     int                   opt;
     char                  str[MAXPATHLEN];

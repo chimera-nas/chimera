@@ -51,11 +51,11 @@ chimera_posix_seek_exec(
  * Returns -1 with errno (ENXIO at/after EOF, or for SEEK_DATA past the last
  * data region).
  */
-static off_t
+static chimera_off_t
 chimera_posix_lseek_hole_data(
     struct chimera_posix_client *posix,
     int                          fd,
-    off_t                        offset,
+    chimera_off_t                        offset,
     uint32_t                     what)
 {
     struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
@@ -125,17 +125,17 @@ chimera_posix_lseek_hole_data(
         return -1;
     }
 
-    return (off_t) ctx.r_offset;
+    return (chimera_off_t) ctx.r_offset;
 } /* chimera_posix_lseek_hole_data */
 
-SYMBOL_EXPORT off_t
+SYMBOL_EXPORT chimera_off_t
 chimera_posix_lseek(
     int   fd,
-    off_t offset,
+    chimera_off_t offset,
     int   whence)
 {
     struct chimera_posix_client *posix     = chimera_posix_get_global();
-    off_t                        file_size = 0;
+    chimera_off_t                        file_size = 0;
 
     if (whence == SEEK_DATA) {
         return chimera_posix_lseek_hole_data(posix, fd, offset, 0);
@@ -146,7 +146,7 @@ chimera_posix_lseek(
     }
 
     if (whence == SEEK_END) {
-        struct stat st;
+        chimera_posix_stat_t st;
 
         if (chimera_posix_fstat(fd, &st) < 0) {
             return -1;
@@ -168,15 +168,15 @@ chimera_posix_lseek64(
     int64_t                      file_size = 0;
 
     if (whence == SEEK_DATA) {
-        return chimera_posix_lseek_hole_data(posix, fd, (off_t) offset, 0);
+        return chimera_posix_lseek_hole_data(posix, fd, (chimera_off_t) offset, 0);
     }
 
     if (whence == SEEK_HOLE) {
-        return chimera_posix_lseek_hole_data(posix, fd, (off_t) offset, 1);
+        return chimera_posix_lseek_hole_data(posix, fd, (chimera_off_t) offset, 1);
     }
 
     if (whence == SEEK_END) {
-        struct stat st;
+        chimera_posix_stat_t st;
 
         if (chimera_posix_fstat(fd, &st) < 0) {
             return -1;
@@ -185,6 +185,6 @@ chimera_posix_lseek64(
         file_size = st.st_size;
     }
 
-    return (int64_t) chimera_posix_fd_lseek(posix, fd, (off_t) offset, whence,
-                                            (off_t) file_size);
+    return (int64_t) chimera_posix_fd_lseek(posix, fd, (chimera_off_t) offset, whence,
+                                            (chimera_off_t) file_size);
 } /* chimera_posix_lseek64 */

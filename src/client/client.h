@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/platform.h"
 
 #include <sys/types.h>
 #ifdef _WIN32
@@ -191,7 +192,7 @@ chimera_mknod(
     const char                   *path,
     int                           path_len,
     mode_t                        mode,
-    dev_t                         dev,
+    chimera_dev_t                         dev,
     chimera_mknod_callback_t      callback,
     void                         *private_data);
 

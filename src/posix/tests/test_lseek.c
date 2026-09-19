@@ -12,7 +12,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    off_t                 pos;
+    chimera_off_t                 pos;
     int64_t               pos64;
     char                  buf[64];
     ssize_t               nread;
@@ -112,7 +112,7 @@ main(
     fprintf(stderr, "Testing SEEK_END...\n");
     pos = chimera_posix_lseek(fd, -5, SEEK_END);
 
-    if (pos != (off_t) (data_len - 5)) {
+    if (pos != (chimera_off_t) (data_len - 5)) {
         fprintf(stderr, "SEEK_END failed: expected %ld, got %ld\n",
                 (long) (data_len - 5), (long) pos);
         chimera_posix_close(fd);

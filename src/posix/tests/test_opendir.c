@@ -4,7 +4,7 @@
 
 // Test for opendir, closedir, readdir, dirfd, rewinddir, seekdir, telldir, scandir
 
-#include <dirent.h>
+#include "common/dirent.h"
 #include "posix_test_common.h"
 
 static void

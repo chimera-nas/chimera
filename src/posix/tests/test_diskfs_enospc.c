@@ -108,7 +108,7 @@ main(
         fprintf(stderr, "open /test/big failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
-    rc          = chimera_posix_fallocate(fd, 0, (off_t) ask);
+    rc          = chimera_posix_fallocate(fd, 0, (chimera_off_t) ask);
     alloc_errno = rc ? errno : 0;
     fprintf(stderr, "fallocate %" PRIu64 " (free - 256K): rc=%d errno=%d (%s)\n",
             ask, rc, alloc_errno, rc ? strerror(alloc_errno) : "ok");

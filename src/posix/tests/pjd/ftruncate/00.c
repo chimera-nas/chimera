@@ -24,7 +24,7 @@ static int
 open_ftruncate(
     const char *name,
     int         flags,
-    off_t       len)
+    chimera_off_t       len)
 {
     int fd = pjd_open(name, flags, 0644);
     int rc;

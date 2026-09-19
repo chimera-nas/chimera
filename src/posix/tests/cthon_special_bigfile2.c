@@ -19,13 +19,13 @@ static char *filename;
 static void
 check_around(
     int   fd,
-    off_t where)
+    chimera_off_t where)
 {
     char        buf;
     int         i;
-    off_t       start    = where - 2;
+    chimera_off_t       start    = where - 2;
     int         numbytes = 5;
-    struct stat statbuf;
+    chimera_posix_stat_t statbuf;
     char        basechar = '0';
 
     if (chimera_posix_lseek(fd, start, SEEK_SET) < 0) {
@@ -126,7 +126,7 @@ main(
 
     // Test around 2GB boundary
     fprintf(stdout, "\tTesting around 2GB boundary...\n");
-    check_around(fd, ((off_t) 0x7fffffff) + 1);
+    check_around(fd, ((chimera_off_t) 0x7fffffff) + 1);
 
     if (chimera_posix_ftruncate(fd, 0) < 0) {
         cthon_error("can't truncate %s", str);
@@ -136,7 +136,7 @@ main(
 
     // Test around 4GB boundary
     fprintf(stdout, "\tTesting around 4GB boundary...\n");
-    check_around(fd, ((off_t) (0xffffffffU)) + 1);
+    check_around(fd, ((chimera_off_t) (0xffffffffU)) + 1);
 
     chimera_posix_close(fd);
     chimera_posix_unlink(str);

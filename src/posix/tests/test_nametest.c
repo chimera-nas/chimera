@@ -95,7 +95,7 @@ get_name(struct info *ip)
 static int
 auto_lookup(struct info *ip)
 {
-    struct stat statb;
+    chimera_posix_stat_t statb;
     int         retval;
 
     retval = chimera_posix_stat(get_name(ip), &statb);
@@ -137,7 +137,7 @@ auto_lookup(struct info *ip)
 static int
 auto_create(struct info *ip)
 {
-    struct stat statb;
+    chimera_posix_stat_t statb;
     int         retval;
     int         fd;
 

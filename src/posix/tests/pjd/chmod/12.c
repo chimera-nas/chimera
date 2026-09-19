@@ -22,7 +22,7 @@
 static int
 fstat_mode(int fd)
 {
-    struct stat st;
+    chimera_posix_stat_t st;
 
     if (chimera_posix_fstat(fd, &st) != 0) {
         return -1;

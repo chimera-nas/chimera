@@ -15,7 +15,7 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #endif
-#include <sys/statvfs.h>
+#include "posix/posix_types.h"
 #ifdef _WIN32
 #include "common/platform.h"
 #else
@@ -28,6 +28,7 @@
 #endif
 
 #include "common/platform.h"
+#include "posix_types.h"
 #include "vfs/sdk/vfs_cred.h"
 
 struct chimera_posix_client;
@@ -145,7 +146,7 @@ int
 chimera_posix_mknod(
     const char *path,
     mode_t      mode,
-    dev_t       dev);
+    chimera_dev_t       dev);
 
 int
 chimera_posix_symlink(
@@ -175,22 +176,22 @@ chimera_posix_readlink(
 int
 chimera_posix_stat(
     const char  *path,
-    struct stat *st);
+    chimera_posix_stat_t *st);
 
 int
 chimera_posix_lstat(
     const char  *path,
-    struct stat *st);
+    chimera_posix_stat_t *st);
 
 int
 chimera_posix_fstat(
     int          fd,
-    struct stat *st);
+    chimera_posix_stat_t *st);
 
-off_t
+chimera_off_t
 chimera_posix_lseek(
     int   fd,
-    off_t offset,
+    chimera_off_t offset,
     int   whence);
 
 int64_t
@@ -204,7 +205,7 @@ chimera_posix_pread(
     int    fd,
     void  *buf,
     size_t count,
-    off_t  offset);
+    chimera_off_t  offset);
 
 ssize_t
 chimera_posix_pread64(
@@ -230,14 +231,14 @@ chimera_posix_pread_into(
     struct evpl_iovec *iov,
     int                niov,
     size_t             count,
-    off_t              offset);
+    chimera_off_t              offset);
 
 ssize_t
 chimera_posix_pwrite(
     int         fd,
     const void *buf,
     size_t      count,
-    off_t       offset);
+    chimera_off_t       offset);
 
 ssize_t
 chimera_posix_pwrite64(
@@ -263,7 +264,7 @@ chimera_posix_preadv(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset);
+    chimera_off_t               offset);
 
 ssize_t
 chimera_posix_preadv64(
@@ -277,7 +278,7 @@ chimera_posix_pwritev(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset);
+    chimera_off_t               offset);
 
 ssize_t
 chimera_posix_pwritev64(
@@ -291,7 +292,7 @@ chimera_posix_preadv2(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset,
+    chimera_off_t               offset,
     int                 flags);
 
 ssize_t
@@ -307,7 +308,7 @@ chimera_posix_pwritev2(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    off_t               offset,
+    chimera_off_t               offset,
     int                 flags);
 
 ssize_t
@@ -409,14 +410,14 @@ chimera_posix_fseek(
 int
 chimera_posix_fseeko(
     CHIMERA_FILE *stream,
-    off_t         offset,
+    chimera_off_t         offset,
     int           whence);
 
 long
 chimera_posix_ftell(
     CHIMERA_FILE *stream);
 
-off_t
+chimera_off_t
 chimera_posix_ftello(
     CHIMERA_FILE *stream);
 
@@ -536,7 +537,7 @@ int
 chimera_posix_fstatat(
     int          dirfd,
     const char  *pathname,
-    struct stat *statbuf,
+    chimera_posix_stat_t *statbuf,
     int          flags);
 
 int
@@ -636,27 +637,27 @@ chimera_posix_fpathconf(
 int
 chimera_posix_truncate(
     const char *path,
-    off_t       length);
+    chimera_off_t       length);
 
 int
 chimera_posix_ftruncate(
     int   fd,
-    off_t length);
+    chimera_off_t length);
 
 // Preallocate space for a file (posix_fallocate(3))
 int
 chimera_posix_fallocate(
     int   fd,
-    off_t offset,
-    off_t len);
+    chimera_off_t offset,
+    chimera_off_t len);
 
 // fallocate(2) with a mode (0 = allocate; PUNCH_HOLE|KEEP_SIZE = deallocate)
 int
 chimera_posix_fallocate_mode(
     int   fd,
     int   mode,
-    off_t offset,
-    off_t len);
+    chimera_off_t offset,
+    chimera_off_t len);
 
 // File locking
 int
@@ -669,7 +670,7 @@ int
 chimera_posix_lockf(
     int   fd,
     int   cmd,
-    off_t len);
+    chimera_off_t len);
 
 // Server-side byte-range copy. Mirrors Linux copy_file_range(2).
 // If off_in / off_out are NULL the corresponding fd's current offset is used
@@ -678,9 +679,9 @@ chimera_posix_lockf(
 ssize_t
 chimera_posix_copy_file_range(
     int          fd_in,
-    off_t       *off_in,
+    chimera_off_t       *off_in,
     int          fd_out,
-    off_t       *off_out,
+    chimera_off_t       *off_out,
     size_t       len,
     unsigned int flags);
 
@@ -689,9 +690,9 @@ chimera_posix_copy_file_range(
 int
 chimera_posix_clone_file_range(
     int    dst_fd,
-    off_t  dst_offset,
+    chimera_off_t  dst_offset,
     int    src_fd,
-    off_t  src_offset,
+    chimera_off_t  src_offset,
     size_t len);
 
 // NFSv4.2 WRITE_SAME: write block_count blocks of block_size bytes from offset,
@@ -701,7 +702,7 @@ chimera_posix_clone_file_range(
 ssize_t
 chimera_posix_write_same(
     int         fd,
-    off_t       offset,
+    chimera_off_t       offset,
     uint32_t    block_size,
     uint64_t    block_count,
     const void *pattern,

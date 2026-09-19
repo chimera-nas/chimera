@@ -13,7 +13,7 @@
 #include <sys/wait.h>
 
 // Maximum file offset for locking tests
-static off_t maxeof;
+static chimera_off_t maxeof;
 
 #define PARENT     0
 #define CHILD      1
@@ -68,7 +68,7 @@ static void testexit(
 static void
 initialize(const char *basepath)
 {
-    maxeof  = (off_t) 1 << (sizeof(off_t) * 8 - 2);
+    maxeof  = (chimera_off_t) 1 << (sizeof(chimera_off_t) * 8 - 2);
     maxeof += maxeof - 1;
 
     parentpid = getpid();
@@ -233,8 +233,8 @@ terrstr(int err)
 
 static char *
 fmtrange(
-    off_t offset,
-    off_t length)
+    chimera_off_t offset,
+    chimera_off_t length)
 {
     static char buf[256];
 
@@ -260,8 +260,8 @@ report(
     int   num,
     int   sec,
     char *what,
-    off_t offset,
-    off_t length,
+    chimera_off_t offset,
+    chimera_off_t length,
     int   pass,
     int   result,
     int   fail)
@@ -338,8 +338,8 @@ test(
     int   num,
     int   sec,
     int   func,
-    off_t offset,
-    off_t length,
+    chimera_off_t offset,
+    chimera_off_t length,
     int   pass,
     int   fail)
 {
@@ -366,10 +366,10 @@ test1(void)
         parentwait();
         open_testfile(OPENFLAGS, OPENMODES);
         header(1, "Test regions of an unlocked file.");
-        test(1, 1, F_TEST, (off_t) 0, (off_t) 1, PASS, FATAL);
-        test(1, 2, F_TEST, (off_t) 0, (off_t) END, PASS, FATAL);
-        test(1, 3, F_TEST, (off_t) 1, (off_t) 1, PASS, FATAL);
-        test(1, 4, F_TEST, (off_t) 1, (off_t) END, PASS, FATAL);
+        test(1, 1, F_TEST, (chimera_off_t) 0, (chimera_off_t) 1, PASS, FATAL);
+        test(1, 2, F_TEST, (chimera_off_t) 0, (chimera_off_t) END, PASS, FATAL);
+        test(1, 3, F_TEST, (chimera_off_t) 1, (chimera_off_t) 1, PASS, FATAL);
+        test(1, 4, F_TEST, (chimera_off_t) 1, (chimera_off_t) END, PASS, FATAL);
         close_testfile(DO_UNLINK);
         childfree(0);
     } else {
@@ -386,19 +386,19 @@ test2(void)
         parentwait();
         header(2, "Try to lock the whole file.");
         open_testfile(OPENFLAGS, OPENMODES);
-        test(2, 0, F_TLOCK, (off_t) 0, (off_t) END, PASS, FATAL);
+        test(2, 0, F_TLOCK, (chimera_off_t) 0, (chimera_off_t) END, PASS, FATAL);
         childfree(0);
         parentwait();
-        test(2, 10, F_ULOCK, (off_t) 0, (off_t) END, PASS, FATAL);
+        test(2, 10, F_ULOCK, (chimera_off_t) 0, (chimera_off_t) END, PASS, FATAL);
         close_testfile(DO_UNLINK);
     } else {
         parentfree(0);
         childwait();
         open_testfile(OPENFLAGS, OPENMODES);
-        test(2, 1, F_TEST, (off_t) 0, (off_t) 1, denied_err, FATAL);
-        test(2, 2, F_TEST, (off_t) 0, (off_t) END, denied_err, FATAL);
-        test(2, 3, F_TEST, (off_t) 1, (off_t) 1, denied_err, FATAL);
-        test(2, 4, F_TEST, (off_t) 1, (off_t) END, denied_err, FATAL);
+        test(2, 1, F_TEST, (chimera_off_t) 0, (chimera_off_t) 1, denied_err, FATAL);
+        test(2, 2, F_TEST, (chimera_off_t) 0, (chimera_off_t) END, denied_err, FATAL);
+        test(2, 3, F_TEST, (chimera_off_t) 1, (chimera_off_t) 1, denied_err, FATAL);
+        test(2, 4, F_TEST, (chimera_off_t) 1, (chimera_off_t) END, denied_err, FATAL);
         close_testfile(DO_UNLINK);
         parentfree(0);
     }
@@ -412,19 +412,19 @@ test3(void)
         parentwait();
         header(3, "Try to lock just the 1st byte.");
         open_testfile(OPENFLAGS, OPENMODES);
-        test(3, 0, F_TLOCK, (off_t) 0, (off_t) 1, PASS, FATAL);
+        test(3, 0, F_TLOCK, (chimera_off_t) 0, (chimera_off_t) 1, PASS, FATAL);
         childfree(0);
         parentwait();
-        test(3, 5, F_ULOCK, (off_t) 0, (off_t) 1, PASS, FATAL);
+        test(3, 5, F_ULOCK, (chimera_off_t) 0, (chimera_off_t) 1, PASS, FATAL);
         close_testfile(DO_UNLINK);
     } else {
         parentfree(0);
         childwait();
         open_testfile(OPENFLAGS, OPENMODES);
-        test(3, 1, F_TEST, (off_t) 0, (off_t) 1, denied_err, FATAL);
-        test(3, 2, F_TEST, (off_t) 0, (off_t) END, denied_err, FATAL);
-        test(3, 3, F_TEST, (off_t) 1, (off_t) 1, PASS, FATAL);
-        test(3, 4, F_TEST, (off_t) 1, (off_t) END, PASS, FATAL);
+        test(3, 1, F_TEST, (chimera_off_t) 0, (chimera_off_t) 1, denied_err, FATAL);
+        test(3, 2, F_TEST, (chimera_off_t) 0, (chimera_off_t) END, denied_err, FATAL);
+        test(3, 3, F_TEST, (chimera_off_t) 1, (chimera_off_t) 1, PASS, FATAL);
+        test(3, 4, F_TEST, (chimera_off_t) 1, (chimera_off_t) END, PASS, FATAL);
         close_testfile(DO_UNLINK);
         parentfree(0);
     }
@@ -438,24 +438,24 @@ test4(void)
         parentwait();
         header(4, "Try to lock the 2nd byte, test around it.");
         open_testfile(OPENFLAGS, OPENMODES);
-        test(4, 0, F_TLOCK, (off_t) 1, (off_t) 1, PASS, FATAL);
+        test(4, 0, F_TLOCK, (chimera_off_t) 1, (chimera_off_t) 1, PASS, FATAL);
         childfree(0);
         parentwait();
-        test(4, 10, F_ULOCK, (off_t) 1, (off_t) 1, PASS, FATAL);
+        test(4, 10, F_ULOCK, (chimera_off_t) 1, (chimera_off_t) 1, PASS, FATAL);
         close_testfile(DO_UNLINK);
     } else {
         parentfree(0);
         childwait();
         open_testfile(OPENFLAGS, OPENMODES);
-        test(4, 1, F_TEST, (off_t) 0, (off_t) 1, PASS, FATAL);
-        test(4, 2, F_TEST, (off_t) 0, (off_t) 2, denied_err, FATAL);
-        test(4, 3, F_TEST, (off_t) 0, (off_t) END, denied_err, FATAL);
-        test(4, 4, F_TEST, (off_t) 1, (off_t) 1, denied_err, FATAL);
-        test(4, 5, F_TEST, (off_t) 1, (off_t) 2, denied_err, FATAL);
-        test(4, 6, F_TEST, (off_t) 1, (off_t) END, denied_err, FATAL);
-        test(4, 7, F_TEST, (off_t) 2, (off_t) 1, PASS, FATAL);
-        test(4, 8, F_TEST, (off_t) 2, (off_t) 2, PASS, FATAL);
-        test(4, 9, F_TEST, (off_t) 2, (off_t) END, PASS, FATAL);
+        test(4, 1, F_TEST, (chimera_off_t) 0, (chimera_off_t) 1, PASS, FATAL);
+        test(4, 2, F_TEST, (chimera_off_t) 0, (chimera_off_t) 2, denied_err, FATAL);
+        test(4, 3, F_TEST, (chimera_off_t) 0, (chimera_off_t) END, denied_err, FATAL);
+        test(4, 4, F_TEST, (chimera_off_t) 1, (chimera_off_t) 1, denied_err, FATAL);
+        test(4, 5, F_TEST, (chimera_off_t) 1, (chimera_off_t) 2, denied_err, FATAL);
+        test(4, 6, F_TEST, (chimera_off_t) 1, (chimera_off_t) END, denied_err, FATAL);
+        test(4, 7, F_TEST, (chimera_off_t) 2, (chimera_off_t) 1, PASS, FATAL);
+        test(4, 8, F_TEST, (chimera_off_t) 2, (chimera_off_t) 2, PASS, FATAL);
+        test(4, 9, F_TEST, (chimera_off_t) 2, (chimera_off_t) END, PASS, FATAL);
         close_testfile(DO_UNLINK);
         parentfree(0);
     }
@@ -469,29 +469,29 @@ test5(void)
         parentwait();
         header(5, "Try to lock 1st and 3rd bytes, test around them.");
         open_testfile(OPENFLAGS, OPENMODES);
-        test(5, 0, F_TLOCK, (off_t) 0, (off_t) 1, PASS, FATAL);
-        test(5, 1, F_TLOCK, (off_t) 2, (off_t) 1, PASS, FATAL);
+        test(5, 0, F_TLOCK, (chimera_off_t) 0, (chimera_off_t) 1, PASS, FATAL);
+        test(5, 1, F_TLOCK, (chimera_off_t) 2, (chimera_off_t) 1, PASS, FATAL);
         childfree(0);
         parentwait();
-        test(5, 14, F_ULOCK, (off_t) 0, (off_t) 1, PASS, FATAL);
-        test(5, 15, F_ULOCK, (off_t) 2, (off_t) 1, PASS, FATAL);
+        test(5, 14, F_ULOCK, (chimera_off_t) 0, (chimera_off_t) 1, PASS, FATAL);
+        test(5, 15, F_ULOCK, (chimera_off_t) 2, (chimera_off_t) 1, PASS, FATAL);
         close_testfile(DO_UNLINK);
     } else {
         parentfree(0);
         childwait();
         open_testfile(OPENFLAGS, OPENMODES);
-        test(5, 2, F_TEST, (off_t) 0, (off_t) 1, denied_err, FATAL);
-        test(5, 3, F_TEST, (off_t) 0, (off_t) 2, denied_err, FATAL);
-        test(5, 4, F_TEST, (off_t) 0, (off_t) END, denied_err, FATAL);
-        test(5, 5, F_TEST, (off_t) 1, (off_t) 1, PASS, FATAL);
-        test(5, 6, F_TEST, (off_t) 1, (off_t) 2, denied_err, FATAL);
-        test(5, 7, F_TEST, (off_t) 1, (off_t) END, denied_err, FATAL);
-        test(5, 8, F_TEST, (off_t) 2, (off_t) 1, denied_err, FATAL);
-        test(5, 9, F_TEST, (off_t) 2, (off_t) 2, denied_err, FATAL);
-        test(5, 10, F_TEST, (off_t) 2, (off_t) END, denied_err, FATAL);
-        test(5, 11, F_TEST, (off_t) 3, (off_t) 1, PASS, FATAL);
-        test(5, 12, F_TEST, (off_t) 3, (off_t) 2, PASS, FATAL);
-        test(5, 13, F_TEST, (off_t) 3, (off_t) END, PASS, FATAL);
+        test(5, 2, F_TEST, (chimera_off_t) 0, (chimera_off_t) 1, denied_err, FATAL);
+        test(5, 3, F_TEST, (chimera_off_t) 0, (chimera_off_t) 2, denied_err, FATAL);
+        test(5, 4, F_TEST, (chimera_off_t) 0, (chimera_off_t) END, denied_err, FATAL);
+        test(5, 5, F_TEST, (chimera_off_t) 1, (chimera_off_t) 1, PASS, FATAL);
+        test(5, 6, F_TEST, (chimera_off_t) 1, (chimera_off_t) 2, denied_err, FATAL);
+        test(5, 7, F_TEST, (chimera_off_t) 1, (chimera_off_t) END, denied_err, FATAL);
+        test(5, 8, F_TEST, (chimera_off_t) 2, (chimera_off_t) 1, denied_err, FATAL);
+        test(5, 9, F_TEST, (chimera_off_t) 2, (chimera_off_t) 2, denied_err, FATAL);
+        test(5, 10, F_TEST, (chimera_off_t) 2, (chimera_off_t) END, denied_err, FATAL);
+        test(5, 11, F_TEST, (chimera_off_t) 3, (chimera_off_t) 1, PASS, FATAL);
+        test(5, 12, F_TEST, (chimera_off_t) 3, (chimera_off_t) 2, PASS, FATAL);
+        test(5, 13, F_TEST, (chimera_off_t) 3, (chimera_off_t) END, PASS, FATAL);
         close_testfile(DO_UNLINK);
         parentfree(0);
     }
@@ -624,7 +624,7 @@ main(
 
         /* What initialize() computes, minus the pipes (passed via argv):
          * maxeof and the shared testfile name keyed by the PARENT's pid. */
-        maxeof    = (off_t) 1 << (sizeof(off_t) * 8 - 2);
+        maxeof    = (chimera_off_t) 1 << (sizeof(chimera_off_t) * 8 - 2);
         maxeof   += maxeof - 1;
         parentpid = atoi(child_ppid);
         snprintf(testfile, sizeof(testfile), "/test/nfstestdir/lockfile%d",

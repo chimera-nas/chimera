@@ -43,7 +43,7 @@ main(
 
     /* Each type can be created and unlinked. */
     for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
-        struct stat junk;
+        chimera_posix_stat_t junk;
         EXPECT(0, pjd_create_file(types[i], n0));
         EXPECT(0, pjd_unlink(n0));
         EXPECT(ENOENT, pjd_lstat(n0, &junk));

@@ -10,7 +10,7 @@
 #define WRITES_PER_THREAD 64
 #define BLOCK_SIZE        256
 #define TOTAL_WRITES      (NUM_THREADS * WRITES_PER_THREAD)
-#define EXPECTED_SIZE     ((off_t) TOTAL_WRITES * BLOCK_SIZE)
+#define EXPECTED_SIZE     ((chimera_off_t) TOTAL_WRITES * BLOCK_SIZE)
 
 struct worker_args {
     int         fd;
@@ -79,7 +79,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           st;
+    chimera_posix_stat_t           st;
     evpl_native_thread_t             threads[NUM_THREADS];
     struct worker_args    args[NUM_THREADS];
     atomic_int            error_count;

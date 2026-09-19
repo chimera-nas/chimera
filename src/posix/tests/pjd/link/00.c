@@ -41,7 +41,7 @@ check(
     long        uid,
     long        gid)
 {
-    struct stat st;
+    chimera_posix_stat_t st;
 
     if (pjd_lstat(name, &st) != 0) {
         PJD_CHECK(0, "lstat %s", name);

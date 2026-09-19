@@ -260,7 +260,7 @@ cthon_rmdirtree(
 void
 cthon_testdir(const char *dir)
 {
-    struct stat statb;
+    chimera_posix_stat_t statb;
     char        fullpath[MAXPATHLEN];
 
     if (dir == NULL) {

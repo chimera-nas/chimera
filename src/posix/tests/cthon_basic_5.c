@@ -38,13 +38,13 @@ main(
     int                   rc;
     int                   count = CTHON_DCOUNT;
     int                   ct;
-    off_t                 size = DSIZE;
-    off_t                 si;
+    chimera_off_t                 size = DSIZE;
+    chimera_off_t                 si;
     int                   fd;
-    off_t                 bytes   = 0;
+    chimera_off_t                 bytes   = 0;
     char                 *bigfile = "bigfile";
     struct timeval        time;
-    struct stat           statb;
+    chimera_posix_stat_t           statb;
     int                   opt;
     char                  buf[BUFSZ];
     char                  str[MAXPATHLEN];

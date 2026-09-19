@@ -21,7 +21,7 @@
 #endif
 #include <fcntl.h>
 #include <errno.h>
-#include <dirent.h>
+#include "common/dirent.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"

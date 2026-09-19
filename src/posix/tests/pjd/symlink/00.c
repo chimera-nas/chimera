@@ -26,7 +26,7 @@ main(
     char           *n1 = pjd_namegen();
     char            n0n1[256];
     struct timespec t0, t1;
-    struct stat     st;
+    chimera_posix_stat_t     st;
 
     EXPECT(0, pjd_create(n0, 0644));
     EXPECT_EQ(S_IFREG, pjd_lstat_type(n0));

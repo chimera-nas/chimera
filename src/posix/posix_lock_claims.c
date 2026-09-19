@@ -621,8 +621,8 @@ chimera_posix_lock_claim_seek_end(
             fl->l_type = (ctx.conflict.type == CHIMERA_VFS_LOCK_READ)
                 ? F_RDLCK : F_WRLCK;
             fl->l_whence = SEEK_SET;
-            fl->l_start  = (off_t) ctx.conflict.offset;
-            fl->l_len    = (off_t) ctx.conflict.length;
+            fl->l_start  = (chimera_off_t) ctx.conflict.offset;
+            fl->l_len    = (chimera_off_t) ctx.conflict.length;
             fl->l_pid    = (pid_t) ctx.conflict.pid;
         }
         return 0;

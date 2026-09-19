@@ -223,7 +223,7 @@ chimera_posix_fcntl(
              * the offset relative to EOF atomically, avoiding a TOCTOU race
              * between a separate fstat and the subsequent fcntl call.
              * offset and length are stored as bit-casts of the signed values;
-             * the backends cast them back to off_t when whence == SEEK_END.
+             * the backends cast them back to chimera_off_t when whence == SEEK_END.
              */
             whence = SEEK_END;
             offset = (uint64_t) (int64_t) fl->l_start;
@@ -334,9 +334,9 @@ chimera_posix_fcntl(
                                        CHIMERA_CLAIM_LW))
                 ? F_WRLCK : F_RDLCK;
             fl->l_whence = SEEK_SET;
-            fl->l_start  = (off_t) conf.offset;
+            fl->l_start  = (chimera_off_t) conf.offset;
             fl->l_len    = (conf.length == UINT64_MAX)
-                ? 0 : (off_t) conf.length;
+                ? 0 : (chimera_off_t) conf.length;
             fl->l_pid = (pid_t) conf.owner.owner_lo;
 
             chimera_posix_fd_release(entry, 0);
@@ -348,9 +348,9 @@ chimera_posix_fcntl(
         if (chimera_posix_lock_claim_test(posix, handle, &probe, &conf)) {
             fl->l_type   = (conf.used & CHIMERA_CLAIM_LW) ? F_WRLCK : F_RDLCK;
             fl->l_whence = SEEK_SET;
-            fl->l_start  = (off_t) conf.offset;
+            fl->l_start  = (chimera_off_t) conf.offset;
             fl->l_len    = (conf.length == UINT64_MAX)
-                ? 0 : (off_t) conf.length;
+                ? 0 : (chimera_off_t) conf.length;
             fl->l_pid = (pid_t) conf.owner.owner_lo;
         } else {
             fl->l_type = F_UNLCK;

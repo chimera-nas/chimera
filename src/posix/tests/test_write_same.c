@@ -50,7 +50,7 @@ verify_pattern(
     unsigned char buf[TOTAL];
     ssize_t       n;
 
-    n = chimera_posix_pread(fd, buf, TOTAL, (off_t) adb_off);
+    n = chimera_posix_pread(fd, buf, TOTAL, (chimera_off_t) adb_off);
     if (n != TOTAL) {
         die("pread verify", n);
     }
@@ -130,7 +130,7 @@ test_offset(void)
         die("open off", fd);
     }
 
-    n = chimera_posix_write_same(fd, (off_t) adb_off, BLOCK_SIZE, BLOCK_CNT,
+    n = chimera_posix_write_same(fd, (chimera_off_t) adb_off, BLOCK_SIZE, BLOCK_CNT,
                                  PATTERN, PATLEN, RELOFF);
     if (n != TOTAL) {
         die("write_same off", n);

@@ -16,7 +16,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           st;
+    chimera_posix_stat_t           st;
 
     posix_test_init(&env, argv, argc);
 

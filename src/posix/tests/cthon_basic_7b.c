@@ -25,7 +25,7 @@ main(
     char                 *fname = CTHON_FNAME;
     char                 *nname = "newfile.";
     int                   fd;
-    struct stat           statb;
+    chimera_posix_stat_t           statb;
     struct timeval        time;
     int                   opt;
     char                  str[MAXPATHLEN];

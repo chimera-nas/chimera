@@ -81,7 +81,7 @@ chimera_posix_mkdir(
              * preserved applies exactly those rules; any other stat
              * outcome (a directory, a dangling link) keeps the backend's
              * errno. */
-            struct stat st;
+            chimera_posix_stat_t st;
 
             if (chimera_posix_stat(path, &st) < 0) {
                 if (errno == ENOTDIR || errno == ELOOP) {

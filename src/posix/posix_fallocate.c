@@ -39,8 +39,8 @@ chimera_posix_do_fallocate(
     struct chimera_posix_client *posix,
     int                          fd,
     uint32_t                     vfs_flags,
-    off_t                        offset,
-    off_t                        len)
+    chimera_off_t                        offset,
+    chimera_off_t                        len)
 {
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
     struct chimera_posix_fd_entry  *entry;
@@ -96,8 +96,8 @@ chimera_posix_do_fallocate(
 SYMBOL_EXPORT int
 chimera_posix_fallocate(
     int   fd,
-    off_t offset,
-    off_t len)
+    chimera_off_t offset,
+    chimera_off_t len)
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
 
@@ -119,8 +119,8 @@ SYMBOL_EXPORT int
 chimera_posix_fallocate_mode(
     int   fd,
     int   mode,
-    off_t offset,
-    off_t len)
+    chimera_off_t offset,
+    chimera_off_t len)
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
 

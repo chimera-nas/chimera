@@ -26,7 +26,7 @@ check(
     long        inode,
     long        nlink)
 {
-    struct stat st;
+    chimera_posix_stat_t st;
 
     if (pjd_lstat(name, &st) != 0) {
         PJD_CHECK(0, "lstat %s", name);
@@ -57,7 +57,7 @@ main(
     pjd_cd(n3);
 
     for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
-        struct stat junk;
+        chimera_posix_stat_t junk;
 
         EXPECT(0, pjd_create_file(types[i], n0));
         EXPECT(0, pjd_chmod(n0, 0644));
@@ -83,7 +83,7 @@ main(
 
     /* Directory rename preserves the inode. */
     {
-        struct stat junk;
+        chimera_posix_stat_t junk;
         EXPECT(0, pjd_mkdir(n0, 0755));
         EXPECT_EQ(S_IFDIR, pjd_lstat_type(n0));
         long        inode = pjd_lstat_inode(n0);

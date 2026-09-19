@@ -24,7 +24,7 @@
 #endif
 #include <fcntl.h>
 
-#include <dirent.h>
+#include "common/dirent.h"
 #include <utlist.h>
 #include "common/macros.h"
 #include "../client/client.h"
@@ -567,7 +567,7 @@ chimera_posix_wait(struct chimera_posix_completion *comp)
 
 static FORCE_INLINE void
 chimera_posix_fill_stat(
-    struct stat               *dst,
+    chimera_posix_stat_t               *dst,
     const struct chimera_stat *src)
 {
     dst->st_dev   = src->st_dev;
@@ -578,7 +578,7 @@ chimera_posix_fill_stat(
     dst->st_gid   = src->st_gid;
     dst->st_rdev  = src->st_rdev;
     dst->st_size  = src->st_size;
-    /* dst is the host struct stat, whose nanosecond timestamps are not spelled
+    /* dst is the host chimera_posix_stat_t, whose nanosecond timestamps are not spelled
      * the same on every platform; src is chimera's own. */
     CHIMERA_STAT_ATIM(*dst) = src->st_atim;
     CHIMERA_STAT_MTIM(*dst) = src->st_mtim;
@@ -909,16 +909,16 @@ chimera_posix_fd_may_write(const struct chimera_posix_fd_entry *entry)
 } /* chimera_posix_fd_may_write */
 
 
-static FORCE_INLINE off_t
+static FORCE_INLINE chimera_off_t
 chimera_posix_fd_lseek(
     struct chimera_posix_client *posix,
     int                          fd,
-    off_t                        offset,
+    chimera_off_t                        offset,
     int                          whence,
-    off_t                        file_size)
+    chimera_off_t                        file_size)
 {
     struct chimera_posix_fd_entry *entry;
-    off_t                          new_offset;
+    chimera_off_t                          new_offset;
 
     if (fd < 0 || fd >= posix->max_fds) {
         errno = EBADF;
@@ -956,7 +956,7 @@ chimera_posix_fd_lseek(
             new_offset = offset;
             break;
         case SEEK_CUR:
-            new_offset = (off_t) entry->ofd->offset + offset;
+            new_offset = (chimera_off_t) entry->ofd->offset + offset;
             break;
         case SEEK_END:
             new_offset = file_size + offset;

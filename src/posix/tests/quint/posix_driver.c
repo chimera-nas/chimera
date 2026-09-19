@@ -36,7 +36,7 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #endif
-#include <sys/statvfs.h>     /* struct statvfs for statvfs/fstatvfs */
+#include "posix/posix_types.h"     /* struct statvfs for statvfs/fstatvfs */
 #ifdef _WIN32
 #include "common/platform.h"
 #else
@@ -158,7 +158,7 @@ posix_module_tracks_holes(const char *module)
 static int
 pt_rm_cb(
     const char        *path,
-    const struct stat *st,
+    const chimera_posix_stat_t *st,
     int                type,
     struct FTW        *ftw)
 {
@@ -400,7 +400,7 @@ res_int(
 static void
 stat_fill(
     json_t            *res,
-    const struct stat *st)
+    const chimera_posix_stat_t *st)
 {
     const char *ftype = "unk";
 
@@ -549,7 +549,7 @@ handle(json_t *req)
             whence = SEEK_HOLE;
         }
         return res_int(chimera_posix_lseek(jint(req, "fd", -1),
-                                           (off_t) jint64(req, "off", 0),
+                                           (chimera_off_t) jint64(req, "off", 0),
                                            whence), errno);
     }
 
@@ -562,7 +562,7 @@ handle(json_t *req)
             n = chimera_posix_read(jint(req, "fd", -1), buf, len);
         } else {
             n = chimera_posix_pread(jint(req, "fd", -1), buf, len,
-                                    (off_t) jint64(req, "off", 0));
+                                    (chimera_off_t) jint64(req, "off", 0));
         }
 
         json_t *res = res_int(n, errno);
@@ -591,7 +591,7 @@ handle(json_t *req)
             n = chimera_posix_write(jint(req, "fd", -1), buf, (size_t) len);
         } else {
             n = chimera_posix_pwrite(jint(req, "fd", -1), buf, (size_t) len,
-                                     (off_t) jint64(req, "off", 0));
+                                     (chimera_off_t) jint64(req, "off", 0));
         }
         free(buf);
         return res_int(n, errno);
@@ -608,7 +608,7 @@ handle(json_t *req)
             n = chimera_posix_readv(jint(req, "fd", -1), iov, niov);
         } else {
             n = chimera_posix_preadv2(jint(req, "fd", -1), iov, niov,
-                                      (off_t) jint64(req, "off", 0), 0);
+                                      (chimera_off_t) jint64(req, "off", 0), 0);
         }
 
         json_t *res = res_int(n, errno);
@@ -640,7 +640,7 @@ handle(json_t *req)
             n = chimera_posix_writev(jint(req, "fd", -1), iov, niov);
         } else {
             n = chimera_posix_pwritev2(jint(req, "fd", -1), iov, niov,
-                                       (off_t) jint64(req, "off", 0), 0);
+                                       (chimera_off_t) jint64(req, "off", 0), 0);
         }
         free(buf);
         return res_int(n, errno);
@@ -648,13 +648,13 @@ handle(json_t *req)
 
     if (strcmp(op, "truncate") == 0) {
         return res_int(chimera_posix_truncate(jstr(req, "path"),
-                                              (off_t) jint64(req, "len", 0)),
+                                              (chimera_off_t) jint64(req, "len", 0)),
                        errno);
     }
 
     if (strcmp(op, "ftruncate") == 0) {
         return res_int(chimera_posix_ftruncate(jint(req, "fd", -1),
-                                               (off_t) jint64(req, "len", 0)),
+                                               (chimera_off_t) jint64(req, "len", 0)),
                        errno);
     }
 
@@ -680,7 +680,7 @@ handle(json_t *req)
 
     if (strcmp(op, "stat") == 0 || strcmp(op, "fstat") == 0 ||
         strcmp(op, "fstatat") == 0) {
-        struct stat st;
+        chimera_posix_stat_t st;
         int         ret;
 
         memset(&st, 0, sizeof(st));
@@ -789,7 +789,7 @@ handle(json_t *req)
     if (strcmp(op, "mknod") == 0) {
         const char *ft   = jstr(req, "ftype");
         mode_t      mode = (mode_t) jint(req, "mode", 0);
-        dev_t       dev  = 0;
+        chimera_dev_t       dev  = 0;
 
         if (ft && strcmp(ft, "fifo") == 0) {
             mode |= S_IFIFO;
@@ -957,8 +957,8 @@ handle(json_t *req)
             fl.l_type = F_UNLCK;
         }
         fl.l_whence = SEEK_SET;
-        fl.l_start  = (off_t) jint64(req, "start", 0);
-        fl.l_len    = (off_t) jint64(req, "len", 0);
+        fl.l_start  = (chimera_off_t) jint64(req, "start", 0);
+        fl.l_len    = (chimera_off_t) jint64(req, "len", 0);
 
         ret = chimera_posix_fcntl(jint(req, "fd", -1), cmd, &fl);
 
@@ -1009,7 +1009,7 @@ handle(json_t *req)
             cmd = F_TEST;
         }
         return res_int(chimera_posix_lockf(jint(req, "fd", -1), cmd,
-                                           (off_t) jint64(req, "len", 0)),
+                                           (chimera_off_t) jint64(req, "len", 0)),
                        errno);
     }
 
@@ -1022,8 +1022,8 @@ handle(json_t *req)
     }
 
     if (strcmp(op, "copy_range") == 0) {
-        off_t   off_in  = (off_t) jint64(req, "off_in", 0);
-        off_t   off_out = (off_t) jint64(req, "off_out", 0);
+        chimera_off_t   off_in  = (chimera_off_t) jint64(req, "off_in", 0);
+        chimera_off_t   off_out = (chimera_off_t) jint64(req, "off_out", 0);
         ssize_t n       = chimera_posix_copy_file_range(
             jint(req, "fd_in", -1), &off_in,
             jint(req, "fd_out", -1), &off_out,
@@ -1035,17 +1035,17 @@ handle(json_t *req)
     if (strcmp(op, "clone_range") == 0) {
         return res_int(chimera_posix_clone_file_range(
                            jint(req, "dst_fd", -1),
-                           (off_t) jint64(req, "dst_off", 0),
+                           (chimera_off_t) jint64(req, "dst_off", 0),
                            jint(req, "src_fd", -1),
-                           (off_t) jint64(req, "src_off", 0),
+                           (chimera_off_t) jint64(req, "src_off", 0),
                            (size_t) jint64(req, "len", 0)), errno);
     }
 
     if (strcmp(op, "fallocate") == 0) {
         int   fd   = jint(req, "fd", -1);
         int   mode = jint(req, "mode", 0);
-        off_t off  = (off_t) jint64(req, "off", 0);
-        off_t len  = (off_t) jint64(req, "len", 0);
+        chimera_off_t off  = (chimera_off_t) jint64(req, "off", 0);
+        chimera_off_t len  = (chimera_off_t) jint64(req, "len", 0);
         /* mode 0 == posix_fallocate (grow); mode 1 == the
          * FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE deallocate pair. */
         int   ret = (mode == 0)

@@ -7,7 +7,7 @@
 
 #include "cthon_common.h"
 #include "common/platform.h"
-#include <sys/statvfs.h>
+#include "posix/posix_types.h"
 
 int
 main(

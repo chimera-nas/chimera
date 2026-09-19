@@ -40,7 +40,7 @@ chimera_posix_read_into_common(
     struct evpl_iovec *iov,
     int                niov,
     size_t             count,
-    off_t              offset,
+    chimera_off_t              offset,
     int                use_fd_offset)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
@@ -118,7 +118,7 @@ chimera_posix_pread_into(
     struct evpl_iovec *iov,
     int                niov,
     size_t             count,
-    off_t              offset)
+    chimera_off_t              offset)
 {
     return chimera_posix_read_into_common(fd, iov, niov, count, offset, 0);
 } /* chimera_posix_pread_into */
