@@ -310,12 +310,23 @@ struct chimera_fuse_channel {
     struct evpl_fd_event        event;
 };
 
+/* What OPENDIR opens a directory with.  Recorded on the open file so the
+ * requests that lend the handle later (READDIR, FSYNCDIR) say what it is. */
+#define CHIMERA_FUSE_OPENDIR_FLAGS \
+        (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)
+
 /* One per kernel OPEN/OPENDIR/CREATE; fuse_open_out.fh carries its pointer.
-* The VFS handle is captured into the request at dispatch time, so nothing
-* but OPEN/RELEASE and the shutdown sweep touches this struct afterwards. */
+ * A request that names it lends the handle to its sequence for as long as
+ * that request runs, so nothing but OPEN/RELEASE and the shutdown sweep
+ * changes this struct afterwards. */
 struct chimera_fuse_open_file {
     struct chimera_vfs_open_handle *handle;
     struct chimera_fuse_mount      *mount;
+    /* The CHIMERA_VFS_OPEN_* word the handle was opened with, which is what
+     * PUTHANDLE owes the sequence: the executor compares it against what each
+     * op needs, so a data handle has to be lent as a data handle and not as
+     * whatever the op would have opened for itself. */
+    unsigned int                    open_flags;
     uint64_t                        readdir_verifier;
     struct chimera_fuse_open_file  *prev;
     struct chimera_fuse_open_file  *next;
@@ -340,38 +351,35 @@ struct chimera_fuse_thread {
 };
 
 struct chimera_fuse_request {
-    struct chimera_fuse_thread     *thread;
-    struct chimera_fuse_channel    *channel;
-    struct chimera_fuse_request    *next;
-    struct chimera_vfs_cred         cred;
-    uint64_t                        unique;
-    uint32_t                        opcode;
-    uint64_t                        nodeid;
-    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                        fh_len;
+    struct chimera_fuse_thread    *thread;
+    struct chimera_fuse_channel   *channel;
+    struct chimera_fuse_request   *next;
+    struct chimera_vfs_cred        cred;
+    uint64_t                       unique;
+    uint32_t                       opcode;
+    uint64_t                       nodeid;
+    uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                       fh_len;
     /* Second handle for the two-node ops (LINK's target, RENAME's newdir). */
-    uint8_t                         fh2[CHIMERA_VFS_FH_SIZE];
-    uint32_t                        fh2_len;
-    /* Transient VFS handle for the op in flight; released by the terminal
-     * completion before the reply. */
-    struct chimera_vfs_open_handle *handle;
+    uint8_t                        fh2[CHIMERA_VFS_FH_SIZE];
+    uint32_t                       fh2_len;
     /* The VFS sequence this request submitted, freed with the request.  A
      * sequence opens what it needs and releases it with itself, so a request
      * driving one carries no handle of its own. */
-    struct chimera_vfs_compound    *compound;
+    struct chimera_vfs_compound   *compound;
     /* OPEN/CREATE result carrier. */
-    struct chimera_fuse_open_file  *file;
+    struct chimera_fuse_open_file *file;
     /* Receive buffer; request field pointers (names, write payload) point
      * into it, so it is not reused until the request is freed. */
-    struct evpl_iovec               buf;
-    int                             buf_allocated;
-    uint32_t                        buf_len;
+    struct evpl_iovec              buf;
+    int                            buf_allocated;
+    uint32_t                       buf_len;
 
     /* Coverage captured at request ENTRY (before the backend op) by ops that
      * condition reply TTLs on it -- a CHIMERA_FUSE_COVER_* value.  See the
      * COVER_* comment: only pre-existing coverage protects state the backend
      * fetched before the call. */
-    int                             entry_cover;
+    int                            entry_cover;
 
     union {
         struct {
@@ -384,6 +392,9 @@ struct chimera_fuse_request {
         } setattr;
         struct {
             struct chimera_vfs_attrs set_attr;
+            /* CREATE: the CHIMERA_VFS_OPEN_* word the file is opened with,
+             * carried to the completion so the open file can record it. */
+            unsigned int             vfs_flags;
         } create;               /* also mkdir/mknod/symlink */
         struct {
             struct evpl_iovec iov;
@@ -441,7 +452,7 @@ void
 chimera_fuse_channel_dead(
     struct chimera_fuse_channel *channel);
 
-/* Reply helpers: deliver (or drop) the reply, release any transient handle,
+/* Reply helpers: deliver (or drop) the reply, free the request's sequence,
  * and recycle the request.  The int-returning ones report whether the kernel
  * actually took the reply (0) or never will (-1), for callers whose reply
  * hands the kernel a reference they must otherwise undo. */
@@ -471,7 +482,7 @@ chimera_fuse_reply_entry(
 
 /* Split primitives for replies that must inspect the delivery result while
  * the request (and its buffer) is still alive: send without recycling, then
- * finish (release any transient handle, recycle the request). */
+ * finish (free the sequence, recycle the request). */
 int
 chimera_fuse_send_only(
     struct chimera_fuse_request *req,

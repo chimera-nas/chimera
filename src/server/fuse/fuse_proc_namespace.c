@@ -69,7 +69,7 @@ chimera_fuse_create_submit(
     chimera_vfs_compound_add_create(req->compound, create_type,
                                     name, (int) strlen(name),
                                     target, target ? (int) strlen(target) : 0,
-                                    set_attr, CHIMERA_FUSE_ATTR_MASK);
+                                    set_attr, CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_entry_sequence_complete, req);
@@ -254,7 +254,7 @@ chimera_fuse_op_link(
     chimera_vfs_compound_add_savefh(req->compound);
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
     chimera_vfs_compound_add_link(req->compound, name, (int) strlen(name),
-                                  CHIMERA_FUSE_ATTR_MASK);
+                                  CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_link_sequence_complete, req);
@@ -301,8 +301,9 @@ chimera_fuse_remove_common(struct chimera_fuse_request *req)
                                           CHIMERA_VFS_OPEN_DIRECTORY,
                                           0);
 
+    /* The reply is a bare status; the directory's change has no reader. */
     chimera_vfs_compound_add_remove(req->compound, name, (int) strlen(name),
-                                    flags);
+                                    flags, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_status_sequence_complete, req);
@@ -402,7 +403,7 @@ chimera_fuse_op_rename(
     chimera_vfs_compound_add_rename(req->compound,
                                     oldname, (int) strlen(oldname),
                                     newname, (int) strlen(newname),
-                                    CHIMERA_VFS_REMOVE_RECALL);
+                                    CHIMERA_VFS_REMOVE_RECALL, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_status_sequence_complete, req);

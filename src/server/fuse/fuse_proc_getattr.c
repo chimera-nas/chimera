@@ -122,7 +122,8 @@ chimera_fuse_op_getattr(
     const struct fuse_getattr_in *in = arg;
 
     if (arglen >= sizeof(*in) && (in->getattr_flags & FUSE_GETATTR_FH)) {
-        struct chimera_vfs_open_handle *oh = chimera_fuse_file(in->fh)->handle;
+        struct chimera_fuse_open_file  *file = chimera_fuse_file(in->fh);
+        struct chimera_vfs_open_handle *oh   = file->handle;
 
         /* The completion's grant rearm reads the handle from req->fh. */
         memcpy(req->fh, oh->fh, oh->fh_len);
@@ -135,16 +136,12 @@ chimera_fuse_op_getattr(
                                                     req->nodeid,
                                                     req->fh, req->fh_len);
 
-        /* The kernel named an open file; the sequence acts on that handle,
-         * which stays owned by the open. */
         req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                    &req->cred);
 
-        /* The kernel named an open file; the sequence borrows that handle and
-         * has no current object of its own. */
-        chimera_vfs_compound_add_puthandle(req->compound, oh,
-                                           CHIMERA_VFS_OPEN_INFERRED |
-                                           CHIMERA_VFS_OPEN_PATH);
+        /* The kernel named an open file; the sequence borrows that handle,
+         * flagged as OPEN opened it, and has no current object of its own. */
+        chimera_vfs_compound_add_puthandle(req->compound, oh, file->open_flags);
 
         chimera_vfs_compound_add_getattr(req->compound,
                                          CHIMERA_VFS_ATTR_MASK_STAT);
@@ -249,7 +246,7 @@ chimera_fuse_op_setattr(
         idx = chimera_vfs_compound_add_setattr(req->compound,
                                                chimera_fuse_file(in->fh)->handle,
                                                &req->u.setattr.set_attr,
-                                               CHIMERA_VFS_ATTR_MASK_STAT);
+                                               0, CHIMERA_VFS_ATTR_MASK_STAT);
         (void) idx;
 
         chimera_vfs_compound_submit(req->compound,
@@ -275,9 +272,11 @@ chimera_fuse_op_setattr(
                                           CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                                           0);
 
+    /* The reply carries only the attributes after the change; nothing here
+     * reads them before it. */
     chimera_vfs_compound_add_setattr(req->compound, NULL,
                                      &req->u.setattr.set_attr,
-                                     CHIMERA_VFS_ATTR_MASK_STAT);
+                                     0, CHIMERA_VFS_ATTR_MASK_STAT);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_setattr_sequence_complete, req);

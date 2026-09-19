@@ -91,8 +91,10 @@ chimera_fuse_op_lookup(
                                           CHIMERA_VFS_OPEN_DIRECTORY,
                                           0);
 
+    /* The entry reply describes the object alone; the directory's attributes
+     * have no reader here. */
     chimera_vfs_compound_add_lookup(req->compound, name, (int) strlen(name),
-                                    CHIMERA_FUSE_ATTR_MASK);
+                                    CHIMERA_FUSE_ATTR_MASK, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_lookup_sequence_complete, req);
