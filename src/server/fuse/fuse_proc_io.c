@@ -452,7 +452,7 @@ chimera_fuse_op_read(
     chimera_vfs_compound_add_read(req->compound, file->handle,
                                   in->offset, in->size,
                                   req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
-                                  0, &actor);
+                                  0, &actor, NULL, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_read_sequence_complete, req);

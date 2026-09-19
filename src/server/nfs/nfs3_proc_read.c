@@ -143,7 +143,7 @@ chimera_nfs3_read(
     chimera_vfs_compound_add_read(compound, NULL,
                                   args->offset, args->count,
                                   iov, 256,
-                                  CHIMERA_NFS3_ATTR_MASK, NULL);
+                                  CHIMERA_NFS3_ATTR_MASK, NULL, NULL, 0);
 
     chimera_vfs_compound_submit(compound,
                                 chimera_nfs3_read_sequence_complete, req);

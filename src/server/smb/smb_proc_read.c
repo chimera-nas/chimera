@@ -397,7 +397,7 @@ chimera_smb_read(struct chimera_smb_request *request)
                                   request->read.iov,
                                   request->read.niov,
                                   0,
-                                  &io_owner);
+                                  &io_owner, NULL, 0);
 
     chimera_vfs_compound_submit(request->vfs_compound,
                                 chimera_smb_read_sequence_complete, request);

@@ -220,7 +220,14 @@ enum chimera_vfs_compound_op_type {
     /* Read from the current object, or from `in_handle`.  The data comes back
      * as iovecs referencing the backend's own buffers rather than a copy, so
      * they carry references and are owned the way an OPEN's handle is -- see
-     * OPEN HANDLE OWNERSHIP. */
+     * OPEN HANDLE OWNERSHIP.
+     *
+     * With `dest_iov` set the read lands in the CALLER'S buffers instead
+     * (chimera_vfs_read_into): the op's iov then references those, which the
+     * caller owned all along and releases itself, and the compound owns
+     * nothing.  One op, a pair of fields selecting the underlying call -- the
+     * shape ALLOCATE's flags and CREATE's type already use -- rather than a
+     * READ_INTO op duplicating READ's whole result surface for one field. */
     CHIMERA_VFS_COMPOUND_OP_READ,
     /* Write to the current object, or to `in_handle`.  The data iovecs are
      * BORROWED, like in_handle: the caller owns the buffers and releases them
@@ -293,6 +300,70 @@ enum chimera_vfs_compound_op_type {
      * thing here. */
     CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
     CHIMERA_VFS_COMPOUND_OP_LOCK,
+    /* Create an anonymous, unlinked object in the directory the current FILE
+     * handle names; the new object's open handle becomes the current OPEN.
+     * The current FILE handle does NOT move -- an unlinked object has no name
+     * to make current, and the directory is where the caller will LINK it
+     * once it is written (the S3 PUT shape: create, write, publish).  So the
+     * op's `fh` result is still the directory's; the object's own is in its
+     * attr.va_fh and on the handle.  The mirror of an unnamed OPEN that also
+     * creates: `created` is set, `attr` describes the object, and out_handle
+     * carries the handle on OPEN's ownership terms.  MUTATES.
+     *
+     * Because the two cursors then name different objects, the handle is
+     * held to the LENT-handle rule: an op it does not serve (a READ behind a
+     * WRITE_ONLY create) fails EINVAL, where the executor would otherwise
+     * re-open the current fh in its place -- which here is the directory,
+     * not the object the caller wrote.  The name-resolving ops are the
+     * exception and re-open the directory as usual, so a LOOKUP or a
+     * second CREATE_UNLINKED can follow in the same sequence.
+     *
+     * The directory is opened as a directory first, exactly as a named OPEN
+     * opens it, and whether a non-directory is refused there is the
+     * backend's to decide, as it is for the named OPEN: a backend whose PATH
+     * open checks the type answers ENOTDIR before any create; memfs, whose
+     * PATH open does not and whose create takes the fh only to find the
+     * filesystem, creates the object regardless.  A backend without
+     * CHIMERA_VFS_CAP_CREATE_UNLINKED fails the op ENOTSUP -- the executor
+     * checks, because the per-op call ABORTS on such a backend rather than
+     * reporting -- and the caller falls back to a temp-name OPEN and a
+     * RENAME, as S3 does today. */
+    CHIMERA_VFS_COMPOUND_OP_CREATE_UNLINKED,
+    /* Named-stream (SMB ADS, NFSv4 named attribute) ops on the base file the
+     * current OPEN handle refers to.  Each addresses the base on the ordinary
+     * rules for an op that acts on an object: an `in_handle` first, then the
+     * handle an earlier op produced when chimera_vfs_compound_op_use_handle
+     * names it -- the shape SMB issues, OPEN(base name) then OPEN_STREAM with
+     * use_handle(base), because a named OPEN's handle sits in its out_handle
+     * and not on the cursor -- and otherwise the current open, or a PATH open
+     * of the current file handle when there is none, which is what every
+     * per-op consumer opens the base with today.
+     *
+     * OPEN_STREAM opens (and per CHIMERA_VFS_OPEN_CREATE / EXCLUSIVE /
+     * TRUNCATE in `stream_flags`, creates or truncates) the fork named
+     * `name`, and the STREAM becomes the current object in both cursors: its
+     * fh is the current file handle and its handle the current open, the
+     * base's handle having been released on the ordinary cursor rules.  That
+     * is what an NFSv4 LOOKUP inside an OPENATTR directory means, and what an
+     * SMB stream CREATE keeps.  `attr` is what chimera_vfs_open_stream
+     * reports, stored as every other attribute result is: the base's metadata
+     * (mode, owner, times, DOS attributes -- what SMB reads for granted and
+     * maximal access) with the fork's own size and allocation, and the
+     * stream's fh.  `created` says whether this open made the fork, and
+     * out_handle carries the handle on OPEN's terms.  MUTATES when the flags
+     * say create or truncate.
+     *
+     * LIST_STREAMS is a LISTXATTRS-shaped page into op->buffer -- the record
+     * layout is on the adder.  REMOVE_STREAM removes one named fork; the base
+     * stays current.  MUTATES.
+     *
+     * All three are gated by CHIMERA_VFS_CAP_NAMED_STREAMS exactly as the
+     * per-op calls are: a backend without it fails the op ENOTSUP.  What a
+     * backend WITH it refuses -- a stream on a symlink, say -- comes back as
+     * that backend's own status. */
+    CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM,
+    CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS,
+    CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM,
     /* Path-addressed.  See the note on ->path. */
     CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH,
     CHIMERA_VFS_COMPOUND_OP_OPEN_PATH,
@@ -552,6 +623,26 @@ struct chimera_vfs_compound_op {
      * accept the ones already there -- mkdir -p.  See the adder. */
     uint8_t                               path_intermediates;
 
+    /* ---- streams ---- */
+    /* OPEN_STREAM: CHIMERA_VFS_OPEN_* for the fork -- CREATE, EXCLUSIVE and
+     * TRUNCATE mean what they mean to chimera_vfs_open_stream, and the rest
+     * become the handle's flags, which is how the sequence knows what the
+     * stream handle serves.  The stream's name rides in `name`, and the
+     * attributes a creating open stamps on the base in `set_attr`.  (Its own
+     * word rather than open_flags, so an OPEN_STREAM cannot be misread as an
+     * OPEN by anything that switches on the flags alone.) */
+    unsigned int                          stream_flags;
+    /* LIST_STREAMS: carry each stream's file handle in its record.  NFSv4's
+     * named-attribute READDIR needs them; SMB's FILE_STREAM_INFORMATION does
+     * not and keeps the compact record. */
+    int                                   stream_want_fh;
+
+    /* READ into the caller's buffers -- see the READ op.  BORROWED on the
+     * WRITE payload's terms: the caller holds them for the life of the
+     * sequence and releases them afterwards.  NULL / 0 is an ordinary READ. */
+    struct evpl_iovec                    *dest_iov;
+    int                                   dest_niov;
+
     /* A PATH-ADDRESSED op resolves this, relative to the sequence's current
      * file handle, instead of addressing the current object.  Owned by the
      * compound and copied by the adder.
@@ -648,16 +739,23 @@ struct chimera_vfs_compound_op {
     char                                 *target; /* READLINK (owned by the compound)  */
     uint32_t                              target_len;
 
-    /* SETXATTR, REMOVEXATTR.  Only the ctime is kept: it is the whole of what
-     * a change_info reply needs, and keeping two more attribute sets per op
-     * would double the size of a sequence for one field. */
+    /* SETXATTR, REMOVEXATTR, REMOVE_STREAM.  Only the ctime is kept: it is
+     * the whole of what a change_info reply needs, and keeping two more
+     * attribute sets per op would double the size of a sequence for one
+     * field.  (remove_stream asks its backend for no attributes at all today,
+     * so for it these stay zero unless the backend volunteers a ctime.) */
     struct timespec                       pre_ctime;
     struct timespec                       post_ctime;
 
     /* ---- READ results ---- */
     /* The data, as references to the backend's buffers, written into the array
      * the caller supplied.  The references are owned by the compound until
-     * chimera_vfs_compound_take_iov(); the array never is. */
+     * chimera_vfs_compound_take_iov(); the array never is.
+     *
+     * A READ with `dest_iov` is different: on success these are dest_iov and
+     * dest_niov handed back -- the caller's own buffers, with the first
+     * read_len bytes filled -- and the compound owns none of it.  take_iov
+     * then answers NULL / 0, and free releases nothing. */
     struct evpl_iovec                    *iov;
     int                                   niov;
     uint32_t                              read_len;
@@ -669,11 +767,13 @@ struct chimera_vfs_compound_op {
      * may fall short of it only by the backend's own report. */
     uint32_t                              committed;
 
-    /* ---- OPEN results ---- */
+    /* ---- OPEN results (and CREATE_UNLINKED's and OPEN_STREAM's) ---- */
     /* The open handle, owned by the CALLER once the sequence has finished --
-     * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed. */
+     * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed.
+     * CREATE_UNLINKED and OPEN_STREAM produce theirs here on the same terms. */
     struct chimera_vfs_open_handle       *out_handle;
-    /* Whether the open created the object. */
+    /* Whether the open created the object (the fork, for OPEN_STREAM; always
+     * set for CREATE_UNLINKED, which creates by definition). */
     uint8_t                               created;
     /* Set when the executor resolved the name before opening (which it does
      * for REGULAR_ONLY or ATTRS_ON_CREATE_ONLY) and found an existing object.
@@ -727,11 +827,12 @@ struct chimera_vfs_compound_op {
     uint64_t                            r_cookie;
     uint64_t                            r_verifier;
 
-    /* GETXATTR (value), LISTXATTRS (back-to-back NUL-terminated names).  Owned
-     * by the compound, buffer_max bytes, valid until it is freed. */
+    /* GETXATTR (value), LISTXATTRS (back-to-back NUL-terminated names),
+     * LIST_STREAMS (packed chimera_vfs_stream_entry records -- see the adder).
+     * Owned by the compound, buffer_max bytes, valid until it is freed. */
     void                               *buffer;
     uint32_t                            buffer_len;
-    uint32_t                            buffer_count;   /* LISTXATTRS: names   */
+    uint32_t                            buffer_count;   /* LISTXATTRS, LIST_STREAMS: entries */
 };
 
 /*
@@ -1023,6 +1124,67 @@ chimera_vfs_compound_add_listxattrs(
 
 int
 chimera_vfs_compound_add_removexattr(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen);
+
+/* Create an anonymous unlinked object in the directory the current file
+ * handle names; its open handle becomes the current open -- see the op.
+ * `flags` is a CHIMERA_VFS_OPEN_* word describing what the handle is for (a
+ * READ or WRITE that follows is served by it on those flags); the per-op
+ * create takes none, so the backend sees only the attributes.  `set_attr`
+ * is required by the underlying call and is copied; the mode's type bits are
+ * the backend's to supply (memfs makes a regular file whatever is asked).
+ * `attr_mask` describes the new object; the fh is always included. */
+int
+chimera_vfs_compound_add_create_unlinked(
+    struct chimera_vfs_compound    *compound,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+/* Open the fork `name` on the base the op addresses; the stream becomes
+ * current -- see the op.  `flags` is CHIMERA_VFS_OPEN_*: CREATE, EXCLUSIVE and
+ * TRUNCATE select the disposition, the rest describe the handle.  `set_attr`
+ * may be NULL; it is copied, and a creating or truncating open stamps it on
+ * the BASE (streams share their base's metadata).  `attr_mask` is fetched
+ * against the stream; the fh is always included. */
+int
+chimera_vfs_compound_add_open_stream(
+    struct chimera_vfs_compound    *compound,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+/* One page of the base's streams from `cookie`, into an op->buffer of
+ * `max_bytes` the compound allocates and owns.  The page is what
+ * chimera_vfs_list_streams produces, verbatim:
+ *
+ *   buffer_count records, each a struct chimera_vfs_stream_entry (size,
+ *   alloc, name_len, fh_len) followed by name_len bytes of un-terminated
+ *   name, then fh_len bytes of the stream's file handle -- fh_len is 0 unless
+ *   `want_fh` was set -- with the next record at the following 8-byte-aligned
+ *   offset; buffer_len is where the last one ends.  The unnamed data fork is
+ *   reported first, as a record with an empty name and the file's own size
+ *   (and, with want_fh, the base's own fh), on every backend that has one --
+ *   memfs reports it for a regular file and nothing for a directory.
+ *
+ * eof and r_cookie are as for LISTXATTRS.  A page too small for its first
+ * record is the backend's ERANGE. */
+int
+chimera_vfs_compound_add_list_streams(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     cookie,
+    uint32_t                     max_bytes,
+    int                          want_fh);
+
+/* Remove the fork `name` from the base the op addresses, which stays
+ * current.  The ctime pair lands in pre_ctime / post_ctime as REMOVEXATTR's
+ * does. */
+int
+chimera_vfs_compound_add_remove_stream(
     struct chimera_vfs_compound *compound,
     const char                  *name,
     int                          namelen);
@@ -1402,7 +1564,16 @@ chimera_vfs_compound_add_remove(
  * needing more than `max_iov` is served short, as any short read is.
  *
  * The DATA those descriptors reference is owned by the compound until taken --
- * see OPEN HANDLE OWNERSHIP. */
+ * see OPEN HANDLE OWNERSHIP.
+ *
+ * `dest_iov` / `dest_niov`, when given, are the caller's own buffers for the
+ * data to land in, and turn the op into chimera_vfs_read_into: `iov` is then
+ * the scratch array that call takes, the result's iov/niov are dest_iov and
+ * dest_niov handed back, the first read_len bytes of them filled, and the
+ * compound owns nothing -- the caller releases its buffers after the run as it
+ * releases a WRITE's.  NULL / 0 is today's READ.  There is no owned variant of
+ * read_into, so a read that lands in the caller's buffers cannot also name an
+ * `io_owner`; supplying both is refused at build. */
 int
 chimera_vfs_compound_add_read(
     struct chimera_vfs_compound      *compound,
@@ -1412,7 +1583,9 @@ chimera_vfs_compound_add_read(
     struct evpl_iovec                *iov,
     int                               max_iov,
     uint64_t                          attr_mask,
-    const struct chimera_claim_actor *io_owner);
+    const struct chimera_claim_actor *io_owner,
+    struct evpl_iovec                *dest_iov,
+    int                               dest_niov);
 
 /* Write `count` bytes of `iov` at `offset` to the current object, or -- when
  * `handle` is non-NULL -- to that handle.  Both `handle` and `iov` are
@@ -1580,7 +1753,13 @@ chimera_vfs_compound_take_file_state(
 /* Take ownership of a READ's data: on return the *iov / *niov references are the
  * caller's to release, and the compound will not.  *iov is the array the caller
  * supplied, which it has owned all along.  *niov is 0 if that op is not a READ,
- * did not run, failed, or has already been taken. */
+ * did not run, failed, or has already been taken.
+ *
+ * A READ with dest_iov has nothing of the compound's to hand over -- the data
+ * landed in the caller's own buffers, which it owns and releases regardless
+ * -- so this answers NULL / 0 for it, safe to call and to release the answer
+ * of, and leaves the op's iov / niov readable.  The caller that supplied
+ * dest_iov already holds the references this would otherwise be moving. */
 void
 chimera_vfs_compound_take_iov(
     struct chimera_vfs_compound *compound,
