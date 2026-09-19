@@ -33,6 +33,7 @@
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_attrs.h"
+#include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
 #include "common/logging.h"
@@ -343,7 +344,9 @@ find_filter(
     assert(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE);
     assert(attr->va_set_mask & CHIMERA_VFS_ATTR_FH);
     assert(S_ISDIR(attr->va_mode));
-    assert(attr->va_acl == NULL);
+    /* The walker's own attrs, live for this call: an ACL is present only
+     * when asked for, and this walk did not ask. */
+    assert(!(attr->va_set_mask & CHIMERA_VFS_ATTR_ACL));
 
     f->filter_calls++;
 
@@ -366,7 +369,7 @@ find_append(
     assert(op->type == CHIMERA_VFS_COMPOUND_OP_FIND);
     assert(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE);
     assert(attr->va_set_mask & CHIMERA_VFS_ATTR_FH);
-    assert(attr->va_acl == NULL);
+    assert(!(attr->va_set_mask & CHIMERA_VFS_ATTR_ACL));
     assert(pathlen > 1 && path[0] == '/');
     assert(pathlen < (int) sizeof(f->paths[0]));
 
@@ -654,12 +657,14 @@ main(
     assert(op->granted & CHIMERA_ACE_READ_DATA);
     /* The decision was reached with the object's ACL in hand, not from its
      * mode bits alone -- an ACL-bearing object would otherwise be answered
-     * from a mode that says nothing about who its ACL admits.  What survives to
-     * here is the request, not the ACL itself: the result copy drops it
-     * deliberately (see chimera_vfs_compound_store_attr), so the answer's own
-     * masks cannot be what says the ACL was consulted. */
+     * from a mode that says nothing about who its ACL admits.  The ACL it was
+     * computed from survives to here by value (see
+     * chimera_vfs_compound_store_attr_to): memfs synthesizes one from the
+     * mode for an object with no explicit ACL, so it is present and
+     * non-empty. */
     assert(op->attr_mask & CHIMERA_VFS_ATTR_ACL);
-    assert(!(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL));
+    assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+    assert(op->attr.va_acl != NULL && op->attr.va_acl->num_aces > 0);
 
     chimera_vfs_compound_free(cp);
     TEST_PASS("ACCESS is evaluated against the object the sequence resolved");
@@ -1448,6 +1453,271 @@ main(
         chimera_vfs_release(ctx.vfs_thread, oh);
     }
     TEST_PASS("SETATTR applies to the current object or to a borrowed handle");
+
+    /* ---- ACLs by value; set-side ACLs borrowed ----
+     * memfs is CAP_ACL_NATIVE and reports an ACL from a per-thread scratch
+     * that is valid only for the completion, which is exactly the hazard the
+     * by-value copy exists for.  Set side: the SETATTR's ACL is a heap buffer
+     * the test owns and frees only after every run that borrowed it.  Read
+     * side: the copies in a LOOKUP's attr and dir_post_attr, a GETATTR's attr
+     * and an OPEN's attr and dir pair survive the scratch being overwritten
+     * by a later per-op lookup, each op owns its own, an op that did not ask
+     * carries none, and a second execution of the same compound (the retry
+     * shape) replaces the first copy rather than leaking or double-freeing
+     * it.  SIDs, which share va_acl's contract, ride the same path. */
+    {
+        struct chimera_vfs_attrs              sattr;
+        struct chimera_acl                   *acl;
+        struct chimera_sid                    sid;
+        const struct chimera_vfs_compound_op *lk, *ga, *plain;
+        const struct chimera_acl             *first;
+        size_t                                acl_size = chimera_acl_size(3);
+        int                                   i_open, i_sa, i_lk, i_ga;
+        int                                   i_plain;
+
+        /* A 3-ACE ACL the mode could not have synthesized: an explicit
+         * named-user entry is not something from_mode produces. */
+        acl = malloc(acl_size);
+        memset(acl, 0, acl_size);
+        acl->num_aces            = 3;
+        acl->aces[0].type        = CHIMERA_ACE_ALLOWED;
+        acl->aces[0].access_mask = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA |
+            CHIMERA_ACE_READ_ATTRIBUTES | CHIMERA_ACE_READ_ACL |
+            CHIMERA_ACE_WRITE_ACL;
+        acl->aces[0].who.type    = CHIMERA_PRINCIPAL_SPECIAL;
+        acl->aces[0].who.special = CHIMERA_WHO_OWNER;
+        acl->aces[1].type        = CHIMERA_ACE_ALLOWED;
+        acl->aces[1].flags       = CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+        acl->aces[1].access_mask = CHIMERA_ACE_READ_DATA;
+        acl->aces[1].who.type    = CHIMERA_PRINCIPAL_SPECIAL;
+        acl->aces[1].who.special = CHIMERA_WHO_GROUP;
+        acl->aces[2].type        = CHIMERA_ACE_ALLOWED;
+        acl->aces[2].access_mask = CHIMERA_ACE_READ_DATA;
+        acl->aces[2].who.type    = CHIMERA_PRINCIPAL_USER;
+        acl->aces[2].who.id      = 1234;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0644;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_open(cp, "aclf", 4,
+                                      CHIMERA_VFS_OPEN_CREATE |
+                                      CHIMERA_VFS_OPEN_READ_ONLY,
+                                      0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* SETATTR the ACL through a sequence.  The op's set_attr carries the
+         * caller's pointer -- borrowed, not copied -- and the two readings
+         * either side of the change come back by value: the pre reading is
+         * the mode-synthesized ACL, the post reading is the one set. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+        sattr.va_acl      = acl;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "aclf", 4, 0, 0);
+        i_sa = chimera_vfs_compound_add_setattr(
+            cp, NULL, &sattr,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_sa);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->set_attr.va_acl == acl);
+        assert(op->pre_attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(op->pre_attr.va_acl != NULL);
+        assert(op->pre_attr.va_acl != acl);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(op->attr.va_acl != NULL);
+        assert(op->attr.va_acl != acl);
+        assert(op->attr.va_acl != op->pre_attr.va_acl);
+        assert(op->attr.va_acl->num_aces == 3);
+        assert(memcmp(op->attr.va_acl, acl, acl_size) == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* Read it back in a NEW sequence: LOOKUP with the ACL in both masks,
+         * a GETATTR that asks, and one that does not. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lk = chimera_vfs_compound_add_lookup(
+            cp, "aclf", 4,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL);
+        i_ga = chimera_vfs_compound_add_getattr(
+            cp, CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL);
+        i_plain = chimera_vfs_compound_add_getattr(cp,
+                                                   CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        /* Overwrite the backend's scratch before reading the results: a
+         * per-op lookup of a DIRECTORY with the ACL requested puts a
+         * mode-synthesized directory ACL where the file's used to be.  A
+         * result that merely pointed at the scratch would now read that. */
+        chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
+                           "a", 1,
+                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+                           CHIMERA_VFS_ATTR_ACL,
+                           0, lookup_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+
+        lk = chimera_vfs_compound_op(cp, i_lk);
+        assert(lk->status == CHIMERA_VFS_OK);
+        assert(lk->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(lk->attr.va_acl != NULL && lk->attr.va_acl != acl);
+        assert(lk->attr.va_acl->num_aces == 3);
+        assert(memcmp(lk->attr.va_acl, acl, acl_size) == 0);
+        /* The directory it was found in has its own copy.  (Its CONTENT is
+         * not asserted: memfs maps the directory and then the child through
+         * one per-thread ACL scratch, so in a lookup that asks for both the
+         * directory's va_acl aliases the child's ACL by the time the
+         * completion runs -- a memfs defect, not the executor's, and one the
+         * by-value copy faithfully preserves.) */
+        assert(lk->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(lk->dir_post_attr.va_acl != NULL);
+        assert(lk->dir_post_attr.va_acl != lk->attr.va_acl);
+
+        ga = chimera_vfs_compound_op(cp, i_ga);
+        assert(ga->status == CHIMERA_VFS_OK);
+        assert(ga->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(ga->attr.va_acl != NULL);
+        /* Each op owns its own copy; equal by content, distinct in memory. */
+        assert(ga->attr.va_acl != lk->attr.va_acl);
+        assert(memcmp(ga->attr.va_acl, acl, acl_size) == 0);
+
+        plain = chimera_vfs_compound_op(cp, i_plain);
+        assert(plain->status == CHIMERA_VFS_OK);
+        assert(!(plain->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL));
+        assert(plain->attr.va_acl == NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* OPEN with the ACL in every mask it has: the object's, and the
+         * directory pair's. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(
+            cp, "aclf", 4, CHIMERA_VFS_OPEN_READ_ONLY, 0, NULL,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(op->attr.va_acl != NULL);
+        assert(memcmp(op->attr.va_acl, acl, acl_size) == 0);
+        assert(op->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(op->dir_pre_attr.va_acl != NULL);
+        assert(op->dir_post_attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(op->dir_post_attr.va_acl != NULL);
+        assert(op->dir_post_attr.va_acl != op->dir_pre_attr.va_acl);
+        chimera_vfs_compound_free(cp);
+
+        /* The retry shape: the same compound executed twice without a free
+         * between.  The second execution's copy replaces the first; a first
+         * copy left behind would be a leak, and one freed twice a crash at
+         * compound_free -- both of which ASAN reports here. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(
+            cp, "aclf", 4,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL);
+        i_ga = chimera_vfs_compound_add_getattr(
+            cp, CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        first = chimera_vfs_compound_op(cp, i_ga)->attr.va_acl;
+        assert(first != NULL);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        ga = chimera_vfs_compound_op(cp, i_ga);
+        assert(ga->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(ga->attr.va_acl != NULL);
+        assert(memcmp(ga->attr.va_acl, acl, acl_size) == 0);
+        chimera_vfs_compound_free(cp);
+
+        /* The set-side buffer outlived every run that borrowed it. */
+        free(acl);
+
+        /* SIDs: set an owner SID (restating the uid, which is what lets the
+         * owner attach one), borrowed on the same terms; read it back by
+         * value alongside an absent group SID and the ACL. */
+        assert(chimera_sid_from_str(&sid, "S-1-5-21-7-8-9-1001") == 0);
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask  = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_OWNER_SID;
+        sattr.va_uid       = 0;
+        sattr.va_owner_sid = &sid;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "aclf", 4, 0, 0);
+        i_sa = chimera_vfs_compound_add_setattr(
+            cp, NULL, &sattr, 0,
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_OWNER_SID |
+            CHIMERA_VFS_ATTR_GROUP_SID);
+        i_ga = chimera_vfs_compound_add_getattr(
+            cp, CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
+            CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_sa);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->set_attr.va_owner_sid == &sid);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID);
+        assert(op->attr.va_owner_sid != NULL && op->attr.va_owner_sid != &sid);
+        assert(chimera_sid_equal(op->attr.va_owner_sid, &sid));
+        assert(!(op->attr.va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID));
+        assert(op->attr.va_group_sid == NULL);
+
+        ga = chimera_vfs_compound_op(cp, i_ga);
+        assert(ga->status == CHIMERA_VFS_OK);
+        assert(ga->attr.va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID);
+        assert(ga->attr.va_owner_sid != op->attr.va_owner_sid);
+        assert(chimera_sid_equal(ga->attr.va_owner_sid, &sid));
+        assert(ga->attr.va_group_sid == NULL);
+        assert(ga->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL);
+        assert(ga->attr.va_acl != NULL && ga->attr.va_acl->num_aces == 3);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("ACLs and SIDs come back by value and outlive the backend's "
+              "completion; the set side is borrowed");
 
     /* ---- READ, and the ownership of what it answers with ----
     * The data arrives as references to the backend's buffers, not a copy, so
@@ -3838,8 +4108,8 @@ main(
      * reset truncates, so a second execution of the same op starts empty.
      * What the executor owes: reset before every execution, the root's fh on
      * the op before the walk, entries with the fh and mode the walk descends
-     * on and no ACL, a refusal that ends the op with eof clear, and ENOTDIR
-     * for a FIND through a regular file. */
+     * on (and no ACL, since none was asked for), a refusal that ends the op
+     * with eof clear, and ENOTDIR for a FIND through a regular file. */
     {
         struct find_ctx          f;
         struct chimera_vfs_attrs sattr;

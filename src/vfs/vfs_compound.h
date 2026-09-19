@@ -508,6 +508,11 @@ enum chimera_vfs_compound_create_type {
  * stops on the entry that does not fit rather than guessing a count up front.
  * The page then ends at that entry's cookie with eof clear.
  *
+ * The attributes append receives are the backend's own, not a copy: an ACL or
+ * SID among them (when attr_mask asked) is live for the duration of the call
+ * and no longer, which is where every consumer that marshals per-entry ACLs
+ * marshals them.  The staged variant drops them instead -- see the dirent.
+ *
  * WHAT APPEND MAY NOT DO is anything reset cannot take back -- above all,
  * emit.  A caller that writes to its own reply buffer and sends only when the
  * sequence has finished is fine; one that streams onto a socket is not.
@@ -537,8 +542,10 @@ typedef int (*chimera_vfs_compound_readdir_append_t)(
  * '/', so the root's own children are "/name" and their children
  * "/name/child"; the root itself is never an entry, and neither is "." or
  * "..".  The attributes are what the caller's attr_mask asked for, with the
- * fh and the mode always present (the walk needs both to descend), and the
- * ACL stripped as every result here strips it.  Entries arrive in the
+ * fh and the mode always present (the walk needs both to descend), handed
+ * over as the walker reports them: an ACL or SID among them is the backend's
+ * own, live for the duration of the callback and no longer -- the streaming
+ * READDIR rule, since nothing here is staged.  Entries arrive in the
  * backend's readdir order, a directory's own entry BEFORE anything below it.
  *
  * `filter` is asked only for a DIRECTORY entry, before that entry's own
@@ -576,9 +583,16 @@ struct chimera_vfs_compound_dirent {
     uint64_t                 cookie;
     uint32_t                 name_len;
     char                     name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
-    /* As for every other attribute result here, va_acl is NULL and the ACL bit
-     * is clear: the backend owns the ACL only for the duration of the entry
-     * callback. */
+    /* The ONE attribute result that does not carry the ACL or the SIDs: here
+     * va_acl, va_owner_sid and va_group_sid are NULL and their bits clear,
+     * whatever the READDIR asked for.  A staged entry is a fixed-size record
+     * -- that is what lets a page be budgeted by count (see the READDIR page
+     * note) -- and an ACL is not: up to CHIMERA_ACL_MAX_ACES of 88 bytes,
+     * per entry, times a page.  Every consumer that marshals per-entry ACLs
+     * (NFSv4 READDIR, SMB's access-based enumeration) does so inside the
+     * enumeration, and the streaming READDIR is where that happens: its
+     * append is handed the backend's live attributes, ACL included, for the
+     * duration of the call. */
     struct chimera_vfs_attrs attr;
 };
 
@@ -647,9 +661,19 @@ struct chimera_vfs_compound_op {
      * lease-recall request, which are the caller's to make. */
     unsigned int                          remove_flags;
     uint32_t                              open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
-    /* OPEN and CREATE: attributes to apply to a created object.  Read by the
-     * executor at execution time, so ATTRS_ON_CREATE_ONLY can clear it once the
-     * name has been resolved. */
+    /* SETATTR, OPEN, CREATE (and CREATE_UNLINKED, OPEN_STREAM, the path
+     * creates): the attributes to apply.  Read by the executor at execution
+     * time, so ATTRS_ON_CREATE_ONLY can clear it once the name has been
+     * resolved.
+     *
+     * SET-SIDE va_acl IS BORROWED, and so are va_owner_sid / va_group_sid.
+     * The adders copy this struct by value, which carries the caller's
+     * pointers across unchanged; the executor hands them to the backend in
+     * place, never copies what they point at, and never frees it.  The caller
+     * keeps those buffers alive for the life of the run -- exactly as it
+     * keeps a WRITE's payload -- and a retried run reads them again.  (An
+     * ACL is the one settable attribute that is not a value in this struct,
+     * so it takes the WRITE payload's terms rather than the struct copy's.) */
     struct chimera_vfs_attrs              set_attr;
 
     /* ---- the name-op knobs: exempt handle, lease skip, match fh ----
@@ -814,20 +838,33 @@ struct chimera_vfs_compound_op {
     uint8_t                               io_typechecked_flag;
 
     /* ---- results ---- */
-    /* LOOKUP, GETATTR, ACCESS.  va_acl is always NULL here and the ACL bit is
-     * always clear in the masks: a backend reports an ACL by pointing at its
-     * own live inode state, which does not outlive its completion, so a copy
-     * that survives the callback cannot carry one.  Rather than leave a
-     * pointer that looks valid and is not, the sequence drops it -- a caller
-     * that needs an ACL issues that getattr itself.  ACCESS's `granted` is
-     * computed while the ACL is still live, so it is unaffected. */
-    struct chimera_vfs_attrs              attr;
+    /* LOOKUP, GETATTR, ACCESS, OPEN, CREATE, and the I/O and change ops that
+     * sample the object after themselves.
+     *
+     * ACLs BY VALUE.  When an op is asked for CHIMERA_VFS_ATTR_ACL -- in its
+     * attr_mask, its pre_attr_mask, or one of its directory masks -- the
+     * executor copies the backend's live ACL into heap storage the op owns
+     * and re-points the result's va_acl at the copy, and the ACL bit stays
+     * set; va_owner_sid and va_group_sid, which share va_acl's lifetime
+     * contract, are copied the same way.  This holds for every attribute
+     * result slot on the op: attr, pre_attr, dir_pre_attr, dir_post_attr,
+     * from_dir_pre_attr and from_dir_post_attr.  A caller reads the ACL from
+     * the completion callback until it frees the compound, which is what
+     * frees the copies.  A backend reports an ACL by pointing at storage
+     * valid only for its own completion, so a struct copy that survived the
+     * callback used to carry a dangling pointer; every result once dropped
+     * the ACL for that reason, and the copy removes the hazard rather than
+     * the attribute.  ACCESS's `granted` was always computed while the ACL
+     * was live; its attr now carries the ACL it was computed from.
+     *
+     * The staged READDIR entry is the one exception -- see the dirent. */
+    struct chimera_vfs_attrs            attr;
     /* The same object BEFORE this op ran, sampled under whatever lock makes
      * it atomic with the change -- which is the whole reason it comes back
      * from the op rather than from a GETATTR the caller issues first.  Only
-     * the attributes named in `pre_attr_mask` are filled; the ACL is dropped
-     * for the reason given above. */
-    struct chimera_vfs_attrs              pre_attr;
+     * the attributes named in `pre_attr_mask` are filled, the ACL by value as
+     * above. */
+    struct chimera_vfs_attrs            pre_attr;
     /* The current object AFTER this op ran: what a LOOKUP resolved, what a
      * PUTFH selected, and for everything else the object the op addressed.
      * A streaming READDIR is the one op that fills this BEFORE it runs rather
@@ -835,26 +872,26 @@ struct chimera_vfs_compound_op {
      * is listing and a READDIR cannot move the current object anyway.
      * A caller that must describe the object an op acted on -- which is most
      * of what a protocol reply is -- would otherwise have to re-derive it. */
-    uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                              fh_len;
-    uint32_t                              granted; /* ACCESS                            */
+    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            fh_len;
+    uint32_t                            granted;   /* ACCESS                            */
     /* READ_PLUS: whether the range it reported is data rather than a hole.
      * Its length and eof land in read_len and eof_read, as a READ's do. */
-    uint32_t                              is_data;
+    uint32_t                            is_data;
     /* SEEK: where the next data or hole begins, and whether the search ran off
      * the end of the file without finding one. */
-    uint64_t                              seek_offset;
-    uint32_t                              seek_eof;
-    char                                 *target; /* READLINK (owned by the compound)  */
-    uint32_t                              target_len;
+    uint64_t                            seek_offset;
+    uint32_t                            seek_eof;
+    char                               *target;   /* READLINK (owned by the compound)  */
+    uint32_t                            target_len;
 
     /* SETXATTR, REMOVEXATTR, REMOVE_STREAM.  Only the ctime is kept: it is
      * the whole of what a change_info reply needs, and keeping two more
      * attribute sets per op would double the size of a sequence for one
      * field.  (remove_stream asks its backend for no attributes at all today,
      * so for it these stay zero unless the backend volunteers a ctime.) */
-    struct timespec                       pre_ctime;
-    struct timespec                       post_ctime;
+    struct timespec                     pre_ctime;
+    struct timespec                     post_ctime;
 
     /* ---- READ results ---- */
     /* The data, as references to the backend's buffers, written into the array
@@ -865,46 +902,46 @@ struct chimera_vfs_compound_op {
      * dest_niov handed back -- the caller's own buffers, with the first
      * read_len bytes filled -- and the compound owns none of it.  take_iov
      * then answers NULL / 0, and free releases nothing. */
-    struct evpl_iovec                    *iov;
-    int                                   niov;
-    uint32_t                              read_len;
-    uint32_t                              eof_read;
+    struct evpl_iovec                  *iov;
+    int                                 niov;
+    uint32_t                            read_len;
+    uint32_t                            eof_read;
 
     /* ---- WRITE results ---- */
-    uint32_t                              written;
+    uint32_t                            written;
     /* Durability actually achieved, which may exceed what was asked for and
      * may fall short of it only by the backend's own report. */
-    uint32_t                              committed;
+    uint32_t                            committed;
 
     /* ---- OPEN results (and CREATE_UNLINKED's and OPEN_STREAM's) ---- */
     /* The open handle, owned by the CALLER once the sequence has finished --
      * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed.
      * CREATE_UNLINKED and OPEN_STREAM produce theirs here on the same terms. */
-    struct chimera_vfs_open_handle       *out_handle;
+    struct chimera_vfs_open_handle     *out_handle;
     /* Whether the open created the object (the fork, for OPEN_STREAM; always
      * set for CREATE_UNLINKED, which creates by definition). */
-    uint8_t                               created;
+    uint8_t                             created;
     /* Set when the executor resolved the name before opening (which it does
      * for REGULAR_ONLY or ATTRS_ON_CREATE_ONLY) and found an existing object.
      * `existing_mode` is that object's mode -- the whole point of the
      * REGULAR_ONLY failure, whose status says only that the open was refused
      * and not what was in the way. */
-    uint8_t                               existed;
-    uint32_t                              existing_mode;
+    uint8_t                             existed;
+    uint32_t                            existing_mode;
     /* The parent directory before and after, for a change_info reply.  Set by
      * CREATE and REMOVE, and by an OPEN that named a child. */
-    struct chimera_vfs_attrs              dir_pre_attr;
-    struct chimera_vfs_attrs              dir_post_attr;
+    struct chimera_vfs_attrs            dir_pre_attr;
+    struct chimera_vfs_attrs            dir_post_attr;
     /* RENAME only: the SOURCE directory's change_info.  The pair above is the
      * target's, which is what every other name-changing op reports.  Both are
      * filled because rename_at hands back both and NFSv4's RENAME reply has a
      * slot for each -- source_cinfo and target_cinfo. */
-    struct chimera_vfs_attrs              from_dir_pre_attr;
-    struct chimera_vfs_attrs              from_dir_post_attr;
+    struct chimera_vfs_attrs            from_dir_pre_attr;
+    struct chimera_vfs_attrs            from_dir_post_attr;
 
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
-    struct chimera_vfs_compound_dirent   *entries;
-    uint32_t                              num_entries;
+    struct chimera_vfs_compound_dirent *entries;
+    uint32_t                            num_entries;
     /* LOCK_TEST and LOCK.  `claim` and `ticket` are BORROWED and must outlive
      * the sequence: the claim core keeps pointers INTO the claim once it is
      * inserted, so its address is its identity and no copy will do.  That is
@@ -1410,7 +1447,9 @@ chimera_vfs_compound_add_recall(
  * `flags` is an ordinary CHIMERA_VFS_OPEN_* word and means exactly what it
  * means to chimera_vfs_open_at.  `opts` selects the two resolve-first
  * behaviours documented on CHIMERA_VFS_COMPOUND_OPEN_* above.  `set_attr` may
- * be NULL; it is copied, so the caller need not keep it alive.
+ * be NULL; the struct is copied, so the caller need not keep it alive -- but
+ * an ACL or SID it points at is BORROWED for the life of the run, on the
+ * terms given on the op's set_attr.
  *
  * The handle this produces belongs to the compound until taken -- see OPEN
  * HANDLE OWNERSHIP at the top of this file. */
@@ -1674,8 +1713,12 @@ chimera_vfs_compound_submit(
 
 /*
  * Return a finished compound.  This releases anything the sequence still
- * holds -- see OPEN HANDLE OWNERSHIP -- and recycles the compound onto the
- * thread's free list rather than returning it to the allocator.
+ * holds -- see OPEN HANDLE OWNERSHIP -- along with everything the ops own
+ * outright (the by-value ACL and SID copies in every attribute result, a
+ * GET_LAYOUT's arrays, a READLINK's target, the xattr and stream buffers),
+ * and recycles the compound onto the thread's free list rather than
+ * returning it to the allocator.  Nothing BORROWED is touched: a lent handle,
+ * a WRITE's payload, a set_attr's ACL.
  */
 void
 chimera_vfs_compound_free(
@@ -1711,7 +1754,8 @@ chimera_vfs_compound_op(
     uint32_t                           index);
 
 /* Create `name` in the current object; it becomes current.  `set_attr` may be
- * NULL.  `target` is the symlink target and is required for -- and only read
+ * NULL; its struct is copied and its ACL / SIDs are BORROWED, as for OPEN.
+ * `target` is the symlink target and is required for -- and only read
  * for -- CHIMERA_VFS_COMPOUND_CREATE_SYMLINK; it is copied. */
 int
 chimera_vfs_compound_add_create(
@@ -1826,7 +1870,9 @@ chimera_vfs_compound_add_write(
 
 /* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
  * that handle with descriptor rights.  `handle` is BORROWED: see ADDRESSING
- * SOMETHING OTHER THAN CURRENT.  On return the op's `set_attr` reports which
+ * SOMETHING OTHER THAN CURRENT.  So is anything `set_attr` points at -- its
+ * va_acl and SIDs, which the caller keeps alive for the life of the run (the
+ * struct itself is copied).  On return the op's `set_attr` reports which
  * attributes were actually applied.
  *
  * `pre_attr_mask` and `attr_mask` sample the object either side of the change,

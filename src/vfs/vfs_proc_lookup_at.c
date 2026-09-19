@@ -106,6 +106,13 @@ chimera_vfs_lookup_at_dispatch(
 
         cached_attr.va_req_mask = 0;
         cached_attr.va_set_mask = 0;
+        /* The tombstone answer below hands the directory attrs over without
+         * having looked them up, so they must read as "nothing available"
+         * rather than as whatever this frame held: a caller that copies a
+         * result by value (the compound executor) trusts the set mask, and
+         * follows the ACL and SID pointers it says are there. */
+        cached_dir_attr.va_req_mask = 0;
+        cached_dir_attr.va_set_mask = 0;
 
         rc = chimera_vfs_name_cache_lookup(
             name_cache,
