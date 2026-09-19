@@ -67,7 +67,7 @@ chimera_dispatch_mknod(
                                          request->mknod.path,
                                          request->mknod.path_len,
                                          NULL, 0,
-                                         &request->mknod.set_attr, 0);
+                                         &request->mknod.set_attr, 0, 0);
 
     chimera_vfs_compound_submit(compound, chimera_mknod_sequence_complete,
                                 request);
