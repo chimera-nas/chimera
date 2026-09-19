@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/host_file.h"
 #include "common/compiler.h"
 #include <stdio.h>
 #include <stdint.h>
@@ -161,7 +162,7 @@ generate_self_signed_cert(
         }
 
         /* Belt-and-suspenders: enforce 0600 explicitly (defense in depth). */
-        if (fchmod(key_fd, 0600) < 0) {
+        if (chimera_host_fchmod(key_fd, 0600) < 0) {
             chimera_server_error("Failed to set key file permissions: %s (%s)",
                                  key_path, strerror(errno));
             close(key_fd);

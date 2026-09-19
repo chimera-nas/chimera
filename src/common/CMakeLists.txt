@@ -11,7 +11,7 @@ if(CHIMERA_NATIVE_RCU)
 endif()
 
 if(WIN32)
-    target_link_libraries(chimera_common bcrypt)
+    target_link_libraries(chimera_common bcrypt advapi32)
 endif()
 
 if(NOT WIN32)

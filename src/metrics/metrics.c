@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/host_file.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,7 +264,7 @@ chimera_metrics_dump_file(
      * world-readable is fine for non-sensitive metrics) so other local users
      * cannot tamper with the dump -- CWE-276 (Incorrect Default Permissions).
      */
-    if (fchmod(fileno(fp), 0644) < 0) {
+    if (chimera_host_fchmod(fileno(fp), 0644) < 0) {
         chimera_metrics_error("Failed to set metrics file permissions on %s", path);
     }
 
