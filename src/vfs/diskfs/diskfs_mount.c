@@ -9,6 +9,7 @@
  * metrics registration.
  */
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
 
@@ -1381,7 +1382,7 @@ diskfs_init(
                                                    diskfs_intent_log_thread_init,
                                                    diskfs_intent_log_thread_shutdown,
                                                    &shared->intent_log);
-    while (!__atomic_load_n(&shared->intent_log.ready, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&shared->intent_log.ready, CHIMERA_MEMORY_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1393,7 +1394,7 @@ diskfs_init(
                                                          diskfs_il_apply_thread_init,
                                                          diskfs_il_apply_thread_shutdown,
                                                          &shared->intent_log);
-    while (!__atomic_load_n(&shared->intent_log.apply_ready, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&shared->intent_log.apply_ready, CHIMERA_MEMORY_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1401,7 +1402,7 @@ diskfs_init(
                                                         diskfs_il_push_thread_init,
                                                         diskfs_il_push_thread_shutdown,
                                                         &shared->intent_log);
-    while (!__atomic_load_n(&shared->intent_log.push_ready, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&shared->intent_log.push_ready, CHIMERA_MEMORY_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1637,7 +1638,7 @@ diskfs_teardown(
      * trim unconditionally (a clean unmount persists the whole space map after the
      * drain; a crash leaves the log intact to replay), so set it first and the
      * push thread keeps the ring draining for the reclaim shutdown. */
-    __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->intent_log.shutdown, 1, CHIMERA_MEMORY_RELEASE);
 
     /* Reclaim workers first: their shutdown finishes the queued drains, which
      * need the inode cache and the intent-log threads still alive. */
@@ -1660,7 +1661,7 @@ diskfs_teardown(
      * destroying the commit thread closes that fd, and the push thread (torn
      * down afterwards, to drain what the commit thread handed off) would
      * otherwise abort writing to it. */
-    __atomic_store_n(&shared->intent_log.commit_alive, 0, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->intent_log.commit_alive, 0, CHIMERA_MEMORY_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
     /* Apply thread next: its shutdown drains the apply queue (applying every
      * remaining record's deltas and advancing applied_seq to the final
@@ -1714,8 +1715,8 @@ diskfs_teardown(
          * durable_seq; stamp every checkpoint with it.  The redo ring is fully
          * trimmed, so the next clean mount loads these snapshots with no deltas
          * left to replay. */
-        uint64_t                ckpt_seq = __atomic_load_n(&shared->intent_log.applied_seq,
-                                                           __ATOMIC_ACQUIRE);
+        uint64_t                ckpt_seq = chimera_atomic_load_n(&shared->intent_log.applied_seq,
+                                                           CHIMERA_MEMORY_ACQUIRE);
 
         if (space_map_persist(shared->space_map, &smio, ckpt_seq) != 0) {
             chimera_diskfs_error("space-map persist at unmount failed");
@@ -1727,8 +1728,8 @@ diskfs_teardown(
                                                 shared->fsid, SM_SB_CLEAN,
                                                 0, 0,
                                                 shared->intent_log.log_seq,
-                                                __atomic_load_n(&shared->gen_next,
-                                                                __ATOMIC_ACQUIRE),
+                                                chimera_atomic_load_n(&shared->gen_next,
+                                                                CHIMERA_MEMORY_ACQUIRE),
                                                 shared->fs_table);
             if (rc != 0) {
                 chimera_diskfs_error("clean-superblock write at unmount failed");
@@ -1831,7 +1832,7 @@ diskfs_thread_init(
     evpl_mutex_init(&thread->grant_lock, NULL);
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
-    __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&thread->grant_pending, 0, CHIMERA_MEMORY_RELAXED);
     evpl_add_doorbell(evpl, &thread->grant_doorbell, diskfs_grant_doorbell_cb);
     thread->grant_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_grant_poll, thread);
 
@@ -1849,7 +1850,7 @@ diskfs_thread_init(
     thread->resume_tail            = NULL;
     thread->bt_op_free_list        = NULL;
     thread->block_waiter_free_list = NULL;
-    __atomic_store_n(&thread->resume_pending, 0, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&thread->resume_pending, 0, CHIMERA_MEMORY_RELAXED);
     evpl_add_doorbell(evpl, &thread->resume_doorbell, diskfs_bt_resume_doorbell_cb);
     evpl_deferral_init(&thread->resume_deferral, diskfs_bt_resume_deferral_cb, thread);
     thread->resume_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_bt_resume_poll,
@@ -1877,7 +1878,7 @@ diskfs_thread_init(
     /* Publish "registration pending" before the doorbell: the commit thread
      * services this from its per-iteration poll (reg_dirty) when awake, or from
      * the wake doorbell when asleep. */
-    __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&shared->intent_log.reg_dirty, 1, CHIMERA_MEMORY_SEQ_CST);
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
     return thread;
@@ -1988,15 +1989,15 @@ diskfs_thread_destroy(void *private_data)
     if (thread->iq_channel) {
         struct diskfs_iq_channel *ch = thread->iq_channel;
 
-        __atomic_store_n(&ch->unregister_requested, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
+        chimera_atomic_store_n(&ch->unregister_requested, 1, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_store_n(&shared->intent_log.reg_dirty, 1, CHIMERA_MEMORY_SEQ_CST);
         evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
         /* Spin (not evpl_continue: with nothing left in flight there is no
          * event to wake the loop, and the IL acks via a plain store with no
          * doorbell).  The commits_inflight drain above guarantees the channel
          * is quiescent, so the IL acks on its next registration sweep. */
-        while (!__atomic_load_n(&ch->unregister_done, __ATOMIC_ACQUIRE)) {
+        while (!chimera_atomic_load_n(&ch->unregister_done, CHIMERA_MEMORY_ACQUIRE)) {
             usleep(100);
         }
 

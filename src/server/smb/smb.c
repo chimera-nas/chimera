@@ -2397,7 +2397,7 @@ chimera_smb_server_handle_rdma(
 
     *segment_iov = iov[0];
 
-    segment_iov->data += direct_hdr->data_offset;
+    segment_iov->data = (char *) segment_iov->data + direct_hdr->data_offset;
     evpl_iovec_set_length(segment_iov, direct_hdr->data_length);
 
     conn->rdma_length += direct_hdr->data_length;

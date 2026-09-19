@@ -38,10 +38,10 @@ evpl_iovec_cursor_copy(
             chunk = left;
         }
 
-        memcpy(out, cursor->iov->data + cursor->offset, chunk);
+        memcpy(out, (char *) cursor->iov->data + cursor->offset, chunk);
 
         left -= chunk;
-        out  += chunk;
+        out = (char *) out + chunk;
 
         cursor->offset += chunk;
 

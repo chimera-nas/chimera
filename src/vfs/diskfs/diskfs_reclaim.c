@@ -9,6 +9,7 @@
  * orphan recovery, and runtime AG-log condensation.
  */
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
 
@@ -652,12 +653,12 @@ diskfs_reclaim_submit_job(
     * reference): skip -- the durable orphan record makes the next mount's
     * scan pick the inode up.  (Condense jobs cannot arrive here during
     * teardown: every journaling request completed before it began.) */
-    if (__atomic_load_n(&r->shutdown, __ATOMIC_ACQUIRE)) {
+    if (chimera_atomic_load_n(&r->shutdown, CHIMERA_MEMORY_ACQUIRE)) {
         free(j);
         return;
     }
 
-    idx = __atomic_fetch_add(&r->rr, 1, __ATOMIC_RELAXED) % r->nworkers;
+    idx = chimera_atomic_fetch_add(&r->rr, 1, CHIMERA_MEMORY_RELAXED) % r->nworkers;
     w   = &r->workers[idx];
 
     evpl_mutex_lock(&w->lock);
@@ -697,7 +698,7 @@ diskfs_reclaim_thread_init(
 
     w->ctx = diskfs_thread_init(evpl, w->shared);
     evpl_add_doorbell(evpl, &w->doorbell, diskfs_reclaim_doorbell_cb);
-    __atomic_store_n(&w->ready, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&w->ready, 1, CHIMERA_MEMORY_RELEASE);
     return w;
 } /* diskfs_reclaim_thread_init */
 
@@ -754,7 +755,7 @@ diskfs_reclaim_create(struct diskfs_shared *shared)
         evpl_mutex_init(&w->lock, NULL);
         w->thread = evpl_thread_create(NULL, diskfs_reclaim_thread_init,
                                        diskfs_reclaim_thread_shutdown, w);
-        while (!__atomic_load_n(&w->ready, __ATOMIC_ACQUIRE)) {
+        while (!chimera_atomic_load_n(&w->ready, CHIMERA_MEMORY_ACQUIRE)) {
             /* spin briefly; context construction is fast */
         }
     }
@@ -771,7 +772,7 @@ diskfs_reclaim_destroy(struct diskfs_shared *shared)
     if (!r) {
         return;
     }
-    __atomic_store_n(&r->shutdown, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&r->shutdown, 1, CHIMERA_MEMORY_RELEASE);
     for (i = 0; i < r->nworkers; i++) {
         evpl_thread_destroy(r->workers[i].thread);
     }
@@ -848,8 +849,8 @@ diskfs_condense_try(struct diskfs_condense *c)
      * Sampled before the snapshot is taken under ag->lock, so it can only
      * undercount what the snapshot reflects -- conservative, never optimistic
      * (recovery replays seq > ckpt_seq idempotently). */
-    c->ckpt_seq = __atomic_load_n(&shared->intent_log.applied_seq,
-                                  __ATOMIC_ACQUIRE);
+    c->ckpt_seq = chimera_atomic_load_n(&shared->intent_log.applied_seq,
+                                  CHIMERA_MEMORY_ACQUIRE);
 
     space_map_condense_prepare(shared->space_map, c->device_id,
                                c->ag_index, c->scratch,

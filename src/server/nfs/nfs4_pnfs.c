@@ -55,7 +55,7 @@ pnfs_put_u32(
     uint32_t value)
 {
     *(uint32_t *) *p = chimera_nfs_hton32(value);
-    *p              += sizeof(uint32_t);
+    *p = (char *) *p + sizeof(uint32_t);
 } /* pnfs_put_u32 */
 
 static inline void
@@ -64,7 +64,7 @@ pnfs_put_u64(
     uint64_t value)
 {
     *(uint64_t *) *p = chimera_nfs_hton64(value);
-    *p              += sizeof(uint64_t);
+    *p = (char *) *p + sizeof(uint64_t);
 } /* pnfs_put_u64 */
 
 /* XDR opaque<>/string<>: 4-byte length, bytes, then zero padding to 4. */
@@ -79,9 +79,9 @@ pnfs_put_opaque(
     pnfs_put_u32(p, len);
     memcpy(*p, data, len);
     if (pad) {
-        memset(*p + len, 0, pad);
+        memset((char *) *p + len, 0, pad);
     }
-    *p += len + pad;
+    *p = (char *) *p + len + pad;
 } /* pnfs_put_opaque */
 
 /*
@@ -304,10 +304,10 @@ chimera_nfs4_encode_ff_layout(
     pnfs_put_u32(&p, 1);                              /* ffm_data_servers<>    */
 
     memcpy(p, deviceid, NFS4_DEVICEID4_SIZE);         /* ffds_deviceid         */
-    p += NFS4_DEVICEID4_SIZE;
+    p = (char *) p + NFS4_DEVICEID4_SIZE;
     pnfs_put_u32(&p, 0);                              /* ffds_efficiency       */
     memcpy(p, zero_stateid, sizeof(zero_stateid));    /* ffds_stateid (anon)   */
-    p += sizeof(zero_stateid);
+    p = (char *) p + sizeof(zero_stateid);
     pnfs_put_u32(&p, 1);                              /* ffds_fh_vers<> count  */
     pnfs_put_opaque(&p, ds_fh, ds_fh_len);            /* the DS's v3 handle    */
     pnfs_put_opaque(&p, ffds_user, 1);                /* ffds_user  (per-iomode)*/
@@ -339,7 +339,7 @@ chimera_nfs4_encode_block_layout(
 
     for (i = 0; i < nseg; i++) {
         memcpy(p, segs[i].deviceid, NFS4_DEVICEID4_SIZE); /* bex_vol_id        */
-        p += NFS4_DEVICEID4_SIZE;
+        p = (char *) p + NFS4_DEVICEID4_SIZE;
         pnfs_put_u64(&p, segs[i].offset);             /* bex_file_offset       */
         pnfs_put_u64(&p, segs[i].length);             /* bex_length            */
         pnfs_put_u64(&p, segs[i].blk_vol_offset);     /* bex_storage_offset    */
@@ -393,7 +393,7 @@ chimera_nfs4_encode_scsi_layout(
 
     for (i = 0; i < nseg; i++) {
         memcpy(p, segs[i].deviceid, NFS4_DEVICEID4_SIZE); /* se_vol_id         */
-        p += NFS4_DEVICEID4_SIZE;
+        p = (char *) p + NFS4_DEVICEID4_SIZE;
         pnfs_put_u64(&p, segs[i].offset);             /* se_file_offset        */
         pnfs_put_u64(&p, segs[i].length);             /* se_length             */
         pnfs_put_u64(&p, segs[i].blk_vol_offset);     /* se_storage_offset     */

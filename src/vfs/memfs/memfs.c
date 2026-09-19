@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/atomic.h"
 #include "common/compiler.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -647,11 +648,11 @@ memfs_block_alloc_charged(
     struct memfs_block  *block;
 
     if (charge && fs->fs_size) {
-        uint64_t used = __atomic_add_fetch(&fs->fs_space_used,
-                                           shared->block_size, __ATOMIC_RELAXED);
+        uint64_t used = chimera_atomic_add_fetch(&fs->fs_space_used,
+                                           shared->block_size, CHIMERA_MEMORY_RELAXED);
         if (used > fs->fs_size) {
-            __atomic_sub_fetch(&fs->fs_space_used, shared->block_size,
-                               __ATOMIC_RELAXED);
+            chimera_atomic_sub_fetch(&fs->fs_space_used, shared->block_size,
+                               CHIMERA_MEMORY_RELAXED);
             return NULL;
         }
     }
@@ -665,8 +666,8 @@ memfs_block_alloc_charged(
 
         if (!block) {
             if (charge && fs->fs_size) {
-                __atomic_sub_fetch(&fs->fs_space_used, shared->block_size,
-                                   __ATOMIC_RELAXED);
+                chimera_atomic_sub_fetch(&fs->fs_space_used, shared->block_size,
+                                   CHIMERA_MEMORY_RELAXED);
             }
             return NULL;
         }
@@ -702,8 +703,8 @@ memfs_block_free_charged(
     block->niov = 0;
 
     if (uncharge && fs->fs_size) {
-        __atomic_sub_fetch(&fs->fs_space_used,
-                           thread->shared->block_size, __ATOMIC_RELAXED);
+        chimera_atomic_sub_fetch(&fs->fs_space_used,
+                           thread->shared->block_size, CHIMERA_MEMORY_RELAXED);
     }
 
     LL_PREPEND(thread->free_block, block);
@@ -1778,7 +1779,7 @@ memfs_map_attrs(
         attr->va_fs_space_total = fs->fs_size ? fs->fs_size :
             CHIMERA_VFS_SYNTHETIC_FS_BYTES;
         attr->va_fs_space_used = fs->fs_size ?
-            __atomic_load_n(&fs->fs_space_used, __ATOMIC_RELAXED) : 0;
+            chimera_atomic_load_n(&fs->fs_space_used, CHIMERA_MEMORY_RELAXED) : 0;
         attr->va_fs_space_avail = attr->va_fs_space_used < attr->va_fs_space_total ?
             attr->va_fs_space_total - attr->va_fs_space_used : 0;
         attr->va_fs_space_free  = attr->va_fs_space_avail;
@@ -2302,7 +2303,7 @@ memfs_setattr(
                                        offset_in_block);
 
                 /* Zero the rest of the block */
-                memset(new_block->iov[0].data + offset_in_block, 0,
+                memset((char *) (char *) new_block->iov[0].data + offset_in_block, 0,
                        block_size - offset_in_block);
 
                 memfs_block_free_charged(thread, fs, old_block, 0);
@@ -2561,7 +2562,7 @@ memfs_mount(
         attr->va_fs_space_total = fs->fs_size ? fs->fs_size :
             CHIMERA_VFS_SYNTHETIC_FS_BYTES;
         attr->va_fs_space_used = fs->fs_size ?
-            __atomic_load_n(&fs->fs_space_used, __ATOMIC_RELAXED) : 0;
+            chimera_atomic_load_n(&fs->fs_space_used, CHIMERA_MEMORY_RELAXED) : 0;
         attr->va_fs_space_avail = attr->va_fs_space_used < attr->va_fs_space_total ?
             attr->va_fs_space_total - attr->va_fs_space_used : 0;
         attr->va_fs_space_free  = attr->va_fs_space_avail;
@@ -4329,7 +4330,7 @@ memfs_write(
                 evpl_iovec_cursor_skip(&old_block_cursor, block_len);
 
                 evpl_iovec_cursor_copy(&old_block_cursor,
-                                       block->iov[0].data + block_offset +
+                                       (char *) block->iov[0].data + block_offset +
                                        block_len,
                                        block_size - block_len -
                                        block_offset);
@@ -4339,7 +4340,7 @@ memfs_write(
             } else {
                 memset(block->iov[0].data, 0, block_offset);
 
-                memset(block->iov[0].data + block_offset + block_len, 0,
+                memset((char *) block->iov[0].data + block_offset + block_len, 0,
                        block_size - block_offset - block_len);
             }
         } else if (old_block) {
@@ -4349,7 +4350,7 @@ memfs_write(
         }
 
         evpl_iovec_cursor_copy(&cursor,
-                               block->iov[0].data + block_offset,
+                               (char *) block->iov[0].data + block_offset,
                                block_len);
 
         fork->blocks[bi] = block;
@@ -4485,7 +4486,7 @@ memfs_allocate(
                                            new_block->iov[0].data,
                                            block_size);
 
-                    memset(new_block->iov[0].data + zero_start, 0,
+                    memset((char *) new_block->iov[0].data + zero_start, 0,
                            zero_end - zero_start);
 
                     memfs_block_free_charged(thread, fs, old_block, 0);
@@ -4929,7 +4930,7 @@ memfs_copy_range(
                 }
                 uint32_t tail_off = block_offset + block_len;
                 if (tail_off < block_size) {
-                    memcpy((uint8_t *) new_block->iov[0].data + tail_off,
+                    memcpy((uint8_t *) (char *) new_block->iov[0].data + tail_off,
                            (uint8_t *) old_block->iov[0].data + tail_off,
                            block_size - tail_off);
                 }
@@ -4937,14 +4938,14 @@ memfs_copy_range(
                 memset(new_block->iov[0].data, 0, block_offset);
                 uint32_t tail_off = block_offset + block_len;
                 if (tail_off < block_size) {
-                    memset((uint8_t *) new_block->iov[0].data + tail_off, 0,
+                    memset((uint8_t *) (char *) new_block->iov[0].data + tail_off, 0,
                            block_size - tail_off);
                 }
             }
         }
 
         memfs_copy_from_inode(thread->shared, src_inode, src_offset + copied,
-                              (uint8_t *) new_block->iov[0].data + block_offset,
+                              (uint8_t *) (char *) new_block->iov[0].data + block_offset,
                               block_len);
 
         if (old_block) {
@@ -5333,7 +5334,7 @@ memfs_clone_range(
                     }
                     uint32_t tail_off = block_offset + block_len;
                     if (tail_off < block_size) {
-                        memcpy((uint8_t *) new_block->iov[0].data + tail_off,
+                        memcpy((uint8_t *) (char *) new_block->iov[0].data + tail_off,
                                (uint8_t *) old_block->iov[0].data + tail_off,
                                block_size - tail_off);
                     }
@@ -5341,14 +5342,14 @@ memfs_clone_range(
                     memset(new_block->iov[0].data, 0, block_offset);
                     uint32_t tail_off = block_offset + block_len;
                     if (tail_off < block_size) {
-                        memset((uint8_t *) new_block->iov[0].data + tail_off, 0,
+                        memset((uint8_t *) (char *) new_block->iov[0].data + tail_off, 0,
                                block_size - tail_off);
                     }
                 }
             }
 
             memfs_copy_from_inode(thread->shared, src_inode, cur_src_off,
-                                  (uint8_t *) new_block->iov[0].data + block_offset,
+                                  (uint8_t *) (char *) new_block->iov[0].data + block_offset,
                                   block_len);
         }
 
@@ -5764,12 +5765,12 @@ memfs_write_same(
             memset(block->iov[0].data, 0, block_offset);
         }
         if (block_offset + block_len < block_size) {
-            memset(block->iov[0].data + block_offset + block_len, 0,
+            memset((char *) block->iov[0].data + block_offset + block_len, 0,
                    block_size - block_offset - block_len);
         }
 
         /* Tile the ADB pattern into the covered span. */
-        memfs_tile_pattern(block->iov[0].data + block_offset, block_len,
+        memfs_tile_pattern((uint8_t *) block->iov[0].data + block_offset, block_len,
                            cur_off - offset, tmpl, adb_bsize);
 
         if (old_block) {

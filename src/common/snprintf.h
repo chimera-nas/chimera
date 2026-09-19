@@ -243,14 +243,14 @@ STBSP__PUBLICDEC void STB_SPRINTF_DECORATE(
 #define stbsp__uint16  unsigned short
 
 #ifndef stbsp__uintptr
-#if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || \
+#if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || \
     defined(__x86_64) || defined(__s390x__)
 #define stbsp__uintptr stbsp__uint64
 #else \
-    /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
+    /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
 #define stbsp__uintptr stbsp__uint32
 #endif \
-    /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
+    /* if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || defined(__x86_64) || defined(__s390x__) */
 #endif /* ifndef stbsp__uintptr */
 
 #ifndef STB_SPRINTF_MSVC_MODE // used for MSVC2013 and earlier (MSVC2015 matches GCC)

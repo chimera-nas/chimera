@@ -241,7 +241,7 @@ dce_rpc(
 
 
     reply_common = outputp;
-    outputp     += sizeof(dce_common_t);
+    outputp = (char *) outputp + sizeof(dce_common_t);
 
     reply_common->ver       = 5;
     reply_common->ver_minor = 0;
@@ -259,7 +259,7 @@ dce_rpc(
             reply_common->ptype = DCE_RPC_PTYPE_BIND_ACK;
 
             reply_bind_ack = outputp;
-            outputp       += sizeof(dce_bind_ack_t);
+            outputp = (char *) outputp + sizeof(dce_bind_ack_t);
 
             reply_bind_ack->max_xmit_frag  = 65535;
             reply_bind_ack->max_recv_frag  = 65535;
@@ -275,7 +275,7 @@ dce_rpc(
             }
 
             reply_result_list = outputp;
-            outputp          += sizeof(p_result_list_t);
+            outputp = (char *) outputp + sizeof(p_result_list_t);
 
             /* DCE/RPC 1.1: the bind-ack carries one presentation result per
              * context the client offered, in order.  Real clients (Windows,
@@ -319,7 +319,7 @@ dce_rpc(
                 }
 
                 reply_result = outputp;
-                outputp     += sizeof(p_result_t);
+                outputp = (char *) outputp + sizeof(p_result_t);
 
                 if (iface_ok && have_ndr32) {
                     reply_result->result                   = 0; /* acceptance */
@@ -350,7 +350,7 @@ dce_rpc(
             reply_common->frag_len = sizeof(*reply_common) + sizeof(*reply_call);
 
             reply_call = outputp;
-            outputp   += sizeof(dce_co_response_t);
+            outputp = (char *) outputp + sizeof(dce_co_response_t);
 
             reply_call->alloc_hint   = 0;
             reply_call->p_cont_id    = request_call.p_cont_id;
@@ -377,7 +377,7 @@ dce_rpc(
                                       ? 0x1C00001A  /* nca_s_fault_context_mismatch */
                                       : 0x1C010002; /* nca_s_op_rng_error */
                 faultp[1] = 0;                    /* reserved / pad */
-                outputp  += 2 * sizeof(uint32_t);
+                outputp = (char *) outputp + 2 * sizeof(uint32_t);
 
                 reply_call->alloc_hint = 0;
                 reply_common->frag_len = (uint16_t) ((char *) outputp - (char *) reply_common);
@@ -389,7 +389,7 @@ dce_rpc(
             reply_call->alloc_hint = rc;
 
             reply_common->frag_len += rc;
-            outputp                += rc;
+            outputp = (char *) outputp + rc;
 
             break;
         default:
@@ -397,7 +397,7 @@ dce_rpc(
             return -1;
     } // switch
 
-    output_iov->length = outputp - output_iov->data;
+    output_iov->length = (char *) outputp - (char *) output_iov->data;
 
     return 0;
 } // dce_rpc

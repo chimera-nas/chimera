@@ -4327,7 +4327,7 @@ cairn_read(
             if (hole_size > bytes_remaining) {
                 hole_size = bytes_remaining;
             }
-            memset(iov[0].data + (current_offset - offset), 0, hole_size);
+            memset((char *) iov[0].data + (current_offset - offset), 0, hole_size);
             current_offset  += hole_size;
             bytes_remaining -= hole_size;
         }
@@ -4351,7 +4351,7 @@ cairn_read(
                 copy_size = bytes_remaining;
             }
 
-            memcpy(iov[0].data + dest_offset,
+            memcpy((char *) iov[0].data + dest_offset,
                    data + extent_offset,
                    copy_size);
 
@@ -4364,7 +4364,7 @@ cairn_read(
 
     if (bytes_remaining) {
         /* Fill trailing hole with zeros */
-        memset(iov[0].data + (current_offset - offset), 0, bytes_remaining);
+        memset((char *) iov[0].data + (current_offset - offset), 0, bytes_remaining);
     }
 
     rocksdb_iter_destroy(iter);

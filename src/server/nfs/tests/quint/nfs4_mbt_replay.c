@@ -2684,7 +2684,7 @@ decode_resop(
                         ? V4_FF_DEVICEID_OFF : 4;
 
                     if (body->len >= off + 16) {
-                        memcpy(r->deviceid, body->data + off, 16);
+                        memcpy(r->deviceid, (const uint8_t *) body->data + off, 16);
                         r->has_deviceid = 1;
                     }
 
@@ -2694,7 +2694,7 @@ decode_resop(
                      * server. */
                     if (g_layout_type == V4_LAYOUT_FLEX &&
                         body->len >= V4_FF_DSFH_OFF + 4) {
-                        const uint8_t *q   = body->data + V4_FF_DSFH_OFF;
+                        const uint8_t *q   = (const uint8_t *) body->data + V4_FF_DSFH_OFF;
                         uint32_t       len = ((uint32_t) q[0] << 24) |
                             ((uint32_t) q[1] << 16) |
                             ((uint32_t) q[2] << 8) | q[3];

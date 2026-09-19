@@ -3,6 +3,7 @@
 #pragma once
 
 #if !defined(_WIN32) && !defined(CHIMERA_NATIVE_RCU)
+#include "common/atomic.h"
 #include <urcu/urcu-qsbr.h>
 #else
 #include <stddef.h>
@@ -45,7 +46,7 @@ SYMBOL_EXPORT void chimera_rcu_read_unlock(void);
 #define rcu_dereference(p) ((__typeof__(p)) InterlockedCompareExchangePointer((void *volatile *)&(p), NULL, NULL))
 #define rcu_assign_pointer(p, v) ((void) InterlockedExchangePointer((void *volatile *)&(p), (void *)(v)))
 #else
-#define rcu_dereference(p) __atomic_load_n(&(p), __ATOMIC_ACQUIRE)
-#define rcu_assign_pointer(p, v) __atomic_store_n(&(p), (v), __ATOMIC_RELEASE)
+#define rcu_dereference(p) chimera_atomic_load_n(&(p), CHIMERA_MEMORY_ACQUIRE)
+#define rcu_assign_pointer(p, v) chimera_atomic_store_n(&(p), (v), CHIMERA_MEMORY_RELEASE)
 #endif
 #endif

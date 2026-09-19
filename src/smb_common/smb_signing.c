@@ -238,7 +238,7 @@ chimera_smb_request_hmac_sha256(
             chunk = left;
         }
 
-        if (EVP_MAC_update(mctx, cursor->iov->data + cursor->offset, chunk) != 1) {
+        if (EVP_MAC_update(mctx, (const unsigned char *) cursor->iov->data + cursor->offset, chunk) != 1) {
             goto done;
         }
 
@@ -317,7 +317,7 @@ chimera_smb_request_cmac_aes_128_cbc(
             chunk = left;
         }
 
-        if (EVP_MAC_update(mctx, cursor->iov->data + cursor->offset, chunk) != 1) {
+        if (EVP_MAC_update(mctx, (const unsigned char *) cursor->iov->data + cursor->offset, chunk) != 1) {
             chimera_smb2_error("Failed to update CMAC-AES-128-CBC context");
             goto done;
         }
@@ -417,7 +417,7 @@ chimera_smb_request_gmac_aes_128(
             chunk = left;
         }
 
-        if (EVP_EncryptUpdate(c, NULL, &outl, cursor->iov->data + cursor->offset, chunk) != 1) {
+        if (EVP_EncryptUpdate(c, NULL, &outl, (const unsigned char *) cursor->iov->data + cursor->offset, chunk) != 1) {
             goto done;
         }
 

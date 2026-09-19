@@ -8,6 +8,7 @@
  * structures; exported (SYMBOL_EXPORT) for the model-based-test harness to link.
  */
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include <string.h>
 #include <stdio.h>
@@ -372,10 +373,10 @@ diskfs_test_await_reclaim(
      * a few consecutive polls so a momentary lull between two reclaim batches is
      * not mistaken for completion. */
     while (diskfs_test_now_ms() < deadline) {
-        uint64_t applied = __atomic_load_n(&shared->intent_log.applied_seq,
-                                           __ATOMIC_ACQUIRE);
-        uint64_t durable = __atomic_load_n(&shared->intent_log.durable_seq,
-                                           __ATOMIC_ACQUIRE);
+        uint64_t applied = chimera_atomic_load_n(&shared->intent_log.applied_seq,
+                                           CHIMERA_MEMORY_ACQUIRE);
+        uint64_t durable = chimera_atomic_load_n(&shared->intent_log.durable_seq,
+                                           CHIMERA_MEMORY_ACQUIRE);
 
         if (diskfs_test_reclaim_idle(shared) && applied == durable) {
             if (++stable >= 3) {
@@ -406,5 +407,5 @@ diskfs_test_crash(struct chimera_vfs *vfs)
      * it there rather than freeing shared here is what keeps the VFS's own
      * internal threads (RCU / close-thread), whose diskfs_thread_destroy still
      * dereferences shared, from touching freed memory. */
-    __atomic_store_n(&shared->test_crash, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->test_crash, 1, CHIMERA_MEMORY_RELEASE);
 } /* diskfs_test_crash */

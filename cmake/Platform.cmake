@@ -40,7 +40,7 @@ else()
 endif()
 
 if(MSVC)
-    add_compile_options(/W3 /WX /experimental:c11atomics /wd4244 /wd4267)
+    add_compile_options(/W3 /WX $<$<COMPILE_LANGUAGE:C>:/experimental:c11atomics> /wd4244 /wd4267 /wd4018)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
                             WIN32_LEAN_AND_MEAN NOMINMAX)
     set(CHIMERA_GENERATED_C_OPTIONS /wd4101 /wd4189)

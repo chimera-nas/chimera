@@ -779,8 +779,8 @@ chimera_nfs4_unmarshall_fattr(
     const struct fattr4      *fattr,
     struct chimera_vfs_attrs *attr)
 {
-    void    *data    = fattr->attr_vals.data;
-    void    *dataend = data + fattr->attr_vals.len;
+    char    *data    = fattr->attr_vals.data;
+    char    *dataend = data + fattr->attr_vals.len;
     uint32_t type;
 
     if (fattr->num_attrmask < 1) {

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #define _GNU_SOURCE
+#include "common/atomic.h"
 #include "common/compiler.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -138,14 +139,14 @@ sm_ag_mc_update(struct sm_ag *ag)
      * gap).  A transiently-stale entry in the old class is harmless: the
      * lookup re-verifies under ag->lock (sm_ag_can_alloc_locked). */
     if (newmax >= 0) {
-        __atomic_fetch_or(&dev->maxclass_bits[newmax][ag->ag_index >> 6],
-                          (1ULL << (ag->ag_index & 63u)), __ATOMIC_RELAXED);
-        __atomic_fetch_add(&dev->mc_class_count[newmax], 1, __ATOMIC_RELAXED);
+        chimera_atomic_fetch_or(&dev->maxclass_bits[newmax][ag->ag_index >> 6],
+                          (1ULL << (ag->ag_index & 63u)), CHIMERA_MEMORY_RELAXED);
+        chimera_atomic_fetch_add(&dev->mc_class_count[newmax], 1, CHIMERA_MEMORY_RELAXED);
     }
     if (ag->maxclass >= 0) {
-        __atomic_fetch_and(&dev->maxclass_bits[ag->maxclass][ag->ag_index >> 6],
-                           ~(1ULL << (ag->ag_index & 63u)), __ATOMIC_RELAXED);
-        __atomic_fetch_sub(&dev->mc_class_count[ag->maxclass], 1, __ATOMIC_RELAXED);
+        chimera_atomic_fetch_and(&dev->maxclass_bits[ag->maxclass][ag->ag_index >> 6],
+                           ~(1ULL << (ag->ag_index & 63u)), CHIMERA_MEMORY_RELAXED);
+        chimera_atomic_fetch_sub(&dev->mc_class_count[ag->maxclass], 1, CHIMERA_MEMORY_RELAXED);
     }
     ag->maxclass = (int16_t) newmax;
 } /* sm_ag_mc_update */
@@ -329,7 +330,7 @@ sm_ag_alloc_locked(
     }
 
     ag->free_bytes -= size;
-    __atomic_sub_fetch(&ag->dev->free_bytes, size, __ATOMIC_RELAXED);
+    chimera_atomic_sub_fetch(&ag->dev->free_bytes, size, CHIMERA_MEMORY_RELAXED);
     return 0;
 } /* sm_ag_alloc_locked */
 
@@ -437,7 +438,7 @@ sm_ag_free_locked(
     }
 
     ag->free_bytes += length;
-    __atomic_add_fetch(&ag->dev->free_bytes, length, __ATOMIC_RELAXED);
+    chimera_atomic_add_fetch(&ag->dev->free_bytes, length, CHIMERA_MEMORY_RELAXED);
 } /* sm_ag_free_locked */
 
 struct space_map *
@@ -652,7 +653,7 @@ sm_try_alloc_from_ag(
     uint64_t offset;
     int      rc;
 
-    if (__atomic_load_n(&ag->free_bytes, __ATOMIC_RELAXED) < want) {
+    if (chimera_atomic_load_n(&ag->free_bytes, CHIMERA_MEMORY_RELAXED) < want) {
         return 1;
     }
     evpl_mutex_lock(&ag->lock);
@@ -756,13 +757,13 @@ sm_pick_and_alloc(
         for (C = want_class; C < SM_SIZE_CLASSES; C++) {
             uint64_t *bits;
 
-            if (__atomic_load_n(&dev->mc_class_count[C], __ATOMIC_RELAXED) == 0) {
+            if (chimera_atomic_load_n(&dev->mc_class_count[C], CHIMERA_MEMORY_RELAXED) == 0) {
                 continue;       /* no AG's largest free extent is in class C */
             }
             bits = dev->maxclass_bits[C];
             for (w = 0; w < dev->mc_words; w++) {
                 uint32_t wi   = (start_w + w) % dev->mc_words;
-                uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
+                uint64_t word = chimera_atomic_load_n(&bits[wi], CHIMERA_MEMORY_RELAXED);
 
                 while (word) {
                     uint32_t b  = (uint32_t) chimera_ctz64(word);
@@ -1228,7 +1229,7 @@ space_map_alloc_apply(
 
         for (c = ag->claims; c; c = c->next) {
             if (offset >= c->base && offset < c->base + c->len) {
-                if (__atomic_sub_fetch(&c->refcount, 1, __ATOMIC_RELAXED) == 0 &&
+                if (chimera_atomic_sub_fetch(&c->refcount, 1, CHIMERA_MEMORY_RELAXED) == 0 &&
                     c->retiring) {
                     sm_ag_remove_claim_locked(ag, c);
                 }
@@ -1264,7 +1265,7 @@ space_map_alloc_discard(
     evpl_mutex_lock(&ag->lock);
     for (c = ag->claims; c; c = c->next) {
         if (offset >= c->base && offset < c->base + c->len) {
-            if (__atomic_sub_fetch(&c->refcount, 1, __ATOMIC_RELAXED) == 0 &&
+            if (chimera_atomic_sub_fetch(&c->refcount, 1, CHIMERA_MEMORY_RELAXED) == 0 &&
                 c->retiring) {
                 sm_ag_remove_claim_locked(ag, c);
             }
@@ -1334,7 +1335,7 @@ sm_ag_recall_claims_locked(struct sm_ag *ag)
         uint64_t w, nw;
         uint32_t cur, lim;
 
-        w = __atomic_load_n(&c->bump, __ATOMIC_ACQUIRE);
+        w = chimera_atomic_load_n(&c->bump, CHIMERA_MEMORY_ACQUIRE);
 
         for (;;) {
             cur = SM_CLAIM_CUR(w);
@@ -1350,8 +1351,8 @@ sm_ag_recall_claims_locked(struct sm_ag *ag)
              * left above its new cursor. */
             nw = SM_CLAIM_PACK(cur, cur);
 
-            if (__atomic_compare_exchange_n(&c->bump, &w, nw, 0,
-                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            if (chimera_atomic_compare_exchange_n(&c->bump, &w, nw, 0,
+                                            CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
                 c->len     = cur;
                 reclaimed += lim - cur;
                 break;
@@ -1545,14 +1546,14 @@ space_map_reserve_chunk(
             uint32_t  w, start_w;
 
             if (!dev->mc_words ||
-                __atomic_load_n(&dev->mc_class_count[C], __ATOMIC_RELAXED) == 0) {
+                chimera_atomic_load_n(&dev->mc_class_count[C], CHIMERA_MEMORY_RELAXED) == 0) {
                 continue;
             }
             bits    = dev->maxclass_bits[C];
             start_w = (seed + dev->mc_rotor++) % dev->mc_words;
             for (w = 0; w < dev->mc_words; w++) {
                 uint32_t wi   = (start_w + w) % dev->mc_words;
-                uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
+                uint64_t word = chimera_atomic_load_n(&bits[wi], CHIMERA_MEMORY_RELAXED);
 
                 while (word) {
                     uint32_t         b  = (uint32_t) chimera_ctz64(word);
@@ -1705,7 +1706,7 @@ space_map_bump_alloc(
      * see the lowered limit.  There is no window in which both sides believe
      * they won, and so no way for the same region to be handed out twice.
      */
-    w = __atomic_load_n(&r->claim->bump, __ATOMIC_ACQUIRE);
+    w = chimera_atomic_load_n(&r->claim->bump, CHIMERA_MEMORY_ACQUIRE);
 
     for (;;) {
         cur = SM_CLAIM_CUR(w);
@@ -1719,8 +1720,8 @@ space_map_bump_alloc(
 
         nw = SM_CLAIM_PACK((uint64_t) cur + need, lim);
 
-        if (__atomic_compare_exchange_n(&r->claim->bump, &w, nw, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        if (chimera_atomic_compare_exchange_n(&r->claim->bump, &w, nw, 0,
+                                        CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
             break;      /* the region [cur, cur+need) is ours alone */
         }
         /* CAS reloaded w with the current value; retry against it. */
@@ -1733,7 +1734,7 @@ space_map_bump_alloc(
     * space_map_alloc_apply decrements), so a re-grant of the region can't race
     * an in-flight ALLOC delta.  Owner-only increment, sequenced-before any
     * release of this claim, so it never races the retiring flag. */
-    __atomic_fetch_add(&r->claim->refcount, 1, __ATOMIC_RELAXED);
+    chimera_atomic_fetch_add(&r->claim->refcount, 1, CHIMERA_MEMORY_RELAXED);
 
     /* ALLOC delta for crash recovery; applied to the in-memory tree only when
      * this txn's redo retires (space_map_alloc_apply), never eagerly -- so the
@@ -1800,7 +1801,7 @@ space_map_reservation_ensure(
      * have lowered `end` since, in which case this reservation can no longer
      * cover `want` and has to be re-grabbed. */
     if (r->valid) {
-        uint64_t w = __atomic_load_n(&r->claim->bump, __ATOMIC_ACQUIRE);
+        uint64_t w = chimera_atomic_load_n(&r->claim->bump, CHIMERA_MEMORY_ACQUIRE);
 
         if ((uint64_t) SM_CLAIM_CUR(w) + want <= (uint64_t) SM_CLAIM_END(w)) {
             return 0;
@@ -2063,7 +2064,7 @@ sm_ag_mark_used_locked(
         sm_ag_size_link(ag, r);
     }
     ag->free_bytes -= length;
-    __atomic_sub_fetch(&ag->dev->free_bytes, length, __ATOMIC_RELAXED);
+    chimera_atomic_sub_fetch(&ag->dev->free_bytes, length, CHIMERA_MEMORY_RELAXED);
     free(e);
 } /* sm_ag_mark_used_locked */
 
@@ -2200,7 +2201,7 @@ space_map_condense_commit(
     /* Publish the new checkpoint frontier for this AG.  A concurrent alloc/free
      * may have re-dirtied it (delta with seq > ckpt_seq) -- leave ckpt_dirty as
      * it stands in that case; only clear it if no newer delta arrived. */
-    __atomic_store_n(&ag->ckpt_seq, ckpt_seq, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&ag->ckpt_seq, ckpt_seq, CHIMERA_MEMORY_RELEASE);
     evpl_mutex_unlock(&ag->lock);
 } /* space_map_condense_commit */
 
@@ -2214,7 +2215,7 @@ space_map_ag_ckpt_seq(
 {
     struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
 
-    return __atomic_load_n(&ag->ckpt_seq, __ATOMIC_ACQUIRE);
+    return chimera_atomic_load_n(&ag->ckpt_seq, CHIMERA_MEMORY_ACQUIRE);
 } /* space_map_ag_ckpt_seq */
 
 /*
@@ -2362,8 +2363,8 @@ sm_persist_batch_submit(
             updates[i].ag->log_generation  = updates[i].generation;
             updates[i].ag->log_base_count  = updates[i].base_count;
             updates[i].ag->log_delta_count = 0;
-            __atomic_store_n(&updates[i].ag->ckpt_seq, updates[i].ckpt_seq,
-                             __ATOMIC_RELEASE);
+            chimera_atomic_store_n(&updates[i].ag->ckpt_seq, updates[i].ckpt_seq,
+                             CHIMERA_MEMORY_RELEASE);
             updates[i].ag->ckpt_dirty = 0;
             evpl_mutex_unlock(&updates[i].ag->lock);
         }
@@ -2491,7 +2492,7 @@ space_map_free_bytes(struct space_map *sm)
      * be allocated.  This replaces an O(all-AGs) scan that locked every AG and
      * dominated CPU on the reservation hot path. */
     for (d = 0; d < sm->num_devices; d++) {
-        free += __atomic_load_n(&sm->devices[d].free_bytes, __ATOMIC_RELAXED);
+        free += chimera_atomic_load_n(&sm->devices[d].free_bytes, CHIMERA_MEMORY_RELAXED);
     }
     return free;
 } /* space_map_free_bytes */
@@ -2511,7 +2512,7 @@ sm_init_device_free_totals(struct space_map *sm)
         for (a = 0; a < dev->num_ags; a++) {
             total += dev->ags[a].free_bytes;
         }
-        __atomic_store_n(&dev->free_bytes, total, __ATOMIC_RELAXED);
+        chimera_atomic_store_n(&dev->free_bytes, total, CHIMERA_MEMORY_RELAXED);
     }
 } /* sm_init_device_free_totals */
 

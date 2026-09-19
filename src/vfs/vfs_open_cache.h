@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/atomic.h"
 #include "common/thread.h"
 
 #include "common/format.h"
@@ -819,7 +820,7 @@ chimera_vfs_open_cache_defer_close(
              * cache and the close fence.  Bumping this after the loop instead
              * would leave exactly that window, which is the race the fence
              * exists to close. */
-            __atomic_add_fetch(r_issued, 1, __ATOMIC_RELEASE);
+            chimera_atomic_add_fetch(r_issued, 1, CHIMERA_MEMORY_RELEASE);
         }
 
         /* Count AFTER processing - this is the number of handles still in the cache */

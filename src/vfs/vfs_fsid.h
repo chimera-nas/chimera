@@ -30,7 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
+#include "common/dirent.h"
 #include "common/thread.h"
 #include <sys/stat.h>
 #ifdef _WIN32

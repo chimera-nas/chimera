@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/atomic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,7 +77,7 @@ chimera_s3_cred_cache_now(
     struct timespec              *ts)
 {
     clock_gettime(CLOCK_REALTIME, ts);
-    ts->tv_sec += __atomic_load_n(&cache->clock_offset_sec, __ATOMIC_RELAXED);
+    ts->tv_sec += chimera_atomic_load_n(&cache->clock_offset_sec, CHIMERA_MEMORY_RELAXED);
 } // chimera_s3_cred_cache_now
 
 static inline unsigned int
@@ -109,7 +110,7 @@ chimera_s3_cred_cache_remove_locked(
     while (*pp) {
         if (*pp == cred) {
             rcu_assign_pointer(*pp, cred->next);
-            __atomic_sub_fetch(&cache->num_credentials, 1, __ATOMIC_RELAXED);
+            chimera_atomic_sub_fetch(&cache->num_credentials, 1, CHIMERA_MEMORY_RELAXED);
             break;
         }
         pp = &(*pp)->next;
@@ -159,7 +160,7 @@ chimera_s3_cred_cache_advance(
     struct chimera_s3_cred_cache *cache,
     int64_t                       seconds)
 {
-    __atomic_add_fetch(&cache->clock_offset_sec, seconds, __ATOMIC_RELAXED);
+    chimera_atomic_add_fetch(&cache->clock_offset_sec, seconds, CHIMERA_MEMORY_RELAXED);
     chimera_s3_cred_cache_sweep(cache);
 } // chimera_s3_cred_cache_advance
 
@@ -322,7 +323,7 @@ chimera_s3_cred_cache_add(
     /* Insert into chain */
     cred->next = cache->buckets[bucket_idx].head;
     rcu_assign_pointer(cache->buckets[bucket_idx].head, cred);
-    __atomic_add_fetch(&cache->num_credentials, 1, __ATOMIC_RELAXED);
+    chimera_atomic_add_fetch(&cache->num_credentials, 1, CHIMERA_MEMORY_RELAXED);
 
     evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
 

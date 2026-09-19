@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "common/compiler.h"
 #include <stdint.h>
@@ -342,7 +343,7 @@ chimera_smb_share_release(struct chimera_smb_share *share)
         return;
     }
 
-    if (__atomic_sub_fetch(&share->refcnt, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&share->refcnt, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         chimera_smb_sharemode_destroy(&share->sharemode);
         free(share);
     }

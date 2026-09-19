@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
@@ -610,16 +611,16 @@ chimera_vfs_io_claim_acquire(
         request->io_handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
         struct chimera_vfs_open_handle *handle = request->io_handle;
 
-        file = __atomic_load_n(&handle->file_state, __ATOMIC_ACQUIRE);
+        file = chimera_atomic_load_n(&handle->file_state, CHIMERA_MEMORY_ACQUIRE);
         if (!file) {
             struct chimera_vfs_file_state *expected = NULL;
 
             file = chimera_vfs_state_get(state, request->fh, request->fh_len,
                                          request->fh_hash, true);
             if (file &&
-                !__atomic_compare_exchange_n(&handle->file_state, &expected,
-                                             file, false, __ATOMIC_ACQ_REL,
-                                             __ATOMIC_ACQUIRE)) {
+                !chimera_atomic_compare_exchange_n(&handle->file_state, &expected,
+                                             file, false, CHIMERA_MEMORY_ACQ_REL,
+                                             CHIMERA_MEMORY_ACQUIRE)) {
                 chimera_vfs_state_put(state, file);
                 file = expected;
             }

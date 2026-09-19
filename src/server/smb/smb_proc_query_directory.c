@@ -173,8 +173,8 @@ chimera_smb_query_directory_readdir_callback(
         return -1;
     }
 
-    request->query_directory.last_file_offset = evpl_iovec_data(&request->query_directory.iov) +
-        request->query_directory.output_length;
+    request->query_directory.last_file_offset = (uint32_t *) ((char *) evpl_iovec_data(&request->query_directory.iov) +
+        request->query_directory.output_length);
 
     evpl_iovec_cursor_init(&entry_cursor, &request->query_directory.iov, 1);
 

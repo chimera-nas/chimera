@@ -9,6 +9,7 @@
  * against stale file handles.
  */
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
 
@@ -140,7 +141,7 @@ diskfs_dispatch_grant(struct diskfs_inode_waiter *w)
         worker->grant_head = w;
     }
     worker->grant_tail = w;
-    __atomic_store_n(&worker->grant_pending, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&worker->grant_pending, 1, CHIMERA_MEMORY_RELEASE);
     evpl_mutex_unlock(&worker->grant_lock);
 
     evpl_ring_doorbell(&worker->grant_doorbell);
@@ -535,8 +536,8 @@ diskfs_gen_extend_complete(
                             "generation-floor superblock write failed: %d",
                             status);
 
-    __atomic_store_n(&shared->gen_floor, ge->new_floor, __ATOMIC_RELEASE);
-    __atomic_store_n(&shared->gen_extend_inflight, 0, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->gen_floor, ge->new_floor, CHIMERA_MEMORY_RELEASE);
+    chimera_atomic_store_n(&shared->gen_extend_inflight, 0, CHIMERA_MEMORY_RELEASE);
 
     evpl_iovec_release(evpl, &ge->iov);
     free(ge);
@@ -565,14 +566,14 @@ diskfs_gen_extend(struct diskfs_thread *thread)
     struct diskfs_gen_extend *ge;
     int                       expect = 0;
 
-    if (!__atomic_compare_exchange_n(&shared->gen_extend_inflight, &expect, 1,
-                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (!chimera_atomic_compare_exchange_n(&shared->gen_extend_inflight, &expect, 1,
+                                     0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
         return;     /* one extension in flight at a time */
     }
 
     ge            = malloc(sizeof(*ge));
     ge->thread    = thread;
-    ge->new_floor = __atomic_load_n(&shared->gen_next, __ATOMIC_RELAXED) +
+    ge->new_floor = chimera_atomic_load_n(&shared->gen_next, CHIMERA_MEMORY_RELAXED) +
         DISKFS_GEN_RESERVE;
 
     evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,
@@ -604,14 +605,14 @@ diskfs_gen_alloc(
     void                 *arg)
 {
     struct diskfs_shared *shared = thread->shared;
-    uint64_t              g      = __atomic_fetch_add(&shared->gen_next, 1,
-                                                      __ATOMIC_RELAXED);
+    uint64_t              g      = chimera_atomic_fetch_add(&shared->gen_next, 1,
+                                                      CHIMERA_MEMORY_RELAXED);
     uint64_t              floor;
 
     chimera_diskfs_abort_if(g >= UINT32_MAX,
                             "inode generation space exhausted");
 
-    floor = __atomic_load_n(&shared->gen_floor, __ATOMIC_ACQUIRE);
+    floor = chimera_atomic_load_n(&shared->gen_floor, CHIMERA_MEMORY_ACQUIRE);
 
     if (g + DISKFS_GEN_RESERVE / 2 >= floor) {
         diskfs_gen_extend(thread);
@@ -627,7 +628,7 @@ diskfs_gen_alloc(
 
             evpl_mutex_lock(&shared->gen_lock);
             /* The extension may have landed while we took the lock. */
-            if (__atomic_load_n(&shared->gen_floor, __ATOMIC_ACQUIRE) > g) {
+            if (chimera_atomic_load_n(&shared->gen_floor, CHIMERA_MEMORY_ACQUIRE) > g) {
                 evpl_mutex_unlock(&shared->gen_lock);
                 diskfs_block_waiter_free(thread, w);
                 *r_gen = (uint32_t) g;
@@ -657,7 +658,7 @@ diskfs_grant_drain(struct diskfs_thread *thread)
     struct diskfs_inode_waiter *list, *w;
     int                         drained = 0;
 
-    if (!__atomic_load_n(&thread->grant_pending, __ATOMIC_ACQUIRE)) {
+    if (!chimera_atomic_load_n(&thread->grant_pending, CHIMERA_MEMORY_ACQUIRE)) {
         return 0;
     }
 
@@ -665,7 +666,7 @@ diskfs_grant_drain(struct diskfs_thread *thread)
     list               = thread->grant_head;
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
-    __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&thread->grant_pending, 0, CHIMERA_MEMORY_RELEASE);
     evpl_mutex_unlock(&thread->grant_lock);
 
     while (list) {

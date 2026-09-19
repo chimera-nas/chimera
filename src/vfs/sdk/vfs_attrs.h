@@ -20,65 +20,65 @@ struct chimera_acl;
  */
 #define CHIMERA_VFS_FH_SIZE                 64
 
-#define CHIMERA_VFS_ATTR_DEV                (1UL << 0)
-#define CHIMERA_VFS_ATTR_INUM               (1UL << 1)
-#define CHIMERA_VFS_ATTR_MODE               (1UL << 2)
-#define CHIMERA_VFS_ATTR_NLINK              (1UL << 3)
-#define CHIMERA_VFS_ATTR_UID                (1UL << 4)
-#define CHIMERA_VFS_ATTR_GID                (1UL << 5)
-#define CHIMERA_VFS_ATTR_RDEV               (1UL << 6)
-#define CHIMERA_VFS_ATTR_SIZE               (1UL << 7)
-#define CHIMERA_VFS_ATTR_ATIME              (1UL << 8)
-#define CHIMERA_VFS_ATTR_MTIME              (1UL << 9)
-#define CHIMERA_VFS_ATTR_CTIME              (1UL << 10)
-#define CHIMERA_VFS_ATTR_SPACE_USED         (1UL << 11)
+#define CHIMERA_VFS_ATTR_DEV                (1ULL << 0)
+#define CHIMERA_VFS_ATTR_INUM               (1ULL << 1)
+#define CHIMERA_VFS_ATTR_MODE               (1ULL << 2)
+#define CHIMERA_VFS_ATTR_NLINK              (1ULL << 3)
+#define CHIMERA_VFS_ATTR_UID                (1ULL << 4)
+#define CHIMERA_VFS_ATTR_GID                (1ULL << 5)
+#define CHIMERA_VFS_ATTR_RDEV               (1ULL << 6)
+#define CHIMERA_VFS_ATTR_SIZE               (1ULL << 7)
+#define CHIMERA_VFS_ATTR_ATIME              (1ULL << 8)
+#define CHIMERA_VFS_ATTR_MTIME              (1ULL << 9)
+#define CHIMERA_VFS_ATTR_CTIME              (1ULL << 10)
+#define CHIMERA_VFS_ATTR_SPACE_USED         (1ULL << 11)
 
-#define CHIMERA_VFS_ATTR_SPACE_AVAIL        (1UL << 12)
-#define CHIMERA_VFS_ATTR_SPACE_FREE         (1UL << 13)
-#define CHIMERA_VFS_ATTR_SPACE_TOTAL        (1UL << 14)
-#define CHIMERA_VFS_ATTR_FILES_TOTAL        (1UL << 15)
-#define CHIMERA_VFS_ATTR_FILES_FREE         (1UL << 16)
-#define CHIMERA_VFS_ATTR_FILES_AVAIL        (1UL << 17)
+#define CHIMERA_VFS_ATTR_SPACE_AVAIL        (1ULL << 12)
+#define CHIMERA_VFS_ATTR_SPACE_FREE         (1ULL << 13)
+#define CHIMERA_VFS_ATTR_SPACE_TOTAL        (1ULL << 14)
+#define CHIMERA_VFS_ATTR_FILES_TOTAL        (1ULL << 15)
+#define CHIMERA_VFS_ATTR_FILES_FREE         (1ULL << 16)
+#define CHIMERA_VFS_ATTR_FILES_AVAIL        (1ULL << 17)
 
-#define CHIMERA_VFS_ATTR_FH                 (1UL << 18)
-#define CHIMERA_VFS_ATTR_ATOMIC             (1UL << 19)
-#define CHIMERA_VFS_ATTR_FSID               (1UL << 20)
+#define CHIMERA_VFS_ATTR_FH                 (1ULL << 18)
+#define CHIMERA_VFS_ATTR_ATOMIC             (1ULL << 19)
+#define CHIMERA_VFS_ATTR_FSID               (1ULL << 20)
 
 /* Windows/SMB DOS attribute bits (FILE_ATTRIBUTE_*).  Optional: a backend
  * sets this bit in va_set_mask only if it actually persists the value. */
-#define CHIMERA_VFS_ATTR_DOS_ATTRIBUTES     (1UL << 21)
+#define CHIMERA_VFS_ATTR_DOS_ATTRIBUTES     (1ULL << 21)
 
 /* Birth/creation time (SMB create time, statx btime).  POSIX has no such
  * concept, so this is optional: a backend sets this bit in va_set_mask only
  * if it actually tracks the value. */
-#define CHIMERA_VFS_ATTR_BTIME              (1UL << 22)
+#define CHIMERA_VFS_ATTR_BTIME              (1ULL << 22)
 
 /* Opaque per-file pNFS layout state (va_pnfs/va_pnfs_len).  The contents are
  * defined and interpreted solely by the NFS server (it packs the data-server
  * deviceid + backing file handle); a backend just persists and returns the
  * blob verbatim, which is all it takes to become a pNFS metadata-server
  * backend.  A backend advertises CHIMERA_VFS_CAP_LAYOUT iff it persists it. */
-#define CHIMERA_VFS_ATTR_PNFS_LAYOUT        (1UL << 23)
+#define CHIMERA_VFS_ATTR_PNFS_LAYOUT        (1ULL << 23)
 #define CHIMERA_VFS_PNFS_LAYOUT_MAX         96
 
 /* Canonical (NFSv4/Windows) ACL, carried via va_acl.  Deliberately excluded
  * from the cacheable mask: the attr cache stays fixed-size and ACLs are fetched
  * fresh, mask-gated, only when a protocol asks for them. */
-#define CHIMERA_VFS_ATTR_ACL                (1UL << 24)
+#define CHIMERA_VFS_ATTR_ACL                (1ULL << 24)
 
 /* Native change attribute (va_change).  Optional and cacheable, modeled on
  * BTIME: a backend sets this bit in va_set_mask only if it tracks a real
  * monotonic change counter (CHIMERA_VFS_CAP_CHANGE).  Deliberately NOT part of
  * MASK_STAT (which every backend must supply); backends without a native
  * counter simply leave it unset and the NFS server derives change from ctime. */
-#define CHIMERA_VFS_ATTR_CHANGE             (1UL << 25)
+#define CHIMERA_VFS_ATTR_CHANGE             (1ULL << 25)
 
 /* SMB AllocationSize reservation (va_alloc_size): the minimum allocated size a
  * file reserves independent of its EOF, set via a CREATE AllocationSize context
  * or FileAllocationInformation.  Optional: a backend sets this bit in
  * va_set_mask only if it persists the reservation, and folds it into the
  * reported va_space_used (max of real usage and the reservation). */
-#define CHIMERA_VFS_ATTR_ALLOC_SIZE         (1UL << 26)
+#define CHIMERA_VFS_ATTR_ALLOC_SIZE         (1ULL << 26)
 
 /* SMB/OS-2 EaSize: the combined byte length of the object's user-namespace
  * extended attributes, in the OS/2 FEALIST encoding (see
@@ -87,7 +87,7 @@ struct chimera_acl;
  * MASK_CACHEABLE -- only the SMB server asks for it, and only for the info
  * levels that carry EaSize.  A backend sets the bit in va_set_mask iff it
  * supports xattrs (CHIMERA_VFS_CAP_XATTR). */
-#define CHIMERA_VFS_ATTR_EA_SIZE            (1UL << 27)
+#define CHIMERA_VFS_ATTR_EA_SIZE            (1ULL << 27)
 
 /* Boolean (va_named_attr): does this object currently have >=1 named stream
  * (SMB ADS / NFSv4 named attribute)?  Backend-reported, never synthesized by a
@@ -97,7 +97,7 @@ struct chimera_acl;
  * constant.  A backend sets this bit in va_set_mask only when it has populated
  * va_named_attr (backends without named-stream support leave it unset, which the
  * NFS marshaller treats as false). */
-#define CHIMERA_VFS_ATTR_NAMED_ATTR         (1UL << 28)
+#define CHIMERA_VFS_ATTR_NAMED_ATTR         (1ULL << 28)
 
 /* Native Windows SIDs of the owner and owning group (va_owner_sid /
  * va_group_sid), the SID companions to va_uid / va_gid.  Optional: a backend
@@ -109,8 +109,8 @@ struct chimera_acl;
  * new numeric owner; OWNER_SID with a NULL/absent pointer clears it
  * explicitly.  Like ACL these are pointer-valued and deliberately excluded
  * from MASK_STAT and MASK_CACHEABLE. */
-#define CHIMERA_VFS_ATTR_OWNER_SID          (1UL << 29)
-#define CHIMERA_VFS_ATTR_GROUP_SID          (1UL << 30)
+#define CHIMERA_VFS_ATTR_OWNER_SID          (1ULL << 29)
+#define CHIMERA_VFS_ATTR_GROUP_SID          (1ULL << 30)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \

@@ -4,6 +4,7 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "common/compiler.h"
 #include <stdio.h>
@@ -177,7 +178,7 @@ chimera_vfs_close_thread_callback(
 
     close_thread->num_pending--;
 
-    __atomic_add_fetch(&close_thread->closes_completed, 1, __ATOMIC_RELEASE);
+    chimera_atomic_add_fetch(&close_thread->closes_completed, 1, CHIMERA_MEMORY_RELEASE);
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
@@ -213,7 +214,7 @@ chimera_vfs_close_thread_sweep(
         } else {
             /* Nothing to close, so the fence slot this handle took when it left
              * the cache is settled here rather than by a callback. */
-            __atomic_add_fetch(&close_thread->closes_completed, 1, __ATOMIC_RELEASE);
+            chimera_atomic_add_fetch(&close_thread->closes_completed, 1, CHIMERA_MEMORY_RELEASE);
         }
 
         /* defer_close removed the handle from the bucket but frees the struct
@@ -1276,7 +1277,7 @@ chimera_vfs_thread_init(
      * CPU migration -- and never strands in a stripe nothing pops. */
     {
         static uint32_t rcu_stripe_seq;
-        uint32_t        s = __atomic_fetch_add(&rcu_stripe_seq, 1, __ATOMIC_RELAXED);
+        uint32_t        s = chimera_atomic_fetch_add(&rcu_stripe_seq, 1, CHIMERA_MEMORY_RELAXED);
         int             p;
 
         for (p = 0; p < CHIMERA_RCU_POOL_COUNT; p++) {

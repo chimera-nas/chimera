@@ -9,6 +9,7 @@
  * tail-pusher that writes logged blocks home and trims the log.
  */
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
 
@@ -36,10 +37,10 @@ dbg_dump_push(void)
         "DBG-PUSH push_outstanding=%d ready=%s push_head=%p redo_inflight=%d log_head=%lu log_tail=%lu used=%lu num_devices=%d",
         il->push_outstanding, il->ready_head ? "NONEMPTY" : "empty",
         (void *) il->push_head, il->redo_inflight,
-        (unsigned long) __atomic_load_n(&il->log_head, __ATOMIC_RELAXED),
-        (unsigned long) __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED),
-        (unsigned long) (__atomic_load_n(&il->log_head, __ATOMIC_RELAXED) -
-                         __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED)),
+        (unsigned long) chimera_atomic_load_n(&il->log_head, CHIMERA_MEMORY_RELAXED),
+        (unsigned long) chimera_atomic_load_n(&il->log_tail, CHIMERA_MEMORY_RELAXED),
+        (unsigned long) (chimera_atomic_load_n(&il->log_head, CHIMERA_MEMORY_RELAXED) -
+                         chimera_atomic_load_n(&il->log_tail, CHIMERA_MEMORY_RELAXED)),
         shared->num_devices);
 
     if (il->log_queue) {
@@ -236,7 +237,7 @@ diskfs_il_contig_free(struct diskfs_intent_log *il)
     uint64_t start = SM_INTENT_LOG_OFFSET;
     uint64_t end   = SM_INTENT_LOG_OFFSET + il->intent_log_size;
     uint64_t head  = il->log_head;     /* commit-owned */
-    uint64_t tail  = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
+    uint64_t tail  = chimera_atomic_load_n(&il->log_tail, CHIMERA_MEMORY_ACQUIRE);
 
     if (head == tail) {
         return il->intent_log_size;     /* empty */
@@ -274,9 +275,9 @@ diskfs_il_place(
         head = SM_INTENT_LOG_OFFSET;     /* wrap; tail of region unused */
     }
     offset = head;
-    __atomic_store_n(&il->log_head, head + reclen, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&il->log_head, head + reclen, CHIMERA_MEMORY_RELEASE);
     /* The record now occupies log space until the trim point passes it. */
-    __atomic_add_fetch(&il->live_records, 1, __ATOMIC_RELEASE);
+    chimera_atomic_add_fetch(&il->live_records, 1, CHIMERA_MEMORY_RELEASE);
     return offset;
 } /* diskfs_il_place */
 
@@ -496,10 +497,10 @@ diskfs_il_rec_alloc(
 {
     struct diskfs_il_record *rec;
 
-    rec = __atomic_load_n(&il->rec_pool, __ATOMIC_ACQUIRE);
+    rec = chimera_atomic_load_n(&il->rec_pool, CHIMERA_MEMORY_ACQUIRE);
     while (rec &&
-           !__atomic_compare_exchange_n(&il->rec_pool, &rec, rec->recycle_next,
-                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+           !chimera_atomic_compare_exchange_n(&il->rec_pool, &rec, rec->recycle_next,
+                                        0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
     }
     if (!rec) {
         rec = malloc(sizeof(*rec));
@@ -537,11 +538,11 @@ diskfs_il_rec_recycle(
 {
     struct diskfs_il_record *head;
 
-    head = __atomic_load_n(&il->rec_pool, __ATOMIC_ACQUIRE);
+    head = chimera_atomic_load_n(&il->rec_pool, CHIMERA_MEMORY_ACQUIRE);
     do {
         rec->recycle_next = head;
-    } while (!__atomic_compare_exchange_n(&il->rec_pool, &head, rec,
-                                          0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    } while (!chimera_atomic_compare_exchange_n(&il->rec_pool, &head, rec,
+                                          0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE));
 } /* diskfs_il_rec_recycle */
 
 
@@ -552,10 +553,10 @@ diskfs_il_ctx_alloc(
 {
     struct diskfs_redo_ctx *ctx;
 
-    ctx = __atomic_load_n(&il->ctx_pool, __ATOMIC_ACQUIRE);
+    ctx = chimera_atomic_load_n(&il->ctx_pool, CHIMERA_MEMORY_ACQUIRE);
     while (ctx &&
-           !__atomic_compare_exchange_n(&il->ctx_pool, &ctx, ctx->free_next,
-                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+           !chimera_atomic_compare_exchange_n(&il->ctx_pool, &ctx, ctx->free_next,
+                                        0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
     }
     if (!ctx) {
         ctx = malloc(sizeof(*ctx));
@@ -581,11 +582,11 @@ diskfs_il_ctx_recycle(
 {
     struct diskfs_redo_ctx *head;
 
-    head = __atomic_load_n(&il->ctx_pool, __ATOMIC_ACQUIRE);
+    head = chimera_atomic_load_n(&il->ctx_pool, CHIMERA_MEMORY_ACQUIRE);
     do {
         ctx->free_next = head;
-    } while (!__atomic_compare_exchange_n(&il->ctx_pool, &head, ctx,
-                                          0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    } while (!chimera_atomic_compare_exchange_n(&il->ctx_pool, &head, ctx,
+                                          0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE));
 } /* diskfs_il_ctx_recycle */
 
 
@@ -710,9 +711,9 @@ diskfs_push_unpin_block(
      * worker may be moving this block to the MRU end under the shard lock
      * (on_lru toggles 0->1), which is fine: the discharge only adjusts the
      * atomic pin_count/state, and the block stays on the LRU either way. */
-    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0) {
-        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
-        __atomic_sub_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    if (chimera_atomic_sub_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
+        chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_sub_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);
     }
 } /* diskfs_push_unpin_block */
 
@@ -777,7 +778,7 @@ diskfs_push_checkpoint_ready(
      * snapshot frontier -- the log is discarded wholesale and there is nothing to
      * replay; a crash leaves the log intact to replay.  Trim every covered record
      * unconditionally. */
-    if (__atomic_load_n(&il->shutdown, __ATOMIC_ACQUIRE)) {
+    if (chimera_atomic_load_n(&il->shutdown, CHIMERA_MEMORY_ACQUIRE)) {
         return 1;
     }
 
@@ -835,16 +836,16 @@ diskfs_push_trim(struct diskfs_intent_log *il)
          * known, leave log_tail unchanged (conservative -- the next hand-off
          * advances it). */
         if (il->push_head) {
-            __atomic_store_n(&il->log_tail, il->push_head->offset, __ATOMIC_RELEASE);
-            __atomic_store_n(&il->log_tail_seq, il->push_head->seq, __ATOMIC_RELEASE);
+            chimera_atomic_store_n(&il->log_tail, il->push_head->offset, CHIMERA_MEMORY_RELEASE);
+            chimera_atomic_store_n(&il->log_tail_seq, il->push_head->seq, CHIMERA_MEMORY_RELEASE);
         } else {
             uint32_t hh = il->handoff_head;
-            uint32_t ht = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
+            uint32_t ht = chimera_atomic_load_n(&il->handoff_tail, CHIMERA_MEMORY_ACQUIRE);
             if (hh != ht) {
                 struct diskfs_il_record *oldest =
                     il->handoff[hh & il->handoff_ring_mask];
-                __atomic_store_n(&il->log_tail, oldest->offset, __ATOMIC_RELEASE);
-                __atomic_store_n(&il->log_tail_seq, oldest->seq, __ATOMIC_RELEASE);
+                chimera_atomic_store_n(&il->log_tail, oldest->offset, CHIMERA_MEMORY_RELEASE);
+                chimera_atomic_store_n(&il->log_tail_seq, oldest->seq, CHIMERA_MEMORY_RELEASE);
             }
         }
 
@@ -856,7 +857,7 @@ diskfs_push_trim(struct diskfs_intent_log *il)
          * (home writes read the in-memory image, never the on-disk log).
          * Release-ordered after the log_tail stores above so the commit
          * thread's acquire-load of a zero count also sees the final tail. */
-        __atomic_sub_fetch(&il->live_records, 1, __ATOMIC_RELEASE);
+        chimera_atomic_sub_fetch(&il->live_records, 1, CHIMERA_MEMORY_RELEASE);
         advanced = 1;
     }
 
@@ -868,7 +869,7 @@ diskfs_push_trim(struct diskfs_intent_log *il)
          * closes wake_doorbell's fd; ringing it after that aborts.  commit_alive
          * is cleared before that teardown, and during shutdown the commit thread
          * makes progress by self-pumping, so a skipped wake is harmless. */
-        if (__atomic_load_n(&il->commit_alive, __ATOMIC_ACQUIRE)) {
+        if (chimera_atomic_load_n(&il->commit_alive, CHIMERA_MEMORY_ACQUIRE)) {
             evpl_ring_doorbell(&il->wake_doorbell);
         }
     }
@@ -982,7 +983,7 @@ diskfs_il_push_doorbell_cb(
                                                 struct diskfs_intent_log,
                                                 push_doorbell);
     uint32_t                  head = il->handoff_head;
-    uint32_t                  tail = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
+    uint32_t                  tail = chimera_atomic_load_n(&il->handoff_tail, CHIMERA_MEMORY_ACQUIRE);
 
     (void) evpl;
 
@@ -1003,7 +1004,7 @@ diskfs_il_push_doorbell_cb(
         il->push_tail = rec;
         diskfs_push_fold_record(il, rec);
     }
-    __atomic_store_n(&il->handoff_head, head, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&il->handoff_head, head, CHIMERA_MEMORY_RELEASE);
 
     diskfs_push_issue(il);
     diskfs_push_trim(il);
@@ -1063,29 +1064,29 @@ diskfs_redo_write_cb(
          * applied_seq (the frontier a checkpoint actually stamps from).  Inode
          * locks were already released in diskfs_il_write_redo once log order was
          * fixed; the block pins are dropped by the push thread at trim. */
-        __atomic_store_n(&il->durable_seq, rec->seq, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&il->durable_seq, rec->seq, CHIMERA_MEMORY_RELEASE);
 
         /* Stage C: publish the durable watermark (1-past-last txn id of this
          * record).  Records retire in id order, so it is monotonic; a worker
          * polling it ACKs the client for every txn below it.  Release-ordered:
          * the record (hence every grouped txn) is durable before this is seen. */
-        __atomic_store_n(&il->durable_wm, rc->end_txn_id, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&il->durable_wm, rc->end_txn_id, CHIMERA_MEMORY_RELEASE);
 
         /* Hand the record image to the push thread (block home writes) and the
          * completion ctx to the apply thread (space-map apply + txn recycle via
          * applied_wm), both in log order.  Each ring is sized larger than the log
          * can ever hold, so neither can fill before the log does. */
         ht = il->handoff_tail;
-        chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
+        chimera_diskfs_abort_if(ht - chimera_atomic_load_n(&il->handoff_head, CHIMERA_MEMORY_ACQUIRE) >=
                                 il->handoff_ring_size, "intent-log hand-off ring overflow");
         il->handoff[ht & il->handoff_ring_mask] = rec;
-        __atomic_store_n(&il->handoff_tail, ht + 1, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&il->handoff_tail, ht + 1, CHIMERA_MEMORY_RELEASE);
 
         at = il->apply_tail;
-        chimera_diskfs_abort_if(at - __atomic_load_n(&il->apply_head, __ATOMIC_ACQUIRE) >=
+        chimera_diskfs_abort_if(at - chimera_atomic_load_n(&il->apply_head, CHIMERA_MEMORY_ACQUIRE) >=
                                 il->apply_ring_size, "intent-log apply ring overflow");
         il->apply_queue[at & il->apply_ring_mask] = rc;
-        __atomic_store_n(&il->apply_tail, at + 1, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&il->apply_tail, at + 1, CHIMERA_MEMORY_RELEASE);
 
         handed_off = 1;
 
@@ -1121,7 +1122,7 @@ diskfs_il_apply_doorbell_cb(
                                                 struct diskfs_intent_log,
                                                 apply_doorbell);
     uint32_t                  head = il->apply_head;
-    uint32_t                  tail = __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE);
+    uint32_t                  tail = chimera_atomic_load_n(&il->apply_tail, CHIMERA_MEMORY_ACQUIRE);
 
     (void) evpl;
 
@@ -1157,13 +1158,13 @@ diskfs_il_apply_doorbell_cb(
          * worker recycles its in-flight txns against.  Release-ordered so a
          * worker that observes applied_wm also observes apply being done with the
          * txn (safe to return it to the per-thread free list). */
-        __atomic_store_n(&il->applied_seq, rc->seq, __ATOMIC_RELEASE);
-        __atomic_store_n(&il->applied_wm, rc->end_txn_id, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&il->applied_seq, rc->seq, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_store_n(&il->applied_wm, rc->end_txn_id, CHIMERA_MEMORY_RELEASE);
 
         diskfs_il_ctx_recycle(il, rc);
     }
 
-    __atomic_store_n(&il->apply_head, head, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&il->apply_head, head, CHIMERA_MEMORY_RELEASE);
 } /* diskfs_il_apply_doorbell_cb */
 
 
@@ -1231,7 +1232,7 @@ diskfs_il_write_redo(
     hdr->seq        = il->log_seq++;
     rec->seq        = hdr->seq;
     ctx->seq        = hdr->seq;     /* Stage B: apply thread advances applied_seq from this */
-    hdr->tail_seq   = __atomic_load_n(&il->log_tail_seq, __ATOMIC_ACQUIRE);
+    hdr->tail_seq   = chimera_atomic_load_n(&il->log_tail_seq, CHIMERA_MEMORY_ACQUIRE);
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;
     hdr->num_deltas = num_deltas;
@@ -1449,7 +1450,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
         uint32_t                ndeltas, next_deltas;
         uint64_t                reclen;
 
-        if (__atomic_load_n(&slot->turn, __ATOMIC_ACQUIRE) != pos + 1) {
+        if (chimera_atomic_load_n(&slot->turn, CHIMERA_MEMORY_ACQUIRE) != pos + 1) {
             break;                        /* empty or not yet published */
         }
 
@@ -1470,14 +1471,14 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
             if (batch_count > 0) {
                 break;
             }
-            if (__atomic_load_n(&il->live_records, __ATOMIC_ACQUIRE) != 0) {
+            if (chimera_atomic_load_n(&il->live_records, CHIMERA_MEMORY_ACQUIRE) != 0) {
                 break;
             }
-            __atomic_store_n(&il->log_tail, il->log_head, __ATOMIC_RELEASE);
+            chimera_atomic_store_n(&il->log_tail, il->log_head, CHIMERA_MEMORY_RELEASE);
             /* Ring is fully trimmed (every prior record durably home): the next
              * record written is the oldest live one, so the live-window lower
              * bound is its own seq (== the current log_seq). */
-            __atomic_store_n(&il->log_tail_seq, il->log_seq, __ATOMIC_RELEASE);
+            chimera_atomic_store_n(&il->log_tail_seq, il->log_seq, CHIMERA_MEMORY_RELEASE);
             if (!diskfs_il_fits(il, reclen)) {
                 break;
             }
@@ -1489,7 +1490,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
         /* Free the slot for reuse (Vyukov consumer publish): the next producer
          * for this slot is at pos + DISKFS_GSQ_SIZE.  txn/enqueue were copied
          * above, so the slot may be overwritten now. */
-        __atomic_store_n(&slot->turn, pos + DISKFS_GSQ_SIZE, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&slot->turn, pos + DISKFS_GSQ_SIZE, CHIMERA_MEMORY_RELEASE);
 
         batch_count++;
         batch_blocks = next_blocks;
@@ -1547,7 +1548,7 @@ diskfs_intent_log_drain_pending(struct diskfs_intent_log *il)
                                 il->num_channels, DISKFS_IL_MAX_CHANNELS);
         il->channels[il->num_channels++] = ch;
 
-        __atomic_store_n(&ch->registered, 1, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&ch->registered, 1, CHIMERA_MEMORY_RELEASE);
     }
     diskfs_il_commit_metrics(il);
 } /* diskfs_intent_log_drain_pending */
@@ -1564,7 +1565,7 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
     /* Clear the dirty flag before we read pending_head / scan for unregisters,
      * so a (un)registration published after this point re-sets it and is picked
      * up on a later poll rather than being lost. */
-    __atomic_store_n(&il->reg_dirty, 0, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&il->reg_dirty, 0, CHIMERA_MEMORY_SEQ_CST);
 
     diskfs_intent_log_drain_pending(il);
 
@@ -1573,7 +1574,7 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
     while (i < il->num_channels) {
         struct diskfs_iq_channel *ch = il->channels[i];
 
-        if (__atomic_load_n(&ch->unregister_requested, __ATOMIC_ACQUIRE)) {
+        if (chimera_atomic_load_n(&ch->unregister_requested, CHIMERA_MEMORY_ACQUIRE)) {
             uint32_t last = il->num_channels - 1;
 
             /* The worker frees the channel (and soon its thread struct) the
@@ -1593,7 +1594,7 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
             }
             il->channels[last] = NULL;
             il->num_channels   = last;
-            __atomic_store_n(&ch->unregister_done, 1, __ATOMIC_RELEASE);
+            chimera_atomic_store_n(&ch->unregister_done, 1, CHIMERA_MEMORY_RELEASE);
             diskfs_il_commit_metrics(il);
             continue;     /* re-process index i (now a different channel) */
         }
@@ -1629,7 +1630,7 @@ diskfs_il_process_all(struct diskfs_intent_log *il)
 static int
 diskfs_il_has_sq_work(struct diskfs_intent_log *il)
 {
-    return __atomic_load_n(&il->gsq_tail, __ATOMIC_SEQ_CST) != il->gsq_head;
+    return chimera_atomic_load_n(&il->gsq_tail, CHIMERA_MEMORY_SEQ_CST) != il->gsq_head;
 } /* diskfs_il_has_sq_work */
 
 
@@ -1667,7 +1668,7 @@ diskfs_il_sq_poll(
      * so a freshly-registered channel would otherwise never enter channels[] and
      * its commits would never be seen.  Gated on a cheap atomic so the common
      * (no-change) case avoids the registration_lock. */
-    if (__atomic_load_n(&il->reg_dirty, __ATOMIC_ACQUIRE)) {
+    if (chimera_atomic_load_n(&il->reg_dirty, CHIMERA_MEMORY_ACQUIRE)) {
         diskfs_il_service_registrations(il);
     }
 
@@ -1686,7 +1687,7 @@ diskfs_il_poll_enter(
     struct diskfs_intent_log *il = private_data;
 
     (void) evpl;
-    __atomic_store_n(&il->awake, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&il->awake, 1, CHIMERA_MEMORY_SEQ_CST);
 } /* diskfs_il_poll_enter */
 
 
@@ -1702,10 +1703,10 @@ diskfs_il_poll_exit(
 {
     struct diskfs_intent_log *il = private_data;
 
-    __atomic_store_n(&il->awake, 0, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&il->awake, 0, CHIMERA_MEMORY_SEQ_CST);
 
     if (diskfs_il_has_sq_work(il)) {
-        __atomic_store_n(&il->awake, 1, __ATOMIC_SEQ_CST);
+        chimera_atomic_store_n(&il->awake, 1, CHIMERA_MEMORY_SEQ_CST);
         diskfs_il_process_all(il);
         evpl_activity(evpl);   /* stay awake; the loop will not block this pass */
     }
@@ -1741,32 +1742,32 @@ diskfs_iq_try_submit(
     /* Claim a global-ring slot (Vyukov bounded MPSC enqueue).  pos == the txn's
      * monotonic id and its log order. */
     prometheus_stopwatch_start(&enqueue);
-    pos = __atomic_load_n(&il->gsq_tail, __ATOMIC_RELAXED);
+    pos = chimera_atomic_load_n(&il->gsq_tail, CHIMERA_MEMORY_RELAXED);
     for ( ;; ) {
         uint64_t turn;
         int64_t  diff;
 
         slot = &il->gsq[pos & DISKFS_GSQ_MASK];
-        turn = __atomic_load_n(&slot->turn, __ATOMIC_ACQUIRE);
+        turn = chimera_atomic_load_n(&slot->turn, CHIMERA_MEMORY_ACQUIRE);
         diff = (int64_t) (turn - pos);
 
         if (diff == 0) {
-            if (__atomic_compare_exchange_n(&il->gsq_tail, &pos, pos + 1, 1,
-                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            if (chimera_atomic_compare_exchange_n(&il->gsq_tail, &pos, pos + 1, 1,
+                                            CHIMERA_MEMORY_RELAXED, CHIMERA_MEMORY_RELAXED)) {
                 break;                    /* claimed slot `pos` */
             }
             /* CAS reloaded pos; retry */
         } else if (diff < 0) {
             return 0;                     /* global ring full -> park */
         } else {
-            pos = __atomic_load_n(&il->gsq_tail, __ATOMIC_RELAXED);
+            pos = chimera_atomic_load_n(&il->gsq_tail, CHIMERA_MEMORY_RELAXED);
         }
     }
 
     slot->txn          = txn;
     slot->enqueue_time = enqueue;
     /* Publish: the commit thread spins on turn==pos+1 before reading the slot. */
-    __atomic_store_n(&slot->turn, pos + 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&slot->turn, pos + 1, CHIMERA_MEMORY_RELEASE);
 
     /* Record on the worker's in-flight ring so completion can find cb/private by
      * id when the watermark passes. */
@@ -1781,7 +1782,7 @@ diskfs_iq_try_submit(
     /* The commit thread polls the global ring every loop iteration while awake,
      * so the wake doorbell is only needed to rouse it once it has slept.  The
      * seq-cst load pairs with the commit thread's diskfs_il_poll_exit handshake. */
-    if (!__atomic_load_n(&il->awake, __ATOMIC_SEQ_CST)) {
+    if (!chimera_atomic_load_n(&il->awake, CHIMERA_MEMORY_SEQ_CST)) {
         evpl_ring_doorbell(&il->wake_doorbell);
     }
     return 1;
@@ -1820,10 +1821,10 @@ int
 diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
 {
     struct diskfs_thread *worker  = ch->worker;
-    uint64_t              durable = __atomic_load_n(
-        &worker->shared->intent_log.durable_wm, __ATOMIC_ACQUIRE);
-    uint64_t              applied = __atomic_load_n(
-        &worker->shared->intent_log.applied_wm, __ATOMIC_ACQUIRE);
+    uint64_t              durable = chimera_atomic_load_n(
+        &worker->shared->intent_log.durable_wm, CHIMERA_MEMORY_ACQUIRE);
+    uint64_t              applied = chimera_atomic_load_n(
+        &worker->shared->intent_log.applied_wm, CHIMERA_MEMORY_ACQUIRE);
     int                   drained = 0;
 
     /* ACK the client for the contiguous prefix now durable (recoverable).  The
@@ -1905,11 +1906,11 @@ diskfs_il_watchdog_cb(
     struct diskfs_intent_log *il = container_of(timer,
                                                 struct diskfs_intent_log,
                                                 wd_timer);
-    uint64_t                  durable_wm  = __atomic_load_n(&il->durable_wm, __ATOMIC_ACQUIRE);
-    uint64_t                  applied_wm  = __atomic_load_n(&il->applied_wm, __ATOMIC_ACQUIRE);
-    uint64_t                  gsq_tail    = __atomic_load_n(&il->gsq_tail, __ATOMIC_ACQUIRE);
-    uint32_t                  apply_head  = __atomic_load_n(&il->apply_head, __ATOMIC_ACQUIRE);
-    uint32_t                  apply_tail  = __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE);
+    uint64_t                  durable_wm  = chimera_atomic_load_n(&il->durable_wm, CHIMERA_MEMORY_ACQUIRE);
+    uint64_t                  applied_wm  = chimera_atomic_load_n(&il->applied_wm, CHIMERA_MEMORY_ACQUIRE);
+    uint64_t                  gsq_tail    = chimera_atomic_load_n(&il->gsq_tail, CHIMERA_MEMORY_ACQUIRE);
+    uint32_t                  apply_head  = chimera_atomic_load_n(&il->apply_head, CHIMERA_MEMORY_ACQUIRE);
+    uint32_t                  apply_tail  = chimera_atomic_load_n(&il->apply_tail, CHIMERA_MEMORY_ACQUIRE);
     uint64_t                  retire_head = il->retire_head;   /* commit-thread private (we are it) */
     uint64_t                  retire_tail = il->retire_tail;
     int                       apply_stalled, commit_stalled;
@@ -1961,8 +1962,8 @@ diskfs_il_watchdog_cb(
             apply_head, apply_tail,
             il->redo_inflight, il->push_outstanding,
             (unsigned long) il->live_records,
-            (unsigned long) __atomic_load_n(&il->log_head, __ATOMIC_ACQUIRE),
-            (unsigned long) __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE));
+            (unsigned long) chimera_atomic_load_n(&il->log_head, CHIMERA_MEMORY_ACQUIRE),
+            (unsigned long) chimera_atomic_load_n(&il->log_tail, CHIMERA_MEMORY_ACQUIRE));
 
         /* Name the journal write that never completed.  In-order retirement
          * stops at the first not-done slot, so retire_head *is* the record
@@ -2063,16 +2064,16 @@ diskfs_intent_log_thread_init(
     il->retire_head = 0;
     il->retire_tail = 0;
     il->handoff     = calloc(il->handoff_ring_size, sizeof(*il->handoff));
-    __atomic_store_n(&il->handoff_head, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&il->handoff_tail, 0, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&il->handoff_head, 0, CHIMERA_MEMORY_RELAXED);
+    chimera_atomic_store_n(&il->handoff_tail, 0, CHIMERA_MEMORY_RELAXED);
 
     /* Stage B: cross-thread apply ring (commit -> apply thread).  Sized like the
      * hand-off ring (larger than the log can hold) so it cannot overflow. */
     il->apply_ring_size = il->handoff_ring_size;
     il->apply_ring_mask = il->handoff_ring_mask;
     il->apply_queue     = calloc(il->apply_ring_size, sizeof(*il->apply_queue));
-    __atomic_store_n(&il->apply_head, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&il->apply_tail, 0, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&il->apply_head, 0, CHIMERA_MEMORY_RELAXED);
+    chimera_atomic_store_n(&il->apply_tail, 0, CHIMERA_MEMORY_RELAXED);
 
     /* Stage C: global submission ring + completion watermarks.  Allocated here
      * (before the commit thread publishes ready) so it exists before any worker
@@ -2084,12 +2085,12 @@ diskfs_intent_log_thread_init(
 
         il->gsq = calloc(DISKFS_GSQ_SIZE, sizeof(*il->gsq));
         for (s = 0; s < DISKFS_GSQ_SIZE; s++) {
-            __atomic_store_n(&il->gsq[s].turn, s, __ATOMIC_RELAXED);
+            chimera_atomic_store_n(&il->gsq[s].turn, s, CHIMERA_MEMORY_RELAXED);
         }
         il->gsq_head = 0;
-        __atomic_store_n(&il->gsq_tail, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&il->durable_wm, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&il->applied_wm, 0, __ATOMIC_RELAXED);
+        chimera_atomic_store_n(&il->gsq_tail, 0, CHIMERA_MEMORY_RELAXED);
+        chimera_atomic_store_n(&il->durable_wm, 0, CHIMERA_MEMORY_RELAXED);
+        chimera_atomic_store_n(&il->applied_wm, 0, CHIMERA_MEMORY_RELAXED);
     }
 
     diskfs_intent_log_metrics_init(il);
@@ -2111,8 +2112,8 @@ diskfs_intent_log_thread_init(
      * are polling while we are actually asleep, stranding the commit until some
      * unrelated doorbell happens to wake us.  poll_enter/poll_exit own it from
      * here; it is 0 (asleep) until the first poll_enter. */
-    __atomic_store_n(&il->awake, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&il->reg_dirty, 1, __ATOMIC_SEQ_CST);   /* service any channels registered before we started polling */
+    chimera_atomic_store_n(&il->awake, 0, CHIMERA_MEMORY_SEQ_CST);
+    chimera_atomic_store_n(&il->reg_dirty, 1, CHIMERA_MEMORY_SEQ_CST);   /* service any channels registered before we started polling */
     il->sq_poll = evpl_add_poll(evpl, diskfs_il_poll_enter, diskfs_il_poll_exit,
                                 diskfs_il_sq_poll, il);
 
@@ -2126,7 +2127,7 @@ diskfs_intent_log_thread_init(
     il->wd_stall_ticks      = 0;
     evpl_add_timer(evpl, &il->wd_timer, diskfs_il_watchdog_cb, DISKFS_IL_WD_INTERVAL_US);
 
-    __atomic_store_n(&il->ready, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&il->ready, 1, CHIMERA_MEMORY_RELEASE);
     return il;
 } /* diskfs_intent_log_thread_init */
 
@@ -2195,7 +2196,7 @@ diskfs_il_push_thread_init(
     }
 
     evpl_add_doorbell(evpl, &il->push_doorbell, diskfs_il_push_doorbell_cb);
-    __atomic_store_n(&il->push_ready, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&il->push_ready, 1, CHIMERA_MEMORY_RELEASE);
     return il;
 } /* diskfs_il_push_thread_init */
 
@@ -2217,7 +2218,7 @@ diskfs_il_push_thread_shutdown(
      * persisted (the crash skips the clean-superblock write), so the next mount
      * still finds and replays every record.  Draining here frees the records
      * cleanly -- avoiding a straggler leak the leak checker would abort on. */
-    while (il->handoff_head != __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE) ||
+    while (il->handoff_head != chimera_atomic_load_n(&il->handoff_tail, CHIMERA_MEMORY_ACQUIRE) ||
            il->push_head || il->push_outstanding) {
         diskfs_il_push_doorbell_cb(evpl, &il->push_doorbell);
         evpl_continue(evpl);
@@ -2250,7 +2251,7 @@ diskfs_il_apply_thread_init(
 
     il->apply_evpl = evpl;
     evpl_add_doorbell(evpl, &il->apply_doorbell, diskfs_il_apply_doorbell_cb);
-    __atomic_store_n(&il->apply_ready, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&il->apply_ready, 1, CHIMERA_MEMORY_RELEASE);
     return il;
 } /* diskfs_il_apply_thread_init */
 
@@ -2269,7 +2270,7 @@ diskfs_il_apply_thread_shutdown(
      * a complete free map.  Runs on the crash path too, to free the ctxs
      * cleanly; applied_seq is in-memory and discarded (the crash does not
      * persist the checkpoint). */
-    while (il->apply_head != __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE)) {
+    while (il->apply_head != chimera_atomic_load_n(&il->apply_tail, CHIMERA_MEMORY_ACQUIRE)) {
         diskfs_il_apply_doorbell_cb(evpl, &il->apply_doorbell);
         evpl_continue(evpl);
     }

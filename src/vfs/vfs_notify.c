@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include <string.h>
 #include <stdlib.h>
@@ -755,10 +756,10 @@ chimera_vfs_notify_watch_update(
     int                                    old_tree;
 
     evpl_mutex_lock(&watch->lock);
-    /* Paired with __atomic_load_n in emit's bucket-walk read.  The
+    /* Paired with chimera_atomic_load_n in emit's bucket-walk read.  The
      * lock makes the store visible under the bucket-walk; the atomic
      * load makes the read well-defined per C11. */
-    __atomic_store_n(&watch->filter_mask, filter_mask, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&watch->filter_mask, filter_mask, CHIMERA_MEMORY_RELAXED);
     old_tree = watch->watch_tree;
     evpl_mutex_unlock(&watch->lock);
 
@@ -848,7 +849,7 @@ chimera_vfs_notify_watch_destroy(
     evpl_mutex_unlock(&bucket->lock);
 
     if (watch->sync) {
-        __atomic_fetch_sub(&notify->num_sync_watches, 1, __ATOMIC_RELAXED);
+        chimera_atomic_fetch_sub(&notify->num_sync_watches, 1, CHIMERA_MEMORY_RELAXED);
 
         /* Ack any events the consumer never drained: the watcher is going
          * away (its kernel objects with it), so the gated mutations must
@@ -1025,7 +1026,7 @@ chimera_vfs_notify_emit_body(
          * watch->lock, and we don't take watch->lock here.  Relaxed
          * order is enough: the SMB layer re-filters at response time
          * anyway, so a momentarily stale mask is benign. */
-        uint32_t mask = __atomic_load_n(&watch->filter_mask, __ATOMIC_RELAXED);
+        uint32_t mask = chimera_atomic_load_n(&watch->filter_mask, CHIMERA_MEMORY_RELAXED);
 
         if (watch->dir_fh_len == dir_fh_len &&
             memcmp(watch->dir_fh, dir_fh, dir_fh_len) == 0 &&
@@ -1443,7 +1444,7 @@ chimera_vfs_notify_watch_set_sync(
     watch->origin = origin;
     if (!watch->sync) {
         watch->sync = 1;
-        __atomic_fetch_add(&notify->num_sync_watches, 1, __ATOMIC_RELAXED);
+        chimera_atomic_fetch_add(&notify->num_sync_watches, 1, CHIMERA_MEMORY_RELAXED);
     }
     evpl_mutex_unlock(&watch->lock);
 } /* chimera_vfs_notify_watch_set_sync */
@@ -1465,7 +1466,7 @@ chimera_vfs_notify_drain_sync(struct chimera_vfs_notify_watch *watch)
 static void
 chimera_vfs_notify_gate_unref(struct chimera_vfs_notify_gate *gate)
 {
-    if (__atomic_sub_fetch(&gate->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&gate->refs, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         free(gate);
     }
 } /* chimera_vfs_notify_gate_unref */
@@ -1527,7 +1528,7 @@ chimera_vfs_notify_gate_ack(
     (void) request;
     chimera_vfs_notify_gate_unref(gate);
 #else  /* ifdef __clang_analyzer__ */
-    if (__atomic_sub_fetch(&gate->pending, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&gate->pending, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         request = chimera_vfs_notify_gate_fire(notify, gate);
         if (request) {
             /* Resume the parked completion on its owning thread; the
@@ -1717,7 +1718,7 @@ chimera_vfs_notify_emit_sync(
     evpl_mutex_lock(&bucket->lock);
 
     for (watch = bucket->watches; watch; watch = watch->next) {
-        uint32_t mask = __atomic_load_n(&watch->filter_mask, __ATOMIC_RELAXED);
+        uint32_t mask = chimera_atomic_load_n(&watch->filter_mask, CHIMERA_MEMORY_RELAXED);
 
         if (!watch->sync ||
             watch->dir_fh_len != dir_fh_len ||
@@ -1754,8 +1755,8 @@ chimera_vfs_notify_emit_sync(
         }
         ev->gate = gate;
 
-        __atomic_fetch_add(&gate->pending, 1, __ATOMIC_ACQ_REL);
-        __atomic_fetch_add(&gate->refs, 1, __ATOMIC_ACQ_REL);
+        chimera_atomic_fetch_add(&gate->pending, 1, CHIMERA_MEMORY_ACQ_REL);
+        chimera_atomic_fetch_add(&gate->refs, 1, CHIMERA_MEMORY_ACQ_REL);
 
         evpl_mutex_lock(&watch->lock);
         if (watch->sync_events_tail) {
@@ -1920,7 +1921,7 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
 
     /* Release the arm hold; if nothing was delivered (or everything acked
      * already) the fire is ours and the completion proceeds inline. */
-    if (__atomic_sub_fetch(&gate->pending, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&gate->pending, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         struct chimera_vfs_request *fired =
             chimera_vfs_notify_gate_fire(notify, gate);
         if (fired) {
@@ -1935,7 +1936,7 @@ chimera_vfs_notify_gate_install(struct chimera_vfs_request *request)
     struct chimera_vfs_notify *notify = request->thread->vfs->vfs_notify;
 
     if (!notify ||
-        __atomic_load_n(&notify->num_sync_watches, __ATOMIC_RELAXED) == 0) {
+        chimera_atomic_load_n(&notify->num_sync_watches, CHIMERA_MEMORY_RELAXED) == 0) {
         return;
     }
 

@@ -9,6 +9,7 @@
  * and pNFS block layouts.
  */
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "common/compiler.h"
 #include "diskfs_internal.h"
@@ -1601,16 +1602,16 @@ diskfs_sb_write_complete(
 {
     struct diskfs_sb_write *sw     = private_data;
     struct diskfs_shared   *shared = sw->thread->shared;
-    uint64_t                floor  = __atomic_load_n(&shared->gen_floor,
-                                                     __ATOMIC_ACQUIRE);
+    uint64_t                floor  = chimera_atomic_load_n(&shared->gen_floor,
+                                                     CHIMERA_MEMORY_ACQUIRE);
 
     chimera_diskfs_abort_if(status != 0,
                             "fs-table superblock write failed: %d", status);
 
     while (floor < sw->new_floor &&
-           !__atomic_compare_exchange_n(&shared->gen_floor, &floor,
+           !chimera_atomic_compare_exchange_n(&shared->gen_floor, &floor,
                                         sw->new_floor, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                                        CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
         /* retry against the freshly-loaded floor */
     }
 
@@ -1635,7 +1636,7 @@ diskfs_sb_write_prepare(
     sw->thread    = thread;
     sw->cb        = cb;
     sw->arg       = arg;
-    sw->new_floor = __atomic_load_n(&shared->gen_next, __ATOMIC_RELAXED) +
+    sw->new_floor = chimera_atomic_load_n(&shared->gen_next, CHIMERA_MEMORY_RELAXED) +
         DISKFS_GEN_RESERVE;
 
     evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,

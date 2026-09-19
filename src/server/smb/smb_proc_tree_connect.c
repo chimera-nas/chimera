@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/atomic.h"
 #include "common/thread.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -52,7 +53,7 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
          * cannot race chimera_smb_remove_share unlinking and releasing the
          * share between the lookup and the store into tree->share. */
         if (share) {
-            __atomic_fetch_add(&share->refcnt, 1, __ATOMIC_RELAXED);
+            chimera_atomic_fetch_add(&share->refcnt, 1, CHIMERA_MEMORY_RELAXED);
         }
 
         evpl_mutex_unlock(&shared->shares_lock);

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/atomic.h"
 #include <stdint.h>
 #include <time.h>
 #include "stopwatch.h"
@@ -84,9 +85,9 @@ chimera_vfs_clock_refresh(uint64_t now_ticks)
     actual  = (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
     elapsed = chimera_vfs_ticks_to_ns(now_ticks);
 
-    __atomic_store_n(&chimera_vfs_clock.delta_ns, actual - chimera_vfs_clock.base_wall_ns - elapsed,
-                     __ATOMIC_RELAXED);
-    __atomic_store_n(&chimera_vfs_clock.last_refresh, now_ticks, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&chimera_vfs_clock.delta_ns, actual - chimera_vfs_clock.base_wall_ns - elapsed,
+                     CHIMERA_MEMORY_RELAXED);
+    chimera_atomic_store_n(&chimera_vfs_clock.last_refresh, now_ticks, CHIMERA_MEMORY_RELAXED);
 } /* chimera_vfs_clock_refresh */
 
 /* Current wall-clock time in nanoseconds, reconstructed from the TSC. */
@@ -95,13 +96,13 @@ chimera_vfs_wall_ns(void)
 {
     uint64_t now_ticks = chimera_vfs_now_ticks();
 
-    if (unlikely(now_ticks - __atomic_load_n(&chimera_vfs_clock.last_refresh, __ATOMIC_RELAXED) >
+    if (unlikely(now_ticks - chimera_atomic_load_n(&chimera_vfs_clock.last_refresh, CHIMERA_MEMORY_RELAXED) >
                  chimera_vfs_clock.refresh_interval)) {
         chimera_vfs_clock_refresh(now_ticks);
     }
 
     return chimera_vfs_clock.base_wall_ns + chimera_vfs_ticks_to_ns(now_ticks) +
-           __atomic_load_n(&chimera_vfs_clock.delta_ns, __ATOMIC_RELAXED);
+           chimera_atomic_load_n(&chimera_vfs_clock.delta_ns, CHIMERA_MEMORY_RELAXED);
 } /* chimera_vfs_wall_ns */
 
 /* chimera_vfs_realtime (wall-clock reads for file timestamps) is part of

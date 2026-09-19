@@ -33,7 +33,7 @@
 #else
 #include <sys/uio.h>
 #endif
-#include <dirent.h>
+#include "common/dirent.h"
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>

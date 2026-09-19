@@ -13,6 +13,7 @@
 
 #define _GNU_SOURCE
 
+#include "common/atomic.h"
 #include "common/compiler.h"
 #include "vfs/sdk/vfs_fh.h"
 #include <stdint.h>
@@ -3973,8 +3974,8 @@ diskfs_metric_gauge_set(
 static inline uint64_t
 diskfs_il_used_bytes(struct diskfs_intent_log *il)
 {
-    uint64_t head = __atomic_load_n(&il->log_head, __ATOMIC_RELAXED);
-    uint64_t tail = __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED);
+    uint64_t head = chimera_atomic_load_n(&il->log_head, CHIMERA_MEMORY_RELAXED);
+    uint64_t tail = chimera_atomic_load_n(&il->log_tail, CHIMERA_MEMORY_RELAXED);
 
     if (head >= tail) {
         return head - tail;
@@ -4545,7 +4546,7 @@ diskfs_block_buf_ref_locked(struct diskfs_block_buf *buf)
 {
     chimera_diskfs_abort_if(buf->on_free,
                             "referencing free diskfs block buffer");
-    __atomic_add_fetch(&buf->refs, 1, __ATOMIC_ACQ_REL);
+    chimera_atomic_add_fetch(&buf->refs, 1, CHIMERA_MEMORY_ACQ_REL);
 } /* diskfs_block_buf_ref_locked */
 
 
@@ -4568,13 +4569,13 @@ diskfs_block_return_buf_locked(
         shard->n_bufless--;
         blk->free_next = NULL;
         buf->next      = NULL;
-        __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&buf->on_free, 0, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_store_n(&buf->refs, 1, CHIMERA_MEMORY_RELEASE);
         blk->buf       = buf;
         blk->iov       = buf->iov;
         blk->pin_count = 0;
         blk->hash_next = NULL;          /* keyless: linked in no bucket */
-        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
         diskfs_block_lru_push_tail(shard, blk);
     } else {
         buf->on_free        = 1;
@@ -4610,8 +4611,8 @@ diskfs_block_buf_alloc_locked(struct diskfs_block_shard *shard)
     shard->free_buffers = buf->next;
     shard->nfree_buffers--;
     buf->next = NULL;
-    __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&buf->on_free, 0, CHIMERA_MEMORY_RELEASE);
+    chimera_atomic_store_n(&buf->refs, 1, CHIMERA_MEMORY_RELEASE);
     return buf;
 } /* diskfs_block_buf_alloc_locked */
 
