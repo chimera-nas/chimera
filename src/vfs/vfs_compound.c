@@ -123,6 +123,12 @@ struct chimera_vfs_compound {
      * the sequence advances. */
     uint8_t                         io_typechecked;
 
+    /* A parking RECALL's inert request answered -- inside the recall call,
+     * or later off the owning thread's resume drain.  Read once the call
+     * returns to tell an inline answer from a park; see the RECALL arm of
+     * step.  Cleared whenever the sequence advances. */
+    uint8_t                         recall_answered;
+
     /* A LOCK's handshake with its claim callback, which may answer inside
      * the acquire call or later from whichever thread released the blocker.
      * lock_phase is what tells the two apart (see the LOCK arm of step and
@@ -262,6 +268,9 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
         free(compound->ops[i].new_path);
         free(compound->ops[i].entries);
         free(compound->ops[i].buffer);
+        /* A GET_LAYOUT's copies of the backend's segments and devices. */
+        free(compound->ops[i].layout_segments);
+        free(compound->ops[i].layout_devices);
 
         /* A LOCK's file state, on the same terms as its handle above: ours
          * until the caller takes it.  PUT, never released: a file state still
@@ -1747,6 +1756,109 @@ chimera_vfs_compound_add_remove_stream(
 } /* chimera_vfs_compound_add_remove_stream */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_get_layout(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     offset,
+    uint64_t                     length,
+    uint32_t                     iomode,
+    uint32_t                     layout_class,
+    uint32_t                     max_segments)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_GET_LAYOUT,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->layout_offset       = offset;
+    op->layout_length       = length;
+    op->layout_iomode       = iomode;
+    op->layout_class        = layout_class;
+    op->layout_max_segments = max_segments;
+
+    return index;
+} /* chimera_vfs_compound_add_get_layout */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_find(
+    struct chimera_vfs_compound         *compound,
+    uint64_t                             attr_mask,
+    chimera_vfs_compound_find_filter_t   filter,
+    chimera_vfs_compound_find_append_t   append,
+    chimera_vfs_compound_readdir_reset_t reset,
+    void                                *private_data)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    /* All three or nothing: the walk stages no entry, so it has nowhere to
+     * put one but append; it prunes on the filter's word; and a walk whose
+     * appends cannot be taken back cannot be re-run. */
+    if (!filter || !append || !reset) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_FIND, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->attr_mask    = attr_mask;
+    op->find_filter  = filter;
+    op->find_append  = append;
+    op->find_reset   = reset;
+    op->find_private = private_data;
+
+    return index;
+} /* chimera_vfs_compound_add_find */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_recall(
+    struct chimera_vfs_compound *compound,
+    const uint8_t               *fh,
+    uint32_t                     fh_len,
+    uint8_t                      retain,
+    unsigned int                 flags)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    /* An fh that cannot be one, and a floor on the shape that has none: the
+     * full recall breaks every holder all the way down, so a NOWAIT with a
+     * retain would quietly do more than was written. */
+    if (fh_len > CHIMERA_VFS_FH_SIZE ||
+        (fh_len > 0 && !fh) ||
+        ((flags & CHIMERA_VFS_COMPOUND_RECALL_NOWAIT) && retain != 0)) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_RECALL, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    if (fh_len) {
+        memcpy(op->recall_fh, fh, fh_len);
+    }
+    op->recall_fh_len = fh_len;
+    op->recall_retain = retain;
+    op->recall_flags  = flags;
+
+    return index;
+} /* chimera_vfs_compound_add_recall */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_create(
     struct chimera_vfs_compound    *compound,
     uint8_t                         create_type,
@@ -2181,9 +2293,10 @@ chimera_vfs_compound_op_done(
     }
 
     compound->index++;
-    compound->open_resolved  = 0;
-    compound->open_retried   = 0;
-    compound->io_typechecked = 0;
+    compound->open_resolved   = 0;
+    compound->open_retried    = 0;
+    compound->io_typechecked  = 0;
+    compound->recall_answered = 0;
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_op_done */
 
@@ -2942,6 +3055,209 @@ chimera_vfs_compound_list_streams_callback(
     chimera_vfs_compound_op_done(compound, error_code);
 } /* chimera_vfs_compound_list_streams_callback */
 
+/*
+ * A GET_LAYOUT finished.  The backend's segments and devices are valid only
+ * while this callback runs, so they are copied into arrays the op owns --
+ * the whole reason the op exists rather than the caller reading the backend's
+ * directly.  Allocated per execution: a retry frees the previous copy first,
+ * since a backend may answer a different count the second time.
+ */
+static void
+chimera_vfs_compound_get_layout_callback(
+    enum chimera_vfs_error                   error_code,
+    uint32_t                                 layout_class,
+    uint32_t                                 num_segments,
+    const struct chimera_vfs_layout_segment *segments,
+    uint32_t                                 num_devices,
+    const struct chimera_vfs_layout_device  *devices,
+    void                                    *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    free(op->layout_segments);
+    free(op->layout_devices);
+    op->layout_segments     = NULL;
+    op->layout_devices      = NULL;
+    op->layout_num_segments = 0;
+    op->layout_num_devices  = 0;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    op->layout_returned_class = layout_class;
+
+    if (num_segments) {
+        op->layout_segments = malloc(num_segments * sizeof(*segments));
+        memcpy(op->layout_segments, segments,
+               num_segments * sizeof(*segments));
+        op->layout_num_segments = num_segments;
+    }
+
+    if (num_devices) {
+        op->layout_devices = malloc(num_devices * sizeof(*devices));
+        memcpy(op->layout_devices, devices, num_devices * sizeof(*devices));
+        op->layout_num_devices = num_devices;
+    }
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_get_layout_callback */
+
+/*
+ * The FIND bridges.  chimera_vfs_find's callbacks take a private pointer and
+ * no op, so each of these looks the op up through the compound and re-issues
+ * the call in the caller's shape, with the ACL stripped from the attributes
+ * as every other result strips it.  The walk cannot be abandoned once it is
+ * dispatched (see the typedefs), so a refused append sets find_stopped and
+ * the two bridges below then drop entries and prune every directory until
+ * the walker has drained.
+ */
+static int
+chimera_vfs_compound_find_filter(
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *arg)
+{
+    struct chimera_vfs_compound    *compound = arg;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+    struct chimera_vfs_attrs        copy;
+
+    if (op->find_stopped) {
+        return 1;
+    }
+
+    chimera_vfs_compound_store_attr_to(&copy, attr);
+
+    return op->find_filter(compound, compound->index, path, pathlen, &copy,
+                           op->find_private);
+} /* chimera_vfs_compound_find_filter */
+
+static int
+chimera_vfs_compound_find_entry(
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *arg)
+{
+    struct chimera_vfs_compound    *compound = arg;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+    struct chimera_vfs_attrs        copy;
+
+    if (op->find_stopped) {
+        return 0;
+    }
+
+    chimera_vfs_compound_store_attr_to(&copy, attr);
+
+    if (op->find_append(compound, compound->index, path, pathlen, &copy,
+                        op->find_private) != 0) {
+        op->find_stopped = 1;
+    }
+
+    return 0;
+} /* chimera_vfs_compound_find_entry */
+
+static void
+chimera_vfs_compound_find_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* eof says whether the walk ran out of entries or the caller stopped
+         * it -- the READDIR page rule. */
+        op->eof = !op->find_stopped;
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_find_complete */
+
+/* Start the walk.  The walker opens each directory for itself, the root
+ * included, so it takes the root's fh rather than the handle the prelude
+ * opened; the fh and the mode are what it descends on. */
+static void
+chimera_vfs_compound_find_start(struct chimera_vfs_compound *compound)
+{
+    struct chimera_vfs_compound_op *op = &compound->ops[compound->index];
+    struct chimera_vfs_open_handle *target;
+
+    target = op->in_handle ? op->in_handle :
+        (op->handle_from >= 0 ? compound->ops[op->handle_from].out_handle :
+         compound->handle);
+
+    chimera_vfs_find(compound->thread, compound->cred,
+                     target->fh, (int) target->fh_len,
+                     op->attr_mask | CHIMERA_VFS_ATTR_FH |
+                     CHIMERA_VFS_ATTR_MODE,
+                     chimera_vfs_compound_find_filter,
+                     chimera_vfs_compound_find_entry,
+                     chimera_vfs_compound_find_complete,
+                     compound);
+} /* chimera_vfs_compound_find_start */
+
+/* Step one of a two-step FIND: the root's type, before the walk starts.
+ * Opening the root as a directory is not the gate it is on a backend whose
+ * PATH open checks the type -- memfs's does not, and its readdir's ENOTDIR
+ * then vanishes inside the walker, which completes an unreadable directory
+ * as an empty one.  So the type is asked for outright, the way READ and WRITE
+ * ask before opening for data, and a FIND through anything but a directory
+ * is ENOTDIR on every backend. */
+static void
+chimera_vfs_compound_find_type_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound *compound = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISDIR(attr->va_mode)) {
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    chimera_vfs_compound_find_start(compound);
+} /* chimera_vfs_compound_find_type_callback */
+
+/*
+ * A parking RECALL's recall has drained.  The `next` of the inert request the
+ * RECALL arm of step built -- reached inside chimera_vfs_io_recall_single when
+ * there was nothing to break, or later through the owning thread's resume
+ * drain once the last holder acked, and on the submitting thread either way.
+ *
+ * What is reported is what recall_caching_fh reports: whether a live share
+ * holder remains now that the recall is over.  The request is finished on
+ * the terms every inert request is (chimera_vfs_complete, then freed), and
+ * its fh is read before that because the report is keyed on it.
+ */
+static void
+chimera_vfs_compound_recall_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_compound    *compound = request->proto_private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    op->recall_still_open = chimera_vfs_fh_has_share_holder(request->thread,
+                                                            request->fh,
+                                                            request->fh_len)
+        ? 1 : 0;
+
+    chimera_vfs_complete(request);
+    chimera_vfs_request_free(request->thread, request);
+
+    compound->recall_answered = 1;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_recall_complete */
+
 static void
 chimera_vfs_compound_write_callback(
     enum chimera_vfs_error    error_code,
@@ -3423,6 +3739,11 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
         case CHIMERA_VFS_COMPOUND_OP_LOOKUPP:
         case CHIMERA_VFS_COMPOUND_OP_READDIR:
+        /* FIND walks from the current object, which is a directory or the
+         * op is wrong: opened as one exactly as READDIR opens it, so the
+         * refusal is ENOTDIR here rather than however the walker's own
+         * open of the root would report it. */
+        case CHIMERA_VFS_COMPOUND_OP_FIND:
         case CHIMERA_VFS_COMPOUND_OP_CREATE:
         case CHIMERA_VFS_COMPOUND_OP_REMOVE:
         /* CREATE_UNLINKED creates IN the current object, which is a
@@ -3470,7 +3791,14 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_SEEK:
         case CHIMERA_VFS_COMPOUND_OP_WRITE_SAME:
         case CHIMERA_VFS_COMPOUND_OP_READ_PLUS:
+        /* GET_LAYOUT asks where the data is; LAYOUTGET opens for data to
+         * ask, and so does this. */
+        case CHIMERA_VFS_COMPOUND_OP_GET_LAYOUT:
             return CHIMERA_VFS_OPEN_INFERRED;
+        /* RECALL takes a file handle and spares whatever handle the op
+         * happens to address; it opens nothing of its own. */
+        case CHIMERA_VFS_COMPOUND_OP_RECALL:
+            return 0;
         /* The range ops bring both of their objects; there is no current one
          * for them to want opened.  in_handle already makes this 0, so this
          * arm only says so out loud. */
@@ -4572,6 +4900,133 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                       chimera_vfs_compound_xattr_change_callback,
                                       compound);
             break;
+
+        case CHIMERA_VFS_COMPOUND_OP_GET_LAYOUT:
+            /* The per-op call answers ENOTSUP itself for a backend that
+             * does not source layouts, so there is nothing to gate here. */
+            chimera_vfs_get_layout(compound->thread, compound->cred,
+                                   target,
+                                   op->layout_offset, op->layout_length,
+                                   op->layout_iomode, op->layout_class,
+                                   op->layout_max_segments,
+                                   chimera_vfs_compound_get_layout_callback,
+                                   compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_FIND:
+            /* The root being walked, recorded before the walk as a streaming
+             * READDIR records its directory: the callbacks may want it, and
+             * a FIND cannot move the current object. */
+            memcpy(op->fh, compound->fh, compound->fh_len);
+            op->fh_len = compound->fh_len;
+
+            /* Before EVERY execution, and before anything else the op does
+             * -- the READDIR rule, so a caller's stage is empty whether the
+             * op then walks or is refused. */
+            op->find_reset(compound, compound->index, op->find_private);
+            op->find_stopped = 0;
+            op->eof          = 0;
+
+            /* The root's type first -- see the callback.  A lent or
+             * explicitly opened handle established it already. */
+            if (compound->handle_explicit) {
+                chimera_vfs_compound_find_start(compound);
+                break;
+            }
+
+            chimera_vfs_getattr(compound->thread, compound->cred,
+                                target,
+                                CHIMERA_VFS_ATTR_MODE,
+                                chimera_vfs_compound_find_type_callback,
+                                compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_RECALL:
+        {
+            struct chimera_vfs_request     *request;
+            struct chimera_vfs_open_handle *spare;
+            const uint8_t                  *fh;
+            uint32_t                        fh_len;
+            uint64_t                        fh_hash;
+
+            /* The object: the op's own fh, else the handle the op addresses
+             * (whose lease is spared), else the current file handle with
+             * nothing spared -- see the adder. */
+            if (op->recall_fh_len) {
+                fh     = op->recall_fh;
+                fh_len = op->recall_fh_len;
+                spare  = NULL;
+            } else if (target) {
+                fh     = target->fh;
+                fh_len = target->fh_len;
+                spare  = target;
+            } else if (compound->fh_len) {
+                fh     = compound->fh;
+                fh_len = compound->fh_len;
+                spare  = NULL;
+            } else {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
+
+            fh_hash = chimera_vfs_hash(fh, (int) fh_len);
+
+            if (op->recall_flags & CHIMERA_VFS_COMPOUND_RECALL_NOWAIT) {
+                /* The full recall as a synchronous question: kicked, and
+                 * answered with whether a holder still blocks. */
+                op->recall_still_open = chimera_vfs_claim_break_caching(
+                    compound->thread->vfs->vfs_state,
+                    fh, (uint8_t) fh_len, fh_hash) ? 1 : 0;
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+                break;
+            }
+
+            /* The inert request recall_handle_lease and recall_caching_fh
+             * build: never dispatched (the opcode is a placeholder for the
+             * metrics), it exists to park in the claim core until the
+             * single-step recall it starts has drained, and its `complete`
+             * is where the sequence goes on.  io_handle is the spared
+             * handle, or NULL to break every holder. */
+            request = chimera_vfs_request_alloc_by_hash(compound->thread,
+                                                        compound->cred,
+                                                        fh, (int) fh_len,
+                                                        fh_hash);
+
+            if (CHIMERA_VFS_IS_ERR(request)) {
+                chimera_vfs_compound_op_done(compound,
+                                             CHIMERA_VFS_PTR_ERR(request));
+                break;
+            }
+
+            request->opcode             = CHIMERA_VFS_OP_GETATTR;
+            request->complete           = chimera_vfs_compound_recall_complete;
+            request->io_handle          = spare;
+            request->proto_private_data = compound;
+
+            compound->recall_answered = 0;
+
+            chimera_vfs_io_recall_single(request, fh, (uint8_t) fh_len,
+                                         fh_hash, op->recall_retain,
+                                         chimera_vfs_compound_recall_complete);
+
+            /* Unlike a LOCK's grant, a parked recall's continuation can
+             * only ever reach this thread through its own resume drain
+             * (chimera_vfs_claim_pump_io posts to the owning thread; the
+             * drain runs it), so there is no race to arbitrate: the call
+             * returned without answering iff the sequence is parked. */
+            if (!compound->recall_answered) {
+                /* PARKED.  Nothing behind this op runs until the last
+                 * holder acks or is revoked.
+                 *
+                 * HOOK for the park callback and cancel (the CLAIM slice):
+                 * this is where park_cb fires for a RECALL, and `request`
+                 * -- kept on the compound while parked -- is what
+                 * chimera_vfs_claim_recall_cancel takes to unpark its
+                 * io-wait ticket and keep chimera_vfs_compound_recall_
+                 * complete from ever running. */
+            }
+            break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
         case CHIMERA_VFS_COMPOUND_OP_LOCK:
