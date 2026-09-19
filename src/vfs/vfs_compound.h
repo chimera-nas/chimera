@@ -254,15 +254,87 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE,
     CHIMERA_VFS_COMPOUND_OP_WRITE_SAME,
     CHIMERA_VFS_COMPOUND_OP_READ_PLUS,
-    /* Byte-range locks.  Only the two that read or take a claim are ops:
-     * RELEASING A CLAIM IS OUT OF BAND, exactly as releasing an open handle
-     * is.  An op belongs in a sequence when it mutates state the sequence
-     * itself holds -- CLOSE is an op because it empties the current open
-     * cursor -- and dropping a lock touches nothing the sequence owns.  The
-     * caller releases with chimera_vfs_claim_release_ranged() whenever it is
-     * done, which is what every consumer already calls today.
+    /* Byte-range locks BECAME the general claim op.  A CLAIM carries any
+     * claim the caller's chimera_vfs_claim_init_* built -- a byte range, an
+     * SMB open share, an NFSv4 open share, a deny probe, or a caching grant
+     * (delegation / lease / oplock / directory lease / FUSE grant) -- and
+     * takes it against the current open handle (locks and grants are
+     * arbitrated per FILE, so the object is the one the current open refers
+     * to).  CLAIM_TEST asks whether it WOULD be granted, changing nothing.
      *
-     * THREADS.  A LOCK that waits is answered from whatever thread releases
+     * RELEASING A CLAIM IS STILL OUT OF BAND (chimera_vfs_claim_release
+     * [_ranged], grant_release, ack, revoke, shrink): none addresses the
+     * cursors or mutates what the run holds, and a release pumps waiters and
+     * is not reversible, so it must not sit behind an op that can fail.
+     * What a run DOES undo is a claim its OWN CLAIM op inserted, when a later
+     * op fails -- the abort release, safe because an acquire that handed
+     * nobody anything blocked others for a while and gave them nothing to
+     * act on.
+     *
+     * ROUTING, BY CONSTRUCT CLASS.  The executor neither builds nor inspects
+     * the claim beyond its construct.  The SMB coalition constructs -- RQLS,
+     * OPLOCK_II/EX/BATCH, DIR_LEASE, whose standing claim is the core-
+     * allocated grant N opens share -- go through
+     * chimera_vfs_claim_grant_settle: one call that coalesces onto the
+     * owner's existing grant, caps the mode to what is grantable without
+     * breaking a peer, and acquires, stepping CW -> CR|H -> CR on a residual
+     * conflict (the loop SMB's create path ran by hand).  The result is the
+     * grant in `claim_grant`, and the claim the caller passed was only ever a
+     * TEMPLATE for it.  Every other construct -- a range, a share, a deny
+     * probe, and the single-holder caches (a delegation, a FUSE grant),
+     * whose claim struct IS the standing claim exactly as their consumers
+     * hold it today -- goes through chimera_vfs_claim_acquire, and the
+     * caller's claim is what gets inserted.
+     *
+     * TRIGGERS.  Three trigger words ride on the op: `pre` fires
+     * (chimera_vfs_claim_invalidate) before the admission attempt -- SMB's
+     * phase-1 OPEN_H / OPEN_H_FORCE handle break; `post` after GRANTED --
+     * SMB's phase-2 OPEN_W break between the share grant and the cache
+     * grant; `deny` on a SYNCHRONOUS denial only, never for a ticket that
+     * queued and later answered DENIED.  The actor is derived from the
+     * claim: {claim->owner, claim->op_handle}.  That expresses the KEY-circle
+     * self-exemption directly, because the trigger engine keys it on
+     * owner.key (chimera_claim_owner_same_lease: key + client), which the
+     * caller's claim already carries -- SMB stamps the LeaseKey on the share
+     * claim's owner exactly so.  The lo/hi rewrite SMB's own break_for_open
+     * does is redundant for exemption (same_key covers it wherever same_owner
+     * would have), so there is no separate actor argument.
+     *
+     * OP_HANDLE.  Before the acquire, a CACHE-class claim (a grant template,
+     * a delegation, a FUSE grant) whose op_handle is NULL is stamped with the
+     * target open handle, so a claim built before the handle existed (a
+     * single-run CREATE) still anchors the HOLDER circle and a metadata op
+     * through that handle does not recall it against itself.  The stamp is
+     * the handle the op ran against; a caller whose claim outlives the run
+     * and needs a durable anchor lends the handle (PUTHANDLE) or stamps
+     * op_handle itself, since a handle the executor opened for the op is
+     * released with the run and only ever compared by address afterwards.
+     * A range claim, a share claim, a deny probe, and a CLAIM_TEST probe are
+     * NEVER stamped: open handles are cached per (fh, access mode, cred) and
+     * shared, so a stamp there would make every lock-owner or open-owner
+     * using that handle one holder to the OWNER circle -- a LOCKT from a
+     * second lock-owner through the same open would see no conflict, two
+     * open-owners' share reservations would not deny each other.  SMB
+     * stamps its own share claim today, knowing its handles; a consumer
+     * that wants that anchoring stamps it itself.
+     *
+     * A consequence for NFSv4 (verified against chimera_vfs_claim_deny_rows):
+     * a cache grant is exempt from the requester's OWN share claim by
+     * construction for SMB -- cache bits never intersect a share's R|W|D
+     * deny mask, and the sole-opener rule skips the requester's own client
+     * (legacy oplock) or any keyed open (lease) -- so OPEN -> CLAIM(share)
+     * -> CLAIM(grant) in one run does not self-conflict.  A delegation
+     * carries the data bits too (R11), so it IS blocked by its own open's
+     * deny bits unless the two are one holder (the share deny row's OWNER
+     * circle: owner_equal, or same op_handle).  NFSv4's share owner
+     * (open-owner hash) and delegation owner (fh hash) differ, and the share
+     * is not stamped, so a deny-carrying NFSv4 OPEN's own delegation is
+     * refused -- exactly as on the per-op path today.  A consumer that
+     * wants it granted shrinks the deny out of band before the grant, or
+     * aligns the two identities itself.  A deny-free open (the common case)
+     * never blocks its own delegation.
+     *
+     * THREADS.  A CLAIM that waits is answered from whatever thread releases
      * the blocker -- the claim core's pump runs where the release ran, and
      * that is some other protocol's thread as often as not.  The promise that
      * the completion fires on the submitting thread holds regardless: an
@@ -271,35 +343,44 @@ enum chimera_vfs_compound_op_type {
      * thread through the core's own resume doorbell before the sequence goes
      * on -- even an answer that happens to land on the submitting thread,
      * because a deferred grant runs inside another consumer's release call
-     * and under its locks.  Nothing behind a LOCK, and no completion, ever
-     * runs anywhere but on the thread that submitted.
+     * and under its locks.  Nothing behind a CLAIM, and no completion, ever
+     * runs anywhere but on the thread that submitted.  A CLAIM_TEST that
+     * projects to a backend arbiter (TEST_BACKEND) comes home the same way.
      *
-     * RELEASE AND TRANSFER.  A claim a LOCK inserts belongs to the SEQUENCE
-     * until the sequence is over, and then to exactly one of two owners:
+     * RELEASE AND TRANSFER, for every kind.  A claim a CLAIM inserts belongs
+     * to the SEQUENCE until the sequence is over, and then to exactly one of
+     * two owners:
      *
      *   the sequence FINISHES OK  -> the claim is the caller's from the
      *     completion callback on.  The caller takes the op's file state with
      *     chimera_vfs_compound_take_file_state() -- it is what a later
-     *     chimera_vfs_claim_release_ranged() needs -- and releases the claim
-     *     when it is done.  The executor never touches that claim again: not
-     *     on chimera_vfs_compound_free(), which only puts a file state the
-     *     caller left behind, and never by releasing behind a caller that
-     *     may already have told its client the lock is held.
+     *     release needs -- and releases the claim when it is done: a range
+     *     with chimera_vfs_claim_release_ranged, a share or single-holder
+     *     cache with chimera_vfs_claim_release, a coalition grant with
+     *     chimera_vfs_claim_grant_release on `claim_grant`.  The executor
+     *     never touches that claim again: not on chimera_vfs_compound_free(),
+     *     which only puts a file state the caller left behind, and never by
+     *     releasing behind a caller that may already have told its client
+     *     the claim is held.
      *
      *   the sequence FINISHES WITH ANY OTHER STATUS -> the executor releases
-     *     every claim a LOCK in it inserted and puts their file states, before
-     *     the completion callback, so the caller sees a failed sequence with
-     *     nothing inserted.  A later op failing, a veto from the gate (on the
-     *     LOCK itself or on anything after it), a refused LOCK behind a
-     *     granted one: all of these.  The LOCK op keeps its own status and
-     *     claim_result -- it ran, and the arbiter did say GRANTED -- and what
-     *     says the claim is gone is that take_file_state() answers NULL.
+     *     every claim a CLAIM in it inserted, each by its own kind's release,
+     *     and puts their file states, before the completion callback, so the
+     *     caller sees a failed sequence with nothing inserted.  A later op
+     *     failing, a veto from the gate (on the CLAIM itself or on anything
+     *     after it), a refused CLAIM behind a granted one: all of these.  The
+     *     CLAIM op keeps its own status and claim_result -- it ran, and the
+     *     arbiter did say GRANTED -- and what says the claim is gone is that
+     *     take_file_state() answers NULL (and claim_grant is NULL).
+     *
+     *   A CLAIM that did not reach GRANTED inserted nothing and owns
+     *     nothing: its file state is put in the op's callback.
      *
      * There is no third outcome: a sequence cannot be torn down while it is
      * in flight, so "aborted" and "finished with a failure" are the same
      * thing here. */
-    CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
-    CHIMERA_VFS_COMPOUND_OP_LOCK,
+    CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST,
+    CHIMERA_VFS_COMPOUND_OP_CLAIM,
     /* Create an anonymous, unlinked object in the directory the current FILE
      * handle names; the new object's open handle becomes the current OPEN.
      * The current FILE handle does NOT move -- an unlinked object has no name
@@ -942,28 +1023,65 @@ struct chimera_vfs_compound_op {
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
     struct chimera_vfs_compound_dirent *entries;
     uint32_t                            num_entries;
-    /* LOCK_TEST and LOCK.  `claim` and `ticket` are BORROWED and must outlive
-     * the sequence: the claim core keeps pointers INTO the claim once it is
-     * inserted, so its address is its identity and no copy will do.  That is
-     * why they are the caller's memory and not the sequence's.
+    /* CLAIM_TEST and CLAIM.  `claim` and `ticket` are BORROWED and outlive
+     * the sequence AND, for a granted CLAIM, the claim it inserts: the claim
+     * core keeps pointers INTO the claim once it is inserted, so its address
+     * is its identity and no copy will do.  That is why they are the
+     * caller's memory and not the sequence's.  The caller builds `claim`
+     * with the matching chimera_vfs_claim_init_* -- range, smb_open,
+     * nfs4_open, rqls, oplock, dir_lease, delegation, fuse_grant, deny_probe
+     * -- and shapes it (op_handle, policy_tag, owner.key, the callbacks)
+     * exactly as it does for the per-op acquire today.  For a coalition
+     * construct (rqls / oplock / dir_lease) it is a TEMPLATE: the inserted
+     * claim is the grant's own, reported in `claim_grant`.
      *
      * `claim_result` is the arbitration answer and `conflict` describes the
-     * holder that refused it (by value, valid whatever the result says).
+     * holder that refused it (by value, valid whatever the result says; a
+     * ZERO conflict on a refused grant means it capped to nothing rather
+     * than met a holder -- see chimera_vfs_claim_grant_settle).
      *
      * `lock_file_state` is the per-file claim state the op had to resolve to
-     * ask the question.  LOCK_TEST puts it back itself.  LOCK hands it to the
-     * caller ON GRANTED IN A SEQUENCE THAT FINISHED OK, and only then -- the
-     * caller needs it to release the lock later -- and puts it back on any
-     * other outcome, so exactly one side owns it in every case.  Take it with
-     * chimera_vfs_compound_take_file_state(); NULL from that on a GRANTED op
-     * means the sequence failed after the grant and the claim was released
-     * with it (see RELEASE AND TRANSFER on the LOCK op). */
+     * ask the question.  CLAIM_TEST puts it back itself.  CLAIM hands it to
+     * the caller ON GRANTED IN A SEQUENCE THAT FINISHED OK, and only then --
+     * the caller needs it to release the claim later -- and puts it back on
+     * any other outcome, so exactly one side owns it in every case.  Take it
+     * with chimera_vfs_compound_take_file_state(); NULL from that on a
+     * GRANTED op means the sequence failed after the grant and the claim was
+     * released with it (see RELEASE AND TRANSFER on the CLAIM op). */
     struct chimera_vfs_claim           *claim;
     struct chimera_vfs_pending_acquire *ticket;
     struct chimera_vfs_file_state      *lock_file_state;
     struct chimera_vfs_claim_conflict   conflict;
     enum chimera_vfs_claim_result claim_result;
-    unsigned int                        lock_flags;
+    /* CHIMERA_VFS_COMPOUND_CLAIM_* -- WAIT / WAIT_HARD / TRY / OPTIONAL /
+     * TEST_BACKEND. */
+    unsigned int                        claim_flags;
+    /* The trigger words fired around the acquire (enum chimera_claim_trigger;
+     * 0 = none) and their CHIMERA_CLAIM_* retain floors: `pre` before the
+     * admission attempt, `post` after GRANTED, `deny` on a synchronous
+     * denial.  A caller that fires its own breaks (NFSv4) leaves them 0.
+     * See TRIGGERS on the CLAIM op for the actor. */
+    uint8_t                             claim_pre_trigger;
+    uint8_t                             claim_pre_retain;
+    uint8_t                             claim_post_trigger;
+    uint8_t                             claim_post_retain;
+    uint8_t                             claim_deny_trigger;
+    uint8_t                             claim_deny_retain;
+    /* Coalition-grant arguments (chimera_vfs_compound_op_set_claim_grant_
+     * opts): v2 epoch semantics, the stat-open strict cap, and the member
+     * seed stored as a fresh grant's member head under the insert.  Ignored
+     * for every other construct. */
+    uint8_t                             claim_is_v2;
+    uint8_t                             claim_cap_strict;
+    void                               *claim_member_seed;
+    /* Coalition-grant results: the (possibly coalesced) grant on GRANTED --
+     * the standing claim is grant->claim, and chimera_vfs_claim_grant_release
+     * is how it is released -- and whether the seed was consumed (false on a
+     * coalesce hit or a racing-create collapse, where the caller registers
+     * its member on the returned grant itself).  NULL / 0 for every other
+     * construct, and NULL after the abort release. */
+    struct chimera_vfs_claim_grant     *claim_grant;
+    uint8_t                             claim_member_seeded;
     /* READDIR and LISTXATTRS: whether the enumeration reached the end, and the
      * cookie of the entry it stopped at, as the backend reported them.  When
      * append refused an entry, that is the refused entry's cookie, and a
@@ -1465,53 +1583,115 @@ chimera_vfs_compound_add_open(
     uint64_t                        dir_pre_attr_mask,
     uint64_t                        dir_post_attr_mask);
 
-/* LOCK waits for a conflicting holder to finish breaking rather than failing
+/* CLAIM waits for a conflicting holder to finish breaking rather than failing
  * the op.  Without it a BREAKING conflict is reported as it stands. */
-#define CHIMERA_VFS_COMPOUND_LOCK_WAIT      (1U << 0)
+#define CHIMERA_VFS_COMPOUND_CLAIM_WAIT         (1U << 0)
 /* ... and additionally waits on a HARD conflict -- another owner's incompatible
  * byte-range lock, which no recall will clear.  This is a blocking lock
  * (F_SETLKW, an SMB2 LOCK without FAIL_IMMEDIATELY) and it can park for as long
  * as the holder keeps it, which is the same open-ended wait a lease break
  * already makes a sequence accept. */
-#define CHIMERA_VFS_COMPOUND_LOCK_WAIT_HARD (1U << 1)
+#define CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD    (1U << 1)
+/* Never park: BREAKING and DENIED come back as the op's result.  WAIT /
+ * WAIT_HARD / TRY are three points on one axis, not independent bits -- TRY
+ * is "neither wait", spelled as its own flag so a caller reads intent rather
+ * than an absence.  The executor treats (!WAIT && !WAIT_HARD) and TRY
+ * identically, and refuses to build a CLAIM that combines TRY with either. */
+#define CHIMERA_VFS_COMPOUND_CLAIM_TRY          (1U << 2)
+/* CLAIM_TEST only: when the local probe is clear, project it to a CAP_LEASE
+ * backend RANGE arbiter (F_GETLK across processes) and report ITS holder, if
+ * any, in `conflict` (used LR / LR|LW, offset, length, owner.owner_lo = the
+ * pid a real OS lock reports).  With no RANGE-capable backend registered the
+ * local answer stands, without a dispatch.  Range claims only. */
+#define CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND (1U << 3)
+/* A non-GRANTED answer is a SUCCESSFUL result: the op completes OK with
+ * claim_result / conflict recorded, the file state put, and the run goes on.
+ * SMB's cache grant is opportunistic (NONE is a valid outcome) and NFSv4's
+ * delegation grant likewise; without this a refused grant would abort-
+ * release the share claim granted just before it.  Without OPTIONAL a
+ * non-GRANTED answer is EAGAIN and stops the run. */
+#define CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL     (1U << 4)
 
 /* Ask whether `claim` WOULD be granted against the current open handle,
  * changing nothing.  This is NFSv4 LOCKT, F_GETLK, NLM TEST, and SMB2's
  * FAIL_IMMEDIATELY pre-check.  The answer lands in the op's `claim_result`,
- * with the refusing holder in `conflict`.
+ * with the refusing holder in `conflict`; a "denied" is an ANSWER, so the
+ * op succeeds and the sequence goes on.  `flags` is
+ * CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND or 0.
  *
  * `claim` is BORROWED but need not outlive the sequence: a probe is never
- * inserted, so nothing keeps a pointer to it afterwards.
+ * inserted, so nothing keeps a pointer to it afterwards.  Its op_handle is
+ * never stamped (see OP_HANDLE on the CLAIM op): a probe through a shared
+ * open must see what another owner holds through it.
  *
- * The caller builds the claim with chimera_vfs_claim_init_range() and shapes
- * it -- SMB2 stamps op_handle and policy_tag, and carries its grant's lease key
- * so a lock and its own caching lease do not break each other.  None of that
- * belongs in a VFS op table: the caller knows what it is asking for, the same
- * way it knows why it is opening. */
+ * The caller builds the claim with the matching chimera_vfs_claim_init_*
+ * and shapes it -- SMB2 stamps op_handle and policy_tag, and carries its
+ * grant's lease key so a lock and its own caching lease do not break each
+ * other.  None of that belongs in a VFS op table: the caller knows what it is
+ * asking for, the same way it knows why it is opening.
+ *
+ * Wants a PATH open: a probe uses only the fh, and a data open of a FIFO
+ * blocks.  A data handle already in the cursor serves it. */
 int
-chimera_vfs_compound_add_lock_test(
+chimera_vfs_compound_add_claim_test(
     struct chimera_vfs_compound *compound,
-    struct chimera_vfs_claim    *claim);
+    struct chimera_vfs_claim    *claim,
+    unsigned int                 flags);
 
-/* Take `claim` against the current open handle.
+/* Take `claim` against the current open handle.  `flags` is
+ * CHIMERA_VFS_COMPOUND_CLAIM_*.  `pre` / `deny` are the trigger words fired
+ * around the acquire (enum chimera_claim_trigger; 0 = none) and `pre_retain`
+ * / `deny_retain` their CHIMERA_CLAIM_* floors; the `post` pair rides on
+ * chimera_vfs_compound_op_set_claim_post, and a coalition grant's knobs on
+ * chimera_vfs_compound_op_set_claim_grant_opts.
  *
- * `claim` and `ticket` are BORROWED and must outlive the sequence AND the lock
- * -- see the note on the op's fields.  On GRANTED in a sequence that finishes
- * OK the claim is inserted and the caller owns it until it releases it; the
- * op's file state comes with it, and the caller must take it.
+ * `claim` and `ticket` are BORROWED and must outlive the sequence AND the
+ * claim -- see the note on the op's fields.  On GRANTED the claim is inserted
+ * (for a coalition construct, the grant's copy of it: `claim_grant`) and the
+ * file state comes to the caller (take_file_state); on any other outcome the
+ * run stops with claim_result + conflict and the file state is put -- unless
+ * OPTIONAL, which makes that a successful result the run goes on past.
  *
  * A sequence that fails after this op was GRANTED releases the claim before
  * the completion callback, which is safe in the way a release generally is
  * not: an acquire that is rolled back blocked other clients for a while and
  * handed them nothing they could act on, so there is nothing for them to have
  * acted upon -- and the caller has not seen the grant either.  The full rule,
- * and the thread the answer comes back on, are on the LOCK op above. */
+ * the routing by construct, the triggers, and the thread the answer comes
+ * back on, are on the CLAIM op above.  Wants a PATH open, as CLAIM_TEST does. */
 int
-chimera_vfs_compound_add_lock(
+chimera_vfs_compound_add_claim(
     struct chimera_vfs_compound        *compound,
     struct chimera_vfs_claim           *claim,
     struct chimera_vfs_pending_acquire *ticket,
-    unsigned int                        flags);
+    unsigned int                        flags,
+    uint8_t                             pre,
+    uint8_t                             pre_retain,
+    uint8_t                             deny,
+    uint8_t                             deny_retain);
+
+/* CLAIM (op `index`): the trigger fired after GRANTED, and its floor --
+ * SMB's phase-2 OPEN_W write-cache break between the share grant and the
+ * cache grant.  0 = none. */
+void
+chimera_vfs_compound_op_set_claim_post(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    uint8_t                      post,
+    uint8_t                      post_retain);
+
+/* CLAIM (op `index`) of a coalition construct (rqls / oplock / dir_lease):
+ * v2 epoch semantics, the stat-open strict cap (0 at the CR floor), and the
+ * member seed (walk-ready: its protocol next-link NULL) a fresh grant is
+ * born holding.  Read back through claim_grant / claim_member_seeded.  A
+ * CLAIM of any other construct ignores them. */
+void
+chimera_vfs_compound_op_set_claim_grant_opts(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    int                          is_v2,
+    int                          cap_strict,
+    void                        *member_seed);
 
 /* ---- path-addressed operations ----
  *
@@ -1998,13 +2178,14 @@ chimera_vfs_compound_take_handle(
     struct chimera_vfs_compound *compound,
     uint32_t                     index);
 
-/* Take ownership of a LOCK's file state: returns it and clears the op's copy,
- * so the compound will not put it and the caller must.  NULL if that op is not
- * a LOCK, did not run, was not GRANTED, was GRANTED in a sequence that then
- * failed (the claim was released with the failure -- see RELEASE AND TRANSFER
- * on the LOCK op), or has already been taken.  A caller whose sequence
- * finished OK MUST take it: the claim is inserted and is the caller's, and the
- * file state is what releasing it needs. */
+/* Take ownership of a CLAIM's file state: returns it and clears the op's copy,
+* so the compound will not put it and the caller must.  NULL if that op is not
+* a CLAIM, did not run, was not GRANTED, was GRANTED in a sequence that then
+* failed (the claim was released with the failure -- see RELEASE AND TRANSFER
+* on the CLAIM op), or has already been taken.  A caller whose sequence
+* finished OK MUST take it: the claim is inserted and is the caller's, and the
+* file state is what releasing it needs -- whatever the kind: a range, a
+* share, a delegation, or a coalition grant (whose handle is `claim_grant`). */
 struct chimera_vfs_file_state *
 chimera_vfs_compound_take_file_state(
     struct chimera_vfs_compound *compound,

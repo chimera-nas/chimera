@@ -34,6 +34,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <unistd.h>
 
 #include <utlist.h>
 
@@ -130,13 +131,15 @@ struct chimera_vfs_compound {
      * step.  Cleared whenever the sequence advances. */
     uint8_t                         recall_answered;
 
-    /* A LOCK's handshake with its claim callback, which may answer inside
-     * the acquire call or later from whichever thread released the blocker.
-     * lock_phase is what tells the two apart (see the LOCK arm of step and
-     * chimera_vfs_compound_lock_callback); lock_resume is the request that
-     * carries a late answer home through the owning thread's doorbell. */
-    _Atomic uint8_t                 lock_phase;
-    struct chimera_vfs_request     *lock_resume;
+    /* A CLAIM's handshake with its claim callback, which may answer inside
+     * the acquire call or later from whichever thread released the blocker
+     * (or, for a CLAIM_TEST projected to a backend arbiter, from whichever
+     * thread the backend answered on).  claim_phase is what tells the two
+     * apart (see the CLAIM arm of step and chimera_vfs_compound_claim_
+     * callback); claim_resume is the request that carries a late answer
+     * home through the owning thread's doorbell. */
+    _Atomic uint8_t                 claim_phase;
+    struct chimera_vfs_request     *claim_resume;
 
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
@@ -304,7 +307,7 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
         chimera_vfs_compound_attr_release(&compound->ops[i].from_dir_pre_attr);
         chimera_vfs_compound_attr_release(&compound->ops[i].from_dir_post_attr);
 
-        /* A LOCK's file state, on the same terms as its handle above: ours
+        /* A CLAIM's file state, on the same terms as its handle above: ours
          * until the caller takes it.  PUT, never released: a file state still
          * here belongs to a sequence that finished OK, whose claim became the
          * caller's at the completion callback (a sequence that did not finish
@@ -1476,37 +1479,45 @@ chimera_vfs_compound_add_readdir_stream(
 } /* chimera_vfs_compound_add_readdir_stream */
 
 SYMBOL_EXPORT int
-chimera_vfs_compound_add_lock_test(
+chimera_vfs_compound_add_claim_test(
     struct chimera_vfs_compound *compound,
-    struct chimera_vfs_claim    *claim)
+    struct chimera_vfs_claim    *claim,
+    unsigned int                 flags)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
 
-    if (!claim) {
+    /* A probe never parks and never inserts, so the only flag that means
+     * anything to it is the backend projection. */
+    if (!claim || (flags & ~CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND)) {
         compound->build_failed = 1;
         return -1;
     }
 
     op = chimera_vfs_compound_next_op(compound,
-                                      CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
+                                      CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST,
                                       &index);
 
     if (!op) {
         return -1;
     }
 
-    op->claim = claim;
+    op->claim       = claim;
+    op->claim_flags = flags;
 
     return index;
-} /* chimera_vfs_compound_add_lock_test */
+} /* chimera_vfs_compound_add_claim_test */
 
 SYMBOL_EXPORT int
-chimera_vfs_compound_add_lock(
+chimera_vfs_compound_add_claim(
     struct chimera_vfs_compound        *compound,
     struct chimera_vfs_claim           *claim,
     struct chimera_vfs_pending_acquire *ticket,
-    unsigned int                        flags)
+    unsigned int                        flags,
+    uint8_t                             pre,
+    uint8_t                             pre_retain,
+    uint8_t                             deny,
+    uint8_t                             deny_retain)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
@@ -1514,25 +1525,70 @@ chimera_vfs_compound_add_lock(
     /* The ticket is what a parked acquire lives in, so an acquire that may
      * wait has to have one.  Refusing here rather than at execution keeps the
      * sequence from being built at all, which build_failed then reports at
-     * submit. */
-    if (!claim || !ticket) {
+     * submit.  The same for the two ways the flag word can contradict
+     * itself: TRY with a wait, and the probe-only backend projection. */
+    if (!claim || !ticket ||
+        ((flags & CHIMERA_VFS_COMPOUND_CLAIM_TRY) &&
+         (flags & (CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                   CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD))) ||
+        (flags & CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND)) {
         compound->build_failed = 1;
         return -1;
     }
 
     op = chimera_vfs_compound_next_op(compound,
-                                      CHIMERA_VFS_COMPOUND_OP_LOCK, &index);
+                                      CHIMERA_VFS_COMPOUND_OP_CLAIM, &index);
 
     if (!op) {
         return -1;
     }
 
-    op->claim      = claim;
-    op->ticket     = ticket;
-    op->lock_flags = flags;
+    op->claim              = claim;
+    op->ticket             = ticket;
+    op->claim_flags        = flags;
+    op->claim_pre_trigger  = pre;
+    op->claim_pre_retain   = pre_retain;
+    op->claim_deny_trigger = deny;
+    op->claim_deny_retain  = deny_retain;
 
     return index;
-} /* chimera_vfs_compound_add_lock */
+} /* chimera_vfs_compound_add_claim */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_claim_post(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    uint8_t                      post,
+    uint8_t                      post_retain)
+{
+    if (index >= compound->num_ops ||
+        compound->ops[index].type != CHIMERA_VFS_COMPOUND_OP_CLAIM) {
+        compound->build_failed = 1;
+        return;
+    }
+
+    compound->ops[index].claim_post_trigger = post;
+    compound->ops[index].claim_post_retain  = post_retain;
+} /* chimera_vfs_compound_op_set_claim_post */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_claim_grant_opts(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    int                          is_v2,
+    int                          cap_strict,
+    void                        *member_seed)
+{
+    if (index >= compound->num_ops ||
+        compound->ops[index].type != CHIMERA_VFS_COMPOUND_OP_CLAIM) {
+        compound->build_failed = 1;
+        return;
+    }
+
+    compound->ops[index].claim_is_v2       = is_v2 ? 1 : 0;
+    compound->ops[index].claim_cap_strict  = cap_strict ? 1 : 0;
+    compound->ops[index].claim_member_seed = member_seed;
+} /* chimera_vfs_compound_op_set_claim_grant_opts */
 
 SYMBOL_EXPORT struct chimera_vfs_file_state *
 chimera_vfs_compound_take_file_state(
@@ -2238,7 +2294,7 @@ chimera_vfs_compound_add_open(
 /* ---------------------------------------------------------------------- */
 
 /*
- * A sequence stopped short of finishing: release every claim a LOCK in it
+ * A sequence stopped short of finishing: release every claim a CLAIM in it
  * inserted, so the caller sees a failed sequence with nothing inserted.
  *
  * Safe in the way a release generally is not, because nobody outside this
@@ -2248,33 +2304,52 @@ chimera_vfs_compound_add_open(
  * it did run, and the arbiter did say GRANTED -- and what says the claim is
  * gone is that chimera_vfs_compound_take_file_state() answers NULL for it.
  *
- * Only ops that RAN are looked at (completed, not num_ops), and only a LOCK
- * still holding its file state has a claim to release: a refused LOCK put its
- * state back in the callback, and there is no earlier point at which the
+ * Only ops that RAN are looked at (completed, not num_ops), and only a CLAIM
+ * still holding its file state has a claim to release: a refused CLAIM put
+ * its state back in the callback, and there is no earlier point at which the
  * state can have been taken.
+ *
+ * Each kind is released the way its consumer releases it: a coalition grant
+ * by dropping the reference the acquire took (chimera_vfs_claim_grant_
+ * release -- a coalesce hit bumped an existing grant's refcount, a fresh
+ * grant was born at one, and either way this drops exactly that), a range
+ * with chimera_vfs_claim_release_ranged, a share or a single-holder cache
+ * with chimera_vfs_claim_release.
  */
 static void
-chimera_vfs_compound_abort_locks(struct chimera_vfs_compound *compound)
+chimera_vfs_compound_abort_claims(struct chimera_vfs_compound *compound)
 {
-    struct chimera_vfs_thread      *thread = compound->thread;
+    struct chimera_vfs_thread      *thread    = compound->thread;
+    struct chimera_vfs_state       *vfs_state = thread->vfs->vfs_state;
     struct chimera_vfs_compound_op *op;
     uint32_t                        i;
 
     for (i = 0; i < compound->completed; i++) {
         op = &compound->ops[i];
 
-        if (op->type != CHIMERA_VFS_COMPOUND_OP_LOCK ||
+        if (op->type != CHIMERA_VFS_COMPOUND_OP_CLAIM ||
             !op->lock_file_state ||
             op->claim_result != CHIMERA_CLAIM_GRANTED) {
             continue;
         }
 
-        chimera_vfs_claim_release_ranged(thread, thread->vfs->vfs_state,
-                                         op->lock_file_state, op->claim);
-        chimera_vfs_state_put(thread->vfs->vfs_state, op->lock_file_state);
+        if (op->claim_grant) {
+            chimera_vfs_claim_grant_release(vfs_state, op->claim_grant,
+                                            true /* pump */);
+            op->claim_grant         = NULL;
+            op->claim_member_seeded = 0;
+        } else if (op->claim->klass == CHIMERA_CLAIM_CLASS_RANGE) {
+            chimera_vfs_claim_release_ranged(thread, vfs_state,
+                                             op->lock_file_state, op->claim);
+        } else {
+            chimera_vfs_claim_release(vfs_state, op->lock_file_state,
+                                      op->claim);
+        }
+
+        chimera_vfs_state_put(vfs_state, op->lock_file_state);
         op->lock_file_state = NULL;
     }
-} /* chimera_vfs_compound_abort_locks */
+} /* chimera_vfs_compound_abort_claims */
 
 static void
 chimera_vfs_compound_finish(
@@ -2284,7 +2359,7 @@ chimera_vfs_compound_finish(
     /* Before the callback, so the caller never sees a claim it would then
      * have to release for a sequence it is about to report as failed. */
     if (status != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_abort_locks(compound);
+        chimera_vfs_compound_abort_claims(compound);
     }
 
     compound->status = status;
@@ -3883,8 +3958,6 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
             return 0;
         /* COMMIT flushes file data; ALLOCATE changes it; SEEK reads the map
          * that describes it.  All three want the data open. */
-        case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
-        case CHIMERA_VFS_COMPOUND_OP_LOCK:
         case CHIMERA_VFS_COMPOUND_OP_COMMIT:
         case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:
         case CHIMERA_VFS_COMPOUND_OP_SEEK:
@@ -3915,6 +3988,12 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_SETXATTR:
         case CHIMERA_VFS_COMPOUND_OP_LISTXATTRS:
         case CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR:
+        /* A claim is arbitrated per file and uses only the fh, so it wants
+         * the same: a data open of a FIFO would block a LOCKT on it (which
+         * opens PATH|NOFOLLOW on the per-op path today).  A data handle
+         * already in the cursor serves the want. */
+        case CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST:
+        case CHIMERA_VFS_COMPOUND_OP_CLAIM:
             return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
         default:
             return 0;
@@ -4000,7 +4079,7 @@ chimera_vfs_compound_lent_serves(
 } /* chimera_vfs_compound_lent_serves */
 
 /*
- * A LOCK's answer, and which thread it arrives on.
+ * A CLAIM's answer, and which thread it arrives on.
  *
  * chimera_vfs_claim_acquire answers inside the call when it can (GRANTED or
  * DENIED on the spot) and later when it cannot: a blocking lock parks on the
@@ -4017,7 +4096,7 @@ chimera_vfs_compound_lent_serves(
  * submitting one, because a deferred grant runs inside some other consumer's
  * release call, under that consumer's locks, which is no place to run the rest
  * of a sequence and the caller's completion.  The two sides agree through
- * lock_phase: the dispatch sets DISPATCHING before asking, the callback tries
+ * claim_phase: the dispatch sets DISPATCHING before asking, the callback tries
  * to move it to ANSWERED, and the dispatch tries to move it to PARKED once the
  * acquire has returned.  Whichever of the two CASes loses knows the other
  * side has the completion.
@@ -4031,17 +4110,23 @@ chimera_vfs_compound_lent_serves(
  * on the owning thread before the acquire and freed there afterwards,
  * whichever way the answer came, which is the term gate-scratch requests
  * already impose.
+ *
+ * A CLAIM_TEST projected to a backend arbiter (TEST_BACKEND) is the same
+ * handshake with a different asker: the backend's completion may run inline
+ * or on a delegation thread, and either way it records and CASes exactly as
+ * the claim core's callback does.  A coalition grant (grant_settle) always
+ * answers inside the call and needs none of this.
  */
-#define CHIMERA_VFS_COMPOUND_LOCK_DISPATCHING 0
-#define CHIMERA_VFS_COMPOUND_LOCK_ANSWERED    1
-#define CHIMERA_VFS_COMPOUND_LOCK_PARKED      2
+#define CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING 0
+#define CHIMERA_VFS_COMPOUND_CLAIM_ANSWERED    1
+#define CHIMERA_VFS_COMPOUND_CLAIM_PARKED      2
 
 static void
-chimera_vfs_compound_lock_resume(
+chimera_vfs_compound_claim_resume(
     struct chimera_vfs_request *request);
 
 static void
-chimera_vfs_compound_lock_resume_alloc(struct chimera_vfs_compound *compound)
+chimera_vfs_compound_claim_resume_alloc(struct chimera_vfs_compound *compound)
 {
     struct chimera_vfs_request *request;
     void                       *scratch;
@@ -4049,17 +4134,23 @@ chimera_vfs_compound_lock_resume_alloc(struct chimera_vfs_compound *compound)
     scratch = chimera_vfs_gate_scratch_alloc(compound->thread);
     request = container_of(scratch, struct chimera_vfs_request, gate.data);
 
-    request->complete           = chimera_vfs_compound_lock_resume;
+    request->complete           = chimera_vfs_compound_claim_resume;
     request->proto_private_data = compound;
     request->notify_gate_resume = 1;
 
-    compound->lock_resume = request;
-} /* chimera_vfs_compound_lock_resume_alloc */
+    compound->claim_resume = request;
+} /* chimera_vfs_compound_claim_resume_alloc */
 
 static void
-chimera_vfs_compound_lock_resume_free(struct chimera_vfs_compound *compound)
+chimera_vfs_compound_claim_resume_free(struct chimera_vfs_compound *compound)
 {
-    struct chimera_vfs_request *request = compound->lock_resume;
+    struct chimera_vfs_request *request = compound->claim_resume;
+
+    /* A synchronous path (a coalition grant, a probe that never projected)
+     * allocated none. */
+    if (!request) {
+        return;
+    }
 
     /* Cleared here rather than trusted to the drain, which only clears it on
      * the path that went through it: an inline answer never did, and a pooled
@@ -4070,48 +4161,145 @@ chimera_vfs_compound_lock_resume_free(struct chimera_vfs_compound *compound)
 
     chimera_vfs_gate_scratch_free(compound->thread, request->gate.data);
 
-    compound->lock_resume = NULL;
-} /* chimera_vfs_compound_lock_resume_free */
+    compound->claim_resume = NULL;
+} /* chimera_vfs_compound_claim_resume_free */
+
+/* The SMB coalition constructs: the ones whose standing claim is a core-
+ * allocated grant and whose acquire is the coalesce / cap / settle loop.
+ * Everything else -- ranges, shares, deny probes, delegations, FUSE grants --
+ * inserts the caller's own claim struct. */
+static inline int
+chimera_vfs_compound_claim_is_coalition(const struct chimera_vfs_claim *claim)
+{
+    switch (claim->construct) {
+        case CHIMERA_CONSTRUCT_RQLS:
+        case CHIMERA_CONSTRUCT_OPLOCK_II:
+        case CHIMERA_CONSTRUCT_OPLOCK_EX:
+        case CHIMERA_CONSTRUCT_OPLOCK_BATCH:
+        case CHIMERA_CONSTRUCT_DIR_LEASE:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_compound_claim_is_coalition */
+
+/* Fire one of a CLAIM's trigger words against the file the op resolved, as
+ * the claim's owner through the claim's handle -- see TRIGGERS on the CLAIM
+ * op for why that actor expresses the KEY-circle self-exemption without a
+ * separate argument.  0 is "no break". */
+static void
+chimera_vfs_compound_claim_fire(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_compound_op *op,
+    uint8_t                         trigger,
+    uint8_t                         retain)
+{
+    struct chimera_vfs_file_state *file = op->lock_file_state;
+    struct chimera_claim_actor     actor;
+
+    if (!trigger) {
+        return;
+    }
+
+    actor.owner     = op->claim->owner;
+    actor.op_handle = op->claim->op_handle;
+
+    chimera_vfs_claim_invalidate(compound->thread->vfs->vfs_state,
+                                 file->fh, file->fh_len, file->fh_hash,
+                                 (enum chimera_claim_trigger) trigger,
+                                 &actor, retain);
+} /* chimera_vfs_compound_claim_fire */
 
 /* The answer is recorded on the op; act on it.  Always on the owning
- * thread, whichever way the answer arrived. */
+ * thread, whichever way the answer arrived.  `sync` says it arrived inside
+ * the dispatch's own call, which is the only case the deny trigger fires
+ * in: a ticket that queued and later answered DENIED never fires it. */
 static void
-chimera_vfs_compound_lock_finish(struct chimera_vfs_compound *compound)
+chimera_vfs_compound_claim_finish(
+    struct chimera_vfs_compound *compound,
+    int                          sync)
 {
-    struct chimera_vfs_compound_op *op = &compound->ops[compound->index];
+    struct chimera_vfs_compound_op *op        = &compound->ops[compound->index];
+    struct chimera_vfs_state       *vfs_state = compound->thread->vfs->vfs_state;
 
-    chimera_vfs_compound_lock_resume_free(compound);
+    chimera_vfs_compound_claim_resume_free(compound);
 
-    if (op->claim_result == CHIMERA_CLAIM_GRANTED) {
-        /* The claim is inserted and the file state goes to the caller with it.
-         * op->lock_file_state already holds it; leaving it there is what makes
-         * take_file_state work -- and what lets an abort find it. */
+    if (op->type == CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST) {
+        /* A probe inserts nothing, so it owns nothing afterwards -- and a
+         * probe that says "denied" has ANSWERED: that is the whole of LOCKT
+         * and F_GETLK, and the sequence goes on. */
+        chimera_vfs_state_put(vfs_state, op->lock_file_state);
+        op->lock_file_state = NULL;
         chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
         return;
     }
 
-    /* Nothing was taken, so the file state is ours to put. */
-    chimera_vfs_state_put(compound->thread->vfs->vfs_state,
-                          op->lock_file_state);
-    op->lock_file_state = NULL;
+    if (op->claim_result == CHIMERA_CLAIM_GRANTED) {
+        /* The claim is inserted and the file state goes to the caller with it.
+         * op->lock_file_state already holds it; leaving it there is what makes
+         * take_file_state work -- and what lets an abort find it.  The post
+         * trigger is the phase-2 break a granted share fires before the cache
+         * grant behind it is asked for. */
+        chimera_vfs_compound_claim_fire(compound, op, op->claim_post_trigger,
+                                        op->claim_post_retain);
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+        return;
+    }
 
-    /* A refusal is the op's answer, not a malfunction -- but it still stops the
-     * sequence, because everything behind a lock in a sequence was written on
-     * the assumption the lock was held.  The caller reads claim_result and
-     * conflict to say WHY in its own protocol's terms: NFS4ERR_DENIED, an SMB2
-     * LOCK_NOT_GRANTED, an EAGAIN from fcntl. */
+    if (sync) {
+        chimera_vfs_compound_claim_fire(compound, op, op->claim_deny_trigger,
+                                        op->claim_deny_retain);
+    }
+
+    /* Nothing was taken, so the file state is ours to put. */
+    chimera_vfs_state_put(vfs_state, op->lock_file_state);
+    op->lock_file_state     = NULL;
+    op->claim_grant         = NULL;
+    op->claim_member_seeded = 0;
+
+    /* A refusal is the op's answer, not a malfunction -- but it still stops
+     * the sequence, because everything behind a claim in a sequence was
+     * written on the assumption the claim was held.  The caller reads
+     * claim_result and conflict to say WHY in its own protocol's terms:
+     * NFS4ERR_DENIED, an SMB2 LOCK_NOT_GRANTED, an EAGAIN from fcntl.  Unless
+     * the caller said the claim was OPTIONAL -- an opportunistic cache grant,
+     * for which NONE is an outcome, not a failure -- in which case the answer
+     * is recorded and the sequence goes on. */
+    if (op->claim_flags & CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL) {
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+        return;
+    }
+
     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EAGAIN);
-} /* chimera_vfs_compound_lock_finish */
+} /* chimera_vfs_compound_claim_finish */
 
 /* The drain's entry point for a marshalled answer: back on the owning
  * thread, with the request having done its one job. */
 static void
-chimera_vfs_compound_lock_resume(struct chimera_vfs_request *request)
+chimera_vfs_compound_claim_resume(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_compound *compound = request->proto_private_data;
 
-    chimera_vfs_compound_lock_finish(compound);
-} /* chimera_vfs_compound_lock_resume */
+    chimera_vfs_compound_claim_finish(compound, 0);
+} /* chimera_vfs_compound_claim_resume */
+
+/* Publish a recorded answer: inside the asking call the dispatch finishes
+ * the op when the call returns to it; after it, the sequence is parked and
+ * the answer rides the doorbell home to chimera_vfs_compound_claim_resume.
+ * Everything the answer wrote has to be written before this: the CAS is what
+ * publishes it to whichever side finishes. */
+static void
+chimera_vfs_compound_claim_answered(struct chimera_vfs_compound *compound)
+{
+    uint8_t expected = CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING;
+
+    if (atomic_compare_exchange_strong(&compound->claim_phase, &expected,
+                                       CHIMERA_VFS_COMPOUND_CLAIM_ANSWERED)) {
+        return;
+    }
+
+    chimera_vfs_io_resume_post(compound->claim_resume);
+} /* chimera_vfs_compound_claim_answered */
 
 /* The claim core's answer, on whatever thread it chose.  Only records and
  * decides who finishes; it touches nothing thread-local itself.
@@ -4119,7 +4307,7 @@ chimera_vfs_compound_lock_resume(struct chimera_vfs_request *request)
  * `granted` is the caller's own claim struct handed back, so there is nothing
  * to copy: on GRANTED it is now inserted. */
 static void
-chimera_vfs_compound_lock_callback(
+chimera_vfs_compound_claim_callback(
     enum chimera_vfs_claim_result            result,
     struct chimera_vfs_claim                *granted,
     const struct chimera_vfs_claim_conflict *conflict,
@@ -4127,7 +4315,6 @@ chimera_vfs_compound_lock_callback(
 {
     struct chimera_vfs_compound    *compound = private_data;
     struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
-    uint8_t                         expected = CHIMERA_VFS_COMPOUND_LOCK_DISPATCHING;
 
     (void) granted;
 
@@ -4137,19 +4324,45 @@ chimera_vfs_compound_lock_callback(
         op->conflict = *conflict;
     }
 
-    /* Everything above has to be written before the phase moves: the CAS is
-     * what publishes it to the dispatch (inline) or to the drain (posted). */
-    if (atomic_compare_exchange_strong(&compound->lock_phase, &expected,
-                                       CHIMERA_VFS_COMPOUND_LOCK_ANSWERED)) {
-        /* Inside the acquire call.  The dispatch finishes the op when the
-         * call returns to it. */
-        return;
+    chimera_vfs_compound_claim_answered(compound);
+} /* chimera_vfs_compound_claim_callback */
+
+/* A backend RANGE arbiter's answer to a projected CLAIM_TEST.  The local
+ * probe was already clear (that is the only time it is asked), so the only
+ * thing it can add is a holder the local arbiter cannot see -- another
+ * process's lock on a passthrough backend -- reported in the range-conflict
+ * shape the POSIX F_GETLK caller renders today.  A backend that could not
+ * answer at all (ENOTSUP from a module that does not arbitrate ranges after
+ * all, an I/O error) leaves the local answer standing: the projection is a
+ * second opinion, not a gate. */
+static void
+chimera_vfs_compound_claim_probe_callback(
+    enum chimera_vfs_error                     status,
+    uint8_t                                    granted,
+    uint64_t                                   token,
+    const struct chimera_claim_range_conflict *conflict,
+    void                                      *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) granted;
+    (void) token;
+
+    if (status == CHIMERA_VFS_OK && conflict &&
+        conflict->type != CHIMERA_VFS_LOCK_UNLOCK) {
+        op->claim_result = CHIMERA_CLAIM_DENIED;
+        memset(&op->conflict, 0, sizeof(op->conflict));
+        op->conflict.construct = CHIMERA_CONSTRUCT_LOCK_ADVISORY;
+        op->conflict.used      = (conflict->type == CHIMERA_VFS_LOCK_WRITE)
+            ? (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW) : CHIMERA_CLAIM_LR;
+        op->conflict.offset         = conflict->offset;
+        op->conflict.length         = conflict->length;
+        op->conflict.owner.owner_lo = conflict->pid;
     }
 
-    /* The dispatch has returned and parked the sequence.  Carry the answer
-     * home; the drain calls chimera_vfs_compound_lock_resume. */
-    chimera_vfs_io_resume_post(compound->lock_resume);
-} /* chimera_vfs_compound_lock_callback */
+    chimera_vfs_compound_claim_answered(compound);
+} /* chimera_vfs_compound_claim_probe_callback */
 
 static void
 chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
@@ -5108,7 +5321,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                          fh_hash, op->recall_retain,
                                          chimera_vfs_compound_recall_complete);
 
-            /* Unlike a LOCK's grant, a parked recall's continuation can
+            /* Unlike a CLAIM's grant, a parked recall's continuation can
              * only ever reach this thread through its own resume drain
              * (chimera_vfs_claim_pump_io posts to the owning thread; the
              * drain runs it), so there is no race to arbitrate: the call
@@ -5127,15 +5340,15 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             break;
         }
 
-        case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
-        case CHIMERA_VFS_COMPOUND_OP_LOCK:
+        case CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST:
+        case CHIMERA_VFS_COMPOUND_OP_CLAIM:
         {
             struct chimera_vfs_state *vfs_state =
                 compound->thread->vfs->vfs_state;
             uint8_t                   expected;
 
-            /* Locks are arbitrated per FILE, not per open, so the question is
-             * asked of the object the current open refers to. */
+            /* Claims are arbitrated per FILE, not per open, so the question
+             * is asked of the object the current open refers to. */
             op->lock_file_state = chimera_vfs_state_get(vfs_state,
                                                         target->fh,
                                                         (uint8_t) target->fh_len,
@@ -5147,49 +5360,113 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 break;
             }
 
-            if (op->type == CHIMERA_VFS_COMPOUND_OP_LOCK_TEST) {
-                /* A probe inserts nothing, so it owns nothing afterwards. */
+            /* A cache claim built before its handle existed (a single-run
+             * CREATE's grant template) anchors the HOLDER circle to the
+             * handle the op runs against, so a metadata op through that
+             * handle does not recall the grant against itself.  A caller
+             * that stamped its own is left alone.  Only the CACHE class:
+             * open handles are cached per (fh, access mode, cred) and
+             * SHARED, so stamping a range claim or a share claim would fold
+             * every lock-owner or open-owner using that handle into one
+             * holder -- see OP_HANDLE on the CLAIM op. */
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_CLAIM &&
+                op->claim->klass == CHIMERA_CLAIM_CLASS_CACHE &&
+                !op->claim->op_handle) {
+                op->claim->op_handle = target;
+            }
+
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST) {
                 op->claim_result = chimera_vfs_claim_test(op->lock_file_state,
                                                           op->claim,
                                                           &op->conflict);
 
-                chimera_vfs_state_put(vfs_state, op->lock_file_state);
-                op->lock_file_state = NULL;
+                /* Clear here, and asked to look further: a backend RANGE
+                 * arbiter sees holders in other processes that the local
+                 * arbiter cannot.  Without one registered the local answer
+                 * is the answer, and nothing is dispatched.  The answer may
+                 * come inside this call or later on another thread, on the
+                 * same terms as an acquire's. */
+                if (op->claim_result == CHIMERA_CLAIM_GRANTED &&
+                    (op->claim_flags & CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND) &&
+                    op->claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
+                    chimera_vfs_claim_backend_range_capable(vfs_state)) {
+                    chimera_vfs_compound_claim_resume_alloc(compound);
+                    atomic_store(&compound->claim_phase,
+                                 CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING);
 
-                /* Unlike LOCK, a probe that says "denied" has ANSWERED: that is
-                 * the whole of LOCKT and F_GETLK, and the sequence goes on. */
-                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+                    chimera_vfs_claim_acquire_backend(
+                        compound->thread,
+                        target->fh, (uint8_t) target->fh_len, target->fh_hash,
+                        CHIMERA_VFS_CLAIM_KLASS_RANGE, 0, 0,
+                        (op->claim->used & CHIMERA_CLAIM_LW) ? 1 : 0,
+                        CHIMERA_VFS_CLAIM_TEST, SEEK_SET,
+                        op->claim->offset, op->claim->length,
+                        &op->claim->owner, 0, NULL, NULL,
+                        chimera_vfs_compound_claim_probe_callback, compound);
+
+                    expected = CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING;
+
+                    if (atomic_compare_exchange_strong(
+                            &compound->claim_phase, &expected,
+                            CHIMERA_VFS_COMPOUND_CLAIM_PARKED)) {
+                        break;
+                    }
+                }
+
+                chimera_vfs_compound_claim_finish(compound, 1);
+                break;
+            }
+
+            /* The phase-1 break, before admission is asked: SMB's OPEN_H /
+             * OPEN_H_FORCE handle break ahead of its share check. */
+            chimera_vfs_compound_claim_fire(compound, op, op->claim_pre_trigger,
+                                            op->claim_pre_retain);
+
+            if (chimera_vfs_compound_claim_is_coalition(op->claim)) {
+                /* A coalition grant: coalesce / cap / acquire / settle in the
+                 * core, always answered inside the call.  The caller's claim
+                 * is the template; the standing claim is the grant's. */
+                bool seeded = false;
+
+                op->claim_result = chimera_vfs_claim_grant_settle(
+                    vfs_state, op->lock_file_state, op->claim,
+                    op->claim_is_v2, op->claim_cap_strict != 0,
+                    op->claim_member_seed, &seeded,
+                    &op->claim_grant, &op->conflict);
+                op->claim_member_seeded = seeded ? 1 : 0;
+
+                chimera_vfs_compound_claim_finish(compound, 1);
                 break;
             }
 
             /* The answer may come inside this call or later on another
-             * thread -- see chimera_vfs_compound_lock_callback.  Everything a
-             * late answer needs is set up before asking, so the callback finds
-             * it whichever way it arrives. */
-            chimera_vfs_compound_lock_resume_alloc(compound);
-            atomic_store(&compound->lock_phase,
-                         CHIMERA_VFS_COMPOUND_LOCK_DISPATCHING);
+             * thread -- see chimera_vfs_compound_claim_callback.  Everything
+             * a late answer needs is set up before asking, so the callback
+             * finds it whichever way it arrives. */
+            chimera_vfs_compound_claim_resume_alloc(compound);
+            atomic_store(&compound->claim_phase,
+                         CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING);
 
             chimera_vfs_claim_acquire(
                 compound->thread, vfs_state, op->lock_file_state,
                 op->claim, op->ticket,
-                !!(op->lock_flags & CHIMERA_VFS_COMPOUND_LOCK_WAIT),
-                !!(op->lock_flags & CHIMERA_VFS_COMPOUND_LOCK_WAIT_HARD),
-                chimera_vfs_compound_lock_callback,
+                !!(op->claim_flags & CHIMERA_VFS_COMPOUND_CLAIM_WAIT),
+                !!(op->claim_flags & CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD),
+                chimera_vfs_compound_claim_callback,
                 NULL, /* no park notification yet -- see the header */
                 compound);
 
-            expected = CHIMERA_VFS_COMPOUND_LOCK_DISPATCHING;
+            expected = CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING;
 
-            if (atomic_compare_exchange_strong(&compound->lock_phase, &expected,
-                                               CHIMERA_VFS_COMPOUND_LOCK_PARKED)) {
+            if (atomic_compare_exchange_strong(&compound->claim_phase, &expected,
+                                               CHIMERA_VFS_COMPOUND_CLAIM_PARKED)) {
                 /* Not answered yet.  The sequence waits here; the callback
                  * will bring the answer home through the doorbell. */
                 break;
             }
 
             /* Answered inside the call: finish inline, as before. */
-            chimera_vfs_compound_lock_finish(compound);
+            chimera_vfs_compound_claim_finish(compound, 1);
             break;
         }
 
