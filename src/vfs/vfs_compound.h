@@ -253,7 +253,44 @@ enum chimera_vfs_compound_op_type {
      * itself holds -- CLOSE is an op because it empties the current open
      * cursor -- and dropping a lock touches nothing the sequence owns.  The
      * caller releases with chimera_vfs_claim_release_ranged() whenever it is
-     * done, which is what every consumer already calls today. */
+     * done, which is what every consumer already calls today.
+     *
+     * THREADS.  A LOCK that waits is answered from whatever thread releases
+     * the blocker -- the claim core's pump runs where the release ran, and
+     * that is some other protocol's thread as often as not.  The promise that
+     * the completion fires on the submitting thread holds regardless: an
+     * answer that arrives inside the acquire call continues the sequence
+     * inline, and any later answer is marshalled back to the submitting
+     * thread through the core's own resume doorbell before the sequence goes
+     * on -- even an answer that happens to land on the submitting thread,
+     * because a deferred grant runs inside another consumer's release call
+     * and under its locks.  Nothing behind a LOCK, and no completion, ever
+     * runs anywhere but on the thread that submitted.
+     *
+     * RELEASE AND TRANSFER.  A claim a LOCK inserts belongs to the SEQUENCE
+     * until the sequence is over, and then to exactly one of two owners:
+     *
+     *   the sequence FINISHES OK  -> the claim is the caller's from the
+     *     completion callback on.  The caller takes the op's file state with
+     *     chimera_vfs_compound_take_file_state() -- it is what a later
+     *     chimera_vfs_claim_release_ranged() needs -- and releases the claim
+     *     when it is done.  The executor never touches that claim again: not
+     *     on chimera_vfs_compound_free(), which only puts a file state the
+     *     caller left behind, and never by releasing behind a caller that
+     *     may already have told its client the lock is held.
+     *
+     *   the sequence FINISHES WITH ANY OTHER STATUS -> the executor releases
+     *     every claim a LOCK in it inserted and puts their file states, before
+     *     the completion callback, so the caller sees a failed sequence with
+     *     nothing inserted.  A later op failing, a veto from the gate (on the
+     *     LOCK itself or on anything after it), a refused LOCK behind a
+     *     granted one: all of these.  The LOCK op keeps its own status and
+     *     claim_result -- it ran, and the arbiter did say GRANTED -- and what
+     *     says the claim is gone is that take_file_state() answers NULL.
+     *
+     * There is no third outcome: a sequence cannot be torn down while it is
+     * in flight, so "aborted" and "finished with a failure" are the same
+     * thing here. */
     CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
     CHIMERA_VFS_COMPOUND_OP_LOCK,
     /* Path-addressed.  See the note on ->path. */
@@ -279,9 +316,14 @@ enum chimera_vfs_compound_op_type {
 /*
  * A READDIR's result is a page, not the whole directory: the caller says how
  * many entries it can use, the executor keeps that many and stops the
- * enumeration there -- reporting eof=0 and the cookie of the first entry it
- * refused, exactly as it would for any caller that stopped early.  A caller
- * wanting more issues another READDIR from that cookie.
+ * enumeration there -- reporting eof=0 and, in r_cookie, the cookie of the
+ * entry it refused, which is where the backend says it stopped.  A cookie
+ * names the entry it belongs to and a READDIR from it returns what FOLLOWS, so
+ * a caller wanting more resumes from the cookie of the last entry it TOOK, not
+ * from r_cookie -- resuming from r_cookie would skip the refused entry.  Every
+ * protocol already does this, because every wire format carries a cookie per
+ * entry; r_cookie is the right place to resume from only when the enumeration
+ * stopped of its own accord (eof set).
  *
  * The budget is a count rather than a byte size because the entries are fixed
  * size (an inline name plus a copied attribute set, ~730 bytes each): a caller
@@ -611,27 +653,32 @@ struct chimera_vfs_compound_op {
      *
      * `lock_file_state` is the per-file claim state the op had to resolve to
      * ask the question.  LOCK_TEST puts it back itself.  LOCK hands it to the
-     * caller ON GRANTED ONLY -- the caller needs it to release the lock later
-     * -- and puts it back on any other outcome, so exactly one side owns it in
-     * every case.  Take it with chimera_vfs_compound_take_file_state(). */
-    struct chimera_vfs_claim             *claim;
-    struct chimera_vfs_pending_acquire   *ticket;
-    struct chimera_vfs_file_state        *lock_file_state;
-    struct chimera_vfs_claim_conflict     conflict;
-    enum chimera_vfs_claim_result         claim_result;
-    unsigned int                          lock_flags;
+     * caller ON GRANTED IN A SEQUENCE THAT FINISHED OK, and only then -- the
+     * caller needs it to release the lock later -- and puts it back on any
+     * other outcome, so exactly one side owns it in every case.  Take it with
+     * chimera_vfs_compound_take_file_state(); NULL from that on a GRANTED op
+     * means the sequence failed after the grant and the claim was released
+     * with it (see RELEASE AND TRANSFER on the LOCK op). */
+    struct chimera_vfs_claim           *claim;
+    struct chimera_vfs_pending_acquire *ticket;
+    struct chimera_vfs_file_state      *lock_file_state;
+    struct chimera_vfs_claim_conflict   conflict;
+    enum chimera_vfs_claim_result claim_result;
+    unsigned int                        lock_flags;
     /* READDIR and LISTXATTRS: whether the enumeration reached the end, and the
-     * cookie to resume it from, as the backend reported them when it stopped.
+     * cookie of the entry it stopped at, as the backend reported them.  When
+     * append refused an entry, that is the refused entry's cookie, and a
+     * resume from it would skip that entry -- see the note on the READDIR page.
      * r_verifier is the directory's verifier (READDIR only). */
-    uint32_t                              eof;
-    uint64_t                              r_cookie;
-    uint64_t                              r_verifier;
+    uint32_t                            eof;
+    uint64_t                            r_cookie;
+    uint64_t                            r_verifier;
 
     /* GETXATTR (value), LISTXATTRS (back-to-back NUL-terminated names).  Owned
      * by the compound, buffer_max bytes, valid until it is freed. */
-    void                                 *buffer;
-    uint32_t                              buffer_len;
-    uint32_t                              buffer_count; /* LISTXATTRS: names   */
+    void                               *buffer;
+    uint32_t                            buffer_len;
+    uint32_t                            buffer_count;   /* LISTXATTRS: names   */
 };
 
 /*
@@ -981,13 +1028,16 @@ chimera_vfs_compound_add_lock_test(
 /* Take `claim` against the current open handle.
  *
  * `claim` and `ticket` are BORROWED and must outlive the sequence AND the lock
- * -- see the note on the op's fields.  On GRANTED the claim is inserted and the
- * caller owns it until it releases it; the op's file state comes with it.
+ * -- see the note on the op's fields.  On GRANTED in a sequence that finishes
+ * OK the claim is inserted and the caller owns it until it releases it; the
+ * op's file state comes with it, and the caller must take it.
  *
- * A sequence that aborts before it finishes releases a claim this op inserted,
- * which is safe in the way a release generally is not: an acquire that is
- * rolled back blocked other clients for a while and handed them nothing they
- * could act on, so there is nothing for them to have acted upon. */
+ * A sequence that fails after this op was GRANTED releases the claim before
+ * the completion callback, which is safe in the way a release generally is
+ * not: an acquire that is rolled back blocked other clients for a while and
+ * handed them nothing they could act on, so there is nothing for them to have
+ * acted upon -- and the caller has not seen the grant either.  The full rule,
+ * and the thread the answer comes back on, are on the LOCK op above. */
 int
 chimera_vfs_compound_add_lock(
     struct chimera_vfs_compound        *compound,
@@ -1069,9 +1119,29 @@ chimera_vfs_compound_add_restorehandle(
  *
  * The handle is BORROWED: the caller holds it for the life of the sequence and
  * releases it afterwards, and the sequence will not release it when the
- * current object moves.  `open_flags` is what the caller opened it with, so
- * the sequence can tell whether it serves an op that needs more; when it does
- * not, the sequence opens its own and leaves this one alone.
+ * current object moves.  `open_flags` is what the caller opened it with -- the
+ * REAL flags: a data handle is READ_ONLY and/or WRITE_ONLY, an opendir handle
+ * is PATH|DIRECTORY -- so the sequence can tell whether it serves the ops that
+ * follow.  A lent handle that does not serve an op FAILS that op with EINVAL
+ * rather than being set aside for one the sequence opens itself: the caller's
+ * open bound rights to this handle (an SMB2 FileId's granted access, an NFSv4
+ * stateid's), and acting through a different one would discard them.
+ *
+ * Two rules decide "serves":
+ *
+ *   1. CHIMERA_VFS_OPEN_INFERRED is never required.  It is provenance -- the
+ *      VFS opened this for an op -- not a capability, and a handle the caller
+ *      opened explicitly serves anything an inferred one would.  So a
+ *      READ_ONLY handle serves COMMIT, ALLOCATE, SEEK and GETATTR, whose own
+ *      wants are spelled with the bit because the executor's opens are
+ *      inferred by definition.
+ *
+ *   2. A PATH handle never serves a data-side op -- READ, WRITE, ALLOCATE,
+ *      SEEK -- because an O_PATH descriptor cannot do those; that refusal is
+ *      the real EBADF, reported early.  COMMIT is the one exception: it is
+ *      served by whatever handle is lent, path or data, because fsyncdir(2)
+ *      IS a commit through an O_PATH directory handle and every backend
+ *      accepts one.
  */
 int
 chimera_vfs_compound_add_puthandle(
@@ -1338,7 +1408,11 @@ chimera_vfs_compound_take_handle(
 
 /* Take ownership of a LOCK's file state: returns it and clears the op's copy,
  * so the compound will not put it and the caller must.  NULL if that op is not
- * a LOCK, did not run, was not GRANTED, or has already been taken. */
+ * a LOCK, did not run, was not GRANTED, was GRANTED in a sequence that then
+ * failed (the claim was released with the failure -- see RELEASE AND TRANSFER
+ * on the LOCK op), or has already been taken.  A caller whose sequence
+ * finished OK MUST take it: the claim is inserted and is the caller's, and the
+ * file state is what releasing it needs. */
 struct chimera_vfs_file_state *
 chimera_vfs_compound_take_file_state(
     struct chimera_vfs_compound *compound,
