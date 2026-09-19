@@ -2316,6 +2316,175 @@ chimera_vfs_claim_grant_acquire(
     return CHIMERA_CLAIM_GRANTED;
 } /* chimera_vfs_claim_grant_acquire */
 
+/* Re-derive a coalition template at `mode`.  A legacy oplock's construct is
+ * a function of its bits (II / EX / BATCH -- what chimera_vfs_claim_init_
+ * oplock derives); an RqLs or directory lease keeps its construct, the
+ * latter masked to CR|H as its constructor masks.  Everything else the
+ * caller stamped -- owner, break_cb, op_handle, policy_tag, cb_private --
+ * is left exactly as it was, which is what makes re-running the constructor
+ * per step unnecessary. */
+static void
+chimera_vfs_claim_grant_restyle(
+    struct chimera_vfs_claim *tmpl,
+    uint8_t                   mode)
+{
+    switch (tmpl->construct) {
+        case CHIMERA_CONSTRUCT_OPLOCK_II:
+        case CHIMERA_CONSTRUCT_OPLOCK_EX:
+        case CHIMERA_CONSTRUCT_OPLOCK_BATCH:
+            if (mode & CHIMERA_CLAIM_H) {
+                tmpl->construct = CHIMERA_CONSTRUCT_OPLOCK_BATCH;
+            } else if (mode & CHIMERA_CLAIM_CW) {
+                tmpl->construct = CHIMERA_CONSTRUCT_OPLOCK_EX;
+            } else {
+                tmpl->construct = CHIMERA_CONSTRUCT_OPLOCK_II;
+            }
+            break;
+        case CHIMERA_CONSTRUCT_DIR_LEASE:
+            mode &= (uint8_t) (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H);
+            break;
+        default:
+            break;
+    } /* switch */
+
+    tmpl->used       = mode;
+    tmpl->advertised = mode;
+} /* chimera_vfs_claim_grant_restyle */
+
+SYMBOL_EXPORT enum chimera_vfs_claim_result
+chimera_vfs_claim_grant_settle(
+    struct chimera_vfs_state          *state,
+    struct chimera_vfs_file_state     *file,
+    const struct chimera_vfs_claim    *template_claim,
+    uint8_t                            is_v2,
+    bool                               cap_strict,
+    void                              *member_seed,
+    bool                              *member_seeded,
+    struct chimera_vfs_claim_grant   **grant_out,
+    struct chimera_vfs_claim_conflict *conflict_out)
+{
+    struct chimera_vfs_claim        tmpl = *template_claim;
+    struct chimera_vfs_claim_grant *grant;
+    enum chimera_vfs_claim_result   result;
+    uint8_t want     = tmpl.used;
+    int settle_guard = 6;
+    bool coalition, legacy;
+
+    *grant_out = NULL;
+    if (member_seeded) {
+        *member_seeded = false;
+    }
+    if (conflict_out) {
+        memset(conflict_out, 0, sizeof(*conflict_out));
+    }
+
+    switch (tmpl.construct) {
+        case CHIMERA_CONSTRUCT_RQLS:
+        case CHIMERA_CONSTRUCT_DIR_LEASE:
+            coalition = true;
+            legacy    = false;
+            break;
+        case CHIMERA_CONSTRUCT_OPLOCK_II:
+        case CHIMERA_CONSTRUCT_OPLOCK_EX:
+        case CHIMERA_CONSTRUCT_OPLOCK_BATCH:
+            coalition = true;
+            legacy    = true;
+            break;
+        default:
+            /* A single-holder cache (delegation, FUSE grant): one exact
+             * attempt at its own mode, no cap, no stepping. */
+            coalition = false;
+            legacy    = false;
+            break;
+    } /* switch */
+
+    /* A legacy oplock and an SMB2 RqLs lease held by the SAME client on the
+     * same file interact per MS-SMB2 3.3.5.9 (smb2.lease.oplock loop 1),
+     * and a legacy oplock request must never recall the requesting client's
+     * own lease: behind the client's H (handle) lease the oplock is NONE
+     * (handle caching already owns the handle); behind a non-H lease it is
+     * capped to LEVEL_II (CR), which coexists with the lease's read cache.
+     * Stepped down HERE so the acquire never fires a self-break against the
+     * client's lease (the exclusive/batch W bit would recall the R lease). */
+    if (legacy && want) {
+        if (chimera_vfs_claim_client_holds_handle_cache(file,
+                                                        tmpl.owner.client_key)) {
+            want = 0;
+        } else if (chimera_vfs_claim_client_holds_cache(file,
+                                                        tmpl.owner.client_key)) {
+            want &= CHIMERA_CLAIM_CR;
+        }
+    }
+
+    /* Coalesce first onto an existing same-owner grant: refcount + a
+     * conflict-free in-place upgrade, never a downgrade.  This is what a
+     * lease re-open does -- including one requesting fewer or no bits, which
+     * keeps the lease at its current state (3.3.5.9.8). */
+    if (coalition) {
+        grant = chimera_vfs_claim_grant_coalesce(file, &tmpl.owner, want,
+                                                 1 /* upgrade_ok */);
+        if (grant) {
+            *grant_out = grant;
+            return CHIMERA_CLAIM_GRANTED;
+        }
+    }
+
+    if (want == 0) {
+        /* Nothing to grant and no grant to join: NONE.  The zero conflict
+        * (construct NONE) is how the caller tells this from a refusal. */
+        return CHIMERA_CLAIM_DENIED;
+    }
+
+    if (coalition) {
+        /* MS-SMB2 3.3.5.9: granting an oplock/lease never breaks a peer the
+         * requester can simply coexist with.  Behind a peer's READ cache an
+         * exclusive/batch request caps to a shared R(H) cache with NO break
+         * (batch9 phase 3, nobreakself); behind an EXCLUSIVE/BATCH holder the
+         * non-strict cap still returns the CR floor with a residual conflict,
+         * so the acquire below breaks that holder down (batch1..8).  A
+         * stat-open caps STRICTLY (0 rather than CR) so an oplock-transparent
+         * probe never breaks anyone -- and, capped to nothing, takes no
+         * oplock at all. */
+        chimera_vfs_claim_grant_restyle(&tmpl, want);
+        want = chimera_vfs_claim_grant_cap_mode(file, &tmpl, cap_strict);
+        if (want == 0) {
+            return CHIMERA_CLAIM_DENIED;
+        }
+    }
+
+    chimera_vfs_claim_grant_restyle(&tmpl, want);
+    result = chimera_vfs_claim_grant_acquire(state, file, &tmpl,
+                                             0 /* upgrade_ok */, is_v2,
+                                             CHIMERA_CLAIM_GRANT_EXACT,
+                                             member_seed, member_seeded,
+                                             grant_out, conflict_out);
+
+    /* CW (write cache) is exclusive across lease keys; a conflicting holder
+     * forces it off but CR+H stay shared.  Drop only CW first (-> CR|H),
+     * then -- if CR|H itself is still hard-denied (a cross-client handle
+     * conflict) -- step down to CR; give up only when even CR is
+     * unobtainable and we are not merely awaiting a break. */
+    while (coalition && result != CHIMERA_CLAIM_GRANTED &&
+           settle_guard-- > 0) {
+        if (want & CHIMERA_CLAIM_CW) {
+            want &= (uint8_t) ~CHIMERA_CLAIM_CW;
+        } else if (want != CHIMERA_CLAIM_CR &&
+                   result == CHIMERA_CLAIM_DENIED) {
+            want = CHIMERA_CLAIM_CR;
+        } else if (result != CHIMERA_CLAIM_BREAKING) {
+            break;
+        }
+        chimera_vfs_claim_grant_restyle(&tmpl, want);
+        result = chimera_vfs_claim_grant_acquire(state, file, &tmpl,
+                                                 0 /* upgrade_ok */, is_v2,
+                                                 CHIMERA_CLAIM_GRANT_EXACT,
+                                                 member_seed, member_seeded,
+                                                 grant_out, conflict_out);
+    }
+
+    return result;
+} /* chimera_vfs_claim_grant_settle */
+
 SYMBOL_EXPORT void
 chimera_vfs_claim_grant_release(
     struct chimera_vfs_state       *state,

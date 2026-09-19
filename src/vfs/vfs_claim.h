@@ -562,6 +562,52 @@ chimera_vfs_claim_grant_release(
     struct chimera_vfs_claim_grant *grant,
     bool                            pump);
 
+/* Coalesce-or-cap-or-acquire a cache grant in one call: the settle loop SMB's
+ * create path used to run by hand (coalesce onto a same-owner / same-lease
+ * grant and upgrade; else cap the requested mode to what is grantable without
+ * breaking a peer, then acquire, stepping CW -> CR|H -> CR on a residual
+ * conflict until it grants or only a break remains).  `template_claim`
+ * carries construct / owner / used / break_cb / op_handle / policy_tag /
+ * cb_private exactly as the caller builds it with chimera_vfs_claim_init_*;
+ * it is copied, never inserted, and the construct is re-derived from the
+ * mode at every step (a legacy oplock is II / EX / BATCH by its bits; an
+ * RqLs or directory lease keeps its construct).  `cap_strict` is the
+ * stat-open strict cap (0 at the CR floor instead of CR).  Two policy inputs
+ * SMB used to read by hand are read here, from claim state: a LEGACY oplock
+ * request by a client that already holds an RqLs H lease on the file asks for
+ * nothing, and by one holding a non-H lease is capped to CR (MS-SMB2
+ * 3.3.5.9, smb2.lease.oplock).
+ *
+ * On GRANTED, *grant_out is the (possibly coalesced) grant, with `member_seed`
+ * stored as a FRESH grant's member head under the insert (*member_seeded
+ * reports it; false on a coalesce hit or a racing-create collapse, where the
+ * caller registers its member on the returned grant itself, as for
+ * chimera_vfs_claim_grant_acquire).  On any other result *grant_out is NULL
+ * and *conflict_out names the holder -- or is ZERO (construct NONE) when the
+ * request capped to nothing rather than met a holder: a LEASE_NONE request
+ * with no lease to join, a strict cap behind a holder, the own-H-lease rule.
+ * The caller reports that as "no oplock / no lease", not as a refusal.
+ *
+ * The v2 epoch seeding (grant->epoch = request epoch + 1) and the protocol
+ * member registration on a coalesced grant are the caller's, as before.
+ *
+ * Only the coalition constructs (RQLS, OPLOCK_*, DIR_LEASE) cap and step; a
+ * single-holder cache template (DELEG_R/W, FUSE_GRANT) is tried exactly once
+ * at its own mode -- a capped delegation is not a thing -- so this is safe to
+ * hand any cache-class template.  No new arbitration: grant_coalesce +
+ * grant_cap_mode + grant_acquire with the settle loop internalized. */
+enum chimera_vfs_claim_result
+chimera_vfs_claim_grant_settle(
+    struct chimera_vfs_state          *state,
+    struct chimera_vfs_file_state     *file,
+    const struct chimera_vfs_claim    *template_claim,
+    uint8_t                            is_v2,
+    bool                               cap_strict,
+    void                              *member_seed,
+    bool                              *member_seeded,
+    struct chimera_vfs_claim_grant   **grant_out,
+    struct chimera_vfs_claim_conflict *conflict_out);
+
 /* Same-client cache queries used by the SMB create path's grant-capping
  * policy (the sole-opener rule lives HERE, not in the admission masks). */
 bool
