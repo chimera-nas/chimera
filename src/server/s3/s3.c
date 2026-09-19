@@ -23,7 +23,7 @@
 #include "s3_tagging.h"
 #include "s3.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 static inline int
 chimera_s3_hexval(int c)
@@ -637,6 +637,29 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_dispatch_callback,
 
 } /* chimera_s3_dispatch_callback */
 
+/* The bucket prelude sequence (PUTROOT -> LOOKUP_PATH) is over: the
+ * lookup's attributes carry the bucket fh the handlers start from. */
+static void
+chimera_s3_dispatch_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    enum chimera_vfs_error   error_code;
+    struct chimera_vfs_attrs attr;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    if (error_code == CHIMERA_VFS_OK) {
+        attr = chimera_vfs_compound_op(compound, 1)->attr;
+    } else {
+        attr.va_set_mask = 0;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_s3_dispatch_callback(error_code, &attr, private_data);
+} /* chimera_s3_dispatch_sequence_complete */
+
 static void
 s3_server_dispatch(
     struct evpl                 *evpl,
@@ -650,6 +673,7 @@ s3_server_dispatch(
     struct chimera_server_s3_shared *shared = thread->shared;
     struct chimera_s3_request       *s3_request;
     struct s3_bucket                *bucket;
+    struct chimera_vfs_compound     *compound;
     const char                      *urlp, *slash, *dot, *host_header;
     int                              host_pathing = 0;
     const char                      *range_str;
@@ -1212,20 +1236,25 @@ s3_server_dispatch(
          * request issues) under the S3 span. */
         thread->vfs->otel_parent = &s3_request->otel;
 
-        chimera_s3_request_get(s3_request);
+        /* The bucket prelude: PUTROOT -> LOOKUP_PATH(bucket path).  Its
+         * answer is the bucket fh every handler starts its own sequences
+         * from.  The path is copied into the sequence, so the map's lock
+         * can go before the sequence runs. */
+        compound = chimera_vfs_compound_alloc(thread->vfs, &s3_request->cred);
 
-        chimera_vfs_lookup(thread->vfs,
-                           &s3_request->cred,
-                           shared->root_fh,
-                           shared->root_fh_len,
-                           bucket_path,
-                           strlen(bucket_path),
-                           CHIMERA_VFS_ATTR_FH,
-                           CHIMERA_VFS_LOOKUP_FOLLOW,
-                           chimera_s3_dispatch_callback,
-                           s3_request);
+        chimera_vfs_compound_add_putroot(compound);
+        chimera_vfs_compound_add_lookup_path(compound,
+                                             bucket_path, strlen(bucket_path),
+                                             CHIMERA_VFS_ATTR_FH,
+                                             CHIMERA_VFS_LOOKUP_FOLLOW);
 
         free(bucket_path);
+
+        chimera_s3_request_get(s3_request);
+
+        chimera_vfs_compound_submit(compound,
+                                    chimera_s3_dispatch_sequence_complete,
+                                    s3_request);
     }
 
 } /* s3_server_dispatch */
