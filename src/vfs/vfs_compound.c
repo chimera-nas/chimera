@@ -79,6 +79,15 @@ struct chimera_vfs_compound {
      * handle: the caller knows what it is for, and re-opening would discard
      * the very reference the caller supplied. */
     uint8_t                         handle_explicit;
+    /* The handle refers to an object OTHER than the one the FILE cursor
+     * names -- a CREATE_UNLINKED's, which lives in the current directory
+     * and has no name of its own.  The re-open rule (a handle that does not
+     * serve an op is released and the current fh opened afresh) would then
+     * open the DIRECTORY in the object's place, so such a handle is held to
+     * the lent-handle rule instead: an op it does not serve fails EINVAL.
+     * The name-resolving ops are the exception, because for them the
+     * directory IS what they want opened. */
+    uint8_t                         handle_nameless;
     /* The saved OPEN slot.  SAVEHANDLE moves into it and RESTOREHANDLE moves
      * back, so exactly one slot refers to a handle at any moment and the
      * ownership bits travel with it. */
@@ -86,6 +95,7 @@ struct chimera_vfs_compound {
     unsigned int                    saved_handle_flags;
     uint8_t                         saved_handle_borrowed;
     uint8_t                         saved_handle_taken;
+    uint8_t                         saved_handle_nameless;
     /* The current handle is the CALLER'S, seeded by PUTHANDLE, and must not be
      * released with the sequence or when the current object moves.  Cleared
      * the moment the executor opens one of its own. */
@@ -203,6 +213,7 @@ chimera_vfs_compound_release_cursor(struct chimera_vfs_compound *compound)
     compound->handle_borrowed = 0;
     compound->handle_taken    = 0;
     compound->handle_explicit = 0;
+    compound->handle_nameless = 0;
 } /* chimera_vfs_compound_release_cursor */
 
 /* The saved OPEN slot, on the same ownership rules as the current one. */
@@ -217,6 +228,7 @@ chimera_vfs_compound_release_saved(struct chimera_vfs_compound *compound)
     compound->saved_handle          = NULL;
     compound->saved_handle_borrowed = 0;
     compound->saved_handle_taken    = 0;
+    compound->saved_handle_nameless = 0;
 } /* chimera_vfs_compound_release_saved */
 
 static void
@@ -236,8 +248,10 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
             chimera_vfs_release(thread, compound->ops[i].out_handle);
         }
         /* Data the caller did not take, for the same reason and on the same
-         * terms as the handle above. */
-        if (compound->ops[i].niov) {
+         * terms as the handle above.  A READ into the caller's own buffers
+         * holds nothing here: its iov IS dest_iov handed back, and releasing
+         * that would release what the caller lent. */
+        if (compound->ops[i].niov && !compound->ops[i].dest_iov) {
             evpl_iovecs_release(thread->evpl,
                                 compound->ops[i].iov,
                                 compound->ops[i].niov);
@@ -345,6 +359,13 @@ chimera_vfs_compound_take_iov(
     *niov = 0;
 
     if (index >= compound->num_ops) {
+        return;
+    }
+
+    /* Nothing of the compound's to move: the data is in the caller's own
+     * buffers, whose references the caller already holds.  The op's iov and
+     * niov stay readable, and NULL / 0 is safe to release. */
+    if (compound->ops[index].dest_iov) {
         return;
     }
 
@@ -1606,6 +1627,126 @@ chimera_vfs_compound_add_removexattr(
 } /* chimera_vfs_compound_add_removexattr */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_create_unlinked(
+    struct chimera_vfs_compound    *compound,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_CREATE_UNLINKED,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->open_flags = flags;
+    op->attr_mask  = attr_mask;
+
+    if (set_attr) {
+        op->set_attr = *set_attr;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_create_unlinked */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_open_stream(
+    struct chimera_vfs_compound    *compound,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    memcpy(op->name, name, namelen);
+    op->name[namelen] = '\0';
+    op->name_len      = (uint32_t) namelen;
+    op->stream_flags  = flags;
+    op->attr_mask     = attr_mask;
+
+    if (set_attr) {
+        op->set_attr = *set_attr;
+    }
+
+    return index;
+} /* chimera_vfs_compound_add_open_stream */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_list_streams(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     cookie,
+    uint32_t                     max_bytes,
+    int                          want_fh)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->cookie         = cookie;
+    op->buffer_max     = max_bytes;
+    op->stream_want_fh = want_fh ? 1 : 0;
+
+    return index;
+} /* chimera_vfs_compound_add_list_streams */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_remove_stream(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen)
+{
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    if (namelen <= 0 || namelen > CHIMERA_VFS_COMPOUND_NAME_MAX) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM,
+                                      &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    memcpy(op->name, name, namelen);
+    op->name[namelen] = '\0';
+    op->name_len      = (uint32_t) namelen;
+
+    return index;
+} /* chimera_vfs_compound_add_remove_stream */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_create(
     struct chimera_vfs_compound    *compound,
     uint8_t                         create_type,
@@ -1785,12 +1926,25 @@ chimera_vfs_compound_add_read(
     struct evpl_iovec                *iov,
     int                               max_iov,
     uint64_t                          attr_mask,
-    const struct chimera_claim_actor *io_owner)
+    const struct chimera_claim_actor *io_owner,
+    struct evpl_iovec                *dest_iov,
+    int                               dest_niov)
 {
     struct chimera_vfs_compound_op *op;
     int                             index;
 
     if (max_iov <= 0 || !iov) {
+        compound->build_failed = 1;
+        return -1;
+    }
+
+    /* A destination is a pointer AND a count, or neither; and read_into has
+     * no owned variant, so a read that names a lease owner cannot also land
+     * in the caller's buffers -- refused here rather than quietly dropping
+     * the owner, which would have the claim layer recall the caller's own
+     * delegation for its own read. */
+    if ((dest_iov != NULL) != (dest_niov > 0) ||
+        (dest_iov && io_owner)) {
         compound->build_failed = 1;
         return -1;
     }
@@ -1810,9 +1964,11 @@ chimera_vfs_compound_add_read(
         op->io_owner      = *io_owner;
         op->have_io_owner = 1;
     }
-    op->offset  = offset;
-    op->count   = count;
-    op->max_iov = max_iov;
+    op->offset    = offset;
+    op->count     = count;
+    op->max_iov   = max_iov;
+    op->dest_iov  = dest_iov;
+    op->dest_niov = dest_niov;
 
     return index;
 } /* chimera_vfs_compound_add_read */
@@ -2645,8 +2801,12 @@ chimera_vfs_compound_read_callback(
     }
 
     if (error_code != CHIMERA_VFS_OK) {
-        /* Nothing was handed over, so nothing is ours to keep. */
-        evpl_iovecs_release(compound->thread->evpl, iov, niov);
+        /* Nothing was handed over, so nothing is ours to keep -- unless what
+         * came back is the caller's own destination, which read_into hands
+         * back whatever the status and which is not ours to release. */
+        if (!op->dest_iov) {
+            evpl_iovecs_release(compound->thread->evpl, iov, niov);
+        }
         chimera_vfs_compound_op_done(compound, error_code);
         return;
     }
@@ -2655,7 +2815,9 @@ chimera_vfs_compound_read_callback(
      * that declares CAP_READ_PROVIDES_BUFFERS answers with buffers of its own
      * and an array of its own to describe them, and an evpl_iovec records the
      * address of the struct that owns it, so the descriptors cannot be copied
-     * into the caller's array.  Keep whichever array the read actually used. */
+     * into the caller's array.  Keep whichever array the read actually used.
+     * For a read into the caller's buffers this is dest_iov handed back, and
+     * reset and take_iov both know not to treat it as the compound's. */
     if (attr) {
         chimera_vfs_compound_store_attr(op, attr);
     }
@@ -2667,6 +2829,118 @@ chimera_vfs_compound_read_callback(
 
     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
 } /* chimera_vfs_compound_read_callback */
+
+/*
+ * A CREATE_UNLINKED finished.  The new object's handle becomes the current
+ * open; the current FILE handle stays on the directory, because an unlinked
+ * object has no name to make current -- see the op.
+ */
+static void
+chimera_vfs_compound_create_unlinked_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    (void) set_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    if (attr) {
+        chimera_vfs_compound_store_attr(op, attr);
+    }
+    op->created = 1;
+
+    /* The directory open the cursor held goes, on the ordinary rules, and the
+     * new object's handle takes the slot -- as a path OPEN's does, and on the
+     * same single-owner terms: the OP owns it through out_handle, so the
+     * cursor addresses it as taken.  The FILE cursor is left where it was. */
+    chimera_vfs_compound_release_cursor(compound);
+
+    compound->handle          = handle;
+    compound->handle_flags    = op->open_flags;
+    compound->handle_explicit = 1;
+    compound->handle_taken    = 1;
+    compound->handle_nameless = 1;
+
+    op->out_handle = handle;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_create_unlinked_callback */
+
+/*
+ * An OPEN_STREAM finished.  The stream becomes the current object in both
+ * cursors -- its fh and its handle -- exactly as a path OPEN's result does;
+ * the base's handle, if the cursor held it, is released by the fh move.
+ */
+static void
+chimera_vfs_compound_open_stream_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    if (attr) {
+        chimera_vfs_compound_store_attr(op, attr);
+    }
+    op->created = oh->r_created;
+
+    /* Moves the FH cursor, which clears the open cursor -- so the open cursor
+     * is set after, not before, and marked taken because the op owns the
+     * handle through out_handle (see the path OPEN completion). */
+    chimera_vfs_compound_set_current(compound, oh->fh, oh->fh_len);
+
+    compound->handle          = oh;
+    compound->handle_flags    = op->stream_flags;
+    compound->handle_explicit = 1;
+    compound->handle_taken    = 1;
+
+    op->out_handle = oh;
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_open_stream_callback */
+
+static void
+chimera_vfs_compound_list_streams_callback(
+    enum chimera_vfs_error error_code,
+    const void            *records,
+    uint32_t               records_len,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie,
+    void                  *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    /* The backend packed the records into the buffer we gave it, which is
+     * op->buffer; `records` is that same pointer handed back. */
+    (void) records;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        op->buffer_len   = records_len;
+        op->buffer_count = count;
+        op->eof          = eof;
+        op->r_cookie     = cookie;
+    }
+
+    chimera_vfs_compound_op_done(compound, error_code);
+} /* chimera_vfs_compound_list_streams_callback */
 
 static void
 chimera_vfs_compound_write_callback(
@@ -3151,8 +3425,19 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_READDIR:
         case CHIMERA_VFS_COMPOUND_OP_CREATE:
         case CHIMERA_VFS_COMPOUND_OP_REMOVE:
+        /* CREATE_UNLINKED creates IN the current object, which is a
+         * directory or the op is wrong: opened as one, as a named OPEN opens
+         * it, so a non-directory fails here with ENOTDIR. */
+        case CHIMERA_VFS_COMPOUND_OP_CREATE_UNLINKED:
             return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
                    CHIMERA_VFS_OPEN_DIRECTORY;
+        /* The stream ops act on the base through whatever handle refers to
+         * it; a PATH one is what every per-op consumer opens for them, and
+         * the cheapest on every type a stream can hang off. */
+        case CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM:
+        case CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS:
+        case CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM:
+            return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
         case CHIMERA_VFS_COMPOUND_OP_ACCESS:
         case CHIMERA_VFS_COMPOUND_OP_READLINK:
@@ -3487,8 +3772,17 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
          * open bound to it -- an SMB2 FileId's granted_access, an NFSv4
          * stateid's rights -- and hand the op a handle the caller never
          * authorized.  So a mismatch here is the caller's bug and is reported,
-         * not papered over. */
-        if (compound->handle && compound->handle_borrowed) {
+         * not papered over.
+         *
+         * A NAMELESS handle (CREATE_UNLINKED's) is held to the same rule for
+         * every op but the name-resolvers: re-opening the current fh in its
+         * place would open the directory, a different object, where the
+         * caller wrote the unlinked one.  An op that wants a directory open
+         * wants exactly that directory, and re-opens it as usual. */
+        if (compound->handle &&
+            (compound->handle_borrowed ||
+             (compound->handle_nameless &&
+              !(open_flags & CHIMERA_VFS_OPEN_DIRECTORY)))) {
             if (!chimera_vfs_compound_lent_serves(op, compound->handle_flags,
                                                   open_flags)) {
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
@@ -3662,7 +3956,20 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             }
 
             if (op->type == CHIMERA_VFS_COMPOUND_OP_READ) {
-                if (op->have_io_owner) {
+                if (op->dest_iov) {
+                    /* Into the caller's buffers: the adder's iov is the
+                     * scratch array read_into takes, and the answer comes
+                     * back describing dest_iov.  No owner -- the adder
+                     * refused the combination. */
+                    chimera_vfs_read_into(compound->thread, compound->cred,
+                                          target,
+                                          op->offset, op->count,
+                                          op->iov, op->max_iov,
+                                          op->dest_iov, op->dest_niov,
+                                          op->attr_mask,
+                                          chimera_vfs_compound_read_callback,
+                                          compound);
+                } else if (op->have_io_owner) {
                     chimera_vfs_read_owned(compound->thread, compound->cred,
                                            target,
                                            op->offset, op->count,
@@ -3960,11 +4267,13 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             compound->saved_handle_flags    = compound->handle_flags;
             compound->saved_handle_borrowed = compound->handle_borrowed;
             compound->saved_handle_taken    = compound->handle_taken;
+            compound->saved_handle_nameless = compound->handle_nameless;
 
             compound->handle          = NULL;
             compound->handle_flags    = 0;
             compound->handle_borrowed = 0;
             compound->handle_taken    = 0;
+            compound->handle_nameless = 0;
 
             chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
             break;
@@ -3981,11 +4290,13 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             compound->handle_flags    = compound->saved_handle_flags;
             compound->handle_borrowed = compound->saved_handle_borrowed;
             compound->handle_taken    = compound->saved_handle_taken;
+            compound->handle_nameless = compound->saved_handle_nameless;
 
             compound->saved_handle          = NULL;
             compound->saved_handle_flags    = 0;
             compound->saved_handle_borrowed = 0;
             compound->saved_handle_taken    = 0;
+            compound->saved_handle_nameless = 0;
 
             chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
             break;
@@ -4201,6 +4512,65 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                      op->name, op->name_len,
                                      chimera_vfs_compound_xattr_change_callback,
                                      compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_CREATE_UNLINKED:
+            /* The directory is open (the prelude saw to that); the create
+             * itself takes the directory's fh.  The capability is checked
+             * HERE because chimera_vfs_create_unlinked aborts the process on
+             * a backend without it rather than reporting -- S3 makes the
+             * same check before calling it. */
+            if (!(chimera_vfs_module_capabilities(compound->thread,
+                                                  compound->fh,
+                                                  (int) compound->fh_len) &
+                  CHIMERA_VFS_CAP_CREATE_UNLINKED)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOTSUP);
+                break;
+            }
+            chimera_vfs_create_unlinked(compound->thread, compound->cred,
+                                        compound->fh, (int) compound->fh_len,
+                                        &op->set_attr,
+                                        op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                        chimera_vfs_compound_create_unlinked_callback,
+                                        compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM:
+            /* The per-op call answers ENOTSUP itself for a backend without
+             * CAP_NAMED_STREAMS, so there is nothing to gate here.  A NULL
+             * set_attr is what "nothing to stamp" means to it, and a copied
+             * empty one is the same thing. */
+            chimera_vfs_open_stream(compound->thread, compound->cred,
+                                    target,
+                                    op->name, op->name_len,
+                                    op->stream_flags,
+                                    op->set_attr.va_set_mask ? &op->set_attr : NULL,
+                                    op->attr_mask | CHIMERA_VFS_ATTR_FH,
+                                    chimera_vfs_compound_open_stream_callback,
+                                    compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS:
+            if (!op->buffer && op->buffer_max) {
+                op->buffer = calloc(1, op->buffer_max);
+            }
+            chimera_vfs_list_streams(compound->thread, compound->cred,
+                                     target,
+                                     op->cookie,
+                                     op->buffer, op->buffer_max,
+                                     op->stream_want_fh,
+                                     chimera_vfs_compound_list_streams_callback,
+                                     compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM:
+            /* Answers with the same (pre, post) pair the xattr changes do,
+             * so it shares their completion. */
+            chimera_vfs_remove_stream(compound->thread, compound->cred,
+                                      target,
+                                      op->name, op->name_len,
+                                      chimera_vfs_compound_xattr_change_callback,
+                                      compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:

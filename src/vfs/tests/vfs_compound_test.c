@@ -1324,7 +1324,7 @@ main(
 
         /* An empty file reads zero bytes at EOF rather than failing. */
         cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
-        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 4096, rdiov, 16, 0, NULL);
+        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 4096, rdiov, 16, 0, NULL, NULL, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -1356,7 +1356,7 @@ main(
 
         /* And a read whose data is never taken: free must release it. */
         cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
-        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 4096, rdiov, 16, 0, NULL);
+        i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 4096, rdiov, 16, 0, NULL, NULL, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -1368,7 +1368,7 @@ main(
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         chimera_vfs_compound_add_lookup(cp, "rd", 2, 0, 0);
-        i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 4096, rdiov, 16, 0, NULL);
+        i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 4096, rdiov, 16, 0, NULL, NULL, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -1421,7 +1421,7 @@ main(
                                               CHIMERA_VFS_ATTR_SIZE,
                                               CHIMERA_VFS_ATTR_SIZE, NULL);
         i_rd = chimera_vfs_compound_add_read(cp, oh, 0, 8, rdiov, 16,
-                                             CHIMERA_VFS_ATTR_MASK_STAT, NULL);
+                                             CHIMERA_VFS_ATTR_MASK_STAT, NULL, NULL, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -2043,7 +2043,7 @@ main(
                                            CHIMERA_VFS_OPEN_PATH |
                                            CHIMERA_VFS_OPEN_DIRECTORY);
         i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 4096, rdiov, 4,
-                                             0, NULL);
+                                             0, NULL, NULL, 0);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -3237,6 +3237,442 @@ main(
         chimera_vfs_compound_free(cp);
     }
     TEST_PASS("handle state persists with a named OPEN; the other shapes say what they do");
+
+    /* ---- CREATE_UNLINKED: an object with no name, written, then published ----
+     * The directory stays the current file handle (an unlinked object has no
+     * name to make current) while the new object's handle takes the open
+     * cursor, so a WRITE lands in it and a GETFH still answers the directory.
+     * The name comes later, by LINK, from the handle the caller took. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *oh;
+        struct evpl_iovec               wiov;
+        uint8_t                         obj_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        obj_fh_len;
+        int                             i_cu, i_fh, i_wr, i_ln, i_lk;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0600;
+
+        assert(evpl_iovec_alloc(ctx.evpl, 8, 0, 1, 0, &wiov) == 1);
+        memcpy(evpl_iovec_data(&wiov), "unlinked", 8);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, a_fh, (int) a_fh_len);
+        i_cu = chimera_vfs_compound_add_create_unlinked(
+            cp, CHIMERA_VFS_OPEN_WRITE_ONLY | CHIMERA_VFS_OPEN_READ_ONLY,
+            &sattr, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_fh = chimera_vfs_compound_add_getfh(cp);
+        i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 2, &wiov, 1,
+                                              0, CHIMERA_VFS_ATTR_SIZE, NULL);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_wr, (uint32_t) i_cu);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_cu);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->created);
+        assert(op->out_handle != NULL);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE);
+        assert(S_ISREG(op->attr.va_mode));
+        /* The op's own fh result is the DIRECTORY: the object is nameless. */
+        assert(op->fh_len == a_fh_len);
+        assert(memcmp(op->fh, a_fh, a_fh_len) == 0);
+        assert(op->attr.va_fh_len != a_fh_len ||
+               memcmp(op->attr.va_fh, a_fh, a_fh_len) != 0);
+        memcpy(obj_fh, op->attr.va_fh, op->attr.va_fh_len);
+        obj_fh_len = op->attr.va_fh_len;
+
+        /* GETFH proves the file cursor did not move. */
+        op = chimera_vfs_compound_op(cp, i_fh);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == a_fh_len);
+        assert(memcmp(op->fh, a_fh, a_fh_len) == 0);
+
+        op = chimera_vfs_compound_op(cp, i_wr);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->written == 8);
+        assert(op->attr.va_size == 8);
+
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_cu);
+        assert(oh != NULL);
+        assert(oh->fh_len == obj_fh_len);
+        assert(memcmp(oh->fh, obj_fh, obj_fh_len) == 0);
+        chimera_vfs_compound_free(cp);
+        evpl_iovec_release(ctx.evpl, &wiov);
+
+        /* Publish: the object (by its handle) is the saved fh, the directory
+         * the current one, and LINK gives it its first name.  A LOOKUP in the
+         * same sequence then finds it with the size the WRITE left. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY |
+                                           CHIMERA_VFS_OPEN_READ_ONLY);
+        chimera_vfs_compound_add_savefh(cp);
+        chimera_vfs_compound_add_putfh(cp, a_fh, (int) a_fh_len);
+        i_ln = chimera_vfs_compound_add_link(cp, "published", 9,
+                                             CHIMERA_VFS_ATTR_MASK_STAT, 0, 0);
+        i_lk = chimera_vfs_compound_add_lookup(cp, "published", 9,
+                                               CHIMERA_VFS_ATTR_MASK_STAT, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ln)->status == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_lk);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->fh_len == obj_fh_len);
+        assert(memcmp(op->fh, obj_fh, obj_fh_len) == 0);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->attr.va_size == 8);
+        chimera_vfs_compound_free(cp);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+
+        /* The two cursors name different objects, so the handle is held to
+         * the lent rule: a READ that a WRITE_ONLY create does not serve is
+         * EINVAL, not a re-open of the directory in the object's place.  A
+         * LOOKUP, wanting the directory, re-opens it as usual and finds the
+         * name given above. */
+        {
+            struct evpl_iovec rdiov[4];
+            int               i_rd;
+
+            cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+            chimera_vfs_compound_add_putfh(cp, a_fh, (int) a_fh_len);
+            i_cu = chimera_vfs_compound_add_create_unlinked(
+                cp, CHIMERA_VFS_OPEN_WRITE_ONLY, &sattr, 0);
+            i_lk = chimera_vfs_compound_add_lookup(cp, "published", 9,
+                                                   CHIMERA_VFS_ATTR_MASK_STAT, 0);
+            ctx.callbacks = 0;
+            chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+            wait_done(&ctx);
+            assert(ctx.callbacks == 1);
+            assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+            assert(chimera_vfs_compound_op(cp, i_cu)->status == CHIMERA_VFS_OK);
+            op = chimera_vfs_compound_op(cp, i_lk);
+            assert(op->status == CHIMERA_VFS_OK);
+            assert(op->attr.va_size == 8);
+            chimera_vfs_compound_free(cp);
+
+            cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+            chimera_vfs_compound_add_putfh(cp, a_fh, (int) a_fh_len);
+            i_cu = chimera_vfs_compound_add_create_unlinked(
+                cp, CHIMERA_VFS_OPEN_WRITE_ONLY, &sattr, 0);
+            i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 8, rdiov, 4, 0,
+                                                 NULL, NULL, 0);
+            ctx.callbacks = 0;
+            chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+            wait_done(&ctx);
+            assert(ctx.callbacks == 1);
+            assert(chimera_vfs_compound_op(cp, i_cu)->status == CHIMERA_VFS_OK);
+            op = chimera_vfs_compound_op(cp, i_rd);
+            assert(op->status == CHIMERA_VFS_EINVAL);
+            assert(op->niov == 0);
+            assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+            chimera_vfs_compound_free(cp);
+        }
+
+        /* (Through a non-directory the answer is the backend's: memfs's PATH
+         * open does not check the type and its create takes the fh only to
+         * find the filesystem, so there is nothing for the executor to pin
+         * there -- see the op's note.) */
+
+        /* The export root is served by a module without the capability: the
+         * op reports it rather than letting the per-op call abort. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putroot(cp);
+        i_cu          = chimera_vfs_compound_add_create_unlinked(cp, 0, &sattr, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_cu);
+        assert(op->status == CHIMERA_VFS_ENOTSUP);
+        assert(op->out_handle == NULL);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("CREATE_UNLINKED makes a nameless object current-open; LINK names it");
+
+    /* ---- named streams: OPEN_STREAM, LIST_STREAMS, REMOVE_STREAM ----
+     * The fork is opened on the base the op addresses -- here the base OPEN's
+     * handle by use_handle, the shape SMB issues -- and becomes current in
+     * both cursors, so a WRITE and a GETATTR behind it see the fork.  The
+     * list is a page of packed records with the unnamed fork first; removing
+     * the stream takes it out of the next page. */
+    {
+        struct chimera_vfs_attrs               sattr;
+        struct evpl_iovec                      wiov;
+        const struct chimera_vfs_stream_entry *ent;
+        const uint8_t                         *rec;
+        uint8_t                                sf_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                               sf_fh_len, off;
+        int                                    i_open, i_os, i_fh, i_wr, i_ga;
+        int                                    i_ls, i_rs, i_ls2;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        assert(evpl_iovec_alloc(ctx.evpl, 8, 0, 1, 0, &wiov) == 1);
+        memcpy(evpl_iovec_data(&wiov), "forkdata", 8);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "sf", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        i_os = chimera_vfs_compound_add_open_stream(
+            cp, "s1", 2,
+            CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_WRITE_ONLY |
+            CHIMERA_VFS_OPEN_READ_ONLY,
+            NULL, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_os, (uint32_t) i_open);
+        i_fh = chimera_vfs_compound_add_getfh(cp);
+        i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 2, &wiov, 1,
+                                              0, CHIMERA_VFS_ATTR_SIZE, NULL);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->status == CHIMERA_VFS_OK);
+        memcpy(sf_fh, op->fh, op->fh_len);
+        sf_fh_len = op->fh_len;
+
+        op = chimera_vfs_compound_op(cp, i_os);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->created);
+        assert(op->out_handle != NULL);
+        /* The stream's attributes are the base's metadata with the fork's
+         * size, and its own fh: a different object from the base. */
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE);
+        assert((op->attr.va_mode & 0777) == 0600);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->attr.va_size == 0);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        assert(op->fh_len == op->attr.va_fh_len);
+        assert(memcmp(op->fh, op->attr.va_fh, op->fh_len) == 0);
+        assert(op->fh_len != sf_fh_len || memcmp(op->fh, sf_fh, sf_fh_len) != 0);
+
+        /* Both cursors moved to the stream: GETFH says so, and the WRITE and
+         * GETATTR behind it went to the fork. */
+        op = chimera_vfs_compound_op(cp, i_fh);
+        assert(op->fh_len == chimera_vfs_compound_op(cp, i_os)->fh_len);
+        assert(memcmp(op->fh, chimera_vfs_compound_op(cp, i_os)->fh,
+                      op->fh_len) == 0);
+        op = chimera_vfs_compound_op(cp, i_wr);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->written == 8);
+        op = chimera_vfs_compound_op(cp, i_ga);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->attr.va_size == 8);
+
+        chimera_vfs_compound_free(cp);
+        evpl_iovec_release(ctx.evpl, &wiov);
+
+        /* The base's page, addressed on the cursor rules (a PATH open of the
+         * current fh): the unnamed fork first, at the base's size of 0, then
+         * s1 at 8 -- then REMOVE_STREAM, and the next page has only the
+         * unnamed fork. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, sf_fh, (int) sf_fh_len);
+        i_ls  = chimera_vfs_compound_add_list_streams(cp, 0, 4096, 1);
+        i_rs  = chimera_vfs_compound_add_remove_stream(cp, "s1", 2);
+        i_ls2 = chimera_vfs_compound_add_list_streams(cp, 0, 4096, 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_ls);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->eof);
+        assert(op->buffer_count == 2);
+        assert(op->buffer_len > 0 && op->buffer_len <= 4096);
+
+        rec = op->buffer;
+        ent = (const struct chimera_vfs_stream_entry *) rec;
+        assert(ent->name_len == 0);
+        assert(ent->size == 0);
+        /* want_fh: the unnamed fork carries the base's own fh. */
+        assert(ent->fh_len == sf_fh_len);
+        assert(memcmp(rec + sizeof(*ent), sf_fh, sf_fh_len) == 0);
+
+        off = (uint32_t) (sizeof(*ent) + ent->name_len + ent->fh_len);
+        off = (off + 7) & ~7u;
+        ent = (const struct chimera_vfs_stream_entry *) (rec + off);
+        assert(ent->name_len == 2);
+        assert(memcmp(rec + off + sizeof(*ent), "s1", 2) == 0);
+        assert(ent->size == 8);
+        assert(ent->fh_len > 0);
+        off += (uint32_t) (sizeof(*ent) + ent->name_len + ent->fh_len);
+        off  = (off + 7) & ~7u;
+        assert(off == op->buffer_len);
+
+        assert(chimera_vfs_compound_op(cp, i_rs)->status == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, i_ls2);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->buffer_count == 1);
+        ent = op->buffer;
+        assert(ent->name_len == 0);
+        assert(ent->fh_len == 0);
+        assert(op->buffer_len == ((sizeof(*ent) + 7) & ~7u));
+        chimera_vfs_compound_free(cp);
+
+        /* The base stayed current across the list and the remove. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, sf_fh, (int) sf_fh_len);
+        chimera_vfs_compound_add_remove_stream(cp, "s1", 2);
+        i_fh          = chimera_vfs_compound_add_getfh(cp);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        /* Already gone: the backend's own answer, and it stops the run. */
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOENT);
+        assert(chimera_vfs_compound_op(cp, i_fh)->status == CHIMERA_VFS_UNSET);
+        chimera_vfs_compound_free(cp);
+
+        /* A backend without CAP_NAMED_STREAMS: the export root's module.
+         * Each op is the per-op call's own ENOTSUP. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putroot(cp);
+        i_os          = chimera_vfs_compound_add_open_stream(cp, "x", 1, 0, NULL, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_os);
+        assert(op->status == CHIMERA_VFS_ENOTSUP);
+        assert(op->out_handle == NULL);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putroot(cp);
+        i_ls          = chimera_vfs_compound_add_list_streams(cp, 0, 4096, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_ls)->status == CHIMERA_VFS_ENOTSUP);
+        chimera_vfs_compound_free(cp);
+
+        /* A base the backend refuses streams on -- memfs allows them on
+         * files and directories, not on a symlink -- comes back as the
+         * backend's own status. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_create(cp, CHIMERA_VFS_COMPOUND_CREATE_SYMLINK,
+                                        "slnk", 4, "sf", 2, NULL, 0, 0, 0);
+        i_os = chimera_vfs_compound_add_open_stream(cp, "x", 1,
+                                                    CHIMERA_VFS_OPEN_CREATE,
+                                                    NULL, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        op = chimera_vfs_compound_op(cp, i_os);
+        assert(op->status == CHIMERA_VFS_EINVAL);
+        assert(op->out_handle == NULL);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("OPEN_STREAM makes the fork current; LIST/REMOVE_STREAM page and prune it");
+
+    /* ---- READ into the caller's buffers ----
+     * With dest_iov the data lands where the caller said, the op's iov is that
+     * destination handed back, and the compound owns none of it: take_iov has
+     * nothing to give and free releases nothing.  The file is the one the
+     * WRITE test left holding "compound". */
+    {
+        struct evpl_iovec  dest;
+        struct evpl_iovec  rdiov[4];
+        struct evpl_iovec *tiov;
+        int                tniov, i_rd;
+
+        assert(evpl_iovec_alloc(ctx.evpl, 4096, 0, 1, 0, &dest) == 1);
+        memset(evpl_iovec_data(&dest), 'x', 4096);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_lookup(cp, "wr", 2, 0, 0);
+        i_rd = chimera_vfs_compound_add_read(cp, NULL, 0, 4096, rdiov, 4,
+                                             CHIMERA_VFS_ATTR_MASK_STAT, NULL,
+                                             &dest, 1);
+        assert(i_rd >= 0);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rd);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->read_len == 8);
+        assert(op->eof_read);
+        assert(op->iov == &dest);
+        assert(op->niov == 1);
+        assert(memcmp(evpl_iovec_data(&dest), "compound", 8) == 0);
+        /* Only read_len bytes were written; the rest is as the caller left it. */
+        assert(((const char *) evpl_iovec_data(&dest))[8] == 'x');
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->attr.va_size == 8);
+
+        chimera_vfs_compound_take_iov(cp, (uint32_t) i_rd, &tiov, &tniov);
+        assert(tiov == NULL);
+        assert(tniov == 0);
+        /* Still readable after the take: the op never stopped describing the
+         * caller's buffers. */
+        assert(op->iov == &dest && op->niov == 1);
+        chimera_vfs_compound_free(cp);
+
+        /* Freeing the compound released nothing of the caller's: the buffer
+         * is still whole and still ours to release. */
+        assert(memcmp(evpl_iovec_data(&dest), "compound", 8) == 0);
+        evpl_iovec_release(ctx.evpl, &dest);
+
+        /* A destination with no count, or a destination plus an owner, is a
+         * malformed op and the sequence does not build. */
+        {
+            struct chimera_claim_actor actor;
+
+            memset(&actor, 0, sizeof(actor));
+            assert(evpl_iovec_alloc(ctx.evpl, 64, 0, 1, 0, &dest) == 1);
+
+            cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+            assert(chimera_vfs_compound_add_read(cp, NULL, 0, 8, rdiov, 4, 0,
+                                                 NULL, &dest, 0) == -1);
+            assert(chimera_vfs_compound_add_read(cp, NULL, 0, 8, rdiov, 4, 0,
+                                                 &actor, &dest, 1) == -1);
+            ctx.callbacks = 0;
+            chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+            wait_done(&ctx);
+            assert(ctx.callbacks == 1);
+            assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+            chimera_vfs_compound_free(cp);
+            evpl_iovec_release(ctx.evpl, &dest);
+        }
+    }
+    TEST_PASS("READ with dest_iov lands in the caller's buffers, which it keeps");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
