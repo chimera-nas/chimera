@@ -73,8 +73,9 @@ chimera_fuse_open_callback(
 
     file = calloc(1, sizeof(*file));
 
-    file->handle = oh;
-    file->mount  = mount;
+    file->handle     = oh;
+    file->mount      = mount;
+    file->open_flags = req->u.open.vfs_flags;
 
     chimera_fuse_file_link(mount, file);
 
@@ -260,8 +261,9 @@ chimera_fuse_create_callback(
 
     file = calloc(1, sizeof(*file));
 
-    file->handle = oh;
-    file->mount  = mount;
+    file->handle     = oh;
+    file->mount      = mount;
+    file->open_flags = req->u.create.vfs_flags;
 
     chimera_fuse_file_link(mount, file);
 
@@ -345,6 +347,7 @@ chimera_fuse_op_create(
     memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
     req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
+    req->u.create.vfs_flags            = flags;
 
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
@@ -358,9 +361,11 @@ chimera_fuse_op_create(
                                           CHIMERA_VFS_OPEN_DIRECTORY,
                                           0);
 
+    /* The entry reply describes the new object; the parent's change has no
+     * reader, so neither directory reading is asked for. */
     chimera_vfs_compound_add_open(req->compound, name, (int) strlen(name),
                                   flags, 0, &req->u.create.set_attr,
-                                  CHIMERA_FUSE_ATTR_MASK);
+                                  CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_create_sequence_complete, req);
@@ -442,11 +447,12 @@ chimera_fuse_op_read(
     /* The kernel named an open file, so the sequence addresses that handle
      * and has no current object.  The descriptor array is the request's and
      * stays the request's -- an evpl_iovec records its owner's address, so it
-     * cannot live in the compound and be copied out. */
+     * cannot live in the compound and be copied out.  A read reply carries no
+     * attributes, so none are asked for. */
     chimera_vfs_compound_add_read(req->compound, file->handle,
                                   in->offset, in->size,
                                   req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
-                                  &actor);
+                                  0, &actor);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_read_sequence_complete, req);
@@ -585,16 +591,19 @@ chimera_fuse_status_sequence_complete(
 /* FLUSH and FSYNC are the same sequence against an already-open file. */
 static void
 chimera_fuse_commit_submit(
-    struct chimera_fuse_request    *req,
-    struct chimera_vfs_open_handle *oh)
+    struct chimera_fuse_request   *req,
+    struct chimera_fuse_open_file *file)
 {
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
 
-    chimera_vfs_compound_add_puthandle(req->compound, oh,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+    /* The kernel named an open file; the sequence borrows it, flagged as it
+     * was opened.  The reply is a bare status, so neither attribute set is
+     * asked for. */
+    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
+                                       file->open_flags);
 
-    chimera_vfs_compound_add_commit(req->compound, 0, 0, 0);
+    chimera_vfs_compound_add_commit(req->compound, 0, 0, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_status_sequence_complete, req);
@@ -623,7 +632,7 @@ chimera_fuse_op_flush(
                                      file->handle->fh_hash, in->lock_owner);
 
     /* close(2) must surface write errors, so flush commits. */
-    chimera_fuse_commit_submit(req, file->handle);
+    chimera_fuse_commit_submit(req, file);
 } /* chimera_fuse_op_flush */
 
 void
@@ -640,7 +649,7 @@ chimera_fuse_op_fsync(
         return;
     }
 
-    chimera_fuse_commit_submit(req, chimera_fuse_file(in->fh)->handle);
+    chimera_fuse_commit_submit(req, chimera_fuse_file(in->fh));
 } /* chimera_fuse_op_fsync */
 
 /* --- RELEASE --- */
@@ -681,6 +690,7 @@ chimera_fuse_op_fallocate(
     uint32_t                     arglen)
 {
     const struct fuse_fallocate_in *in = arg;
+    struct chimera_fuse_open_file  *file;
     uint32_t                        flags;
 
     if (arglen < sizeof(*in)) {
@@ -697,14 +707,16 @@ chimera_fuse_op_fallocate(
         return;
     }
 
+    file = chimera_fuse_file(in->fh);
+
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
 
-    /* The kernel named an open file; the sequence borrows it.  fallocate(2)
-     * reports only success, so neither attribute set is asked for. */
-    chimera_vfs_compound_add_puthandle(req->compound,
-                                       chimera_fuse_file(in->fh)->handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+    /* The kernel named an open file; the sequence borrows it, flagged as it
+     * was opened.  fallocate(2) reports only success, so neither attribute
+     * set is asked for. */
+    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
+                                       file->open_flags);
 
     chimera_vfs_compound_add_allocate(req->compound, NULL,
                                       in->offset, in->length, flags,
@@ -756,8 +768,9 @@ chimera_fuse_op_lseek(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_lseek_in *in = arg;
-    uint32_t                    what;
+    const struct fuse_lseek_in    *in = arg;
+    struct chimera_fuse_open_file *file;
+    uint32_t                       what;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -778,12 +791,15 @@ chimera_fuse_op_lseek(
             return;
     } /* switch */
 
+    file = chimera_fuse_file(in->fh);
+
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
 
-    chimera_vfs_compound_add_puthandle(req->compound,
-                                       chimera_fuse_file(in->fh)->handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+    /* The kernel named an open file; the sequence borrows it, flagged as it
+     * was opened. */
+    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
+                                       file->open_flags);
 
     chimera_vfs_compound_add_seek(req->compound, NULL, in->offset, what);
 
