@@ -4947,15 +4947,40 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         }
 
         case CHIMERA_VFS_COMPOUND_OP_SETATTR:
-            /* With the caller's own handle the change is authorized by that
-             * open's grant rather than re-checked against the object's mode --
-             * the difference between ftruncate(2) and truncate(2), and the
-             * whole reason a caller hands a handle in. */
-            if (op->in_handle) {
+            /* Through a handle the caller NAMED -- one it lent, or the one an
+             * earlier op produced and use_handle points at -- the change is
+             * authorized by that open's grant rather than re-checked against
+             * the object's mode: the difference between ftruncate(2) and
+             * truncate(2), and the whole reason a caller names a handle.  The
+             * two are the same claim of authority, and an OPEN in this same
+             * sequence is as much the caller's open as one it lent: the
+             * truncate behind an SMB2 FILE_OVERWRITE or an NFSv4 OPEN with a
+             * size rides on the open the client was just granted.
+             *
+             * With one distinction, and it is the one POSIX makes: a PATH open
+             * is not a descriptor the change could be made through.  An O_PATH
+             * descriptor cannot ftruncate or futimens -- it was opened to reach
+             * the object, not to act on it, and it asked for and was granted no
+             * access -- so a handle from a PATH open in this sequence carries no
+             * rights to ride, and the object's mode decides.  That is what keeps
+             * a path-addressed utimensat or truncate (OPEN_PATH, then SETATTR
+             * through its handle, which is how the SDK reaches an object by
+             * path) checked against the file's CURRENT permissions, where a
+             * data open of the same file by the same credential would have been
+             * gated at the open itself.  A handle the CALLER lent is taken at
+             * its word as before: the caller holds the descriptor and says what
+             * it is.
+             *
+             * A SETATTR addressing the CURRENT object -- which nothing in this
+             * sequence opened for it -- is checked against the mode. */
+            if (target &&
+                (op->in_handle ||
+                 (op->handle_from >= 0 &&
+                  target->cache_id != CHIMERA_VFS_OPEN_ID_PATH))) {
                 chimera_vfs_fsetattr(compound->thread, compound->cred,
-                                     op->in_handle,
+                                     target,
                                      &op->set_attr,
-                                     0, op->attr_mask,
+                                     op->pre_attr_mask, op->attr_mask,
                                      chimera_vfs_compound_setattr_callback,
                                      compound);
             } else {

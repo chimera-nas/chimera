@@ -240,13 +240,31 @@ enum chimera_vfs_compound_op_type {
      * BORROWED, like in_handle: the caller owns the buffers and releases them
      * once the sequence is over.  MUTATES. */
     CHIMERA_VFS_COMPOUND_OP_WRITE,
-    /* Apply `set_attr`.  With an `in_handle` the attributes are applied through
-     * it with descriptor rights -- the ftruncate(2) rule, where the open's own
-     * grant authorizes the change rather than the object's current mode --
-     * which is why a protocol that resolved a handle for itself hands it in
-     * rather than letting this re-open by name.  Without one, the current
-     * object is opened and the attributes applied against the object's mode.
-     * MUTATES. */
+    /* Apply `set_attr`.  Through a handle the CALLER named -- an `in_handle`,
+     * or the handle an earlier op produced when chimera_vfs_compound_op_use_
+     * handle names it -- the attributes are applied with descriptor rights: the
+     * ftruncate(2) rule, where that open's own grant authorizes the change
+     * rather than the object's current mode.  That is why a protocol which
+     * resolved a handle for itself hands it in rather than letting this re-open
+     * by name, and it holds for the handle an OPEN in the SAME sequence just
+     * produced: the truncate behind an SMB2 CREATE with FILE_OVERWRITE, or
+     * behind an NFSv4 OPEN of an existing file with a size in its attributes,
+     * is authorized by the open the client was just granted -- a file it may
+     * write but whose mode forbids writing is exactly the case the two rules
+     * disagree about.
+     *
+     * A PATH open is the exception, and POSIX makes the same one: an O_PATH
+     * descriptor cannot ftruncate or futimens.  It was opened to REACH the
+     * object and asked for no access, so a handle an OPEN_PATH (or any other
+     * PATH open) in this sequence produced carries no rights to ride and the
+     * object's mode decides -- which is what a path-addressed truncate(2) or
+     * utimensat(2) means, and how a caller that reaches an object by path gets
+     * the answer its own API owes.  A handle the caller LENT is taken at its
+     * word whatever it is: the caller holds the descriptor and says what it is
+     * for.
+     *
+     * Without either, the current object is opened and the attributes applied
+     * against the object's mode.  MUTATES. */
     CHIMERA_VFS_COMPOUND_OP_SETATTR,
     /* Extended attributes of the current object.  SETXATTR and REMOVEXATTR
      * MUTATE -- see the MUTATION note above. */
@@ -2308,8 +2326,10 @@ chimera_vfs_compound_add_write(
     uint64_t                          post_attr_mask,
     const struct chimera_claim_actor *io_owner);
 
-/* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
- * that handle with descriptor rights.  `handle` is BORROWED: see ADDRESSING
+/* Apply `set_attr` to the current object, or -- when `handle` is non-NULL, or
+ * chimera_vfs_compound_op_use_handle names an earlier op's (a PATH open's
+ * excepted) -- to that handle with descriptor rights.  `handle` is BORROWED:
+ * see ADDRESSING
  * SOMETHING OTHER THAN CURRENT.  So is anything `set_attr` points at -- its
  * va_acl and SIDs, which the caller keeps alive for the life of the run (the
  * struct itself is copied).  On return the op's `set_attr` reports which

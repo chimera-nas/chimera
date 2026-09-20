@@ -6465,6 +6465,116 @@ main(
     TEST_PASS("CLOSE(CLOSE_DOC) unlinks what the arming named, reports the "
               "unlink's own status, and defers to a stream holder");
 
+    /* ---- a SETATTR through the handle an OPEN in the same run produced is
+     * authorized by that open, not by the object's mode ----
+     * The SMB2 "create a read-only file, then truncate through the handle"
+     * shape: the create grants what it was asked for, and the truncate behind
+     * it rides on that grant.  The same SETATTR addressing the object by name
+     * is checked against the mode, and refused. */
+    {
+        struct chimera_vfs_cred  ucred;
+        struct chimera_vfs_attrs sattr, tattr;
+        uint8_t                  e_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                 e_fh_len;
+        int                      i_open, i_sa, i_lk;
+
+        chimera_vfs_cred_init_unix(&ucred, 1000, 1000, 0, NULL);
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 0777;
+
+        chimera_vfs_mkdir(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
+                          "e14", 3, &sattr,
+                          CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                          mkdir_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        memcpy(e_fh, ctx.fh, ctx.fh_len);
+        e_fh_len = ctx.fh_len;
+
+        /* Created read-only, opened for write: open_at grants a freshly
+         * created file the access it was opened with, and stamps it. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0400;
+
+        memset(&tattr, 0, sizeof(tattr));
+        tattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        tattr.va_size     = 16;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &ucred);
+        chimera_vfs_compound_add_putfh(cp, e_fh, (int) e_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "ro", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        i_sa = chimera_vfs_compound_add_setattr(cp, NULL, &tattr, 0,
+                                                CHIMERA_VFS_ATTR_SIZE);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_sa,
+                                           (uint32_t) i_open);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_sa);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        assert(op->attr.va_size == 16);
+        chimera_vfs_compound_free(cp);
+
+        /* ...and the same truncate through a PATH open's handle is NOT: an
+         * O_PATH descriptor cannot ftruncate, and an open that asked for no
+         * access grants none to ride.  The mode decides, and refuses -- which
+         * is what keeps a path-addressed truncate(2) or utimensat(2), the
+         * shape an SDK caller reaching an object by path builds, checked
+         * against the file's current permissions. */
+        memset(&tattr, 0, sizeof(tattr));
+        tattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        tattr.va_size     = 24;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &ucred);
+        chimera_vfs_compound_add_putfh(cp, e_fh, (int) e_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "ro", 2,
+                                               CHIMERA_VFS_OPEN_PATH,
+                                               0, NULL, 0, 0, 0);
+        i_sa = chimera_vfs_compound_add_setattr(cp, NULL, &tattr, 0, 0);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_sa,
+                                           (uint32_t) i_open);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_op(cp, i_open)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_sa)->status == CHIMERA_VFS_EACCES);
+        chimera_vfs_compound_free(cp);
+
+        /* The same truncate by NAME, with no open of this run's to authorize
+         * it, is checked against the 0400 mode and refused.  That difference
+         * is the whole of ftruncate(2) versus truncate(2). */
+        memset(&tattr, 0, sizeof(tattr));
+        tattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        tattr.va_size     = 32;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &ucred);
+        chimera_vfs_compound_add_putfh(cp, e_fh, (int) e_fh_len);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "ro", 2, 0, 0);
+        i_sa          = chimera_vfs_compound_add_setattr(cp, NULL, &tattr, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_sa)->status == CHIMERA_VFS_EACCES);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("a SETATTR through the handle an earlier op produced takes the "
+              "descriptor-rights path, unless that open was a PATH open");
+
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
     ctx.callbacks = 0;
