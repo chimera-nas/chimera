@@ -813,12 +813,14 @@ struct chimera_smb_request {
         } create;
 
         struct  {
-            uint16_t                        flags;
-            struct chimera_smb_file_id      file_id;
-            struct chimera_smb_open_file   *open_file;
-            struct chimera_vfs_open_handle *parent_handle;
-            struct chimera_vfs_doc_info     doc_info;
-            struct chimera_smb_attrs        r_attrs;
+            uint16_t                      flags;
+            struct chimera_smb_file_id    file_id;
+            struct chimera_smb_open_file *open_file;
+            /* The postquery GETATTR was refused.  Recorded by the close run's
+             * gate, which answers OK for that op regardless so the CLOSE behind
+             * it still ends the client's open -- see chimera_smb_close_gate. */
+            uint8_t                       attr_failed;
+            struct chimera_smb_attrs      r_attrs;
         } close;
 
         struct {
