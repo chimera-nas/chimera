@@ -102,6 +102,7 @@ chimera_posix_writev_internal(
     req.writev.callback     = chimera_posix_writev_callback;
     req.writev.private_data = &comp;
     req.writev.handle       = entry->handle;
+    req.writev.open_flags   = chimera_posix_fd_open_flags(entry);
     req.writev.offset       = write_offset;
     req.writev.length       = total_len;
     req.writev.src_iov      = iov;

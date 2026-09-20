@@ -216,6 +216,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
          * the VFS core/backend works through. */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             uint32_t                        result_count;
@@ -243,6 +244,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         /* For chimera_writev - caller provides struct iovec array */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             int                             niov;
@@ -256,6 +258,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         /* For chimera_writerv - caller provides evpl_iovec */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             int                             niov;

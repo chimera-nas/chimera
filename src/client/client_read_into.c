@@ -23,6 +23,7 @@ chimera_read_into(
     request->read_into.callback     = callback;
     request->read_into.private_data = private_data;
     request->read_into.handle       = handle;
+    request->read_into.open_flags   = chimera_client_handle_open_flags(handle);
     request->read_into.offset       = offset;
     request->read_into.length       = length;
     request->read_into.dest_niov    = niov;

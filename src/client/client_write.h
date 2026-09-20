@@ -83,30 +83,78 @@ chimera_writerv_complete(
     callback(client_thread, error_code, callback_arg);
 } /* chimera_writerv_complete */
 
-/* Dispatch for chimera_write - allocate evpl_iovec and copy from buffer */
+/*
+ * The three write shapes finish alike: the WRITE is the last op, its
+ * written / committed pair is what the per-op completion reported, and the
+ * sequence owns nothing of the payload (borrowed) or the handle (lent).
+ */
+static void
+chimera_write_sequence_result(
+    struct chimera_vfs_compound *compound,
+    enum chimera_vfs_error      *status,
+    uint32_t                    *written,
+    uint32_t                    *committed)
+{
+    const struct chimera_vfs_compound_op *op;
+
+    *status    = chimera_vfs_compound_status(compound);
+    *written   = 0;
+    *committed = 0;
+
+    if (*status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        *written   = op->written;
+        *committed = op->committed;
+    }
+
+    /* Read out before the free: a freed sequence is recycled and reset. */
+    chimera_vfs_compound_free(compound);
+} /* chimera_write_sequence_result */
+
 static void
 chimera_write_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    const struct chimera_vfs_compound_op *op;
-    enum chimera_vfs_error                status;
-    uint32_t                              written = 0, committed = 0;
+    enum chimera_vfs_error status;
+    uint32_t               written, committed;
 
-    status = chimera_vfs_compound_status(compound);
-
-    if (status == CHIMERA_VFS_OK) {
-        op = chimera_vfs_compound_op(compound,
-                                     chimera_vfs_compound_num_ops(compound) - 1);
-        written   = op->written;
-        committed = op->committed;
-    }
-
-    chimera_vfs_compound_free(compound);
+    chimera_write_sequence_result(compound, &status, &written, &committed);
 
     chimera_write_complete(status, written, committed, NULL, NULL,
                            private_data);
 } /* chimera_write_sequence_complete */
+
+static void
+chimera_writev_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    enum chimera_vfs_error status;
+    uint32_t               written, committed;
+
+    chimera_write_sequence_result(compound, &status, &written, &committed);
+
+    chimera_writev_complete(status, written, committed, NULL, NULL,
+                            private_data);
+} /* chimera_writev_sequence_complete */
+
+static void
+chimera_writerv_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    enum chimera_vfs_error status;
+    uint32_t               written, committed;
+
+    chimera_write_sequence_result(compound, &status, &written, &committed);
+
+    chimera_writerv_complete(status, written, committed, NULL, NULL,
+                             private_data);
+} /* chimera_writerv_sequence_complete */
+
+/* Dispatch for chimera_write - allocate evpl_iovec and copy from buffer */
 
 static inline void
 chimera_dispatch_write(
@@ -216,18 +264,25 @@ chimera_dispatch_writev(
         }
     }
 
-    chimera_vfs_write(thread->vfs_thread,
-                      chimera_client_req_cred(request),
-                      request->writev.handle,
-                      request->writev.offset,
-                      request->writev.length,
-                      1,
-                      0,
-                      0,
-                      request->writev.iov,
-                      niov,
-                      chimera_writev_complete,
-                      request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* The shape of chimera_dispatch_write: handle and payload borrowed, the
+     * payload released by chimera_writev_complete. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->writev.handle,
+                                       request->writev.open_flags);
+    chimera_vfs_compound_add_write(request->compound,
+                                   request->writev.handle,
+                                   request->writev.offset,
+                                   request->writev.length,
+                                   1,
+                                   request->writev.iov, niov,
+                                   0, 0,
+                                   NULL);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_writev_sequence_complete, request);
 } /* chimera_dispatch_writev */
 
 /* Dispatch for chimera_writerv - evpl_iovec already provided */
@@ -236,16 +291,25 @@ chimera_dispatch_writerv(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_write(thread->vfs_thread,
-                      chimera_client_req_cred(request),
-                      request->writerv.handle,
-                      request->writerv.offset,
-                      request->writerv.length,
-                      1,
-                      0,
-                      0,
-                      request->writerv.iov,
-                      request->writerv.niov,
-                      chimera_writerv_complete,
-                      request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* As chimera_dispatch_write; the payload here is the caller's iovecs,
+     * moved into the request by chimera_writerv and released by
+     * chimera_writerv_complete. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->writerv.handle,
+                                       request->writerv.open_flags);
+    chimera_vfs_compound_add_write(request->compound,
+                                   request->writerv.handle,
+                                   request->writerv.offset,
+                                   request->writerv.length,
+                                   1,
+                                   request->writerv.iov,
+                                   request->writerv.niov,
+                                   0, 0,
+                                   NULL);
+
+    chimera_vfs_compound_submit(request->compound,
+                                chimera_writerv_sequence_complete, request);
 } /* chimera_dispatch_writerv */
