@@ -171,6 +171,11 @@ struct chimera_vfs_compound {
 
     chimera_vfs_compound_gate_t     gate;
     void                           *gate_private;
+    /* The gate is on the stack, and this is the op it was consulted on: what
+     * chimera_vfs_compound_op_edit refuses to edit at or below.  Outside the
+     * call gating is 0 and nothing may be edited at all. */
+    uint8_t                         gating;
+    uint32_t                        gate_index;
 
     /* Last: see the note on ->next.  This array is the whole reason a compound
     * is recycled rather than malloc'd per request -- it is by far the largest
@@ -2444,6 +2449,58 @@ chimera_vfs_compound_finish(
     compound->callback(compound, compound->private_data);
 } /* chimera_vfs_compound_finish */
 
+/*
+ * The gate's index rule, enforced where it can be cheaply enforced.
+ *
+ * A gate may edit the ARGUMENTS of any op AHEAD of the one it is consulted on,
+ * and may not touch one at or below it -- those have run, and their arguments
+ * are what they ran with.  Nothing can stop a gate writing wherever it likes,
+ * so what this does is NOTICE: it fingerprints the argument region of every op
+ * at or below the gate's index before the call and again after, and aborts on a
+ * difference.  A gate that quietly rewrites an op that has already run produces
+ * a sequence that did something other than what the results say it did, which is
+ * the one way a gate edit can corrupt a run.
+ *
+ * The argument region is the contiguous prefix of the op struct, from `skip` to
+ * the results -- which is why the struct is laid out that way.  `status` is
+ * outside it: the gate's whole purpose is to replace that, and it does so
+ * through the pointer it is handed, not through the op.
+ *
+ * DEBUG ONLY.  The cost is one pass over up to the whole sequence per op
+ * completion, paid only by a run that HAS a gate; that is cheap enough to leave
+ * on while the tests run and not cheap enough to leave on in production, where
+ * the caller being checked is the VFS's own front ends.
+ */
+#ifndef NDEBUG
+#define CHIMERA_VFS_COMPOUND_ARG_OFFSET offsetof(struct chimera_vfs_compound_op, skip)
+#define CHIMERA_VFS_COMPOUND_ARG_LEN \
+        (offsetof(struct chimera_vfs_compound_op, attr) - \
+         CHIMERA_VFS_COMPOUND_ARG_OFFSET)
+
+static uint64_t
+chimera_vfs_compound_arg_fingerprint(
+    const struct chimera_vfs_compound *compound,
+    uint32_t                           through)
+{
+    const uint8_t *bytes;
+    uint64_t       hash = 14695981039346656037UL;
+    uint32_t       i;
+    size_t         j;
+
+    for (i = 0; i <= through; i++) {
+        bytes = (const uint8_t *) &compound->ops[i] +
+            CHIMERA_VFS_COMPOUND_ARG_OFFSET;
+
+        for (j = 0; j < CHIMERA_VFS_COMPOUND_ARG_LEN; j++) {
+            hash ^= bytes[j];
+            hash *= 1099511628211UL;
+        }
+    }
+
+    return hash;
+} /* chimera_vfs_compound_arg_fingerprint */
+#endif /* ifndef NDEBUG */
+
 /* One op finished.  Record it and either advance or stop. */
 static void
 chimera_vfs_compound_op_done(
@@ -2468,10 +2525,30 @@ chimera_vfs_compound_op_done(
     }
 
     /* The caller's veto, before anything behind this op runs -- and after the
-     * op's own results are recorded, because that is what it inspects. */
+     * op's own results are recorded, because that is what it inspects.  It may
+     * also edit the ops AHEAD of this one, including skipping them; what it may
+     * not touch is this one and the ones before it. */
     if (compound->gate) {
+#ifndef NDEBUG
+        uint64_t before = chimera_vfs_compound_arg_fingerprint(compound,
+                                                               compound->index);
+#endif /* ifndef NDEBUG */
+
+        compound->gating     = 1;
+        compound->gate_index = compound->index;
+
         compound->gate(compound, compound->index, &status,
                        compound->gate_private);
+
+        compound->gating = 0;
+
+#ifndef NDEBUG
+        chimera_vfs_abort_if(
+            before != chimera_vfs_compound_arg_fingerprint(compound,
+                                                           compound->index),
+            "compound gate edited op %u or an op before it; a gate may only "
+            "edit ops that have not run", compound->index);
+#endif /* ifndef NDEBUG */
     }
 
     done->status = status;
@@ -4455,12 +4532,32 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
     struct chimera_vfs_open_handle *target, *range_src, *range_dst;
     unsigned int                    open_flags;
 
+    /* An op a gate skipped is run PAST, not run: nothing is dispatched, its
+     * status stays CHIMERA_VFS_UNSET and its results are untouched, and it does
+     * not count among the ops that ran.  Nothing is cleared on the way through
+     * either -- the per-op scratch below was cleared when the sequence advanced
+     * off the last op that actually ran. */
+    while (compound->index < compound->num_ops &&
+           compound->ops[compound->index].skip) {
+        compound->index++;
+    }
+
     if (compound->index >= compound->num_ops) {
         chimera_vfs_compound_finish(compound, CHIMERA_VFS_OK);
         return;
     }
 
     op = &compound->ops[compound->index];
+
+    /* A skipped op produced no handle, and an op addressing one by
+     * use_handle would be acting on NULL -- silently, on whatever the
+     * underlying call does with it.  The gate that skipped it wrote a sequence
+     * that does not hold together, so say so here rather than three frames
+     * down in a backend. */
+    chimera_vfs_abort_if(op->handle_from >= 0 &&
+                         compound->ops[op->handle_from].skip,
+                         "compound op %u addresses the handle of op %d, which "
+                         "a gate skipped", compound->index, op->handle_from);
 
     /* The object this op acts on: the one the caller handed in, or else the
      * sequence's current object.  Ops that resolve a NAME use compound->handle
@@ -5596,6 +5693,14 @@ chimera_vfs_compound_submit(
     compound->park_state     = CHIMERA_VFS_COMPOUND_PARK_NONE;
     compound->recall_request = NULL;
 
+    /* A gate's edits are re-applied on every execution, and a skip is one of
+     * them: the last run's is cleared so the gate decides again, rather than
+     * an op staying skipped because it was skipped once.  This is the READDIR
+     * reset rule applied to the sequence itself. */
+    for (uint32_t i = 0; i < compound->num_ops; i++) {
+        compound->ops[i].skip = 0;
+    }
+
     /* An op that could not be built is not an op the sequence may skip: a
      * shorter sequence is a different request, and one that has quietly
      * dropped the operation the caller cared about usually succeeds. */
@@ -5723,3 +5828,24 @@ chimera_vfs_compound_op(
 
     return &compound->ops[index];
 } /* chimera_vfs_compound_op */
+
+/*
+ * The writable view, for a gate.  The index rule is exact here -- the executor
+ * knows which op the gate is being consulted on -- so this refuses rather than
+ * notices: NULL for an op that has already run, for one that does not exist,
+ * and for a caller that is not a gate at all.  A gate is the only thing that
+ * may edit a built sequence, because it is the only thing the executor stops
+ * for between the ops.
+ */
+SYMBOL_EXPORT struct chimera_vfs_compound_op *
+chimera_vfs_compound_op_edit(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index)
+{
+    if (!compound->gating || index <= compound->gate_index ||
+        index >= compound->num_ops) {
+        return NULL;
+    }
+
+    return &compound->ops[index];
+} /* chimera_vfs_compound_op_edit */

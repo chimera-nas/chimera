@@ -264,6 +264,74 @@ veto_gate(
     }
 } /* veto_gate */
 
+/*
+ * A gate that EDITS the ops that have not run: the SMB2 SET_INFO ALLOCATION
+ * shape, where the size to set is a function of the size the op just read, and
+ * a skip.  Both are written from what the caller already had plus what the
+ * finished op reported -- never accumulated onto the last run's edit -- which
+ * is what makes them survive a re-execution unchanged.
+ *
+ * It also asks for what it may NOT have, and records that it was refused.
+ */
+#define EDIT_GATE_NONE ((uint32_t) ~0u)
+
+struct edit_gate_ctx {
+    int      calls;
+    uint32_t at;            /* edit when consulted on this op           */
+    uint32_t size_index;    /* the SETATTR to re-size, or EDIT_GATE_NONE */
+    uint32_t skip_index;    /* the op to skip, or EDIT_GATE_NONE         */
+    uint64_t wrote;         /* the size it assigned, last time it ran    */
+    int      refused_self;
+    int      refused_below;
+    int      refused_past_end;
+};
+
+static void
+edit_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct edit_gate_ctx                 *e = private_data;
+    const struct chimera_vfs_compound_op *done;
+    struct chimera_vfs_compound_op       *ahead;
+
+    (void) status;
+
+    e->calls++;
+
+    if (index != e->at) {
+        return;
+    }
+
+    /* The ops that have run, and one that does not exist: all refused. */
+    e->refused_self     = chimera_vfs_compound_op_edit(compound, index) == NULL;
+    e->refused_below    = chimera_vfs_compound_op_edit(compound, index - 1) == NULL;
+    e->refused_past_end = chimera_vfs_compound_op_edit(
+        compound, chimera_vfs_compound_num_ops(compound)) == NULL;
+
+    done = chimera_vfs_compound_op(compound, index);
+
+    if (e->size_index != EDIT_GATE_NONE) {
+        ahead = chimera_vfs_compound_op_edit(compound, e->size_index);
+        assert(ahead != NULL);
+
+        /* Round the size just read up to the allocation unit and ASSIGN it.
+         * A gate that added to what it wrote last time would get a different
+         * sequence on the second execution; this one gets the same. */
+        ahead->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+        ahead->set_attr.va_size      = (done->attr.va_size + 63) & ~((uint64_t) 63);
+        e->wrote                     = ahead->set_attr.va_size;
+    }
+
+    if (e->skip_index != EDIT_GATE_NONE) {
+        ahead = chimera_vfs_compound_op_edit(compound, e->skip_index);
+        assert(ahead != NULL);
+        ahead->skip = 1;
+    }
+} /* edit_gate */
+
 /* A second VFS thread whose only job is to release a claim, so the grant it
  * pumps to a parked LOCK arrives on a thread that is not the one that
  * submitted the sequence.  It records itself so the test can prove the
@@ -560,9 +628,6 @@ main(
     int                                   i_getfh, i_access;
     const struct chimera_vfs_compound_op *op;
 
-    (void) argc;
-    (void) argv;
-
     ChimeraLogLevel = CHIMERA_LOG_INFO;
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
@@ -607,6 +672,46 @@ main(
     memcpy(a_fh, ctx.fh, ctx.fh_len);
     a_fh_len = ctx.fh_len;
     mkdir_under(&ctx, &cred, a_fh, a_fh_len, "b");
+
+    /* ---- the death test's child ----
+     * A gate that skips an op another op addresses by use_handle has written a
+     * sequence that does not hold together, and the executor aborts rather
+     * than hand that op a NULL handle.  An abort cannot be observed in the
+     * process it happens in, so the parent re-runs this binary with the flag
+     * below and checks how the child died -- see the gate-edit section.  A
+     * fresh process rather than a fork: the abort path runs inside a process
+     * whose other threads are the VFS's own, and a forked copy of those is not
+     * something to abort inside. */
+    if (argc > 1 && strcmp(argv[1], "--die-skip-handle-from") == 0) {
+        struct edit_gate_ctx g;
+        int                  i_open;
+
+        memset(&g, 0, sizeof(g));
+        g.at         = 0;
+        g.size_index = EDIT_GATE_NONE;
+        g.skip_index = 1;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_set_gate(cp, edit_gate, &g);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "die", 3,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, NULL, 0, 0, 0);
+        chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_use_handle(cp, 2, (uint32_t) i_open);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        /* Not reached: the executor aborts on the op that addresses the
+         * skipped OPEN's handle.  _exit, not return: the parent's only signal
+         * is that the child did NOT end cleanly, and a leak check on a process
+         * that was supposed to abort mid-sequence would end it uncleanly for
+         * the wrong reason. */
+        _exit(0);
+    }
 
     /* ---- chaining: PUTFH(mem); LOOKUP a; LOOKUP b; GETATTR; GETFH ----
      * Every op after the PUTFH addresses whatever the previous one resolved.
@@ -5932,6 +6037,202 @@ main(
     }
     TEST_PASS("CLAIM_TEST with TEST_BACKEND falls back to the local answer on "
               "memfs, and a claim through a FIFO takes a PATH open");
+
+    /* ---- the gate edits the ops that have not run ----
+     * The SMB2 SET_INFO ALLOCATION shape: the size a SETATTR applies is a
+     * function of the size the GETATTR in front of it just read, which the
+     * caller cannot know when it builds the sequence.  The gate writes it, and
+     * writes it again on a second execution -- from the caller's own argument
+     * plus what the run observed, so the sequence is the same sequence both
+     * times.  A skip is the same kind of edit: the op is run PAST, not run.
+     * What the gate may NOT reach is anything at or below the op it is
+     * consulted on. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *oh;
+        struct edit_gate_ctx            g;
+        int                             i_open, i_ga, i_sa, i_ga2;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "gedit", 5,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* Ten bytes of file, so the rounding has something to round. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        sattr.va_size     = 10;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        chimera_vfs_compound_add_setattr(cp, NULL, &sattr, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* The caller's own argument: a size of 0, which the gate replaces. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        sattr.va_size     = 0;
+
+        memset(&g, 0, sizeof(g));
+        g.at         = 1;
+        g.size_index = 2;
+        g.skip_index = EDIT_GATE_NONE;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_set_gate(cp, edit_gate, &g);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_ga  = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_SIZE);
+        i_sa  = chimera_vfs_compound_add_setattr(cp, NULL, &sattr, 0, 0);
+        i_ga2 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_SIZE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->attr.va_size == 10);
+        /* The gate was refused everything it may not edit, and the SETATTR it
+         * may edit applied the size it wrote. */
+        assert(g.refused_self && g.refused_below && g.refused_past_end);
+        assert(g.wrote == 64);
+        assert(chimera_vfs_compound_op(cp, i_sa)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->attr.va_size == 64);
+
+        /* The SAME sequence again.  The gate is consulted again and re-applies
+         * its edit -- computed from what the run reports, not added to what it
+         * wrote last time -- so the second execution is the first one's
+         * sequence, and the file ends where it ended before. */
+        g.calls       = 0;
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(g.calls == 4);
+        assert(g.wrote == 64);
+        assert(chimera_vfs_compound_op(cp, i_ga)->attr.va_size == 64);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->attr.va_size == 64);
+        chimera_vfs_compound_free(cp);
+
+        /* A SKIPPED op: the same shape, but the gate runs the sequence past
+         * the SETATTR instead of editing it.  Nothing is dispatched for it,
+         * its status stays UNSET, and the file is untouched -- while the op
+         * BEHIND it still runs. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        sattr.va_size     = 0;
+
+        memset(&g, 0, sizeof(g));
+        g.at         = 1;
+        g.size_index = EDIT_GATE_NONE;
+        g.skip_index = 2;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_set_gate(cp, edit_gate, &g);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_ga  = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_SIZE);
+        i_sa  = chimera_vfs_compound_add_setattr(cp, NULL, &sattr, 0, 0);
+        i_ga2 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_SIZE);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_sa)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->attr.va_size == 64);
+        /* The skipped op is not an op the gate is consulted about. */
+        assert(g.calls == 3);
+
+        /* Again: the skip does not persist, it is re-decided -- and decided
+         * the same way, so the SETATTR is skipped again and the file is still
+         * 64 bytes. */
+        g.calls       = 0;
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(g.calls == 3);
+        assert(chimera_vfs_compound_op(cp, i_sa)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->attr.va_size == 64);
+        chimera_vfs_compound_free(cp);
+
+        /* ...and a skip whose op is the LAST one: the sequence finishes
+         * having run one fewer op than it holds. */
+        memset(&g, 0, sizeof(g));
+        g.at         = 0;
+        g.size_index = EDIT_GATE_NONE;
+        g.skip_index = 1;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_set_gate(cp, edit_gate, &g);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_SIZE);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_num_ops(cp) == 2);
+        assert(chimera_vfs_compound_num_completed(cp) == 1);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_release(ctx.vfs_thread, oh);
+
+        /* A skipped op that another op addresses by use_handle is a sequence
+         * that does not hold together, and the executor says so rather than
+         * acting on a NULL handle.  It aborts, so it is checked in a child
+         * process -- see the flag at the top of main. */
+        {
+            char cmd[4096];
+            int  rc;
+
+            snprintf(cmd, sizeof(cmd),
+                     "exec '%s' --die-skip-handle-from >/dev/null 2>&1",
+                     argv[0]);
+            rc = system(cmd);
+            /* However the abort ends the child -- SIGABRT under a sanitizer,
+             * possibly another fatal signal through the crash handler -- what
+             * must not happen is the child returning 0, which would mean the
+             * executor ran the op. */
+            assert(rc != 0);
+        }
+    }
+    TEST_PASS("a gate rewrites and skips the ops ahead of it, is refused the "
+              "ones behind it, and re-applies both on a second execution");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
