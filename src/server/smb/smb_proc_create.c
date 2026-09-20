@@ -1898,8 +1898,16 @@ chimera_smb_create_after_share(
                         chimera_smb_grant_add_member(grant, open_file);
                     }
                     /* The grant owns the epoch so coalesced opens and breaks
-                     * share one counter; a v2 lease is granted at the client's
-                     * epoch + 1 (1 for a brand-new lease, 3.3.5.9.11). */
+                     * share one counter, and a FRESH v2 lease is born at the
+                     * client's epoch + 1 (1 for a brand-new lease, 3.3.5.9.11).
+                     * Only a fresh one: an open that JOINED an existing lease
+                     * did not change its caching state, and an epoch that moved
+                     * without the state moving is what tells a client its cache
+                     * was invalidated when it was not (smb2.lease.v2_epoch2,
+                     * v2_complex1).  Consuming the member seed is what says the
+                     * grant was born here -- a coalesce hit, and the collapse
+                     * of a racing create onto somebody else's grant, both leave
+                     * the seed unused and both are joins. */
                     if (grant_is_v2 && member_seeded) {
                         grant->epoch = request->create.rqls.epoch + 1;
                     }
@@ -4044,13 +4052,28 @@ chimera_smb_create_resume_parked_conn(
          * moment its break leaves the pending-notify state -- i.e. the
          * notification has been sent -- whereas an ordinary ack-required park
          * resumes only once the file's caching leases actually settle. */
-        /* A share-parked CREATE (gen_parked) is on this list only so CANCEL and
-         * teardown can find it: it waits on a vfs share-acquire ticket, has no
-         * park_fh, and completes through chimera_smb_create_share_park_finish.
-         * Sweeping it here would complete a create that never got its share
-         * reservation -- with SUCCESS, since park_fh_len 0 reads as "settled". */
+        /* Only a CREATE parked on a BREAK ACK belongs to this sweep, and
+         * park_fh is what says so: it names the file whose caching leases have
+         * to settle before the open may answer, and the reply hold is the one
+         * thing that sets it.
+         *
+         * Everything else a CREATE waits on puts it on this list too -- a
+         * share-acquire ticket, a durable reconnect racing its own disconnect,
+         * a sequence parked on its CLAIM -- but only so CANCEL and teardown can
+         * find it, and each completes through its own resume.  Sweeping one
+         * here would complete a create that never got its share reservation,
+         * with SUCCESS, because a zero-length park_fh reads as "settled" -- and
+         * then its real resume would complete it a second time.
+         *
+         * Keyed on park_fh rather than on the parked-ness flags, because those
+         * are per-PARK and this list is per-REQUEST: a sequenced create that
+         * parks, resumes and parks again is on the list throughout while its
+         * flag goes down and up, and the gap between two runs is exactly when
+         * another request's reply drives this sweep. */
         if (req->smb2_hdr.command == SMB2_CREATE &&
+            req->create.park_fh_len &&
             !req->create.gen_parked &&
+            !req->create.seq_parked &&
             (req->create.park_on_notify
              ? !chimera_vfs_claim_break_pending_notify(
                  vfs_state, req->create.park_fh, req->create.park_fh_len,
@@ -6189,8 +6212,10 @@ chimera_smb_create_run_complete(
             if (!gop->claim_member_seeded) {
                 chimera_smb_grant_add_member(grant, open_file);
             }
-            /* The grant owns the epoch so coalesced opens and breaks share one
-             * counter; a v2 lease is granted at the client's epoch + 1. */
+            /* A FRESH v2 lease is born at the client's epoch + 1; one this
+             * open merely joined keeps the epoch it has.  See the note on the
+             * op-at-a-time path: consuming the member seed is what says the
+             * grant was born here. */
             if (request->create.seq_grant_is_v2 && gop->claim_member_seeded) {
                 grant->epoch = request->create.rqls.epoch + 1;
             }
@@ -7455,6 +7480,10 @@ chimera_smb_create(struct chimera_smb_request *request)
      * never holds one at all, and the parent-fh accessor has to be able to tell
      * "no handle" from whatever the request pool last left here. */
     request->create.parent_handle = NULL;
+    /* No reply hold yet.  The parked-request sweep reads this to tell a CREATE
+     * waiting on a break ack from one waiting on anything else, so it must not
+     * arrive from the request pool carrying a previous create's file. */
+    request->create.park_fh_len = 0;
     /* Sequence state.  seq_open_file is the half-built open a run carries, and
      * a request arriving from the pool must not inherit one. */
     request->create.seq_open_file     = NULL;
