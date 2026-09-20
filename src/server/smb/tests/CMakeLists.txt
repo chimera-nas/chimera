@@ -539,8 +539,10 @@ endif()
 set(SMBTORTURE_ADS_LIST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/smbtorture_ads_subtests.txt)
 set(SMBTORTURE_ADS_LIST ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_ads_subtests.txt)
 configure_file(${SMBTORTURE_ADS_LIST_SRC} ${SMBTORTURE_ADS_LIST} COPYONLY)
-target_compile_definitions(smbtorture_test
-    PRIVATE SMBTORTURE_ADS_LIST="${SMBTORTURE_ADS_LIST}")
+if(TARGET smbtorture_test)
+    target_compile_definitions(smbtorture_test
+        PRIVATE SMBTORTURE_ADS_LIST="${SMBTORTURE_ADS_LIST}")
+endif()
 
 file(STRINGS ${SMBTORTURE_ADS_LIST_SRC} _ads_lines)
 set(SMBTORTURE_ADS_PATTERNS "")
