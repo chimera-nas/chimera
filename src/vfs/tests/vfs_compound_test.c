@@ -2712,7 +2712,7 @@ main(
                                               CHIMERA_VFS_OPEN_INFERRED |
                                               CHIMERA_VFS_OPEN_PATH |
                                               CHIMERA_VFS_OPEN_DIRECTORY, 0);
-        i_cl = chimera_vfs_compound_add_close(cp);
+        i_cl = chimera_vfs_compound_add_close(cp, 0, NULL);
         i_gh = chimera_vfs_compound_add_gethandle(cp);
 
         ctx.callbacks = 0;
@@ -2729,7 +2729,7 @@ main(
         /* CLOSE with nothing open. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_cl          = chimera_vfs_compound_add_close(cp);
+        i_cl          = chimera_vfs_compound_add_close(cp, 0, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -2812,7 +2812,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, h, CHIMERA_VFS_OPEN_READ_ONLY);
-        i_cl          = chimera_vfs_compound_add_close(cp);
+        i_cl          = chimera_vfs_compound_add_close(cp, 0, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -6233,6 +6233,237 @@ main(
     }
     TEST_PASS("a gate rewrites and skips the ops ahead of it, is refused the "
               "ones behind it, and re-applies both on a second execution");
+
+    /* ---- CLOSE performs the delete-on-close unlink ----
+     * Arming the flag is out of band; the unlink it eventually causes is the
+     * CLOSE's, because it addresses an object and has to happen before the
+     * backend handle the release detached is closed. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *oh;
+        struct chimera_vfs_file_state  *fs;
+        uint8_t                         d_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        d_fh_len;
+        uint8_t                         nd_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        nd_fh_len;
+        int                             i_open, i_cl, i_lk;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        /* A file, armed for delete-on-close, closed WITH the flag: the name
+         * goes, and the op says so. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "doc1", 4,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_set_delete_on_close(ctx.vfs_thread, oh,
+                                        root_fh, (uint16_t) root_fh_len,
+                                        "doc1", 4, &cred);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_READ_ONLY);
+        i_cl = chimera_vfs_compound_add_close(
+            cp, CHIMERA_VFS_COMPOUND_CLOSE_DOC, NULL);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->doc_fired == 1);
+        assert(op->doc_base_deferred == 0);
+        assert(op->doc_status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "doc1", 4, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOENT);
+        chimera_vfs_compound_free(cp);
+
+        /* A NON-EMPTY directory: the unlink fails, the caller is told which
+         * failure it was -- MS-FSA reports it to the client, because the
+         * object survived -- and the name is still there. */
+        mkdir_under(&ctx, &cred, root_fh, root_fh_len, "docd");
+        memcpy(d_fh, ctx.fh, ctx.fh_len);
+        d_fh_len = ctx.fh_len;
+        mkdir_under(&ctx, &cred, d_fh, d_fh_len, "child");
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, d_fh, (int) d_fh_len);
+        chimera_vfs_compound_add_open_current(cp,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_PATH |
+                                              CHIMERA_VFS_OPEN_DIRECTORY, 0);
+        i_open        = chimera_vfs_compound_add_gethandle(cp);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_set_delete_on_close(ctx.vfs_thread, oh,
+                                        root_fh, (uint16_t) root_fh_len,
+                                        "docd", 4, &cred);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_INFERRED |
+                                           CHIMERA_VFS_OPEN_PATH |
+                                           CHIMERA_VFS_OPEN_DIRECTORY);
+        i_cl = chimera_vfs_compound_add_close(
+            cp, CHIMERA_VFS_COMPOUND_CLOSE_DOC, NULL);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        /* The CLOSE itself succeeded: the handle is gone either way. */
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->doc_fired == 1);
+        assert(op->doc_status == CHIMERA_VFS_ENOTEMPTY);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "docd", 4, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* A named stream still holding the base open: the removal is DEFERRED
+         * rather than done, the file is left delete-pending for the stream's
+         * own last close to finish, and the name survives for now. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "doc2", 4,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr,
+                                               CHIMERA_VFS_ATTR_FH, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_open);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        memcpy(nd_fh, op->attr.va_fh, op->attr.va_fh_len);
+        nd_fh_len = op->attr.va_fh_len;
+        oh        = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(ctx.vfs->vfs_state, nd_fh,
+                                   (uint8_t) nd_fh_len,
+                                   chimera_vfs_hash(nd_fh, (int) nd_fh_len),
+                                   true);
+        assert(fs != NULL);
+        chimera_vfs_state_stream_holder_inc(fs);
+
+        chimera_vfs_set_delete_on_close(ctx.vfs_thread, oh,
+                                        root_fh, (uint16_t) root_fh_len,
+                                        "doc2", 4, &cred);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_READ_ONLY);
+        i_cl = chimera_vfs_compound_add_close(
+            cp, CHIMERA_VFS_COMPOUND_CLOSE_DOC, NULL);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->doc_base_deferred == 1);
+        assert(op->doc_fired == 0);
+        assert(op->doc_status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        assert(chimera_vfs_state_is_delete_pending(fs));
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "doc2", 4, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_state_stream_holder_dec(fs);
+        chimera_vfs_state_clear_delete_pending(fs);
+        chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
+
+        /* A CLOSE WITHOUT the flag on an armed handle is the bare release it
+         * always was: the name stays. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "doc3", 4,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_set_delete_on_close(ctx.vfs_thread, oh,
+                                        root_fh, (uint16_t) root_fh_len,
+                                        "doc3", 4, &cred);
+        chimera_vfs_clear_delete_on_close(ctx.vfs_thread, oh);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_READ_ONLY);
+        i_cl          = chimera_vfs_compound_add_close(cp, 0, NULL);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_cl);
+        assert(op->doc_fired == 0);
+        assert(op->doc_status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_lk          = chimera_vfs_compound_add_lookup(cp, "doc3", 4, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("CLOSE(CLOSE_DOC) unlinks what the arming named, reports the "
+              "unlink's own status, and defers to a stream holder");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
