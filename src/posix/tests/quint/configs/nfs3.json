@@ -40,6 +40,11 @@
   // cause and candidate fix, in the posix corpus.schema.json; tools/
   // devliveness.py fails the build if one listed here is never exercised.
   "deviations": [
+    // A hole punch reaching entirely past EOF sends no WRITE over NFS3 --
+    // the emulation is zero-writes clamped to EOF -- so the server never
+    // sees the modification that drops the set-id bits.  NFSv3 has no way
+    // to ask for it; see PD21.
+    "PD21"
   ],
 
   "batches": [
