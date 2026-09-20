@@ -779,7 +779,19 @@ struct chimera_vfs_compound_op {
      * in the saved object to rename from. */
     char                                  new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
     uint32_t                              new_name_len;
-    unsigned int                          open_flags; /* OPEN: CHIMERA_VFS_OPEN_*           */
+    /* OPEN: the CHIMERA_VFS_OPEN_* word to open with -- and, for PUTHANDLE,
+     * the word the caller says its LENT handle was opened with.
+     *
+     * THE ACCESS BITS ARE CAPABILITIES, NOT RESTRICTIONS, whatever their names
+     * suggest: READ_ONLY means "this can read" and WRITE_ONLY "this can
+     * write", so a read-write handle sets BOTH -- which is how O_RDWR is
+     * spelled everywhere in the VFS and how chimera_vfs_open_access_mode reads
+     * it back (READ_ONLY without WRITE_ONLY is the only thing that is a
+     * read-only handle).  A caller that lends a read-write handle as READ_ONLY
+     * alone is not describing a restriction, it is withholding a capability,
+     * and the op that needs the withheld one fails.  See the serves rules on
+     * PUTHANDLE. */
+    unsigned int                          open_flags;
     /* CLOSE: CHIMERA_VFS_COMPOUND_CLOSE_* -- whether this close honours the
      * handle's delete-on-close.  See the adder. */
     unsigned int                          close_flags;
@@ -1963,6 +1975,17 @@ chimera_vfs_compound_add_restorehandle(
  * rather than being set aside for one the sequence opens itself: the caller's
  * open bound rights to this handle (an SMB2 FileId's granted access, an NFSv4
  * stateid's), and acting through a different one would discard them.
+ *
+ * THE FLAGS ARE CAPABILITIES, NOT RESTRICTIONS.  An op's want is the set of
+ * things it needs the handle to be able to do, and a lent handle serves when it
+ * can do all of them -- so READ_ONLY means "this can read" and WRITE_ONLY "this
+ * can write", and a read-write handle is lent as READ_ONLY|WRITE_ONLY.  That is
+ * not a quirk of this rule: it is how O_RDWR is spelled throughout the VFS, and
+ * chimera_vfs_open_access_mode reads exactly that pair back as the read-write
+ * access mode (READ_ONLY without WRITE_ONLY is the only read-only handle).  The
+ * names read the other way round, which is why it is said here: a caller that
+ * lends its read-write handle as READ_ONLY has withheld a capability, and the
+ * READ it lent it for still serves while the WRITE behind it does not.
  *
  * Three rules decide "serves":
  *
