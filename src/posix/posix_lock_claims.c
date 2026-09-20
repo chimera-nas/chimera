@@ -3,14 +3,29 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 /*
- * Local claim-core bridge for posix byte-range locks.
+ * Byte-range locks for the posix client.
  *
- * fcntl locks arbitrate through the embedded VFS's claim core first (the
- * in-process arbiter: protocol claims and other posix threads), then project
- * through the OP_LOCK backend passthrough so cross-process conflicts keep
- * working (each process has its own core instance; the kernel is the shared
- * arbiter).  Claims are heap chimera_posix_ofd_lock nodes tracked per open
- * file description; the description's last close releases them.
+ * TAKING one is a VFS SEQUENCE: PUTHANDLE of the descriptor's own open file,
+ * lent with the flags it was opened with, then a CLAIM against it (F_SETLK is
+ * TRY, F_SETLKW is WAIT|WAIT_HARD) or a CLAIM_TEST (F_GETLK).  The claim core
+ * is the in-process arbiter -- protocol claims and other posix threads -- and
+ * the executor projects to an OP_LOCK backend passthrough beneath it so
+ * cross-process conflicts keep working: each process has its own core
+ * instance, and the kernel is the shared arbiter.  Claims are heap
+ * chimera_posix_ofd_lock nodes tracked per open file description; the
+ * description's last close releases them.
+ *
+ * fcntl runs on an application thread, which has no VFS thread to submit a
+ * sequence with and no event loop to be called back on, so each run is built
+ * and submitted on a worker and the application thread blocks on its
+ * completion.
+ *
+ * WHAT STAYS OUT OF BAND is what a sequence op cannot be.  A release is not
+ * reversible and pumps waiters, so it must not sit behind an op that can
+ * fail: F_UNLCK's carve, the same-owner replace carve behind a downgrade (a
+ * re-insert the owner held the covering range throughout, which cannot fail),
+ * the close-time release, and the backend token release are all calls, not
+ * ops.  So is the whole SEEK_END arm -- see chimera_posix_lock_claim_seek_end.
  *
  * Locking: every ofd->locks list is guarded by the client's fd_lock (one
  * coarse guard so a carve can unlink fragments tracked on ANY description).
@@ -314,131 +329,259 @@ chimera_posix_ofd_lock_carve(
 } /* chimera_posix_ofd_lock_carve */
 
 /* -------------------------------------------------------------------- */
-/* F_SETLKW condvar bridge                                              */
+/* F_SETLK / F_SETLKW / F_GETLK: one sequence each                      */
 /* -------------------------------------------------------------------- */
 
-struct chimera_posix_lock_waiter {
-    evpl_mutex_t mutex;
-    evpl_cond_t  cond;
-    int          done;
-    enum chimera_vfs_claim_result result;
-};
+/* The CLAIM's (or CLAIM_TEST's) index in a lock sequence: PUTHANDLE is 0. */
+#define CHIMERA_POSIX_LOCK_OP_CLAIM 1
 
-static void
-chimera_posix_lock_acquire_cb(
-    enum chimera_vfs_claim_result            result,
-    struct chimera_vfs_claim                *granted,
-    const struct chimera_vfs_claim_conflict *conflict,
-    void                                    *private_data)
-{
-    struct chimera_posix_lock_waiter *waiter = private_data;
-
-    evpl_mutex_lock(&waiter->mutex);
-    waiter->result = result;
-    waiter->done   = 1;
-    evpl_cond_signal(&waiter->cond);
-    evpl_mutex_unlock(&waiter->mutex);
-} /* chimera_posix_lock_acquire_cb */
-
-/* Everything the acquire needs, on the calling thread's stack: the ticket
- * lives here because the core may queue it and fire the callback later, and
- * the request is the vehicle for reaching a worker.  The caller blocks until
- * the callback fires, and the completion path touches no part of this once
- * it has, so stack storage is safe for both. */
+/*
+ * Everything a lock run needs, on the calling application thread's stack.
+ * That thread blocks on the sequence's completion, so the storage outlives
+ * the run -- but the CLAIM's claim and ticket are deliberately NOT here:
+ * they are the caller's lock node, which outlives the LOCK, because an
+ * inserted claim's address is its identity to the claim core.
+ *
+ * The request is only the vehicle.  A sequence is submitted by a
+ * chimera_vfs_thread and fcntl runs on an application thread that has none,
+ * so the run is built and submitted on a worker's thread; the worker calls
+ * the exec callback and never looks at an opcode.
+ */
 struct chimera_posix_lock_claim_ctx {
-    struct chimera_client_request      request;
-    struct chimera_posix_client       *posix;
-    struct chimera_posix_ofd_lock     *node;
-    struct chimera_vfs_pending_acquire ticket;
-    struct chimera_posix_lock_waiter   waiter;
-    bool                               wait;
+    struct chimera_client_request     request;
+    struct chimera_posix_completion   comp;
+    struct chimera_posix_client      *posix;
+    struct chimera_vfs_open_handle   *handle;
+    unsigned int                      open_flags;
+    /* F_SETLK / F_SETLKW: the node whose claim is being taken. */
+    struct chimera_posix_ofd_lock    *node;
+    bool                              wait;
+    /* F_GETLK: the probe, which the sequence borrows but never inserts, so
+    * it need only outlive the submission the waiting thread is holding. */
+    struct chimera_vfs_claim          probe;
+    /* Results, read by the application thread once the completion fires. */
+    enum chimera_vfs_error status;
+    enum chimera_vfs_claim_result result;
+    struct chimera_vfs_claim_conflict conflict;
 };
 
 /*
- * Run the acquire on a worker's VFS thread.  A byte-range claim on a
- * CAP_LEASE backend is confirmed with that backend before its grant is
- * reported, and that confirm is dispatched from the acquiring thread's own
- * request pool -- which fcntl, running on the application's thread, does not
- * have.  Nothing may touch the context after chimera_vfs_claim_acquire()
- * returns: the callback it fires releases the waiting thread, which owns
- * this storage.
+ * A lock run has finished, on the worker thread that submitted it.
+ *
+ * CHIMERA_CLAIM_GRANTED is 0, so an op that never ran would read back as a
+ * grant: the SEQUENCE's status is what says the claim was taken, and the
+ * claim_result only says why it was not.
  */
+static void
+chimera_posix_lock_claim_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_posix_lock_claim_ctx  *ctx = private_data;
+    struct chimera_vfs_state             *state;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_file_state        *taken;
+
+    state = chimera_posix_vfs_state(ctx->posix);
+
+    ctx->status = chimera_vfs_compound_status(compound);
+    op          = chimera_vfs_compound_op(compound,
+                                          CHIMERA_POSIX_LOCK_OP_CLAIM);
+
+    ctx->result   = op->claim_result;
+    ctx->conflict = op->conflict;
+
+    /*
+     * On GRANTED the claim is inserted and the sequence hands over the file
+     * state it resolved to insert it into; the contract is that the caller
+     * takes it.  We take it and PUT it straight back, because the lock node
+     * already holds a reference to the very same state --
+     * chimera_vfs_state_get is refcounted per fh, and the executor resolved
+     * it from the same handle chimera_posix_ofd_lock_alloc resolved it from.
+     *
+     * The NODE's reference is the one to keep.  It is taken when the node is
+     * allocated and put when the node is freed, so it covers the node's whole
+     * life -- including the window before any grant, and the refused acquire
+     * that never reaches a GRANTED op at all -- and it is what every release
+     * path that never ran through a sequence already uses: the carve's freed
+     * fragments, ofd_lock_free, untrack_release, and the last close.  Keeping
+     * the sequence's instead would mean one reference for a granted node and
+     * none for a refused one, with a branch at every free.
+     *
+     * A CLAIM_TEST inserts nothing, so it hands over nothing and this is
+     * simply NULL for the F_GETLK run.
+     */
+    taken = chimera_vfs_compound_take_file_state(compound,
+                                                 CHIMERA_POSIX_LOCK_OP_CLAIM);
+
+    if (taken) {
+        chimera_vfs_state_put(state, taken);
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_posix_complete(&ctx->comp, ctx->status);
+} /* chimera_posix_lock_claim_complete */
+
 static void
 chimera_posix_lock_claim_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
     struct chimera_posix_lock_claim_ctx *ctx = request->lock_probe_private;
+    struct chimera_vfs_compound         *compound;
+    unsigned int                         flags;
 
-    chimera_vfs_claim_acquire(thread->vfs_thread,
-                              chimera_posix_vfs_state(ctx->posix),
-                              ctx->node->file, &ctx->node->claim, &ctx->ticket,
-                              ctx->wait, ctx->wait,
-                              chimera_posix_lock_acquire_cb, NULL,
-                              &ctx->waiter);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          chimera_client_req_cred(request));
+
+    /* The descriptor's own open file, lent as it was opened.  A claim is
+     * arbitrated per FILE and uses only the fh, so the data handle fcntl was
+     * called on serves the op's PATH want and nothing is re-opened.  Lending
+     * it is safe for a range claim precisely because the executor stamps
+     * op_handle on a CACHE-class claim only: handles are cached per (fh,
+     * access mode, cred) and SHARED, so a stamp here would fold every posix
+     * lock taken through one such handle into a single holder. */
+    chimera_vfs_compound_add_puthandle(compound, ctx->handle, ctx->open_flags);
+
+    if (ctx->node) {
+        /* F_SETLKW queues behind a breaking caching holder AND behind
+         * another owner's incompatible lock; F_SETLK waits for neither, and
+         * the BREAKING it can be answered with is the same EAGAIN a DENIED
+         * is -- the recalls are kicked, the claim is not inserted. */
+        flags = ctx->wait
+            ? (CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+               CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD)
+            : CHIMERA_VFS_COMPOUND_CLAIM_TRY;
+
+        chimera_vfs_compound_add_claim(compound, &ctx->node->claim,
+                                       &ctx->node->ticket, flags,
+                                       /* pre */ 0, 0, /* deny */ 0, 0);
+    } else {
+        /* One op for both halves of F_GETLK: the local core answers first,
+         * and the executor projects the probe to a range-arbitrating backend
+         * when it comes back clear. */
+        chimera_vfs_compound_add_claim_test(
+            compound, &ctx->probe, CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND);
+    }
+
+    chimera_vfs_compound_submit(compound, chimera_posix_lock_claim_complete,
+                                ctx);
 } /* chimera_posix_lock_claim_exec */
 
-enum chimera_vfs_claim_result
-chimera_posix_lock_claim_acquire(
-    struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd_lock *node,
-    bool                           wait)
+/*
+ * Submit the run and block this application thread on its completion.
+ *
+ * A parked F_SETLKW waits here for as long as the holder keeps the lock, and
+ * nothing in this client can take that wait back: fcntl(2) has no caller to
+ * answer, this thread is inside the call and cannot see a signal, and a
+ * close(2) from another thread releases locks without touching a pending
+ * acquire.  So no park callback is registered and no cancel is posted -- the
+ * compound's own chimera_vfs_compound_cancel_post is what a front end with an
+ * out-of-band cancel (a FUSE INTERRUPT, an SMB2 CANCEL) uses, and there is no
+ * such event to route here.
+ */
+static void
+chimera_posix_lock_claim_run(struct chimera_posix_lock_claim_ctx *ctx)
 {
-    struct chimera_vfs_state           *state = chimera_posix_vfs_state(posix);
+    ctx->request.lock_probe_private = ctx;
+
+    chimera_posix_worker_enqueue(chimera_posix_choose_worker(ctx->posix),
+                                 &ctx->request, chimera_posix_lock_claim_exec);
+
+    (void) chimera_posix_wait(&ctx->comp);
+    chimera_posix_completion_destroy(&ctx->comp);
+} /* chimera_posix_lock_claim_run */
+
+int
+chimera_posix_lock_claim_acquire(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    unsigned int                    open_flags,
+    struct chimera_posix_ofd_lock  *node,
+    bool                            wait)
+{
     struct chimera_posix_lock_claim_ctx ctx;
 
     memset(&ctx, 0, sizeof(ctx));
-    ctx.posix = posix;
-    ctx.node  = node;
-    ctx.wait  = wait;
+    chimera_posix_completion_init(&ctx.comp, &ctx.request);
 
-    evpl_mutex_init(&ctx.waiter.mutex, NULL);
-    evpl_cond_init(&ctx.waiter.cond, NULL);
-    ctx.waiter.done   = 0;
-    ctx.waiter.result = CHIMERA_CLAIM_DENIED;
+    ctx.posix      = posix;
+    ctx.handle     = handle;
+    ctx.open_flags = open_flags;
+    ctx.node       = node;
+    ctx.wait       = wait;
 
-    /* `wait` queues on BREAKING and (as wait_hard) on a hard DENIED lock
-     * conflict -- the F_SETLKW contract.  Without it the call is a try:
-     * GRANTED/DENIED/BREAKING all resolve inside it.  Either way GRANTED and
-     * DENIED fire the callback synchronously; a queued ticket fires it later
-     * from whichever thread pumps the release, and a queued RANGE grant has
-     * its backend confirm deferred to the projection service thread. */
-    if (chimera_vfs_claim_backend_range_capable(state)) {
-        /* A grant here may need confirming with the backend, which requires
-         * a VFS thread: marshal onto a worker and wait for it there.  The
-         * request is only the vehicle -- the worker calls the exec callback
-         * and never looks at an opcode -- so it carries its context the way
-         * the other lock probes do. */
-        ctx.request.heap_allocated     = 0;
-        ctx.request.lock_probe_private = &ctx;
+    chimera_posix_lock_claim_run(&ctx);
 
-        chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
-                                     &ctx.request,
-                                     chimera_posix_lock_claim_exec);
-    } else {
-        /* No range-arbitrating module: the local core is the whole arbiter
-         * and nothing projects, so skip the worker round trip. */
-        chimera_vfs_claim_acquire(NULL, state, node->file, &node->claim,
-                                  &ctx.ticket, wait, wait,
-                                  chimera_posix_lock_acquire_cb, NULL,
-                                  &ctx.waiter);
+    if (ctx.status == CHIMERA_VFS_OK) {
+        return 0;
     }
 
-    evpl_mutex_lock(&ctx.waiter.mutex);
-    while (!ctx.waiter.done) {
-        evpl_cond_wait(&ctx.waiter.cond, &ctx.waiter.mutex);
-    }
-    evpl_mutex_unlock(&ctx.waiter.mutex);
+    /* A refused claim is the op's answer, reported as EAGAIN by the
+     * executor; anything else is a sequence that could not ask, and carries
+     * its own errno. */
+    errno = (ctx.status == CHIMERA_VFS_EAGAIN)
+        ? EAGAIN : chimera_posix_errno_from_status(ctx.status);
 
-    evpl_mutex_destroy(&ctx.waiter.mutex);
-    evpl_cond_destroy(&ctx.waiter.cond);
-
-    return ctx.waiter.result;
+    return -1;
 } /* chimera_posix_lock_claim_acquire */
 
+int
+chimera_posix_lock_claim_getlk(
+    struct chimera_posix_client       *posix,
+    struct chimera_vfs_open_handle    *handle,
+    unsigned int                       open_flags,
+    bool                               exclusive,
+    uint64_t                           offset,
+    uint64_t                           length,
+    struct chimera_vfs_claim_conflict *conflict)
+{
+    struct chimera_posix_lock_claim_ctx ctx;
+    struct chimera_claim_owner          owner;
+
+    memset(&ctx, 0, sizeof(ctx));
+    chimera_posix_completion_init(&ctx.comp, &ctx.request);
+
+    ctx.posix      = posix;
+    ctx.handle     = handle;
+    ctx.open_flags = open_flags;
+
+    chimera_posix_lock_owner_init(&owner);
+    chimera_vfs_claim_init_range(&ctx.probe, exclusive, /* smb */ false,
+                                 offset, length, &owner);
+
+    chimera_posix_lock_claim_run(&ctx);
+
+    if (ctx.status != CHIMERA_VFS_OK) {
+        errno = chimera_posix_errno_from_status(ctx.status);
+        return -1;
+    }
+
+    /* A probe that says "denied" has ANSWERED -- the op succeeds either way
+     * and the result is the answer. */
+    if (ctx.result == CHIMERA_CLAIM_GRANTED) {
+        return 0;
+    }
+
+    *conflict = ctx.conflict;
+    return 1;
+} /* chimera_posix_lock_claim_getlk */
+
 /* -------------------------------------------------------------------- */
-/* Backend probes: F_GETLK and the SEEK_END passthrough                 */
+/* The SEEK_END passthrough: a backend RANGE op, reached by hand         */
 /* -------------------------------------------------------------------- */
+
+/*
+ * The one lock path that is not a sequence, and the worker-and-condvar
+ * bridge that survives for it.  CLAIM takes a RESOLVED range and carries no
+ * `whence`, while a SEEK_END range's absolute geometry is the backend's to
+ * resolve atomically with the operation -- resolving EOF on this side is
+ * exactly the fstat TOCTOU the whence passthrough exists to avoid.  So a
+ * SEEK_END fcntl bypasses local arbitration entirely and asks the backend
+ * directly, which still needs a VFS thread to be asked from and still has to
+ * answer an application thread that is blocked.
+ */
 
 struct chimera_posix_lock_probe_ctx {
     struct chimera_client_request       request;
@@ -537,40 +680,6 @@ chimera_posix_lock_probe(
     evpl_cond_destroy(&ctx->cond);
     return true;
 } /* chimera_posix_lock_probe */
-
-bool
-chimera_posix_lock_claim_test(
-    struct chimera_posix_client       *posix,
-    struct chimera_vfs_open_handle    *handle,
-    const struct chimera_vfs_claim    *probe,
-    struct chimera_vfs_claim_conflict *conflict)
-{
-    struct chimera_posix_lock_probe_ctx ctx;
-
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.exclusive = (probe->used & CHIMERA_CLAIM_LW) ? 1 : 0;
-    ctx.flags     = CHIMERA_VFS_CLAIM_TEST;
-    ctx.whence    = SEEK_SET;
-    ctx.offset    = probe->offset;
-    ctx.length    = probe->length;
-
-    if (!chimera_posix_lock_probe(posix, handle, &ctx)) {
-        return false;
-    }
-
-    if (ctx.status != CHIMERA_VFS_OK ||
-        ctx.conflict.type == CHIMERA_VFS_LOCK_UNLOCK) {
-        return false;
-    }
-
-    memset(conflict, 0, sizeof(*conflict));
-    conflict->used = (ctx.conflict.type == CHIMERA_VFS_LOCK_WRITE)
-        ? (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW) : CHIMERA_CLAIM_LR;
-    conflict->offset         = ctx.conflict.offset;
-    conflict->length         = ctx.conflict.length;
-    conflict->owner.owner_lo = ctx.conflict.pid;
-    return true;
-} /* chimera_posix_lock_claim_test */
 
 int
 chimera_posix_lock_claim_seek_end(

@@ -101,11 +101,16 @@ struct chimera_posix_ofd_token {
  * its own chimera_vfs_state_get reference on `file` so the anchor outlives
  * the claim. */
 struct chimera_posix_ofd_lock {
-    struct chimera_vfs_claim       claim;
-    struct chimera_vfs_file_state *file;
-    struct chimera_posix_ofd      *ofd;  /* owning description; NULL until tracked */
-    struct chimera_posix_ofd_lock *prev;
-    struct chimera_posix_ofd_lock *next;
+    struct chimera_vfs_claim           claim;
+    /* The CLAIM op's ticket.  It lives here for the same reason the claim
+     * does: the sequence BORROWS both and the claim core may keep the ticket
+     * queued after the acquire call has returned, so neither may be stack
+     * storage of a submission that is already over. */
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_vfs_file_state     *file;
+    struct chimera_posix_ofd          *ofd; /* owning description; NULL until tracked */
+    struct chimera_posix_ofd_lock     *prev;
+    struct chimera_posix_ofd_lock     *next;
 };
 
 struct CHIMERA_ALIGNED(64) chimera_posix_fd_entry {
@@ -278,16 +283,22 @@ void chimera_posix_ofd_lock_replace(
     uint64_t                        offset,
     uint64_t                        length);
 
-/* Acquire the local claim, bridged onto the calling app thread's condvar.
- * `wait` is the F_SETLKW contract (queue on BREAKING and on a hard DENIED
- * conflict); without it the call is a try.  On a CAP_LEASE backend the
- * acquire runs on a worker's VFS thread so a granted range is confirmed
- * with the backend before it is reported. */
-enum chimera_vfs_claim_result
+/* Take `node`'s claim as a VFS sequence -- PUTHANDLE of the descriptor's own
+ * open file, lent with the flags it was opened with, then a CLAIM against it.
+ * `wait` is the F_SETLKW contract (queue on a breaking holder and on another
+ * owner's incompatible lock); without it the run is a TRY.  The application
+ * thread blocks on the sequence's completion.
+ *
+ * 0 when the claim was granted and inserted; -1 with errno set otherwise --
+ * EAGAIN for a refusal, and the status's own errno for a sequence that could
+ * not ask the question at all. */
+int
 chimera_posix_lock_claim_acquire(
-    struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd_lock *node,
-    bool                           wait);
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    unsigned int                    open_flags,
+    struct chimera_posix_ofd_lock  *node,
+    bool                            wait);
 
 /* Record a backend range token this description holds without a local
  * claim (a SEEK_END grant), so last close can release it. */
@@ -318,14 +329,24 @@ chimera_posix_lock_claim_unlock_ranged(
     uint64_t                        offset,
     uint64_t                        length);
 
-/* F_GETLK's backend half: ask a range-arbitrating backend whether anything
- * outside this process holds the probed range.  Returns false when nothing
- * arbitrates ranges or the range is free; true fills *conflict. */
-bool
-chimera_posix_lock_claim_test(
+/* F_GETLK: ask whether the range WOULD be granted, as one sequence --
+ * PUTHANDLE of the descriptor's open file, then a CLAIM_TEST carrying
+ * CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND.  That one op is both halves of
+ * the question: the local core answers first, and when it is clear the
+ * executor projects the probe to a range-arbitrating backend so holders
+ * outside this process are seen too (with no such backend registered the
+ * local answer stands and nothing is dispatched).
+ *
+ * 1 when a holder was reported, filling *conflict; 0 when the range is free;
+ * -1 with errno set when the sequence could not ask. */
+int
+chimera_posix_lock_claim_getlk(
     struct chimera_posix_client       *posix,
     struct chimera_vfs_open_handle    *handle,
-    const struct chimera_vfs_claim    *probe,
+    unsigned int                       open_flags,
+    bool                               exclusive,
+    uint64_t                           offset,
+    uint64_t                           length,
     struct chimera_vfs_claim_conflict *conflict);
 
 /* SEEK_END ranges: the offset is resolved by the backend, atomically with
