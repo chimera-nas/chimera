@@ -27,6 +27,7 @@
 #include "nfs_internal.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 
 #define NFS4_PNFS_STRIPE_UNIT    1048576U /* 1 MiB                              */
@@ -1388,146 +1389,120 @@ chimera_nfs4_layouterror(
     chimera_nfs4_compound_complete(req, res->ler_status);
 } /* chimera_nfs4_layouterror */
 
-static void
-chimera_nfs4_layoutcommit_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct nfs_request      *req = private_data;
-    struct LAYOUTCOMMIT4res *res = &req->res_compound.resarray[req->index].oplayoutcommit;
-
-    (void) pre_attr;
-    (void) set_attr;
-
-    chimera_nfs_info("LAYOUTCOMMIT req=%p setattr complete err=%d -> reply",
-                     req, error_code);
-
-    if (req->handle) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-    }
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->locr_status);
-        return;
-    }
-
-    res->locr_resok4.locr_newsize.ns_sizechanged = 1;
-    res->locr_resok4.locr_newsize.ns_size        =
-        (post_attr && (post_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE))
-        ? post_attr->va_size : 0;
-
-    res->locr_status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_layoutcommit_setattr_complete */
-
 /*
- * The client's reported high-water byte is in hand and the file is open: apply
- * it iff it extends the file.  loca_last_write_offset says how far the client
- * wrote THROUGH THE LAYOUT (RFC 8881 18.42.3); it is not a truncate request, so
- * a smaller value than the MDS already knows about -- a client that only
- * rewrote the front of a file, or raced a concurrent extension -- must leave
- * the size alone, and ns_sizechanged reports that honestly.
+ * LAYOUTCOMMIT as one sequence: PUTFH, open the MDS file, read the size it
+ * holds, apply the client's high-water mark.
+ *
+ * The apply is conditional on the read -- loca_last_write_offset says how far
+ * the client wrote THROUGH THE LAYOUT (RFC 8881 18.42.3), not what the file
+ * should now be, so a value the MDS has already passed must leave the size
+ * alone -- and that is exactly the question a gate answers: it is consulted
+ * when the GETATTR finishes, with the size in hand and the SETATTR not yet
+ * dispatched, and either writes the attributes the SETATTR is to apply or
+ * skips it outright.  Two round trips become one run.
+ *
+ * The gate is asked again on every execution, so everything it writes is
+ * computed from the arguments the caller already had plus the size just read,
+ * and assigned rather than accumulated.
  */
-static void
-chimera_nfs4_layoutcommit_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request       *req  = private_data;
-    struct LAYOUTCOMMIT4args *args = &req->args_compound->argarray[req->index].oplayoutcommit;
-    struct LAYOUTCOMMIT4res  *res  = &req->res_compound.resarray[req->index].oplayoutcommit;
-    struct chimera_vfs_attrs *set_attr;
-    uint64_t                  cur, want;
+#define NFS4_PNFS_LC_OP_OPEN    1
+#define NFS4_PNFS_LC_OP_GETATTR 2
+#define NFS4_PNFS_LC_OP_SETATTR 3
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle      = NULL;
-        res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->locr_status);
+static void
+chimera_nfs4_layoutcommit_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct nfs_request                   *req  = private_data;
+    struct LAYOUTCOMMIT4args             *args =
+        &req->args_compound->argarray[req->index].oplayoutcommit;
+    const struct chimera_vfs_compound_op *gop;
+    struct chimera_vfs_compound_op       *sop;
+    uint64_t                              cur, want;
+
+    if (index != NFS4_PNFS_LC_OP_GETATTR || *status != CHIMERA_VFS_OK) {
         return;
     }
 
-    cur  = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
+    sop = chimera_vfs_compound_op_edit(compound, NFS4_PNFS_LC_OP_SETATTR);
+    /* The layout authorized the completed data write. */
+    sop->setattr_after_write = 1;
+    gop = chimera_vfs_compound_op(compound, NFS4_PNFS_LC_OP_GETATTR);
+
+    cur  = (gop->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? gop->attr.va_size : 0;
     want = args->loca_last_write_offset.no_offset + 1;
 
     if (want <= cur && !args->loca_time_modify.nt_timechanged) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle                                  = NULL;
-        res->locr_resok4.locr_newsize.ns_sizechanged = 0;
-        res->locr_status                             = NFS4_OK;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        /* The commit extends the file; it never shrinks it.  Nothing to
+         * apply, so the SETATTR does not run and ns_sizechanged says so. */
+        sop->skip = 1;
         return;
     }
 
-    /* Compound-lifetime storage so it outlives this async setattr. */
-    set_attr = xdr_dbuf_alloc_space(sizeof(*set_attr), req->encoding->dbuf);
-    chimera_nfs_abort_if(set_attr == NULL, "Failed to allocate space");
-
-    set_attr->va_req_mask = 0;
-    set_attr->va_set_mask = 0;
+    sop->skip                 = 0;
+    sop->set_attr.va_req_mask = 0;
+    sop->set_attr.va_set_mask = 0;
 
     if (want > cur) {
-        set_attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
-        set_attr->va_size      = want;
+        sop->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+        sop->set_attr.va_size      = want;
     }
 
     if (args->loca_time_modify.nt_timechanged) {
-        set_attr->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
-        set_attr->va_mtime.tv_sec  = args->loca_time_modify.nt_time.seconds;
-        set_attr->va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
+        sop->set_attr.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
+        sop->set_attr.va_mtime.tv_sec  = args->loca_time_modify.nt_time.seconds;
+        sop->set_attr.va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
     }
 
     chimera_nfs_info("LAYOUTCOMMIT req=%p size %llu -> %llu mtime_chg=%d",
                      req, (unsigned long long) cur, (unsigned long long) want,
                      args->loca_time_modify.nt_timechanged);
-    /* The layout already authorized the data write; only publish its metadata. */
-    chimera_vfs_setattr_after_write(req->thread->vfs_thread, &req->cred, req->handle,
-                                    set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
-                                    chimera_nfs4_layoutcommit_setattr_complete, req);
-} /* chimera_nfs4_layoutcommit_getattr_complete */
+} /* chimera_nfs4_layoutcommit_gate */
 
 static void
-chimera_nfs4_layoutcommit_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs4_layoutcommit_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request       *req  = private_data;
-    struct LAYOUTCOMMIT4args *args = &req->args_compound->argarray[req->index].oplayoutcommit;
-    struct LAYOUTCOMMIT4res  *res  = &req->res_compound.resarray[req->index].oplayoutcommit;
+    struct nfs_request                   *req = private_data;
+    struct LAYOUTCOMMIT4res              *res =
+        &req->res_compound.resarray[req->index].oplayoutcommit;
+    const struct chimera_vfs_compound_op *sop;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    chimera_nfs_info("LAYOUTCOMMIT req=%p run complete err=%d -> reply",
+                     req, error_code);
 
     if (error_code != CHIMERA_VFS_OK) {
         res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_compound_free(compound);
         chimera_nfs4_compound_complete(req, res->locr_status);
         return;
     }
 
-    req->handle = handle;
+    sop = chimera_vfs_compound_op(compound, NFS4_PNFS_LC_OP_SETATTR);
 
-    /* No new high-water byte reported: nothing to sync to the MDS. */
-    if (!args->loca_last_write_offset.no_newoffset) {
-        chimera_nfs_info("LAYOUTCOMMIT req=%p open ok, no new offset (no MDS size sync) -> reply",
-                         req);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle                                  = NULL;
+    /* A SETATTR the gate skipped is left CHIMERA_VFS_UNSET and did not run:
+     * the MDS already knew a size at least this high and no mtime was
+     * reported, so nothing changed and the reply says so honestly. */
+    if (sop->status == CHIMERA_VFS_OK) {
+        res->locr_resok4.locr_newsize.ns_sizechanged = 1;
+        res->locr_resok4.locr_newsize.ns_size        =
+            (sop->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? sop->attr.va_size : 0;
+    } else {
         res->locr_resok4.locr_newsize.ns_sizechanged = 0;
-        res->locr_status                             = NFS4_OK;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
-        return;
     }
 
-    /* Read the size the MDS holds before deciding: the commit extends the file,
-     * it never shrinks it. */
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->handle,
-                        CHIMERA_VFS_ATTR_SIZE,
-                        chimera_nfs4_layoutcommit_getattr_complete, req);
-} /* chimera_nfs4_layoutcommit_open_callback */
+    chimera_vfs_compound_free(compound);
+
+    res->locr_status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_layoutcommit_complete */
 
 void
 chimera_nfs4_layoutcommit(
@@ -1536,12 +1511,19 @@ chimera_nfs4_layoutcommit(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LAYOUTCOMMIT4args *args = &argop->oplayoutcommit;
-    struct LAYOUTCOMMIT4res  *res  = &resop->oplayoutcommit;
-    struct nfs_client        *client;
-    struct nfs_layout_state  *layout;
+    struct LAYOUTCOMMIT4args    *args = &argop->oplayoutcommit;
+    struct LAYOUTCOMMIT4res     *res  = &resop->oplayoutcommit;
+    struct nfs_client           *client;
+    struct nfs_layout_state     *layout;
+    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_attrs     set_attr;
 
     req->handle = NULL;
+
+    /* The gate writes what is really applied, once the size is known; this is
+     * only what the op is born holding. */
+    set_attr.va_req_mask = 0;
+    set_attr.va_set_mask = 0;
 
     if (!chimera_vfs_pnfs_feature_enabled(thread->shared->vfs)) {
         res->locr_status = NFS4ERR_NOTSUPP;
@@ -1592,13 +1574,37 @@ chimera_nfs4_layoutcommit(
         return;
     }
 
+    /* No new high-water byte reported: nothing to sync to the MDS, and no
+     * reason to open the file at all. */
+    if (!args->loca_last_write_offset.no_newoffset) {
+        chimera_nfs_info("LAYOUTCOMMIT req=%p no new offset (no MDS size sync) -> reply",
+                         req);
+        res->locr_resok4.locr_newsize.ns_sizechanged = 0;
+        res->locr_status                             = NFS4_OK;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
     /* Open the MDS file to apply the client-reported size/mtime.  Data lives
      * on the DS; with COMMIT_THRU_MDS the client reports the new high-water
      * mark here so MDS metadata catches up. */
     chimera_nfs_info("LAYOUTCOMMIT enter req=%p fhlen=%u -> opening MDS file",
                      req, req->fhlen);
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh, req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs4_layoutcommit_open_callback, req);
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_SIZE);
+    /* Against the object's mode, which is what the per-op path checked: it
+     * applied through chimera_vfs_setattr and not the f-form, so the size a
+     * LAYOUTCOMMIT reports is authorized the way a truncate(2) is rather than
+     * riding an open's grant.  Naming the open here would change that. */
+    chimera_vfs_compound_add_setattr(compound, NULL, &set_attr, 0,
+                                     CHIMERA_VFS_ATTR_SIZE);
+
+    chimera_vfs_compound_set_gate(compound, chimera_nfs4_layoutcommit_gate, req);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_layoutcommit_complete,
+                                req);
 } /* chimera_nfs4_layoutcommit */
