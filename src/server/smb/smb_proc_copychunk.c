@@ -284,13 +284,12 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
                                        request->ioctl.cc_src_handle,
-                                       CHIMERA_VFS_OPEN_INFERRED |
-                                       CHIMERA_VFS_OPEN_READ_ONLY);
+                                       request->ioctl.cc_src_open_file->open_flags);
     chimera_vfs_compound_add_savehandle(request->vfs_compound);
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
                                        request->ioctl.cc_dst_handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->ioctl.cc_dst_open_file->open_flags);
 
     chimera_vfs_compound_add_copy_range(request->vfs_compound,
                                         NULL,
@@ -306,28 +305,53 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
                                 request);
 } /* chimera_smb_copychunk_next */
 
-/* Source size resolved: kick off the per-chunk copy (each chunk's read range is
- * validated against EOF in chimera_smb_copychunk_next). */
+/*
+ * PUTHANDLE(src), GETATTR -- the source size, as its own sequence in front of
+ * the per-chunk ones.
+ *
+ * It is not folded into the first chunk's sequence, though it could be: the
+ * size decides whether any chunk is built at all, and a chunk that reads past
+ * EOF is refused with STATUS_INVALID_VIEW_SIZE carrying a SRV_COPYCHUNK_RESPONSE
+ * body of the progress so far (MS-SMB2 3.3.5.15.6).  A gate can only substitute
+ * a VFS error for an op's status, and every VFS error this handler sees is
+ * mapped to one of NOT_SUPPORTED / INVALID_DEVICE_REQUEST / INVALID_PARAMETER
+ * with no body -- so a veto there would have to be told apart from a real
+ * copy_range failure by something other than its status.  A separate sequence
+ * says the same thing without the disguise.
+ */
 static void
-chimera_smb_copychunk_src_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_smb_copychunk_src_getattr_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              src_size = 0;
 
-    if (error_code != CHIMERA_VFS_OK) {
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        src_size = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ?
+            op->attr.va_size : 0;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK) {
         chimera_smb_copychunk_done(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
-    request->ioctl.cc_src_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)
-                                 ? attr->va_size : 0;
+    request->ioctl.cc_src_size = src_size;
 
     /* Per-chunk EOF validation happens in chimera_smb_copychunk_next so any
      * earlier chunks are copied before a past-EOF chunk fails. */
     chimera_smb_copychunk_next(request);
-} /* chimera_smb_copychunk_src_getattr_cb */
+} /* chimera_smb_copychunk_src_getattr_complete */
 
 void
 chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
@@ -439,11 +463,18 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
 
     /* Fetch the source size first so a chunk reading past EOF can be rejected
      * with STATUS_INVALID_VIEW_SIZE before any data is copied. */
-    chimera_vfs_getattr(
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.cc_src_handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        chimera_smb_copychunk_src_getattr_cb,
-        request);
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->ioctl.cc_src_handle,
+                                       src_open_file->open_flags);
+
+    chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_copychunk_src_getattr_complete,
+                                request);
 } /* chimera_smb_ioctl_copychunk */

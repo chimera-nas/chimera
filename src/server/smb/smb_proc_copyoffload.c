@@ -10,6 +10,7 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * Block-level server-side copy beyond COPYCHUNK (smb_proc_copychunk.c):
@@ -107,91 +108,177 @@ chimera_smb_copy_error_status(enum chimera_vfs_error error_code)
            : SMB2_STATUS_INVALID_PARAMETER;
 } /* chimera_smb_copy_error_status */
 
+/* COPY_RANGE -- the fallback sequence, run when the clone was refused. */
 static void
-chimera_smb_duplicate_extents_copy_cb(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  length,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_duplicate_extents_copy_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     chimera_smb_duplicate_extents_done(
         request,
-        (error_code == CHIMERA_VFS_OK)
+        (status == CHIMERA_VFS_OK)
         ? SMB2_STATUS_SUCCESS
-        : chimera_smb_copy_error_status(error_code));
-} /* chimera_smb_duplicate_extents_copy_cb */
+        : chimera_smb_copy_error_status(status));
+} /* chimera_smb_duplicate_extents_copy_complete */
 
+/*
+ * The range ops take BOTH objects from the caller -- neither addresses the
+ * current one -- so a clone or a copy is a sequence of exactly one op, with no
+ * cursor to establish first.
+ */
 static void
-chimera_smb_duplicate_extents_clone_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_duplicate_extents_submit_copy(struct chimera_smb_request *request)
+{
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_copy_range(
+        request->vfs_compound,
+        request->ioctl.de_src_open_file->handle,
+        request->ioctl.de_src_offset,
+        request->ioctl.de_dst_open_file->handle,
+        request->ioctl.de_dst_offset,
+        request->ioctl.de_length,
+        0,
+        0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_duplicate_extents_copy_complete,
+                                request);
+} /* chimera_smb_duplicate_extents_submit_copy */
+
+/* CLONE_RANGE. */
+static void
+chimera_smb_duplicate_extents_clone_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
 
-    if (error_code == CHIMERA_VFS_OK) {
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status == CHIMERA_VFS_OK) {
         chimera_smb_duplicate_extents_done(request, SMB2_STATUS_SUCCESS);
         return;
     }
 
     /* A backend without reflink (or one rejecting this alignment) still copies
-    * the bytes via the generic copy_range path so the data lands correctly. */
+     * the bytes via the generic copy_range path so the data lands correctly.
+     * It is a SECOND sequence rather than a second op behind the clone: the
+     * fallback is what the clone's refusal means, and a sequence stops at its
+     * first failure -- there is no "run this instead" op. */
     if (!request->ioctl.de_copy_fallback &&
-        (error_code == CHIMERA_VFS_ENOTSUP || error_code == CHIMERA_VFS_EINVAL)) {
+        (status == CHIMERA_VFS_ENOTSUP || status == CHIMERA_VFS_EINVAL)) {
         request->ioctl.de_copy_fallback = 1;
-        chimera_vfs_copy_range(
-            request->compound->thread->vfs_thread,
-            &request->session_handle->session->cred,
-            request->ioctl.de_src_open_file->handle,
-            request->ioctl.de_src_offset,
-            request->ioctl.de_dst_open_file->handle,
-            request->ioctl.de_dst_offset,
-            request->ioctl.de_length,
-            0,
-            0, 0,
-            chimera_smb_duplicate_extents_copy_cb,
-            request);
+        chimera_smb_duplicate_extents_submit_copy(request);
         return;
     }
 
     chimera_smb_duplicate_extents_done(request,
-                                       chimera_smb_copy_error_status(error_code));
-} /* chimera_smb_duplicate_extents_clone_cb */
+                                       chimera_smb_copy_error_status(status));
+} /* chimera_smb_duplicate_extents_clone_complete */
 
 static void
-chimera_smb_duplicate_extents_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_smb_duplicate_extents_submit_clone(struct chimera_smb_request *request)
 {
-    struct chimera_smb_request *request = private_data;
-    uint64_t                    src_size;
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred);
 
-    if (error_code != CHIMERA_VFS_OK) {
+    chimera_vfs_compound_add_clone_range(
+        request->vfs_compound,
+        request->ioctl.de_src_open_file->handle,
+        request->ioctl.de_src_offset,
+        request->ioctl.de_dst_open_file->handle,
+        request->ioctl.de_dst_offset,
+        request->ioctl.de_length,
+        0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_duplicate_extents_clone_complete,
+                                request);
+} /* chimera_smb_duplicate_extents_submit_clone */
+
+/*
+ * PUTHANDLE(dst), GETATTR, PUTHANDLE(src), GETATTR.
+ *
+ * Both objects are measured in one sequence: the destination range must already
+ * lie within the destination (a dup must not extend it), the sparse-ness of the
+ * two must match, and the source range must lie within the source.  The clone
+ * is a sequence of its own because it must not run when any of those refuse,
+ * and a caller's gate can only fail an op -- it cannot skip one -- so a refusal
+ * expressed there would be indistinguishable, in the completion, from a clone
+ * the backend turned down and that the copy fallback should answer.
+ */
+static void
+chimera_smb_duplicate_extents_getattr_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              dst_size = 0, src_size = 0;
+    int                                   dst_sparse = 0, src_sparse = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        /* ops: [0] PUTHANDLE(dst) [1] GETATTR(dst) [2] PUTHANDLE(src)
+         *      [3] GETATTR(src) */
+        op       = chimera_vfs_compound_op(compound, 1);
+        dst_size = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ?
+            op->attr.va_size : 0;
+        /* Valid only when the reply carries DOS attributes: an attribute struct
+         * that was never asked for them holds whatever that field last carried,
+         * and a stale SPARSE from an earlier request turned this into an
+         * intermittent NOT_SUPPORTED on the linux backend
+         * (smb2.ioctl.dup_extents_dest_lock). */
+        dst_sparse = ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+                      (op->attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE));
+
+        op       = chimera_vfs_compound_op(compound, 3);
+        src_size = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ?
+            op->attr.va_size : 0;
+        src_sparse = ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+                      (op->attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE));
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK) {
         chimera_smb_duplicate_extents_done(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
-    src_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
+    request->ioctl.de_dst_size   = dst_size;
+    request->ioctl.de_dst_sparse = dst_sparse ? 1 : 0;
+
+    /* A dup must not extend the destination (dup_extents_len_beyond_dest). */
+    if (request->ioctl.de_dst_offset + request->ioctl.de_length > dst_size) {
+        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
+        return;
+    }
 
     /* Block-cloning a sparse source into a non-sparse destination is not
      * supported (MS-FSCC 2.3.8): the sparse-ness must match.  A sparse source
      * with a sparse destination (or two dense files) clones fine
-     * (smb2.ioctl.dup_extents_sparse_src vs sparse_dest/sparse_both).
-     *
-     * The sparse bit lives in the DOS attributes, which a backend reports
-     * only when asked and which the passthrough backends never report.  Read
-     * it only when the reply says it is there: an attribute struct that was
-     * never asked for it holds whatever that field last carried, and a stale
-     * SPARSE from an earlier request turned this into an intermittent
-     * NOT_SUPPORTED on the linux backend (smb2.ioctl.dup_extents_dest_lock). */
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
-        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE) &&
-        !request->ioctl.de_dst_sparse) {
+     * (smb2.ioctl.dup_extents_sparse_src vs sparse_dest/sparse_both). */
+    if (src_sparse && !request->ioctl.de_dst_sparse) {
         chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
         return;
     }
@@ -203,55 +290,8 @@ chimera_smb_duplicate_extents_getattr_cb(
         return;
     }
 
-    chimera_vfs_clone_range(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.de_src_open_file->handle,
-        request->ioctl.de_src_offset,
-        request->ioctl.de_dst_open_file->handle,
-        request->ioctl.de_dst_offset,
-        request->ioctl.de_length,
-        0, 0,
-        chimera_smb_duplicate_extents_clone_cb,
-        request);
-} /* chimera_smb_duplicate_extents_getattr_cb */
-
-/* Destination attributes fetched first: the destination range must already lie
- * within the destination file (a dup must not extend it).  On success, fetch
- * the source attributes and proceed to the clone. */
-static void
-chimera_smb_duplicate_extents_dst_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_INVALID_PARAMETER);
-        return;
-    }
-
-    request->ioctl.de_dst_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
-    /* Valid only when the reply carries DOS attributes; see the sparse check
-     * in chimera_smb_duplicate_extents_getattr_cb. */
-    request->ioctl.de_dst_sparse =
-        ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
-         (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE)) ? 1 : 0;
-
-    if (request->ioctl.de_dst_offset + request->ioctl.de_length > request->ioctl.de_dst_size) {
-        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
-        return;
-    }
-
-    chimera_vfs_getattr(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.de_src_open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
-        chimera_smb_duplicate_extents_getattr_cb,
-        request);
-} /* chimera_smb_duplicate_extents_dst_getattr_cb */
+    chimera_smb_duplicate_extents_submit_clone(request);
+} /* chimera_smb_duplicate_extents_getattr_complete */
 
 void
 chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
@@ -306,39 +346,64 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
         return;
     }
 
-    /* Validate the destination range against the destination's EOF first (a
-     * dup must not extend the destination -- dup_extents_len_beyond_dest), then
-     * the source range. */
-    chimera_vfs_getattr(
+    /* Measure both files, in that order: the destination's EOF bounds the dup
+     * and the source's bounds what may be read. */
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        dst_open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
-        chimera_smb_duplicate_extents_dst_getattr_cb,
-        request);
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       dst_open_file->handle,
+                                       dst_open_file->open_flags);
+    chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT |
+                                     CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       src_open_file->handle,
+                                       src_open_file->open_flags);
+    chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT |
+                                     CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_duplicate_extents_getattr_complete,
+                                request);
 } /* chimera_smb_ioctl_duplicate_extents */
 
 /* ------------------------------- OFFLOAD_READ ---------------------------- */
 
+/* PUTHANDLE, GETATTR. */
 static void
-chimera_smb_offload_read_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_smb_offload_read_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request   *request = private_data;
-    struct chimera_smb_open_file *src     = request->ioctl.od_src_open_file;
-    uint64_t                      src_size, avail, xfer;
+    struct chimera_smb_request           *request = private_data;
+    struct chimera_smb_open_file         *src     = request->ioctl.od_src_open_file;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              src_size = 0, avail, xfer;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        src_size = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ?
+            op->attr.va_size : 0;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     request->ioctl.od_src_open_file = NULL;
 
-    if (error_code != CHIMERA_VFS_OK) {
+    if (status != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, src);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
-
-    src_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
 
     if (request->ioctl.od_file_offset >= src_size) {
         chimera_smb_open_file_release(request, src);
@@ -361,7 +426,7 @@ chimera_smb_offload_read_getattr_cb(
 
     chimera_smb_open_file_release(request, src);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_offload_read_getattr_cb */
+} /* chimera_smb_offload_read_sequence_complete */
 
 void
 chimera_smb_ioctl_offload_read(struct chimera_smb_request *request)
@@ -392,13 +457,20 @@ chimera_smb_ioctl_offload_read(struct chimera_smb_request *request)
 
     request->ioctl.od_src_open_file = src_open_file;
 
-    chimera_vfs_getattr(
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        src_open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        chimera_smb_offload_read_getattr_cb,
-        request);
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       src_open_file->handle,
+                                       src_open_file->open_flags);
+
+    chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_offload_read_sequence_complete,
+                                request);
 } /* chimera_smb_ioctl_offload_read */
 
 /* ------------------------------ OFFLOAD_WRITE ---------------------------- */
@@ -419,58 +491,73 @@ chimera_smb_offload_write_done(
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_offload_write_done */
 
+/* COPY_RANGE -- the fallback sequence. */
 static void
-chimera_smb_offload_write_copy_cb(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  length,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_offload_write_copy_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     chimera_smb_offload_write_done(
         request,
-        (error_code == CHIMERA_VFS_OK)
+        (status == CHIMERA_VFS_OK)
         ? SMB2_STATUS_SUCCESS
-        : chimera_smb_copy_error_status(error_code));
-} /* chimera_smb_offload_write_copy_cb */
+        : chimera_smb_copy_error_status(status));
+} /* chimera_smb_offload_write_copy_complete */
 
+/* CLONE_RANGE. */
 static void
-chimera_smb_offload_write_clone_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_offload_write_clone_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
 
-    if (error_code == CHIMERA_VFS_OK) {
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status == CHIMERA_VFS_OK) {
         chimera_smb_offload_write_done(request, SMB2_STATUS_SUCCESS);
         return;
     }
 
     if (!request->ioctl.od_copy_fallback &&
-        (error_code == CHIMERA_VFS_ENOTSUP || error_code == CHIMERA_VFS_EINVAL)) {
+        (status == CHIMERA_VFS_ENOTSUP || status == CHIMERA_VFS_EINVAL)) {
         request->ioctl.od_copy_fallback = 1;
-        chimera_vfs_copy_range(
+
+        request->vfs_compound = chimera_vfs_compound_alloc(
             request->compound->thread->vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred);
+
+        chimera_vfs_compound_add_copy_range(
+            request->vfs_compound,
             request->ioctl.od_src_open_file->handle,
             request->ioctl.od_transfer_offset,
             request->ioctl.od_dst_open_file->handle,
             request->ioctl.od_file_offset,
             request->ioctl.od_copy_length,
             0,
-            0, 0,
-            chimera_smb_offload_write_copy_cb,
-            request);
+            0, 0);
+
+        chimera_vfs_compound_submit(request->vfs_compound,
+                                    chimera_smb_offload_write_copy_complete,
+                                    request);
         return;
     }
 
     chimera_smb_offload_write_done(request,
-                                   chimera_smb_copy_error_status(error_code));
-} /* chimera_smb_offload_write_clone_cb */
+                                   chimera_smb_copy_error_status(status));
+} /* chimera_smb_offload_write_clone_complete */
 
 void
 chimera_smb_ioctl_offload_write(struct chimera_smb_request *request)
@@ -548,15 +635,20 @@ chimera_smb_ioctl_offload_write(struct chimera_smb_request *request)
      * offset within the token range. */
     request->ioctl.od_transfer_offset += base_offset;
 
-    chimera_vfs_clone_range(
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_clone_range(
+        request->vfs_compound,
         src_open_file->handle,
         request->ioctl.od_transfer_offset,
         dst_open_file->handle,
         request->ioctl.od_file_offset,
         request->ioctl.od_copy_length,
-        0, 0,
-        chimera_smb_offload_write_clone_cb,
-        request);
+        0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_offload_write_clone_complete,
+                                request);
 } /* chimera_smb_ioctl_offload_write */
