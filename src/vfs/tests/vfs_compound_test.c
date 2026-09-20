@@ -2908,6 +2908,92 @@ main(
     }
     TEST_PASS("the open cursor ops fill, hand out, close, and move the slot");
 
+    /* ---- use_handle names an op that LEAVES a handle, or nothing at all ----
+     * A PUTHANDLE and an OPEN_CURRENT both put a handle on the cursor and
+     * neither publishes one in out_handle, so naming either as a use_handle
+     * source resolves to NULL -- and the addressing op used to dereference it
+     * three frames down in a backend.  The source op's type is known where
+     * use_handle is called, so the sequence fails to BUILD and submit answers
+     * EINVAL: nothing runs, and nothing crashes. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *h, *h2;
+        int                             i_open, i_ph, i_ga, i_oc, i_gh;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "uhsrc", 5,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        h = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(h != NULL);
+        chimera_vfs_compound_free(cp);
+
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_ph = chimera_vfs_compound_add_puthandle(cp, h,
+                                                  CHIMERA_VFS_OPEN_READ_ONLY);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_ga,
+                                           (uint32_t) i_ph);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        /* Refused whole: not one op of it ran. */
+        assert(chimera_vfs_compound_num_completed(cp) == 0);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        chimera_vfs_compound_free(cp);
+        chimera_vfs_release(ctx.vfs_thread, h);
+
+        /* The same for an OPEN_CURRENT, whose handle the cursor owns... */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_oc = chimera_vfs_compound_add_open_current(cp,
+                                                     CHIMERA_VFS_OPEN_READ_ONLY,
+                                                     0);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_ga,
+                                           (uint32_t) i_oc);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        chimera_vfs_compound_free(cp);
+
+        /* ...and the GETHANDLE behind it is the op to name instead, which is
+         * the same sequence, built the way that works. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        chimera_vfs_compound_add_open_current(cp, CHIMERA_VFS_OPEN_READ_ONLY,
+                                              0);
+        i_gh = chimera_vfs_compound_add_gethandle(cp);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_ga,
+                                           (uint32_t) i_gh);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        h2 = chimera_vfs_compound_take_handle(cp, (uint32_t) i_gh);
+        assert(h2 != NULL);
+        chimera_vfs_compound_free(cp);
+        chimera_vfs_release(ctx.vfs_thread, h2);
+    }
+    TEST_PASS("a use_handle source that leaves no handle fails the build "
+              "instead of handing an op NULL");
+
     /* ---- PUTROOT makes the export root current ---- */
     {
         uint8_t  mroot_fh[CHIMERA_VFS_FH_SIZE];
