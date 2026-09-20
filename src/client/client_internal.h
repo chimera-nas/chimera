@@ -362,6 +362,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        cookie;
             chimera_readdir_callback_t      callback;
             chimera_readdir_complete_t      complete;

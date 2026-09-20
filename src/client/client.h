@@ -478,6 +478,24 @@ struct chimera_dirent {
     int      namelen;
 };
 
+/*
+ * Called once per entry, in directory order, before `complete`.  Return 0 to
+ * take the entry and go on; non-zero to take it and stop there, in which
+ * case `complete` reports eof clear and THIS entry's cookie -- a resume from
+ * that cookie returns what follows the entry, so a caller that stopped on it
+ * has lost nothing.
+ *
+ * The callback must be REVERSIBLE, and must not emit.  chimera_readdir runs
+ * as a VFS sequence, and the VFS may execute a sequence more than once
+ * before it completes (a retry after a conflict); each execution drives the
+ * callback again from the same starting cookie.  So whatever the callback
+ * keeps has to be REPLACEABLE rather than appended to -- a buffer indexed
+ * by cookie, a page the caller rebuilds from its first entry, the single
+ * entry readdir(3) holds -- and nothing may be sent, written to a stream, or
+ * otherwise made visible outside the caller until `complete` fires.  A
+ * callback that appends to a list, or that writes each entry to a socket as
+ * it arrives, will see duplicates on a re-run.
+ */
 typedef int (*chimera_readdir_callback_t)(
     struct chimera_client_thread *thread,
     const struct chimera_dirent  *dirent,
