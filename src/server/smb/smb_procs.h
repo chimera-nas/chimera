@@ -18,14 +18,9 @@ void
 chimera_smb_create_pending_unregister(
     struct chimera_smb_request *request);
 
-/* Tear down a CREATE parked on a share-acquire ticket whose connection is going
- * away (called from the async-interim drain). */
-void
-chimera_smb_create_abandon_share_park(
-    struct chimera_smb_request *request);
-
-/* The same, for a SEQUENCED create: abandon the run that is parked on its share
- * CLAIM.  Whether the cancel takes or the answer already in flight wins is the
+/* Tear down a CREATE parked on its share CLAIM whose connection is going away
+ * (called from the async-interim drain): abandon the run.  Whether the cancel
+ * takes or the answer already in flight wins is the
  * claim core's arbitration; either way exactly one completion runs, and it
  * tears the half-built open down without replying. */
 void

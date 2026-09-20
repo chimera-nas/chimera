@@ -583,37 +583,33 @@ struct chimera_smb_request {
             /* Set by the open/mkdir callbacks when this CREATE actually created
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */
-            uint8_t                         r_created;
-            /* Bounded re-getattr budget for an ACCESS_DENIED that may be the
+            uint8_t                       r_created;
+            /* Bounded resubmission budget for an ACCESS_DENIED that may be the
              * transient server-owned state of an object a concurrent CREATE is
-             * still constructing (see chimera_smb_create_open_at_callback). */
-            uint8_t                         access_retries;
-            /* Open handle parked across the access-retry getattr. */
-            struct chimera_vfs_open_handle *access_retry_oh;
-            /* Bounded retry budget + parked handle for a share conflict against a
-             * durable holder whose owning connection is mid-disconnect: the
-             * holder will yield once its disconnect parks it, so re-attempt the
-             * open completion on a short timer until it does (or the budget
-             * lapses into a real SHARING_VIOLATION).  See
-             * chimera_smb_create_open_at_callback. */
-            uint16_t                        share_conflict_retries;
-            struct chimera_vfs_open_handle *share_conflict_oh;
+             * still constructing (see chimera_smb_create_gate_rules). */
+            uint8_t                       access_retries;
+            /* Bounded retry budget for a share conflict against a durable holder
+             * whose owning connection is mid-disconnect: the holder will yield
+             * once its disconnect parks it, so re-run the claim on a short timer
+             * until it does (or the budget lapses into a real
+             * SHARING_VIOLATION). */
+            uint16_t                      share_conflict_retries;
             /* Set by the durable-reconnect path: this CREATE is reclaiming a
             * surviving open, not opening a new one.  The access was granted at
             * the original open, and MS-SMB2 has the reconnect ignore the
             * DesiredAccess / CreateOptions / etc. fields entirely, so the
             * getattr-reply callback must not re-run the ACL access check. */
-            uint8_t                         reconnect;
+            uint8_t                       reconnect;
             /* Set by the DH2Q create_guid replay path (MS-SMB2 §3.3.5.9.7): this
              * CREATE re-presents an already-completed create, so the reply must
              * echo the ORIGINAL handle's create_action (stored on the open) and,
              * for an oplock (non-lease) handle, the REQUESTED oplock level rather
              * than the granted one. */
-            uint8_t                         replay;
+            uint8_t                       replay;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */
-            uint32_t                        ctx_present_mask;
+            uint32_t                      ctx_present_mask;
             struct {
                 uint64_t persistent;
                 uint64_t volatile_id;
@@ -690,43 +686,24 @@ struct chimera_smb_request {
             uint8_t                            explicit_index_fork;
             uint16_t                           stream_name_len;
             char                               stream_name[SMB_FILENAME_MAX];
-            struct chimera_vfs_open_handle    *base_oh;
-            /* Async share-acquire park (Phase 2 oplock).  A regular-file open
-             * whose share reservation hard-conflicts with a batch-oplock holder
-             * parks here until the holder closes (then granted) or merely acks
-             * (then SHARING_VIOLATION).  gen_finish_cb resumes the open's tail on
-             * a synchronous OR parked grant; the gen_* fields carry the parked
-             * open's state across the wait. */
-            void                               (*gen_finish_cb)(
-                struct chimera_smb_request   *request,
-                struct chimera_smb_open_file *open_file);
-            struct chimera_smb_open_file      *gen_parked_open;
-            struct chimera_vfs_file_state     *gen_parked_fs;
+            /* The share reservation the run takes: the ticket the CLAIM op
+             * queues when it must wait, and what the reservation RETAINS once
+             * the transient truncate write is shrunk back out of it. */
             struct chimera_vfs_pending_acquire gen_ticket;
             uint8_t                            gen_held_granted;
             uint8_t                            gen_held_denied;
-            uint8_t                            gen_parked;
-            /* Whether this open may PARK on a conflicting batch-oplock break.
-             * Only the regular-file path (open_at_callback) may: the mkdir /
-             * stream / pipe paths resolve a BREAKING conflict straight to
-             * SHARING_VIOLATION.  Separate from gen_finish_cb, which every path
-             * that can defer its tail now sets. */
-            uint8_t                            gen_may_park;
             /* Deferred content replacement (MS-FSA 2.1.5.1.2: an open is
              * adjudicated BEFORE the file is modified, so a refused CREATE must
              * leave it untouched).  A truncating disposition therefore does NOT
              * carry CHIMERA_VFS_OPEN_TRUNCATE into the VFS open; trunc_deferred
-             * records that the replacement is still owed, and it is issued from
-             * chimera_smb_create_issue_truncate once the share reservation is
-             * granted -- while the transient write grant taken for the conflict
-             * check is still held, and before chimera_smb_create_finish_share_
-             * grant shrinks it away.  gen_truncating marks that setattr in
-             * flight, so the open's caller knows the tail has been deferred
-             * exactly as gen_parked does for a break park. */
+             * records that the replacement is still owed, and it is the SETATTR
+             * the run appends BEHIND the share reservation -- while the
+             * transient write grant taken for the conflict check is still held,
+             * and before chimera_smb_create_finish_share_grant shrinks it
+             * away. */
             uint8_t                            trunc_deferred;
-            uint8_t                            gen_truncating;
             struct chimera_vfs_attrs           trunc_attr;
-            /* Set by chimera_smb_create_gen_open_file_normal when the share
+            /* Set by the completion when the share
              * conflict it could not resolve is against a durable holder that will
              * park+yield shortly: an enum chimera_smb_durable_yield value telling
              * the open-completion path whether to retry on a timer instead of
@@ -734,15 +711,6 @@ struct chimera_smb_request {
              * SPECULATIVE = short).  Re-evaluated (cleared first) per create
              * attempt. */
             uint8_t                            gen_share_retry;
-            /* GRANTED/DENIED result stashed by chimera_smb_create_share_park_cb
-             * when the share-park ticket resolves on another thread, so the
-             * owning thread's resume doorbell can finish the open with it.
-             * gen_resume_next is that queue's own link: it must NOT share
-             * async.park_next, because a share-parked CREATE also emits an
-             * async interim and is therefore linked on conn->parked_requests by
-             * that field at the same time. */
-            enum chimera_vfs_claim_result      gen_resume_result;
-            struct chimera_smb_request        *gen_resume_next;
             /* Registration of this deferred DH2Q create on tree->pending_creates
             * (see the comment there): pending_link chains the list, and
             * pending_linked says whether this request is currently on it.  The
@@ -788,7 +756,8 @@ struct chimera_smb_request {
              * dir-lease content break must be SEQUENCED after the file break is
              * acked — so it is emitted on resume, not before the park (MS-SMB2;
              * smbtorture dirlease.overwrite expects break-then-ack-then-break).
-             * The parent_handle is kept alive across the park for the emit. */
+             * The parent's fh is a COPY (seq_parent_fh), so it outlives the park
+             * without the run holding a VFS reference across it. */
             uint8_t                            dir_break_pending;
             uint8_t                            dir_break_has_skip;
             uint32_t                           dir_break_action;
@@ -808,7 +777,6 @@ struct chimera_smb_request {
              * the mid-path link and retries rather than seeing a bare ELOOP. */
             uint16_t                           r_symlink_unparsed;
             char                               r_symlink_target[CHIMERA_VFS_PATH_MAX];
-            struct chimera_vfs_open_handle    *r_symlink_handle;
 
             /* ---- the CREATE as one VFS sequence ----
              *
@@ -821,11 +789,49 @@ struct chimera_smb_request {
              * a resubmission, so nothing here survives a run it did not
              * describe. */
             int8_t                             seq_parent_idx;
+            int8_t                             seq_bound_probe_idx;
             int8_t                             seq_parentopen_idx;
             int8_t                             seq_open_idx;
             int8_t                             seq_share_idx;
             int8_t                             seq_trunc_idx;
             int8_t                             seq_grant_idx;
+            /* The op whose ATTRIBUTES describe the object this create opened,
+             * which is not always the op that produced its handle: a mkdir
+             * reads them off the CREATE and opens the new directory by handle
+             * afterwards, a share-root open reads them off a GETATTR because an
+             * unnamed OPEN reports none, and a stream reads them off the
+             * OPEN_STREAM.  For the ordinary open by name the two are one op. */
+            int8_t                             seq_attr_idx;
+            /* The directory CREATE, so the completion can tell a collision --
+             * which the OPEN_IF fallback and the symlink probe both answer --
+             * from any other failure.  -1 on every other shape. */
+            int8_t                             seq_create_idx;
+            /* The named-stream shape: the OPEN of the BASE file, and the
+             * file-level DELETE reservation taken against it.  The base is also
+             * where the create's own rules are asked, because the object the
+             * client named is the FILE; what the fork adds is its own existence.
+             * -1 on every other shape. */
+            int8_t                             seq_base_idx;
+            int8_t                             seq_base_claim_idx;
+            /* Which shape this run is: CHIMERA_SMB_CREATE_SEQ_*.  Chosen once
+             * per submission, because the completion's classification of a
+             * failure depends on it. */
+            uint8_t                            seq_shape;
+            /* A directory CREATE collided and the disposition was OPEN_IF, so
+             * the create falls back to opening what is there -- the ordinary
+             * shape, with the leaf opened as a directory.  Sticky across the
+             * resubmission, so the fallback cannot loop back into the mkdir. */
+            uint8_t                            seq_mkdir_opened;
+            /* The BASE file's handle, carried between runs for the same reason
+             * the leaf's is: the base reservation is re-taken by every claim
+             * run, and it addresses the base rather than the fork.  Released
+             * once the create is answered -- the fork's handle owns the I/O
+             * from then on. */
+            struct chimera_vfs_open_handle    *seq_base_oh;
+            /* And the ticket that reservation needs.  That acquire never waits
+             * -- a refusal is an answer there -- but an acquire has to have
+             * somewhere to queue before it can decide not to. */
+            struct chimera_vfs_pending_acquire seq_base_ticket;
             /* The open_file the run is building, allocated BEFORE the
              * submission because the share claim embedded in it is what the
              * CLAIM op takes and a claim's ADDRESS is its identity.  Every
@@ -871,11 +877,6 @@ struct chimera_smb_request {
             /* The connection went away while the run was parked: the
              * completion tears the half-built open down and sends no reply. */
             uint8_t                            seq_abandoned;
-            /* The flags the leaf OPEN was issued with, for a PUTHANDLE that
-             * lends its handle to a later run -- the real flags, which
-             * PUTHANDLE requires and which cannot be read off a handle the
-             * run has not produced yet. */
-            unsigned int                       seq_open_flags;
             /* The share claim's arguments, hoisted out of the run: what the
              * handle RETAINS once the transient truncate write is shrunk
              * away, and the trigger words fired around the acquire. */
@@ -2236,15 +2237,6 @@ struct chimera_server_smb_thread {
      * (chimera_vfs_claim_ack_pending() is false).  The re-check makes a
      * parameterless broadcast safe -- only genuinely-settled creates complete. */
     struct evpl_doorbell                lease_resume_doorbell;
-
-    /* Cross-thread queue of CREATEs parked on a share/handle-lease conflict
-     * (chimera_smb_create_share_park_cb) whose vfs ticket resolved on ANOTHER
-     * thread.  The deferred CREATE response's iovecs are thread-local, so the
-     * resolving thread enqueues the request here (with the GRANTED/DENIED result
-     * stashed on it) and rings this thread's lease_resume_doorbell; the handler
-     * drains the queue and completes each on this, its owning, thread.  Guarded
-     * by lease_break_lock. */
-    struct chimera_smb_request         *share_resume_head;
 
     /* Cross-thread queue of blocking byte-range LOCKs (MS-SMB2 3.3.5.14) parked
      * on a conflicting range whose VFS acquire ticket was GRANTED on ANOTHER
