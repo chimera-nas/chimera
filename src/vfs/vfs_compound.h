@@ -978,6 +978,10 @@ struct chimera_vfs_compound_op {
      * is being done under. */
     struct chimera_claim_actor            io_owner;
     uint8_t                               have_io_owner;
+    /* ...and with this set, `io_owner.owner.owner_lo` is not the value the
+     * caller supplied but the fh_hash of the object the op RESOLVES, filled in
+     * at step time -- see chimera_vfs_compound_op_set_io_owner_from_handle. */
+    uint8_t                               io_owner_from_handle;
     /* Executor scratch: whether the two-step I/O type check has run.  Lives on
      * the op only so the open-flags decision, which sees an op and not the
      * sequence, can tell the two steps apart. */
@@ -2437,7 +2441,11 @@ chimera_vfs_compound_add_read(
  * write, into the op's `pre_attr` and `attr`.  A protocol that reports the
  * change -- NFSv3's wcc_data, SMB2 restoring the mtime a write advanced on a
  * write-time-sticky handle -- needs those two readings to be atomic with the
- * write, which a separate GETATTR in the same sequence would not be. */
+ * write, which a separate GETATTR in the same sequence would not be.
+ *
+ * `io_owner` here is a value the caller already holds.  A caller whose open is
+ * in this same run does not hold it yet, and says so with
+ * chimera_vfs_compound_op_set_io_owner_from_handle instead. */
 int
 chimera_vfs_compound_add_write(
     struct chimera_vfs_compound      *compound,
@@ -2480,6 +2488,37 @@ chimera_vfs_compound_op_set_handle(
     struct chimera_vfs_compound    *compound,
     uint32_t                        index,
     struct chimera_vfs_open_handle *handle);
+
+/* READ, WRITE: attribute the I/O to `io_owner`, with owner_lo taken from the
+ * OBJECT THE OP RESOLVES rather than from the value supplied.
+ *
+ * The explicit form -- the adders' `io_owner` argument -- is a value the caller
+ * already has, and it serves every caller that opened the object before the
+ * sequence was built.  It does not serve the one that opens it INSIDE the
+ * sequence.  An NFSv4 operation under an open stateid is attributed to
+ * (client, that open handle's fh_hash), and "PUTFH; OPEN; WRITE(current
+ * stateid)" is a run whose handle does not exist when the run is written: there
+ * is no value to pass.  Left unattributed, the claim layer reads the client's
+ * own write as a stranger's -- denying it against the client's own share
+ * reservation, and recalling the delegation it is being done under.
+ *
+ * So the caller supplies the half it knows -- the proto, the client key, the
+ * lease key, owner_hi -- and this says where the other half comes from.  At
+ * step time owner_lo is overwritten with the fh_hash of the handle the op ends
+ * up acting on: the one `use_handle` names, the one the caller lent, or the
+ * sequence's current object, whichever the op resolves.  fh_hash identifies the
+ * OBJECT and not the open, so all three agree whenever they name the same file,
+ * which is what makes "whichever the op resolves" a definition rather than a
+ * guess.
+ *
+ * Whatever owner_lo the caller put in the struct is ignored.  A READ into the
+ * caller's own buffers takes no owner at all (there is no owned read_into), and
+ * naming one here is refused at build exactly as the adder refuses it. */
+void
+chimera_vfs_compound_op_set_io_owner_from_handle(
+    struct chimera_vfs_compound      *compound,
+    uint32_t                          index,
+    const struct chimera_claim_actor *io_owner);
 
 /* ---- the name-op setters ----
  *

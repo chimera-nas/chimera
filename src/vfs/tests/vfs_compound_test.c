@@ -6379,6 +6379,167 @@ main(
     TEST_PASS("pre fires before admission, post after the grant, deny on a "
               "synchronous refusal");
 
+    /* ---- an io_owner derived from the handle the op ADDRESSES ----
+     * A write cache is held by an owner whose owner_lo is the object's
+     * fh_hash, which is how a protocol that keys on an open handle names
+     * itself (NFSv4: the stateid's handle).  Its own write must not recall it.
+     *
+     * The caller can say so with the explicit io_owner only when it holds that
+     * handle already.  When the OPEN is in the same run the handle does not
+     * exist at build time, and the best a caller could write was an owner with
+     * owner_lo unset -- which is a different owner, and breaks the very cache
+     * the write is being done under.  op_set_io_owner_from_handle is the
+     * caller supplying the half it knows and the executor filling in the
+     * other half from whatever the op resolved. */
+    {
+        struct chimera_vfs_state         *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs          sattr;
+        struct chimera_vfs_open_handle   *oh;
+        struct chimera_vfs_claim          cache;
+        struct chimera_claim_owner        owner_w;
+        struct chimera_claim_actor        actor;
+        struct chimera_vfs_claim_conflict conflict;
+        struct chimera_vfs_file_state    *fs;
+        struct break_rec                  rec;
+        struct evpl_iovec                 wiov;
+        int                               i_open, i_wr;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "ioown", 5,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        /* The holder: owner_lo is the object's fh_hash, exactly as
+         * nfs4_vfs_io_authorize builds it from the stateid's handle. */
+        memset(&owner_w, 0, sizeof(owner_w));
+        owner_w.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_w.client_key = 0x10;
+        owner_w.owner_lo   = oh->fh_hash;
+
+        assert(evpl_iovec_alloc(ctx.evpl, 8, 0, 1, 0, &wiov) == 1);
+        memcpy(evpl_iovec_data(&wiov), "derived!", 8);
+
+        /* The actor as a caller can write it at build time: the proto and the
+         * client are its own, and owner_lo is the half it does not have. */
+        memset(&actor, 0, sizeof(actor));
+        actor.owner          = owner_w;
+        actor.owner.owner_lo = 0;
+
+        /* Derived: PUTFH; OPEN; WRITE(the OPEN's handle), attributed to the
+         * owner the executor completes from that handle.  Nothing recalls. */
+        chimera_vfs_claim_init_oplock(&cache,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                                      &owner_w);
+        memset(&rec, 0, sizeof(rec));
+        cache.break_cb   = break_rec_cb;
+        cache.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs, &cache, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "ioown", 5,
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, NULL, 0, 0, 0);
+        i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 0, &wiov, 1,
+                                              0, 0, NULL);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_wr,
+                                           (uint32_t) i_open);
+        chimera_vfs_compound_op_set_io_owner_from_handle(cp, (uint32_t) i_wr,
+                                                         &actor);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_wr)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        assert(rec.fired == 0);
+        assert(cache.break_state == CHIMERA_CLAIM_BREAK_IDLE);
+
+        /* The same run with the same actor passed the only way a caller could
+         * pass it before -- owner_lo still 0, because there was nothing to put
+         * there -- is a stranger, and the holder loses its write cache. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "ioown", 5,
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, NULL, 0, 0, 0);
+        i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 0, &wiov, 1,
+                                              0, 0, &actor);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_wr,
+                                           (uint32_t) i_open);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_wr)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        assert(rec.fired == 1);
+        assert(cache.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+
+        chimera_vfs_claim_ack(&cache, CHIMERA_CLAIM_CR);
+        chimera_vfs_claim_release(state, fs, &cache);
+
+        /* Derivation does not need use_handle: an op addressing the CURRENT
+         * object resolves a handle too, and fh_hash names the object rather
+         * than the open, so the same actor is completed the same way. */
+        chimera_vfs_claim_init_oplock(&cache,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                                      &owner_w);
+        memset(&rec, 0, sizeof(rec));
+        cache.break_cb   = break_rec_cb;
+        cache.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs, &cache, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 0, &wiov, 1,
+                                              0, 0, NULL);
+        chimera_vfs_compound_op_set_io_owner_from_handle(cp, (uint32_t) i_wr,
+                                                         &actor);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_wr)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        assert(rec.fired == 0);
+        assert(cache.break_state == CHIMERA_CLAIM_BREAK_IDLE);
+
+        chimera_vfs_claim_release(state, fs, &cache);
+        chimera_vfs_state_put(state, fs);
+        evpl_iovec_release(ctx.evpl, &wiov);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("a derived io_owner is completed from the handle the op "
+              "addresses, so a run's own OPEN does not recall its own cache");
+
     /* ---- CLAIM_TEST with TEST_BACKEND, and the PATH open ----
      * memfs arbitrates no byte ranges, so the projection has nowhere to go
      * and the local answer stands, answered inside submit.  A probe uses
