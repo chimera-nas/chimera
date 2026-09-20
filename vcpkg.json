@@ -27,7 +27,6 @@
     },
     "jansson",
     "xxhash",
-    "rocksdb",
-    "libiconv"
+    "rocksdb"
   ]
 }

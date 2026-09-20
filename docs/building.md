@@ -16,6 +16,8 @@ roughly in order of convenience:
 3. The **top-level Makefile**, which wraps the CMake invocations for both
    devcontainer and native workflows.
 
+For MSVC builds on Windows x64 or ARM64, see [Native Windows development](windows.md).
+
 ## Using the devcontainer
 
 The repository ships a [development container](https://containers.dev/) at
