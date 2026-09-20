@@ -20,6 +20,7 @@
  * validated the wire encoding this harness shares with the server.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -789,7 +790,7 @@ mbt_pnfs_ds_start(
     char                          fsname[32];
 
     snprintf(dir, sizeof(dir), "%s/ds%d", env->session_dir, idx);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr, "pnfs ds%d state dir %s: %s\n", idx, dir,
                 strerror(errno));
         exit(1);
@@ -1054,7 +1055,7 @@ mbt_env_open_opts(
         char dir[300], cfg[512];
 
         snprintf(dir, sizeof(dir), "%s/cairn", env->session_dir);
-        if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "cairn dir %s: %s\n", dir, strerror(errno));
             exit(1);
         }
@@ -1303,7 +1304,7 @@ mbt_env_fs_setup_as(
         /* The model's export root is 0777, owned root:root; create it that way
          * (umask is neutralized in the replayer main) so the passthrough tree
          * starts from the same state as the mkfs backends. */
-        if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0777) != 0 && errno != EEXIST) {
             fprintf(stderr, "failed to create %s backing dir %s: %s\n",
                     env->module, dir, strerror(errno));
             exit(1);

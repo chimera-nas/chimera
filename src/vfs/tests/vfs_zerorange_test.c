@@ -27,6 +27,7 @@
  * the checker itself is sound); diskfs reproduces the bug.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

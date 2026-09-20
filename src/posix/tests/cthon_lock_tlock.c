@@ -8,6 +8,7 @@
 // Tests POSIX record locking functionality using fcntl() and lockf()
 //
 
+#include "common/test_host.h"
 #include "common/getopt.h"
 #include "cthon_common.h"
 #include <signal.h>
@@ -642,8 +643,8 @@ main(
                  getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
 
         fprintf(stderr, "Creating session directory %s\n", env.session_dir);
-        (void) mkdir(posix_test_session_root(), 0755);
-        (void) mkdir(env.session_dir, 0755);
+        (void) chimera_test_mkdir(posix_test_session_root(), 0755);
+        (void) chimera_test_mkdir(env.session_dir, 0755);
 
         rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
         if (rc < 0) {

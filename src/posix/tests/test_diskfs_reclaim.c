@@ -16,6 +16,7 @@
  * (park -> snapshot -> slot flip -> resume) many times over.
  */
 
+#include "common/test_host.h"
 #include <inttypes.h>
 
 #include "common/platform.h"

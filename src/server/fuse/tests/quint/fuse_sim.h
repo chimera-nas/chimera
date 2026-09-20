@@ -39,6 +39,7 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -382,7 +383,7 @@ fuse_sim_open(
 
     snprintf(sim->session_dir, sizeof(sim->session_dir),
              "/tmp/fuse_sim_%d", (int) getpid());
-    mkdir(sim->session_dir, 0755);
+    chimera_test_mkdir(sim->session_dir, 0755);
 
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) != 0) {
         fuse_sim_fail("socketpair");

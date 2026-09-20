@@ -6,10 +6,11 @@
 // Based on cthon/basic/test1.c from Connectathon 2004
 //
 // Uses the following important system calls against the server:
-//   mkdir()
+//   chimera_test_mkdir()
 //   creat()
 //   close()
 
+#include "common/test_host.h"
 #include "common/getopt.h"
 #include "cthon_common.h"
 

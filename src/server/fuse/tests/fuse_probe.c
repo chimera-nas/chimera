@@ -14,6 +14,7 @@
  * the code under test.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

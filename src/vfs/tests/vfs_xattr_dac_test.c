@@ -26,6 +26,7 @@
  * defaulting to the working directory.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

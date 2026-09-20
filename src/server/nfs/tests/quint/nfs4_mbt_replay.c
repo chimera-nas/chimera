@@ -30,6 +30,7 @@
  * nfs4_replay.py, in git history -- compared raw bytes.)
  */
 
+#include "common/test_host.h"
 #include "common/getopt.h"
 #include <jansson.h>
 #ifdef _WIN32
@@ -4745,7 +4746,7 @@ main(
     /* Neutralize the host umask so passthrough backends (linux/io_uring) apply
     * client-sent modes verbatim and the export root keeps its 0777 -- the
     * model's fresh share root.  Without this a host umask of 022 turns the
-    * root's mkdir(0777) into 0755, which the strict nfs4 replayer reports as a
+    * root's chimera_test_mkdir(0777) into 0755, which the strict nfs4 replayer reports as a
     * getattr.mode divergence on the very first GETATTR (the nfs3 replayer does
     * the same).  The mkfs backends store modes directly and are unaffected. */
     umask(0);

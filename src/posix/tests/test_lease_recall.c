@@ -15,6 +15,7 @@
  * spurious failure anywhere in the recall/drain/re-acquire loop fails it.
  */
 
+#include "common/test_host.h"
 #include "posix_test_common.h"
 
 int

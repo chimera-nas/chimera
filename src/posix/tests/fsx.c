@@ -21,6 +21,7 @@
  */
 
 #define _GNU_SOURCE
+#include "common/test_host.h"
 #include <limits.h>
 #include <assert.h>
 #include <libgen.h>
@@ -3976,8 +3977,8 @@ main(
         }
         snprintf(chimera_session_dir, sizeof(chimera_session_dir),
                  "%s/fsx_%d_%ld", test_root, getpid(), (long) time(NULL));
-        (void) mkdir(test_root, 0755);
-        if (mkdir(chimera_session_dir, 0755) != 0 && errno != EEXIST) {
+        (void) chimera_test_mkdir(test_root, 0755);
+        if (chimera_test_mkdir(chimera_session_dir, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "Failed to create session directory %s: %s\n",
                     chimera_session_dir, strerror(errno));
             exit(100);
@@ -4066,12 +4067,12 @@ main(
                 /* Create fsx subdirectory for linux backend */
                 char fsx_dir[512];
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
-                (void) mkdir(fsx_dir, 0755);
+                (void) chimera_test_mkdir(fsx_dir, 0755);
                 chimera_server_mount(chimera_server, "share", "linux", chimera_session_dir, NULL);
             } else if (strcmp(chimera_nfs_backend, "io_uring") == 0) {
                 char fsx_dir[512];
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
-                (void) mkdir(fsx_dir, 0755);
+                (void) chimera_test_mkdir(fsx_dir, 0755);
                 chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir, NULL);
             } else if (strcmp(chimera_nfs_backend, "memfs") == 0 ||
                        strcmp(chimera_nfs_backend, "diskfs_io_uring") == 0 ||
@@ -4151,7 +4152,7 @@ main(
                 /* Create fsx subdirectory */
                 char fsx_dir[512];
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
-                (void) mkdir(fsx_dir, 0755);
+                (void) chimera_test_mkdir(fsx_dir, 0755);
             } else {
                 /* mkfs-capable backends mount a named filesystem; create it
                 * first (EEXIST is fine, e.g. a persistent store reused). */

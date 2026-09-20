@@ -19,6 +19,7 @@
  */
 
 #define _GNU_SOURCE
+#include "common/test_host.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 #include "server/server.h"
@@ -544,7 +545,7 @@ main(
     snprintf(env.session_dir, sizeof(env.session_dir),
              "%s/smbtorture_test_%d_%lu", session_base, getpid(), tv.tv_sec);
 
-    if (mkdir(env.session_dir, 0755) < 0 && errno != EEXIST) {
+    if (chimera_test_mkdir(env.session_dir, 0755) < 0 && errno != EEXIST) {
         fprintf(stderr, "Failed to create session directory: %s\n", strerror(errno));
         return EXIT_FAILURE;
     }

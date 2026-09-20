@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/test_host.h"
 #include "common/getopt.h"
 #include "common/compiler.h"
 #include <stdio.h>
@@ -27,7 +28,9 @@
 #include <errno.h>
 #include <signal.h>
 #include "common/dirent.h"
+#ifndef _WIN32
 #include <execinfo.h>
+#endif
 #include <jansson.h>
 #include "posix/posix.h"
 #include "server/server.h"
@@ -65,6 +68,7 @@
  * buffers instead of using stdio, and pre-warm backtrace() at arm time so
  * its one-time dlopen/malloc happens outside the handler.
  */
+#ifndef _WIN32
 static void
 posix_test_child_watchdog_fire(int sig)
 {
@@ -228,6 +232,8 @@ posix_test_fork_exec(char *const cargv[])
     return pid;
 } /* posix_test_fork_exec */
 
+#endif /* Unix cross-process fixtures */
+
 struct posix_test_env {
     struct chimera_posix_client *posix;
     struct chimera_server       *server;       // For NFS backend tests
@@ -346,17 +352,23 @@ static inline const char *
 posix_test_session_root(void)
 {
     const char *root = getenv("CHIMERA_TEST_ROOT");
+#ifndef _WIN32
     struct stat st;
+#endif
 
     if (root) {
         return root;
     }
 
+#ifdef _WIN32
+    return chimera_test_session_root();
+#else
     if (stat("/build", &st) == 0 && S_ISDIR(st.st_mode)) {
         return "/build/test";
     }
 
     return "/tmp/chimera_test";
+#endif
 } // posix_test_session_root
 
 /* Emit the external-module client config into a posix.json "config" object:
@@ -744,7 +756,7 @@ posix_test_start_nfs_server(struct posix_test_env *env)
          * which the container's overlayfs root rejects with EOPNOTSUPP. */
         if (strcmp(nfs_backend_name, "linux") == 0 ||
             strcmp(nfs_backend_name, "io_uring") == 0) {
-            if (mkdir(module_path, 0777) != 0 && errno != EEXIST) {
+            if (chimera_test_mkdir(module_path, 0777) != 0 && errno != EEXIST) {
                 fprintf(stderr, "Failed to create extra export subdir %s: %s\n",
                         module_path, strerror(errno));
                 exit(EXIT_FAILURE);
@@ -926,14 +938,15 @@ posix_test_init(
 
     int         rc;
 
-    (void) mkdir(session_root, 0755);
-    (void) mkdir(env->session_dir, 0755);
+    (void) chimera_test_mkdir(session_root, 0755);
+    (void) chimera_test_mkdir(env->session_dir, 0755);
 
     /* Ownership by the test identity matters for the passthrough (linux)
      * backend, whose server side writes into the dir as cred.uid; chown needs
      * privilege.  Unprivileged (serialized-fallback) runs only use
      * engine-managed backends, where ownership by the invoking user is
      * already right. */
+#ifndef _WIN32
     if (geteuid() == 0) {
         rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
         if (rc < 0) {
@@ -941,6 +954,8 @@ posix_test_init(
             exit(EXIT_FAILURE);
         }
     }
+
+#endif
 
     if (is_nfs) {
         posix_test_start_nfs_server(env);
@@ -1089,9 +1104,7 @@ posix_test_cleanup(
     }
 
     if (remove_session && env->session_dir[0] != '\0') {
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-        rc = system(cmd);
+        rc = chimera_test_remove_tree(env->session_dir);
         if (rc < 0) {
             fprintf(stderr, "Failed to remove session directory %s: %s\n", env->session_dir, strerror(errno));
             exit(EXIT_FAILURE);

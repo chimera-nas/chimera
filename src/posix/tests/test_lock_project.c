@@ -17,6 +17,7 @@
  * Registered for the memfs backend only (the knob lives on that arbiter).
  */
 
+#include "common/test_host.h"
 #include "posix_test_common.h"
 
 static struct flock

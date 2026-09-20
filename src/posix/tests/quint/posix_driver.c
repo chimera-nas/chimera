@@ -26,6 +26,7 @@
 
 #define _GNU_SOURCE
 
+#include "common/test_host.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
@@ -1127,7 +1128,7 @@ handle(json_t *req)
                 }
                 snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
                 pt_tree_path(new_dir, sizeof(new_dir));
-                if (mkdir(new_dir, 0777) != 0) {
+                if (chimera_test_mkdir(new_dir, 0777) != 0) {
                     fprintf(stderr,
                             "posix_driver: newfs mkdir %s failed: %s\n",
                             new_dir, strerror(errno));
@@ -1235,7 +1236,7 @@ handle(json_t *req)
             }
             snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
             pt_tree_path(new_dir, sizeof(new_dir));
-            if (mkdir(new_dir, 0777) != 0) {
+            if (chimera_test_mkdir(new_dir, 0777) != 0) {
                 fprintf(stderr, "posix_driver: newfs mkdir %s failed: %s\n",
                         new_dir, strerror(errno));
                 return res_int(-1, errno);
@@ -1536,7 +1537,7 @@ posix_env_setup(
             int  mrc;
 
             snprintf(dir, sizeof(dir), "%s/fs0", g_pt_root);
-            if (mkdir(dir, 0777) != 0) {
+            if (chimera_test_mkdir(dir, 0777) != 0) {
                 fprintf(stderr, "posix_driver: mkdir %s: %s\n", dir,
                         strerror(errno));
                 return 1;
@@ -1645,7 +1646,7 @@ posix_env_setup(
             char dir[340];
 
             snprintf(dir, sizeof(dir), "%s/fs0", g_pt_root);
-            if (mkdir(dir, 0777) != 0) {
+            if (chimera_test_mkdir(dir, 0777) != 0) {
                 fprintf(stderr, "posix_driver: mkdir %s: %s\n", dir,
                         strerror(errno));
                 return 1;

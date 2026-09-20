@@ -31,6 +31,7 @@
 #ifndef CTL_MBT_COMMON_H
 #define CTL_MBT_COMMON_H
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

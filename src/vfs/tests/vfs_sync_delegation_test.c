@@ -11,6 +11,7 @@
  *     and dispatch falls back to inline execution on the caller thread.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -43,6 +43,12 @@
 #define UTIME_OMIT 1073741822L
 #define SEEK_DATA 3
 #define SEEK_HOLE 4
+#define _PC_NAME_MAX 1
+#define _PC_PATH_MAX 2
+#define _PC_LINK_MAX 3
+#define _PC_SYMLINK_MAX 4
+#define _PC_NO_TRUNC 5
+#define _PC_CHOWN_RESTRICTED 6
 
 typedef struct chimera_posix_stat_info {
     uint64_t st_dev, st_ino, st_nlink, st_rdev;

@@ -64,3 +64,13 @@ endif()
 add_executable(native_getopt_test ../getopt_test.c)
 target_include_directories(native_getopt_test PRIVATE "${CHIMERA_SOURCE_ROOT}/src")
 add_test(NAME chimera/native/getopt COMMAND native_getopt_test)
+
+add_executable(native_host_fixture_test ../host_fixture_test.c)
+target_include_directories(native_host_fixture_test PRIVATE
+    "${CHIMERA_SOURCE_ROOT}/src" "${CHIMERA_SOURCE_ROOT}/ext/libevpl/include")
+if(MSVC)
+    target_compile_definitions(native_host_fixture_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(native_host_fixture_test PRIVATE /experimental:c11atomics)
+    target_link_libraries(native_host_fixture_test PRIVATE bcrypt)
+endif()
+add_test(NAME chimera/native/host_fixture COMMAND native_host_fixture_test)

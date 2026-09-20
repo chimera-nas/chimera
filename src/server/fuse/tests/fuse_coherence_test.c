@@ -14,6 +14,7 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -280,7 +281,7 @@ main(
     snprintf(a, sizeof(a), "%s/coh_dir", argv[1]);
     snprintf(b, sizeof(b), "%s/coh_dir", argv[2]);
 
-    CHECK(mkdir(a, 0755) == 0, "A makes a directory");
+    CHECK(chimera_test_mkdir(a, 0755) == 0, "A makes a directory");
 
     CHECK(stat(b, &st) == 0, "B primes the directory's attrs");
 
@@ -289,7 +290,7 @@ main(
     usleep(20000); /* ensure a distinguishable mtime */
 
     snprintf(b2, sizeof(b2), "%s/coh_dir/inner", argv[1]);
-    CHECK(mkdir(b2, 0755) == 0, "A makes a directory inside it");
+    CHECK(chimera_test_mkdir(b2, 0755) == 0, "A makes a directory inside it");
 
     waited = poll_for_mtime_change(b, &old_mtime);
     CHECK(waited >= 0,

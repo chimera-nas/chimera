@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/test_host.h"
 #include "common/getopt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,8 +134,8 @@ client_test_init(
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-    (void) mkdir(test_root, 0755);
-    (void) mkdir(env->session_dir, 0755);
+    (void) chimera_test_mkdir(test_root, 0755);
+    (void) chimera_test_mkdir(env->session_dir, 0755);
     /* Hand the dir to the test credential so the linux-passthrough backend,
      * where the server acts on the host fs as that uid, can create in it.
      * Needs CAP_CHOWN, which only the privileged CI runs have; everywhere

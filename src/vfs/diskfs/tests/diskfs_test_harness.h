@@ -17,6 +17,7 @@
 #ifndef DISKFS_TEST_HARNESS_H
 #define DISKFS_TEST_HARNESS_H
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

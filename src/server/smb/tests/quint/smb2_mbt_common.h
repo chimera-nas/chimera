@@ -46,6 +46,7 @@
 #ifndef SMB2_MBT_COMMON_H
 #define SMB2_MBT_COMMON_H
 
+#include "common/test_host.h"
 #include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>

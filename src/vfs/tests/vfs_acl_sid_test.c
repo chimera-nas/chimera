@@ -26,6 +26,7 @@
  * where <backend> is memfs (default), cairn, diskfs_io_uring, or diskfs_aio.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

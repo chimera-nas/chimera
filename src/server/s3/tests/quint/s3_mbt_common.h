@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -643,7 +644,7 @@ s3_mbt_env_open_module(
         char dir[300], cfg[512];
 
         snprintf(dir, sizeof(dir), "%s/cairn", env->session_dir);
-        if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "cairn dir %s: %s\n", dir, strerror(errno));
             exit(1);
         }
@@ -741,7 +742,7 @@ s3_mbt_env_fs_setup(
         int  mrc;
 
         snprintf(dir, sizeof(dir), "%s/%s", env->pt_root, fsname);
-        if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0777) != 0 && errno != EEXIST) {
             fprintf(stderr, "failed to create %s backing dir %s: %s\n",
                     env->module, dir, strerror(errno));
             exit(1);
