@@ -73,48 +73,32 @@ chimera_dispatch_open(
                                 request);
 } /* chimera_dispatch_open */
 
-static void
-chimera_open_at_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
-{
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *thread         = request->thread;
-    chimera_open_callback_t        callback       = request->open.callback;
-    void                          *callback_arg   = request->open.private_data;
-    int                            heap_allocated = request->heap_allocated;
-
-    if (heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
-
-    callback(thread, error_code, oh, callback_arg);
-
-} /* chimera_open_at_complete */
-
+/*
+ * openat(2) with a real directory descriptor: the descriptor is lent and
+ * checked to be a directory, then the same OPEN_PATH the path form issues
+ * from the root resolves the relative path from it -- see
+ * chimera_client_compound_at_dir for why a path op and not a named OPEN.
+ * The completion is the path form's: the handle is taken from the last op.
+ */
 static inline void
 chimera_dispatch_open_at(
-    struct chimera_client_thread   *thread,
-    struct chimera_vfs_open_handle *parent_handle,
-    struct chimera_client_request  *request)
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_client_compound_at_dir(thread, request,
+                                              request->open.parent_handle,
+                                              request->open.dir_open_flags);
+
     /* set_attr (creation mode) is initialized by the caller. */
-    chimera_vfs_open_at(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        parent_handle,
-        request->open.path,
-        request->open.path_len,
-        request->open.flags,
-        &request->open.set_attr,
-        CHIMERA_VFS_ATTR_FH,
-        0,
-        0,
-        chimera_open_at_complete,
-        request);
+    chimera_vfs_compound_add_open_path(compound,
+                                       request->open.path,
+                                       request->open.path_len,
+                                       request->open.flags,
+                                       &request->open.set_attr,
+                                       CHIMERA_VFS_ATTR_FH);
+
+    chimera_vfs_compound_submit(compound, chimera_open_sequence_complete,
+                                request);
 } /* chimera_dispatch_open_at */
