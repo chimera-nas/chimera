@@ -12,6 +12,7 @@
 #include "nfs4_callback.h"
 #include "server/server.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 
 /* Parked-GETATTR context while a CB_GETATTR to a write-delegation holder is
@@ -345,59 +346,81 @@ chimera_nfs4_getattr_open_callback(
 } /* chimera_nfs4_getattr_open_callback */
 
 /* A named-attribute directory is synthetic: its attributes are the base file's
- * owner/timestamps presented as a directory.  Override mode/type/nlink so the
- * object reads back as NF4ATTRDIR, then run the normal marshalling path (which
- * derives the NF4ATTRDIR type override from req->fh). */
+ * owner/timestamps presented as a directory.  The run is the base PATH-opened
+ * and stat'd; the overrides that make it read back as NF4ATTRDIR are applied
+ * here, and then the normal marshalling path runs (which derives the
+ * NF4ATTRDIR type override from req->fh).
+ *
+ * The marshalling happens with the sequence still alive, because an ACL among
+ * the attributes belongs to the op until the compound is freed. */
+#define NFS4_ATTRDIR_GETATTR_OP 2
+
 static void
 chimera_nfs4_getattr_attrdir_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct GETATTR4res *res = &req->res_compound.resarray[req->index].opgetattr;
+    struct nfs_request                   *req  = private_data;
+    struct GETATTR4args                  *args =
+        &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res                   *res =
+        &req->res_compound.resarray[req->index].opgetattr;
+    const struct chimera_vfs_compound_op *gop;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
-        if (req->handle) {
-            chimera_vfs_release(req->thread->vfs_thread, req->handle);
-            req->handle = NULL;
-        }
+        chimera_vfs_compound_free(compound);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    attr->va_mode      = S_IFDIR | 0755;
-    attr->va_nlink     = 2;
-    attr->va_size      = 0;
-    attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_NLINK;
+    gop  = chimera_vfs_compound_op(compound, NFS4_ATTRDIR_GETATTR_OP);
+    attr = gop->attr;
 
-    chimera_nfs4_getattr_finish(req, attr);
+    attr.va_mode      = S_IFDIR | 0755;
+    attr.va_nlink     = 2;
+    attr.va_size      = 0;
+    attr.va_set_mask |= CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_NLINK;
+
+    res->status = chimera_nfs4_getattr_fill(req, args, res, &attr,
+                                            req->fh, req->fhlen);
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_getattr_attrdir_complete */
 
 static void
-chimera_nfs4_getattr_attrdir_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs4_getattr_attrdir(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req)
 {
-    struct nfs_request  *req  = private_data;
-    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4args         *args =
+        &req->args_compound->argarray[req->index].opgetattr;
+    struct chimera_vfs_compound *compound;
+    const uint8_t               *base;
+    int                          base_len;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs4_compound_complete(req, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
+    chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
 
-    req->handle = handle;
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        chimera_nfs4_attr2mask(args->attr_request,
-                                               args->num_attr_request),
-                        chimera_nfs4_getattr_attrdir_complete,
-                        req);
-} /* chimera_nfs4_getattr_attrdir_open_callback */
+    chimera_vfs_compound_add_putfh(compound, base, base_len);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+    chimera_vfs_compound_add_getattr(compound,
+                                     chimera_nfs4_attr2mask(
+                                         args->attr_request,
+                                         args->num_attr_request));
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_getattr_attrdir_complete,
+                                req);
+} /* chimera_nfs4_getattr_attrdir */
 
 void
 chimera_nfs4_getattr(
@@ -425,16 +448,8 @@ chimera_nfs4_getattr(
     /* GETATTR on a synthetic named-attribute directory: stat the base file it
      * wraps, then present it as a directory. */
     if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
-        const uint8_t *base;
-        int            base_len;
-
-        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
-
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            base, base_len,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                            chimera_nfs4_getattr_attrdir_open_callback,
-                            req);
+        req->handle = NULL;
+        chimera_nfs4_getattr_attrdir(thread, req);
         return;
     }
 

@@ -4233,8 +4233,16 @@ chimera_nfs4_compound_try_vfs(
         /* Mirrors chimera_nfs4_putfh.  The pseudo-root is not a wrapped VFS
          * handle at all; the decode authenticates the wire handle, recovers the
          * inner VFS handle, and re-derives the export id and squashed
-         * credential the sequence will run under; a named-attribute directory
-         * handle addresses a synthetic object the VFS does not have. */
+         * credential the sequence will run under.
+         *
+         * A NAMED-ATTRIBUTE DIRECTORY HANDLE IS THE OTHER ONE, and it stays
+         * out: it names no VFS object.  Its VFS identity is the BASE file
+         * whose handle it prefixes, and every op addressed to it acts on that
+         * base or on a fork of it, so it cannot seed a cursor that holds VFS
+         * handles.  Each such op is a sequence of its own instead, built by
+         * its own handler -- which is where the base is recovered from the
+         * wire handle (nfs4_proc_openattr.c and the attrdir arms of LOOKUP,
+         * READDIR, REMOVE, OPEN and GETATTR are all runs now). */
         if (fh_is_nfs4_root(pa->object.data, pa->object.len) ||
             pa->object.len > NFS4_FHSIZE) {
             return 0;
