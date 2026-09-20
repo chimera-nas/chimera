@@ -364,6 +364,33 @@ remote_release_main(void *arg)
     return NULL;
 } /* remote_release_main */
 
+/* A cancel asked for from a thread that is NOT the one that submitted, which
+ * is where every real cancel trigger arrives: a FUSE_INTERRUPT off the kernel
+ * queue, an SMB2 CANCEL on another channel, a teardown on the thread the
+ * disconnect landed on.  It needs no VFS thread of its own -- the post only
+ * latches and rings the submitting thread's doorbell -- which is itself part
+ * of the contract under test. */
+struct remote_cancel {
+    struct chimera_vfs_compound *compound;
+    int                          posts;
+    pthread_t                    self;
+};
+
+static void *
+remote_cancel_main(void *arg)
+{
+    struct remote_cancel *rc = arg;
+    int                   i;
+
+    rc->self = pthread_self();
+
+    for (i = 0; i < rc->posts; i++) {
+        chimera_vfs_compound_cancel_post(rc->compound);
+    }
+
+    return NULL;
+} /* remote_cancel_main */
+
 /* The park notification.  It counts itself -- "exactly once per submission"
  * is most of the contract -- and keeps the op index it was handed, which is
  * the whole of what a front end needs to emit its interim. */
@@ -498,6 +525,61 @@ pump_probe(
     assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
     chimera_vfs_compound_free(cp);
 } /* pump_probe */
+
+/*
+ * Drain the thread's doorbell when there is nothing of our own to wait for.
+ *
+ * A cancel_post that arrives for a run which is already over rides the
+ * doorbell home and produces no completion, so there is no wakeup to wait on
+ * -- and spinning the event loop blind is how a test waits forever.  So a
+ * wakeup is provoked instead: a run parks behind the conflicting claim the
+ * caller is holding on `oh`, its cancel is posted from another thread, and
+ * the completion that comes back is the thing to wait for.  Anything posted
+ * BEFORE this call was on the list before this post was, so the drain that
+ * delivers this one has already taken it.
+ *
+ * Costs exactly one completion, like pump_probe, which is what makes
+ * "nothing else completed" checkable around it.
+ */
+static void
+pump_cancel(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *oh,
+    uint32_t                        owner_lo)
+{
+    struct chimera_vfs_claim           claim;
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_claim_owner         owner;
+    struct chimera_vfs_compound       *cp;
+    struct remote_cancel               rc;
+    pthread_t                          tid;
+
+    memset(&owner, 0, sizeof(owner));
+    owner.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+    owner.owner_lo = owner_lo;
+    chimera_vfs_claim_init_range(&claim, true, false, 0, 16, &owner);
+
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_puthandle(cp, oh,
+                                       CHIMERA_VFS_OPEN_READ_ONLY |
+                                       CHIMERA_VFS_OPEN_WRITE_ONLY);
+    chimera_vfs_compound_add_claim(cp, &claim, &ticket,
+                                   CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                   CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                   0, 0, 0, 0);
+    chimera_vfs_compound_submit(cp, compound_cb, ctx);
+    assert(!ctx->done);
+
+    rc.compound = cp;
+    rc.posts    = 1;
+    assert(pthread_create(&tid, NULL, remote_cancel_main, &rc) == 0);
+    assert(pthread_join(tid, NULL) == 0);
+
+    wait_done(ctx);
+    assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ECANCELED);
+    chimera_vfs_compound_free(cp);
+} /* pump_cancel */
 
 static int
 find_has(
@@ -3707,6 +3789,430 @@ main(
     }
     TEST_PASS("a parked RECALL reports its park and is cancellable; the breaks "
               "it kicked stay kicked, and NOWAIT never parks");
+
+    /* ---- cancel_post: the cancel whose trigger is on another thread ----
+     * chimera_vfs_compound_cancel is the submitting thread's call and runs
+     * the completion inline, which is exactly what a FUSE_INTERRUPT, an SMB2
+     * CANCEL or a teardown cannot have: they arrive on whatever thread read
+     * them, holding their own state lock.  cancel_post is the same cancel
+     * marshalled onto the submitting thread, and what is pinned here is that
+     * it decides nothing where it is called, that the completion still fires
+     * exactly once and still on the submitting thread, and that posting twice
+     * is posting once. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           claim_a, claim_b;
+        struct chimera_vfs_pending_acquire ticket_b;
+        struct chimera_claim_owner         owner_a, owner_b;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_file_state     *fs;
+        struct remote_cancel               rc;
+        struct park_rec                    park;
+        pthread_t                          self = pthread_self();
+        pthread_t                          tid;
+        int                                i_open, i_lock, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "cx", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 51;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.owner_lo = 52;
+
+        /* Someone else holds the range, so the run below parks. */
+        chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
+        assert(chimera_vfs_claim_try_acquire(state, fs, &claim_a, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        /* ---- a post from a second thread takes the park back here ---- */
+        chimera_vfs_claim_init_range(&claim_b, true, false, 0, 16, &owner_b);
+        memset(&park, 0, sizeof(park));
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b,
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+
+        assert(ctx.callbacks == 0);
+        assert(park.calls == 1);
+        assert(park.index == (uint32_t) i_lock);
+
+        rc.compound = cp;
+        rc.posts    = 1;
+        assert(pthread_create(&tid, NULL, remote_cancel_main, &rc) == 0);
+        assert(pthread_join(tid, NULL) == 0);
+
+        /* The post decided nothing: no completion ran on the posting thread,
+         * and none has run here either -- this thread has not been near its
+         * doorbell since. */
+        assert(ctx.callbacks == 0);
+        assert(!ctx.done);
+
+        /* It comes home, and the cancel is made here. */
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(pthread_equal(ctx.cb_thread, self));
+        assert(!pthread_equal(ctx.cb_thread, rc.self));
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ECANCELED);
+        assert(chimera_vfs_compound_op(cp, i_lock)->status ==
+               CHIMERA_VFS_ECANCELED);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_lock) ==
+               NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* ---- two posts are one completion ----
+         * Both are made before this thread goes near its doorbell, so the
+         * second meets the latch the first set. */
+        chimera_vfs_claim_init_range(&claim_b, true, false, 0, 16, &owner_b);
+        memset(&park, 0, sizeof(park));
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b,
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                0, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        assert(park.calls == 1);
+
+        rc.compound = cp;
+        rc.posts    = 2;
+        assert(pthread_create(&tid, NULL, remote_cancel_main, &rc) == 0);
+        assert(pthread_join(tid, NULL) == 0);
+        assert(ctx.callbacks == 0);
+
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ECANCELED);
+
+        /* A third post, now that the run is over and the compound is still
+         * the caller's: it rides home again and finds nothing to take back.
+         * The drain it rides is the one pump_cancel provokes, and the only
+         * completion in there is pump_cancel's own. */
+        rc.posts = 1;
+        assert(pthread_create(&tid, NULL, remote_cancel_main, &rc) == 0);
+        assert(pthread_join(tid, NULL) == 0);
+        chimera_vfs_compound_free(cp);
+        pump_cancel(&ctx, &cred, oh, 53);
+        assert(ctx.callbacks == 2);
+
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs, &claim_a);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("cancel_post cancels from another thread, completes once on the "
+              "submitting one, and two posts are one completion");
+
+    /* ---- cancel_post racing the grant, from a third thread ----
+     * The same arbitration as the inline cancel's race, one hop further out:
+     * the holder lets go on one thread while the cancel is posted from
+     * another, and the submitting thread is where both answers land.  Either
+     * outcome is correct; what may never happen is both, or neither.  Looped,
+     * because a race proved once is a race not proved. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           claim_a, claim_b;
+        struct chimera_vfs_pending_acquire ticket_b;
+        struct chimera_claim_owner         owner_a, owner_b;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_file_state     *fs, *fs_b;
+        struct remote_release              rr;
+        struct remote_cancel               rc;
+        pthread_t                          self = pthread_self();
+        pthread_t                          rtid, ctid;
+        int                                cancels = 0, grants = 0;
+        int                                joined;
+        int                                i_open, i_lock, iter;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "cy", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 61;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.owner_lo = 62;
+
+        for (iter = 0; iter < 100; iter++) {
+            chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16,
+                                         &owner_a);
+            assert(chimera_vfs_claim_try_acquire(state, fs, &claim_a,
+                                                 &conflict) ==
+                   CHIMERA_CLAIM_GRANTED);
+
+            chimera_vfs_claim_init_range(&claim_b, true, false, 0, 16,
+                                         &owner_b);
+
+            cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+            chimera_vfs_compound_add_puthandle(cp, oh,
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY);
+            i_lock = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b,
+                                                    CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                    CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                    0, 0, 0, 0);
+            ctx.callbacks = 0;
+            chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+            assert(ctx.callbacks == 0);
+
+            /* Two other threads at once: one lets the range go, the other
+             * asks for the run to be cancelled.  Neither may complete
+             * anything itself.
+             *
+             * On odd iterations the release is allowed to finish before this
+             * thread goes near its doorbell, so the post can only arrive to
+             * find the ticket already answered and the "the grant owns the
+             * completion" arm is taken whatever the scheduler does.  On even
+             * ones the drain runs WHILE both are in flight, which is the real
+             * race: whether the posted cancel reaches the claim core before
+             * the release does is nobody's to say. */
+            rr.vfs      = ctx.vfs;
+            rr.fs       = fs;
+            rr.claim    = &claim_a;
+            rc.compound = cp;
+            rc.posts    = 1;
+            assert(pthread_create(&rtid, NULL, remote_release_main, &rr) == 0);
+
+            joined = 0;
+            if (iter & 1) {
+                assert(pthread_join(rtid, NULL) == 0);
+                joined = 1;
+            }
+
+            assert(pthread_create(&ctid, NULL, remote_cancel_main, &rc) == 0);
+
+            wait_done(&ctx);
+
+            /* Joined only now: the compound is the caller's until it is
+             * freed, so a post that has not been made yet is still legal. */
+            if (!joined) {
+                assert(pthread_join(rtid, NULL) == 0);
+            }
+            assert(pthread_join(ctid, NULL) == 0);
+
+            /* Exactly one completion, here, whichever side won. */
+            assert(ctx.callbacks == 1);
+            assert(pthread_equal(ctx.cb_thread, self));
+
+            if (chimera_vfs_compound_status(cp) == CHIMERA_VFS_ECANCELED) {
+                cancels++;
+                assert(chimera_vfs_compound_op(cp, i_lock)->status ==
+                       CHIMERA_VFS_ECANCELED);
+                assert(chimera_vfs_compound_take_file_state(
+                           cp, (uint32_t) i_lock) == NULL);
+                chimera_vfs_compound_free(cp);
+            } else {
+                grants++;
+                assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+                assert(chimera_vfs_compound_op(cp, i_lock)->claim_result ==
+                       CHIMERA_CLAIM_GRANTED);
+                fs_b = chimera_vfs_compound_take_file_state(cp,
+                                                            (uint32_t) i_lock);
+                assert(fs_b != NULL);
+                /* Freed while the post may still be riding: the core holds
+                 * the memory back rather than recycle it underneath the
+                 * doorbell, and the drain finishes the job. */
+                chimera_vfs_compound_free(cp);
+                chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs_b,
+                                                 &claim_b);
+                chimera_vfs_state_put(state, fs_b);
+            }
+
+            assert(ctx.callbacks == 1);
+        }
+
+        /* Which side wins a true race is the scheduler's business, so the
+         * split is not asserted -- what is, is that every iteration produced
+         * exactly one completion (checked above), and that the grant arm was
+         * really taken: the odd iterations force it. */
+        assert(cancels + grants == 100);
+        assert(grants >= 50);
+
+        /* One last drain, so a post that was still riding when the final
+         * iteration finished is collected rather than left holding a
+         * compound the free deferred. */
+        chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
+        assert(chimera_vfs_claim_try_acquire(state, fs, &claim_a, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+        ctx.callbacks = 0;
+        pump_cancel(&ctx, &cred, oh, 63);
+        assert(ctx.callbacks == 1);
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs, &claim_a);
+
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("cancel_post racing a grant from a third thread produces exactly "
+              "one completion, whichever wins");
+
+    /* ---- cancel_post for a run that is not parked ----
+     * The caller learns nothing synchronously, so it cannot know whether the
+     * run it posted for is still waiting -- which is the point: a post that
+     * finds nothing to take back is legal and silent, and the run answers
+     * with whatever it actually did.  Two shapes: a post for a run that has
+     * already finished (the compound still the caller's, and then freed while
+     * the post is still riding), and a post that lands before the run is even
+     * submitted, which must not poison it. */
+    {
+        struct chimera_vfs_state         *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs          sattr;
+        struct chimera_vfs_open_handle   *oh;
+        struct chimera_vfs_claim          claim_a;
+        struct chimera_claim_owner        owner_a;
+        struct chimera_vfs_claim_conflict conflict;
+        struct chimera_vfs_file_state    *fs;
+        struct remote_cancel              rc;
+        pthread_t                         tid;
+        int                               i_open, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "cz", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        /* Held for the whole block: it is what pump_cancel's runs park
+         * behind. */
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 71;
+        chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
+        assert(chimera_vfs_claim_try_acquire(state, fs, &claim_a, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        /* A run that never parks: it answers with what it did, and the post
+         * that arrives afterwards changes nothing. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_ga = chimera_vfs_compound_add_getattr(cp,
+                                                CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+
+        rc.compound = cp;
+        rc.posts    = 1;
+        assert(pthread_create(&tid, NULL, remote_cancel_main, &rc) == 0);
+        assert(pthread_join(tid, NULL) == 0);
+        assert(ctx.callbacks == 1);
+
+        /* Freed with the post still in flight -- the legal case the caller
+         * cannot avoid, and the one the core defends: the free releases what
+         * the compound held and leaves the recycle to the drain. */
+        chimera_vfs_compound_free(cp);
+
+        pump_cancel(&ctx, &cred, oh, 72);
+        assert(ctx.callbacks == 2);
+
+        /* A post that lands before the run does.  It is drained by
+         * pump_cancel below, finds a compound that has not been submitted,
+         * and leaves it to run normally afterwards. */
+        cp          = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        rc.compound = cp;
+        rc.posts    = 1;
+        assert(pthread_create(&tid, NULL, remote_cancel_main, &rc) == 0);
+        assert(pthread_join(tid, NULL) == 0);
+
+        ctx.callbacks = 0;
+        pump_cancel(&ctx, &cred, oh, 73);
+        assert(ctx.callbacks == 1);
+
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 2);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs, &claim_a);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("cancel_post on a run that is not parked is silent, and the run "
+              "answers with its real outcome");
 
     /* ---- REMOVE that matches its victim ----
      * The name-op setters ride behind the adder, so a caller that has no lease

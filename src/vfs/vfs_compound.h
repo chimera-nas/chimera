@@ -103,6 +103,10 @@
  * abandons a parked run and completes it CHIMERA_VFS_ECANCELED.  Which parks
  * are visible to either -- the ones the executor drives itself, not the ones
  * an ordinary op takes below it -- is on the park callback's own contract.
+ * A cancel whose trigger arrives on another thread, which is most of them --
+ * a FUSE_INTERRUPT, an SMB2 CANCEL, a teardown -- uses
+ * chimera_vfs_compound_cancel_post instead, which marshals rather than
+ * arbitrate where it is called.
  *
  * ADDRESSING SOMETHING OTHER THAN CURRENT.  Ops address the current object,
  * which is what makes a sequence a sequence.  One kind of caller cannot: a
@@ -1303,6 +1307,9 @@ typedef void (*chimera_vfs_compound_callback_t)(
  * The callback must not submit, cancel or free anything of this compound's.
  * It runs from inside the very acquire that is parking, before the executor
  * has finished recording the park; cancelling from inside it aborts.
+ * chimera_vfs_compound_cancel_post is the exception, and is safe here: it
+ * arbitrates nothing in the call, so the cancel it asks for is made from the
+ * drain, after the park has been recorded.
  */
 typedef void (*chimera_vfs_compound_park_cb_t)(
     struct chimera_vfs_compound *compound,
@@ -2135,11 +2142,13 @@ chimera_vfs_compound_submit(
  *
  * Called ONLY from the submitting thread -- the thread that will run, or is
  * running, the completion -- and only while the run is parked, which is what
- * the park callback tells the caller.  This is the deadline pattern: the
- * park callback emits the protocol's interim and arms a timer on the
- * submitting thread; the timer, if it fires first, calls this.  An SMB2
- * CANCEL, a FUSE INTERRUPT, an NLM CANCEL, and a session teardown are the
- * same shape.  The caller maps ECANCELED to its own cancelled status.
+ * the park callback tells the caller.  This is the deadline pattern, and
+ * nothing else: the park callback emits the protocol's interim and arms a
+ * timer on the submitting thread; the timer, if it fires first, calls this.
+ * An SMB2 CANCEL, a FUSE INTERRUPT, an NLM CANCEL and a session teardown
+ * want the same cancel but arrive on some other thread, and they call
+ * chimera_vfs_compound_cancel_post below, which marshals here.  The caller
+ * maps ECANCELED to its own cancelled status.
  *
  * Returns non-zero when the cancel TOOK, and 0 when it did not.  There is no
  * third answer, and both are ordinary:
@@ -2185,6 +2194,79 @@ chimera_vfs_compound_submit(
  */
 int
 chimera_vfs_compound_cancel(
+    struct chimera_vfs_compound *compound);
+
+/*
+ * Ask for a run to be cancelled FROM ANY THREAD.
+ *
+ * chimera_vfs_compound_cancel above is the submitting thread's call: it
+ * arbitrates on the spot and runs the completion inline when it wins.  That
+ * is the right shape for the deadline timer, which is armed on the submitting
+ * thread by the park callback and fires there.  It is the wrong shape for
+ * every other cancel a front end actually has, because every other cancel
+ * TRIGGER arrives somewhere else: a FUSE_INTERRUPT is read off the kernel
+ * queue by whichever thread got to it, an SMB2 CANCEL arrives on another
+ * channel, an NLM CANCEL on another connection, and a session or connection
+ * teardown runs wherever the disconnect landed.  Such a caller holds its own
+ * state lock over the list it found the run in, and must not have a
+ * completion -- which replies, frees and recycles ITS request -- run inside
+ * the call, on its thread, under its lock.
+ *
+ * So this one decides nothing where it is called.  It marshals the request to
+ * cancel onto the submitting thread through the core's own resume doorbell --
+ * the same one that carries a deferred CLAIM grant home -- and the ordinary
+ * chimera_vfs_compound_cancel runs there.  It never blocks, never runs the
+ * completion, and never re-enters the caller: safe to call with the caller's
+ * own state lock held, which is the whole point of it.
+ *
+ * WHAT THE CALLER MAY ASSUME ON RETURN.  Nothing about the outcome: there is
+ * no return value because nothing has been arbitrated yet.  What is promised
+ * is what was already promised -- the completion callback fires EXACTLY ONCE,
+ * on the submitting thread, and it now carries one of two answers:
+ *
+ *   CHIMERA_VFS_ECANCELED, at the op that was parked.  The cancel took, and
+ *     everything on chimera_vfs_compound_cancel's non-zero arm holds.
+ *
+ *   the run's REAL outcome.  The cancel lost, or there was nothing to cancel
+ *     by the time it arrived: the grant won the race, or the run was never
+ *     parked, or it had already finished.  A post that finds nothing to take
+ *     back is legal and silent -- a caller whose timer and whose protocol
+ *     event both fire need not arbitrate between them.
+ *
+ * Because the caller learns nothing synchronously, it must keep whatever the
+ * completion needs -- the compound, its request, its reply buffers -- alive
+ * until the completion fires.  That is the whole difference from the inline
+ * form, where a taken cancel hands the completion back before the call
+ * returns.
+ *
+ * IDEMPOTENCE.  Any number of posts for one run produce one completion.  A
+ * latch on the compound admits one post at a time: a second while the first
+ * is still riding is dropped, because the ride it asks for is already booked,
+ * and one that arrives after the first was drained rides again and finds
+ * nothing to take back.  Posting against the run's own completion is the same
+ * arbitration the inline form makes, made once, on the submitting thread.
+ * The two forms do not interfere: a deadline timer that fires inline while a
+ * post is in flight simply cancels first, and the post arrives to find the
+ * run over.
+ *
+ * LIVENESS -- THE CALLER'S OBLIGATION.  Post only while the compound is
+ * guaranteed not to have been freed yet.  A pointer to a freed compound is a
+ * use-after-free the core cannot detect, here as anywhere.  In practice this
+ * is free: the consumers that need this keep their parked runs on a list
+ * under a lock, a run leaves that list only in its own completion, which
+ * takes the same lock, and the post is made while holding it.  The core
+ * covers the half the caller CANNOT: a post made legally, while the run was
+ * alive, that is still on the doorbell when the run completes and the caller
+ * frees the compound.  Such a free releases everything the compound held but
+ * defers the recycle to the drain, so the vehicle never lands on a compound
+ * that has been handed out again.
+ *
+ * Unlike the inline form this is safe from inside the park callback: nothing
+ * is cancelled in the call, and the drain runs long after the park has been
+ * recorded.
+ */
+void
+chimera_vfs_compound_cancel_post(
     struct chimera_vfs_compound *compound);
 
 /*
