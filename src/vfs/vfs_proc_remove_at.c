@@ -233,9 +233,25 @@ chimera_vfs_remove_at_dispatch(
     request->proto_private_data                    = private_data;
 
     /* Recall any delegation/oplock on the file being removed before unlinking
-     * it (the caller supplies its FH when known). */
-    chimera_vfs_io_recall(request, child_fh, child_fh_len,
-                          child_fh_len ? chimera_vfs_hash(child_fh, child_fh_len) : 0,
+     * it (the caller supplies its FH when known).
+     *
+     * EXCEPT for the MATCHED form, whose FH is an IDENTITY and not a recall
+     * request: "the type assertion and the recall request are the caller's to
+     * have already made -- which every match caller (SMB delete-on-close, the
+     * durable reap) has".  Recalling it here would break the holder a second
+     * time, after the caller's own single-step break: the SMB delete-on-close
+     * peer gets RH -> R from the arming recall and then a full revoke to NONE
+     * from this one (smbtorture smb2.lease.unlink: count 0x2 vs 0x1, and the
+     * second notification carries no ACK_REQUIRED).  The name-based delete
+     * withholds a sticky-resolved FH here for exactly this reason -- see
+     * child_fh_resolved on the gate -- and a matched delete needs the same
+     * split, which it cannot make for itself: withholding the FH would
+     * disable the match the whole form exists for. */
+    chimera_vfs_io_recall(request,
+                          match_child_fh ? NULL : child_fh,
+                          match_child_fh ? 0 : child_fh_len,
+                          (!match_child_fh && child_fh_len) ?
+                          chimera_vfs_hash(child_fh, child_fh_len) : 0,
                           0 /* namespace recall: revoke fully */,
                           chimera_vfs_dispatch);
 
