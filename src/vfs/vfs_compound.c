@@ -4229,7 +4229,15 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
             /* The type check comes first, through a PATH open; the data then
              * comes through a DATA one.  They are different handles from
              * different caches, so the sequence opens twice -- exactly as the
-             * per-op path does, and for the same reason. */
+             * per-op path does, and for the same reason.
+             *
+             * READ names the capability it needs (READ_ONLY, which a lent
+             * read-write handle carries alongside WRITE_ONLY -- the bits are
+             * capabilities, see PUTHANDLE); WRITE names none, so the write
+             * access a lent handle carries is the backend's to refuse rather
+             * than this rule's.  Asking for WRITE_ONLY here would also be
+             * asking the executor to OPEN for write when it opens for itself,
+             * which is a different question from what a lent handle serves. */
             if (!op->io_typechecked_flag) {
                 return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
             }
