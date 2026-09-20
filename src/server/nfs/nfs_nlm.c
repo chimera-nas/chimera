@@ -17,6 +17,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * The FH opens below are internal lock-bookkeeping opens (the client already
@@ -193,7 +194,11 @@ struct nlm_test_ctx {
     struct evpl                      *evpl;
     struct evpl_rpc2_encoding        *encoding;
     struct evpl_rpc2_conn            *conn;
-    struct chimera_vfs_open_handle   *handle;
+    /* The probe, built before the run and read by the executor while the
+     * CLAIM_TEST op runs.  Never inserted, so nothing keeps a pointer to it
+     * afterwards -- but it has to outlive the submission, which the build's
+     * stack frame would not. */
+    struct chimera_vfs_claim          probe;
     xdr_opaque                        cookie;
     uint8_t                           cookie_buf[LM_MAXSTRLEN];
     uint64_t                          offset;
@@ -209,84 +214,68 @@ struct nlm_test_ctx {
     uint32_t                          fh_len;
 };
 
+/* PUTFH seats the object, OPEN_CURRENT opens it, and the CLAIM_TEST asks the
+ * question.  The open is a PATH open because a probe reads only the file
+ * handle -- and because a data open of a FIFO blocks, which is the whole
+ * reason the compound's probe ops want one. */
+#define NLM_TEST_OP_PROBE 2
+
 static void
-chimera_nfs_nlm4_test_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs_nlm4_test_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nlm_test_ctx              *ctx       = private_data;
-    struct chimera_server_nfs_thread *thread    = ctx->thread;
-    struct chimera_server_nfs_shared *shared    = thread->shared;
-    struct evpl                      *evpl      = ctx->evpl;
-    struct evpl_rpc2_encoding        *encoding  = ctx->encoding;
-    struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
-    struct chimera_vfs_file_state    *file_state;
-    struct chimera_claim_owner        owner;
-    struct chimera_vfs_claim          probe;
-    struct chimera_vfs_claim_conflict conflict;
-    enum chimera_vfs_claim_result     result;
-    struct nlm4_testres               res;
-    int                               rc;
+    struct nlm_test_ctx                  *ctx      = private_data;
+    struct chimera_server_nfs_thread     *thread   = ctx->thread;
+    struct chimera_server_nfs_shared     *shared   = thread->shared;
+    struct evpl                          *evpl     = ctx->evpl;
+    struct evpl_rpc2_encoding            *encoding = ctx->encoding;
+    const struct chimera_vfs_compound_op *vop;
+    enum chimera_vfs_error                error_code;
+    struct nlm4_testres                   res;
+    int                                   rc;
 
     res.cookie.len  = ctx->cookie.len;
     res.cookie.data = ctx->cookie.data;
 
+    error_code = chimera_vfs_compound_status(compound);
+
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs_debug("NLM TEST open failed: error %d -> NLM4_STALE_FH", error_code);
+        chimera_nfs_debug("NLM TEST failed: error %d -> NLM4_STALE_FH",
+                          error_code);
         res.test_stat.stat = NLM4_STALE_FH;
         goto send_reply;
     }
 
-    file_state = chimera_vfs_state_get(vfs_state,
-                                       handle->fh, handle->fh_len,
-                                       handle->fh_hash, false);
+    /* A denial is an ANSWER, so the op succeeded and the run went on -- the
+     * probe never fails for being refused.  A file nobody holds a claim on
+     * answers GRANTED without the executor having to invent the "no state
+     * means no holders" case this used to make for itself. */
+    vop = chimera_vfs_compound_op(compound, NLM_TEST_OP_PROBE);
 
-    if (!file_state) {
-        /* No state on this file means no claims held — TEST grants. */
-        chimera_vfs_release(thread->vfs_thread, handle);
-        res.test_stat.stat = NLM4_GRANTED;
-        goto send_reply;
-    }
-
-    memset(&owner, 0, sizeof(owner));
-    owner.proto      = CHIMERA_CLAIM_PROTO_NLM;
-    owner.client_key = nlm_owner_client_key(ctx->caller_name);
-    owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
-
-    chimera_vfs_claim_init_range(&probe, ctx->exclusive, /* smb */ false,
-                                 ctx->offset,
-                                 NLM_POSIX_LEN_TO_VFS(ctx->length),
-                                 &owner);
-
-    memset(&conflict, 0, sizeof(conflict));
-
-    result = chimera_vfs_claim_test(file_state, &probe, &conflict);
-
-    if (result == CHIMERA_CLAIM_GRANTED) {
+    if (vop->claim_result == CHIMERA_CLAIM_GRANTED) {
         res.test_stat.stat = NLM4_GRANTED;
     } else {
         res.test_stat.stat = NLM4_DENIED;
         /* WRITE_LT iff the holder's used bits include a write-implying
          * capability (a write delegation reports exclusive though it holds
          * no LW). */
-        res.test_stat.holder.exclusive = (conflict.used &
+        res.test_stat.holder.exclusive = (vop->conflict.used &
                                           (CHIMERA_CLAIM_W |
                                            CHIMERA_CLAIM_CW |
                                            CHIMERA_CLAIM_LW)) != 0;
         res.test_stat.holder.svid     = 0;  /* not exposed by the claim core */
         res.test_stat.holder.oh.len   = 0;
         res.test_stat.holder.oh.data  = NULL;
-        res.test_stat.holder.l_offset = conflict.offset;
+        res.test_stat.holder.l_offset = vop->conflict.offset;
         /* conflict.length already uses UINT64_MAX for a to-EOF/whole-file
          * holder, which is exactly the NLM to-EOF sentinel. */
-        res.test_stat.holder.l_len = conflict.length;
+        res.test_stat.holder.l_len = vop->conflict.length;
     }
 
-    chimera_vfs_state_put(vfs_state, file_state);
-    chimera_vfs_release(thread->vfs_thread, handle);
-
  send_reply:
+    chimera_vfs_compound_free(compound);
+
     chimera_nfs_debug("NLM TEST cb: stat=%d", res.test_stat.stat);
 
     if (ctx->proc == 16) {
@@ -298,7 +287,7 @@ chimera_nfs_nlm4_test_open_cb(
         chimera_nfs_abort_if(rc, "Failed to send NLM TEST reply");
     }
     free(ctx);
-} /* chimera_nfs_nlm4_test_open_cb */
+} /* chimera_nfs_nlm4_test_complete */
 
 /* -------------------------------------------------------------------------
  * LOCK procedure callbacks
@@ -847,6 +836,8 @@ chimera_nfs_nlm4_do_test(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nlm_test_ctx              *ctx;
+    struct chimera_vfs_compound      *compound;
+    struct chimera_claim_owner        owner;
     uint8_t                           vfh[CHIMERA_VFS_FH_SIZE];
     int                               vfh_len;
     uint16_t                          vexp;
@@ -933,14 +924,26 @@ chimera_nfs_nlm4_do_test(
         memcpy(ctx->cookie_buf, args->cookie.data, args->cookie.len);
     }
 
-    /* Conflict detection is delegated to vfs_state — the test_open_cb
-     * does the lookup and probe synchronously once the FH is validated. */
-    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
-                        vfh,
-                        vfh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs_nlm4_test_open_cb,
-                        ctx);
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NLM;
+    owner.client_key = nlm_owner_client_key(ctx->caller_name);
+    owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
+
+    chimera_vfs_claim_init_range(&ctx->probe, ctx->exclusive, /* smb */ false,
+                                 ctx->offset,
+                                 NLM_POSIX_LEN_TO_VFS(ctx->length),
+                                 &owner);
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          &nlm_system_cred);
+
+    chimera_vfs_compound_add_putfh(compound, vfh, vfh_len);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+    chimera_vfs_compound_add_claim_test(compound, &ctx->probe, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs_nlm4_test_complete, ctx);
 } /* chimera_nfs_nlm4_do_test */
 
 void
