@@ -848,6 +848,26 @@ struct chimera_smb_request {
              * teardown may take the park back with
              * chimera_vfs_compound_cancel.  Cleared when the run completes. */
             uint8_t                            seq_parked;
+            /* This create is honestly TWO runs: one to open the leaf, then the
+             * out-of-band work that has to reach outside this open (the
+             * AppInstanceId failover, the disconnected-persistent refusal, the
+             * parked-writer purge), then one to claim it.  Set when persistent
+             * handles are configured or the request carries an AppInstanceId,
+             * which are the only ways any of that is not a no-op. */
+            uint8_t                            seq_split;
+            /* The claim run addresses a handle this server already holds and
+            * LENT to it, so the completion must not take one off the run. */
+            uint8_t                            seq_borrowed_handle;
+            /* The share CLAIM has had its first, non-waiting attempt, and the
+             * conflict it met was a holder mid-break that nothing could purge
+             * out of the way -- so the next attempt WAITS for that holder's
+             * answer.  Asking that way round is what keeps the purge before the
+             * park: a WAIT that queued first would be waiting on a holder the
+             * purge would have removed. */
+            uint8_t                            seq_share_wait;
+            /* The leaf handle, carried between the two runs: the first took it
+             * off its OPEN and the second lends it back with PUTHANDLE. */
+            struct chimera_vfs_open_handle    *seq_oh;
             /* The connection went away while the run was parked: the
              * completion tears the half-built open down and sends no reply. */
             uint8_t                            seq_abandoned;
