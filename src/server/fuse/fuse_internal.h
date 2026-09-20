@@ -407,19 +407,23 @@ struct chimera_fuse_request {
             uint32_t size;      /* getxattr/listxattr size probe or limit */
         } xattr;
         struct {
-            /* Heap entry embedding the lease/ticket; the lease's address
-             * must be stable once inserted, so it never lives here. */
+            /* Heap entry embedding the claim/ticket; the claim's address is
+             * its identity once inserted and must outlive the sequence AND
+             * the lock, so it never lives here. */
             struct chimera_fuse_lock      *entry;
             struct chimera_fuse_lock_file *lf;
-            /* 0 = dispatch in progress, 1 = callback completed inline,
-             * 2 = dispatch returned (a later callback must marshal home) */
-            atomic_int                     phase;
+            /* GETLK's probe, which is never inserted and so needs only to
+             * outlive the sequence -- which the request does. */
+            struct chimera_vfs_claim       probe;
             int                            result_errno;
-            uint64_t                       start;
-            uint64_t                       end;
-            int                            exclusive;
-            int                            wait;
             int                            parked; /* on mount->parked_locks */
+            /* An interrupt has been marshalled to this request's own thread
+             * and the doorbell still holds the pointer, so the run's
+             * completion must not reply and recycle underneath it: it parks
+             * the outcome in result_errno with `done` and lets the drain
+             * settle.  Both under mount->lock_lock. */
+            int                            cancel_posted;
+            int                            done;
             struct chimera_fuse_request   *park_prev;
             struct chimera_fuse_request   *park_next;
         } lock;
@@ -720,12 +724,12 @@ chimera_fuse_locks_release_owner(
     uint64_t                    owner);
 
 /* Cancel the parked SETLKW with the given unique, if any.  Returns 1 when a
- * parked lock was found and cancellation initiated (the original request
- * replies EINTR via its owning thread), 0 when the unique is unknown. */
+ * parked lock was found and cancellation initiated (the cancel itself runs on
+ * the request's own thread, which replies EINTR if it wins the race against
+ * the grant), 0 when the unique is unknown.  Callable from any thread. */
 int
 chimera_fuse_locks_interrupt(
     struct chimera_fuse_mount *mount,
-    struct chimera_vfs_state  *state,
     uint64_t                   unique);
 
 /* Teardown: cancel parked acquires and release every granted lock. */
@@ -734,7 +738,8 @@ chimera_fuse_locks_shutdown(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_mount  *mount);
 
-/* Reply path for a blocked lock resumed on its owning thread. */
+/* Cancel-or-reply path for a blocked lock marshalled home to its own
+ * thread -- see chimera_fuse_locks_interrupt. */
 void
 chimera_fuse_lock_resume(
     struct chimera_fuse_request *req);

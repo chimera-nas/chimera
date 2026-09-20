@@ -12,19 +12,31 @@
  * per-process identity POSIX wants: the kernel hands us the same token for
  * every fd of one process.
  *
- * vfs_state stores opaque per-holder ranges and never merges or splits, so
- * POSIX range surgery is done here (the NFSv4 LOCK/LOCKU precedent): a new
- * lock or unlock trims every overlapping range the same owner holds,
- * re-inserting the kept sub-ranges.  A same-owner re-insert can never fail:
- * the owner held the covering range throughout, so no conflicting claim can
- * have appeared inside it.
+ * Taking one is a VFS SEQUENCE: PUTHANDLE lends the kernel's own open file,
+ * and a CLAIM (or, for GETLK, a CLAIM_TEST) asks the claim core against it.
+ * GETLK is a probe; SETLK is CLAIM(WAIT), which rides out a breakable
+ * caching holder and reports a hard lock conflict as it stands; SETLKW is
+ * CLAIM(WAIT|WAIT_HARD), which additionally queues behind that lock.
  *
- * A blocking SETLKW parks in vfs_state's pending queue with the request
- * held open; the grant callback can fire on any thread, so completion is
- * marshalled home through the per-thread resume doorbell.  FUSE_INTERRUPT
- * cancels a parked lock through chimera_vfs_claim_cancel, whose
+ * What stays OUT OF BAND is what a sequence op cannot be.  vfs_state stores
+ * opaque per-holder ranges and never merges or splits, so POSIX range
+ * surgery is done here (the NFSv4 LOCK/LOCKU precedent): a new lock or
+ * unlock trims every overlapping range the same owner holds, re-inserting
+ * the kept sub-ranges.  A same-owner re-insert can never fail -- the owner
+ * held the covering range throughout, so no conflicting claim can have
+ * appeared inside it -- and a release is not reversible, so neither belongs
+ * behind an op that can fail.  F_UNLCK and the FLUSH lock_owner release are
+ * releases outright.
+ *
+ * A blocking SETLKW parks the run, and the park callback is what puts the
+ * request where FUSE_INTERRUPT can find it.  The interrupt arrives on
+ * whatever thread read it from the kernel's shared queue, while the cancel
+ * belongs to the thread that submitted -- it finishes the run inline when it
+ * takes -- so the interrupt only ASKS, marshalling the request home through
+ * the per-thread resume doorbell.  There, chimera_vfs_compound_cancel's
  * return value decides exactly one of the two racers (grant vs cancel)
- * completes the request.
+ * completes the request, exactly as chimera_vfs_claim_cancel's did beneath
+ * it before the sequence owned the acquire.
  */
 
 #include "common/thread.h"
@@ -34,7 +46,6 @@
 
 #include "fuse_internal.h"
 #include "vfs/vfs_claim.h"
-#include "vfs/vfs_procs.h"
 
 #define CHIMERA_FUSE_LOCK_LEN(start, end) \
         ((end) >= CHIMERA_FUSE_LOCK_EOF ? UINT64_MAX : (end) - (start) + 1)
@@ -217,6 +228,54 @@ chimera_fuse_lock_trim(
 
 /* --- GETLK --- */
 
+/* The CLAIM_TEST's index in the GETLK sequence (PUTHANDLE is 0). */
+#define CHIMERA_FUSE_GETLK_OP_CLAIM 1
+
+static void
+chimera_fuse_getlk_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request             *req = private_data;
+    const struct chimera_vfs_compound_op    *op;
+    const struct chimera_vfs_claim_conflict *conflict;
+    enum chimera_vfs_error                   status;
+    struct fuse_lk_out                       out;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    memset(&out, 0, sizeof(out));
+    out.lk.type = F_UNLCK;
+
+    op       = chimera_vfs_compound_op(compound, CHIMERA_FUSE_GETLK_OP_CLAIM);
+    conflict = &op->conflict;
+
+    /* Only a byte-range lock is a lock: a conflicting cache claim (some
+     * client's read cache, possibly this mount's own) breaks transparently
+     * when a real lock is taken and must not be reported as one. */
+    if (op->claim_result != CHIMERA_CLAIM_GRANTED &&
+        chimera_fuse_conflict_is_lock(conflict)) {
+        out.lk.type  = (conflict->used & CHIMERA_CLAIM_LW) ? F_WRLCK : F_RDLCK;
+        out.lk.start = conflict->offset;
+        if (conflict->length == UINT64_MAX ||
+            conflict->offset + conflict->length - 1 >= CHIMERA_FUSE_LOCK_EOF) {
+            out.lk.end = CHIMERA_FUSE_LOCK_EOF;
+        } else {
+            out.lk.end = conflict->offset + conflict->length - 1;
+        }
+        /* The claim core reports conflicts by value without a pid; NFS
+         * clients give the same answer for remote holders. */
+        out.lk.pid = 0;
+    }
+
+    chimera_fuse_reply(req, 0, &out, sizeof(out));
+} /* chimera_fuse_getlk_sequence_complete */
+
 void
 chimera_fuse_op_getlk(
     struct chimera_fuse_request *req,
@@ -224,15 +283,9 @@ chimera_fuse_op_getlk(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_lk_in          *in    = arg;
-    struct chimera_fuse_mount        *mount = req->channel->mount;
-    struct chimera_vfs_state         *state = chimera_fuse_vfs_state(req);
-    struct chimera_fuse_open_file    *file;
-    struct chimera_vfs_file_state    *file_state;
-    struct chimera_vfs_claim          probe;
-    struct chimera_vfs_claim_conflict conflict;
-    enum chimera_vfs_claim_result     result;
-    struct fuse_lk_out                out;
+    const struct fuse_lk_in       *in    = arg;
+    struct chimera_fuse_mount     *mount = req->channel->mount;
+    struct chimera_fuse_open_file *file;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -246,64 +299,63 @@ chimera_fuse_op_getlk(
 
     file = chimera_fuse_file(in->fh);
 
-    memset(&out, 0, sizeof(out));
-    out.lk.type = F_UNLCK;
-
-    file_state = chimera_vfs_state_get(state, file->handle->fh,
-                                       file->handle->fh_len,
-                                       file->handle->fh_hash, false);
-
-    if (!file_state) {
-        /* No lease state on the file at all: nothing can conflict. */
-        chimera_fuse_reply(req, 0, &out, sizeof(out));
-        return;
-    }
-
-    chimera_fuse_lock_lease_init(&probe, mount, in->owner,
+    /* The probe is never inserted, so it need only outlive the sequence --
+     * which the request does, being recycled by the reply. */
+    chimera_fuse_lock_lease_init(&req->u.lock.probe, mount, in->owner,
                                  in->lk.start, in->lk.end,
                                  in->lk.type == F_WRLCK);
 
-    memset(&conflict, 0, sizeof(conflict));
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
 
-    result = chimera_vfs_claim_test(file_state, &probe, &conflict);
+    /* The kernel named an open file; the sequence borrows it, flagged as
+     * it was opened.  A claim wants only the fh, so a data handle serves
+     * the PATH want and nothing is re-opened. */
+    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
+                                       file->open_flags);
 
-    /* Only a byte-range lock is a lock: a conflicting cache claim (some
-     * client's read cache, possibly this mount's own) breaks transparently
-     * when a real lock is taken and must not be reported as one. */
-    if (result != CHIMERA_CLAIM_GRANTED &&
-        chimera_fuse_conflict_is_lock(&conflict)) {
-        out.lk.type  = (conflict.used & CHIMERA_CLAIM_LW) ? F_WRLCK : F_RDLCK;
-        out.lk.start = conflict.offset;
-        if (conflict.length == UINT64_MAX ||
-            conflict.offset + conflict.length - 1 >= CHIMERA_FUSE_LOCK_EOF) {
-            out.lk.end = CHIMERA_FUSE_LOCK_EOF;
-        } else {
-            out.lk.end = conflict.offset + conflict.length - 1;
-        }
-        /* The claim core reports conflicts by value without a pid; NFS
-         * clients give the same answer for remote holders. */
-        out.lk.pid = 0;
-    }
+    /* Local only: no TEST_BACKEND.  A FUSE kernel asking F_GETLK wants what
+     * this server arbitrates, which is what the per-op probe answered. */
+    chimera_vfs_compound_add_claim_test(req->compound, &req->u.lock.probe, 0);
 
-    chimera_vfs_state_put(state, file_state);
-
-    chimera_fuse_reply(req, 0, &out, sizeof(out));
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_getlk_sequence_complete, req);
 } /* chimera_fuse_op_getlk */
 
 /* --- SETLK / SETLKW --- */
 
-/* Complete a lock request on its owning thread: commit or discard the
- * entry, do the POSIX range surgery, and reply. */
+/* The CLAIM's index in the SETLK sequence (PUTHANDLE is 0). */
+#define CHIMERA_FUSE_SETLK_OP_CLAIM 1
+
+/*
+ * Settle a finished lock request on its owning thread: commit or discard the
+ * entry, do the POSIX range surgery, and reply.
+ *
+ * Unless an interrupt is in flight.  chimera_fuse_locks_interrupt marshals
+ * the request to this thread with the mount lock held, so from the moment it
+ * posts until the drain consumes it there is a doorbell holding this pointer
+ * -- and replying would recycle the request underneath it.  So the outcome is
+ * parked on the request instead and the drain settles it, which it does
+ * having first cleared the flag.
+ */
 static void
-chimera_fuse_lock_finish(struct chimera_fuse_request *req)
+chimera_fuse_lock_settle(
+    struct chimera_fuse_request *req,
+    int                          error)
 {
     struct chimera_fuse_mount     *mount = req->channel->mount;
     struct chimera_vfs_state      *state = chimera_fuse_vfs_state(req);
     struct chimera_fuse_lock      *entry = req->u.lock.entry;
     struct chimera_fuse_lock_file *lf    = req->u.lock.lf;
-    int                            error = req->u.lock.result_errno;
 
     evpl_mutex_lock(&mount->lock_lock);
+
+    if (req->u.lock.cancel_posted) {
+        req->u.lock.result_errno = error;
+        req->u.lock.done         = 1;
+        evpl_mutex_unlock(&mount->lock_lock);
+        return;
+    }
 
     if (req->u.lock.parked) {
         DL_DELETE2(mount->parked_locks, req, u.lock.park_prev, u.lock.park_next);
@@ -324,44 +376,121 @@ chimera_fuse_lock_finish(struct chimera_fuse_request *req)
     evpl_mutex_unlock(&mount->lock_lock);
 
     chimera_fuse_reply(req, error, NULL, 0);
-} /* chimera_fuse_lock_finish */
+} /* chimera_fuse_lock_settle */
 
+/*
+ * The doorbell drain, on the request's own thread: an interrupt asked for
+ * this run to be cancelled, or the completion handed us an outcome it could
+ * not reply with.
+ */
 void
 chimera_fuse_lock_resume(struct chimera_fuse_request *req)
 {
-    chimera_fuse_lock_finish(req);
+    struct chimera_fuse_mount *mount = req->channel->mount;
+    int                        done, error;
+
+    evpl_mutex_lock(&mount->lock_lock);
+    req->u.lock.cancel_posted = 0;
+    done                      = req->u.lock.done;
+    error                     = req->u.lock.result_errno;
+    evpl_mutex_unlock(&mount->lock_lock);
+
+    if (done) {
+        /* The run finished while the interrupt was in flight and left the
+         * outcome for us rather than free a request the doorbell still
+         * pointed at.  Whichever answer it carries is the one that stands:
+         * the interrupt never reached the cancel. */
+        chimera_fuse_lock_settle(req, error);
+        return;
+    }
+
+    /*
+     * Still parked, so the cancel decides -- and its return value is the
+     * whole arbitration, never a guess.  Non-zero: we took the park back and
+     * the completion has ALREADY RUN inside this call, with ECANCELED, which
+     * settled and replied EINTR (cancel_posted is clear again, so it did not
+     * defer).  Zero: the grant owns the completion, it is running or about to
+     * on whatever thread released the conflict, and it comes home to this one
+     * carrying whatever the run actually did.  Exactly one of the two
+     * completes the request, and neither may be touched here afterwards.
+     */
+    chimera_vfs_compound_cancel(req->compound);
 } /* chimera_fuse_lock_resume */
 
+/*
+ * The run parked: put the request where FUSE_INTERRUPT can find it.  Fires
+ * once, on this thread, from inside the acquire -- before anything can
+ * answer it, because the answer comes home through this thread's doorbell.
+ */
 static void
-chimera_fuse_setlk_acquire_cb(
-    enum chimera_vfs_claim_result            result,
-    struct chimera_vfs_claim                *granted_claim,
-    const struct chimera_vfs_claim_conflict *conflict,
-    void                                    *private_data)
+chimera_fuse_lock_park_cb(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req      = private_data;
-    int                          expected = 0;
+    struct chimera_fuse_request *req   = private_data;
+    struct chimera_fuse_mount   *mount = req->channel->mount;
 
-    switch (result) {
-        case CHIMERA_CLAIM_GRANTED:
-            req->u.lock.result_errno = 0;
+    evpl_mutex_lock(&mount->lock_lock);
+    req->u.lock.parked = 1;
+    DL_APPEND2(mount->parked_locks, req, u.lock.park_prev, u.lock.park_next);
+    evpl_mutex_unlock(&mount->lock_lock);
+} /* chimera_fuse_lock_park_cb */
+
+static void
+chimera_fuse_lock_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request   *req   = private_data;
+    struct chimera_vfs_state      *state = chimera_fuse_vfs_state(req);
+    struct chimera_vfs_file_state *taken;
+    enum chimera_vfs_error         status;
+    int                            error;
+
+    status = chimera_vfs_compound_status(compound);
+
+    switch (status) {
+        case CHIMERA_VFS_OK:
+            error = 0;
             break;
-        case CHIMERA_CLAIM_BREAKING:
-            /* Non-blocking lock against a breakable caching holder: the
-             * break has been kicked; report unavailable-now. */
-            req->u.lock.result_errno = EAGAIN;
+        case CHIMERA_VFS_EAGAIN:
+            /* The claim was refused: a hard lock conflict a non-blocking
+             * SETLK will not wait for.  A breakable caching holder never
+             * lands here -- WAIT rides those out. */
+            error = EAGAIN;
             break;
-        case CHIMERA_CLAIM_DENIED:
+        case CHIMERA_VFS_ECANCELED:
+            /* FUSE_INTERRUPT took the park back. */
+            error = EINTR;
+            break;
         default:
-            req->u.lock.result_errno = EAGAIN;
+            error = chimera_fuse_errno(status);
             break;
     } /* switch */
 
-    if (!atomic_compare_exchange_strong(&req->u.lock.phase, &expected, 1)) {
-        /* The dispatch path has returned; marshal home for the reply. */
-        chimera_fuse_resume_post(req);
+    /*
+     * On GRANTED the claim is inserted and the file state comes with it; the
+     * contract is that the caller takes it.  We then PUT it, because the
+     * (owner, file) bucket already holds a reference to the very same state
+     * -- chimera_vfs_state_get is refcounted per fh, and the executor
+     * resolved it from the same handle the bucket was built from.  The
+     * bucket's is the one to keep: it covers every lock in the bucket at
+     * once and a parked acquire holding none, it is what the release paths
+     * that never ran through a sequence use (the trim's re-insert, the FLUSH
+     * owner release, shutdown), and its lifetime is already exactly the
+     * bucket's.  Keeping the sequence's instead would mean a reference per
+     * lock and a bucket with none before the first grant.
+     */
+    taken = chimera_vfs_compound_take_file_state(compound,
+                                                 CHIMERA_FUSE_SETLK_OP_CLAIM);
+
+    if (taken) {
+        chimera_vfs_state_put(state, taken);
     }
-} /* chimera_fuse_setlk_acquire_cb */
+
+    chimera_fuse_lock_settle(req, error);
+} /* chimera_fuse_lock_sequence_complete */
 
 static void
 chimera_fuse_setlk_unlock(
@@ -402,7 +531,8 @@ chimera_fuse_op_setlk(
     struct chimera_fuse_open_file *file;
     struct chimera_fuse_lock_file *lf;
     struct chimera_fuse_lock      *entry;
-    int                            wait, expected;
+    unsigned int                   claim_flags;
+    int                            wait;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -453,71 +583,60 @@ chimera_fuse_op_setlk(
     entry->lf = lf;
     lf->pending++;
 
-    /*
-     * F_SETLK must fail EAGAIN on a real lock conflict without waiting --
-     * but a conflicting CACHING lease is not a lock: it is someone's read
-     * cache (possibly this very mount's own invalidation grant, whose
-     * owner identity deliberately differs from lock owners), it breaks in
-     * milliseconds, and reporting it as EAGAIN would fabricate a lock that
-     * does not exist.  So probe first: a hard conflict answers EAGAIN
-     * immediately, anything else acquires with wait so breakable holders
-     * are recalled and waited through.  A conflicting lock that lands in
-     * the probe-to-acquire window turns this SETLK into a short wait; a
-     * delayed success is more faithful than a spurious failure.
-     */
-    if (!wait) {
-        struct chimera_vfs_claim_conflict conflict;
-        enum chimera_vfs_claim_result     probe;
-
-        memset(&conflict, 0, sizeof(conflict));
-
-        probe = chimera_vfs_claim_test(lf->file_state, &entry->claim,
-                                       &conflict);
-
-        if (probe == CHIMERA_CLAIM_DENIED ||
-            (probe == CHIMERA_CLAIM_BREAKING &&
-             chimera_fuse_conflict_is_lock(&conflict))) {
-            lf->pending--;
-            chimera_fuse_lock_file_maybe_free(mount, state, lf);
-            evpl_mutex_unlock(&mount->lock_lock);
-            free(entry);
-            chimera_fuse_reply(req, EAGAIN, NULL, 0);
-            return;
-        }
-    }
-
-    req->u.lock.entry        = entry;
-    req->u.lock.lf           = lf;
-    req->u.lock.result_errno = EIO;
-    req->u.lock.wait         = wait;
-    req->u.lock.start        = entry->start;
-    req->u.lock.end          = entry->end;
-    req->u.lock.exclusive    = entry->exclusive;
-    atomic_store(&req->u.lock.phase, 0);
-
-    /* Findable by FUSE_INTERRUPT while parked (any acquire may park at
-     * least for the duration of a caching-lease break). */
-    req->u.lock.parked = 1;
-    DL_APPEND2(mount->parked_locks, req, u.lock.park_prev, u.lock.park_next);
-
     evpl_mutex_unlock(&mount->lock_lock);
 
-    /* wait=true so breakable cache holders are recalled and waited through;
-     * wait_hard=false so a genuine lock conflict still completes rather than
-     * queueing forever (SETLKW's blocking is the caller's own retry). */
-    chimera_vfs_claim_acquire(req->thread->vfs_thread, state, lf->file_state,
-                              &entry->claim, &entry->ticket,
-                              true, wait,
-                              chimera_fuse_setlk_acquire_cb,
-                              NULL,
-                              req);
+    req->u.lock.entry         = entry;
+    req->u.lock.lf            = lf;
+    req->u.lock.result_errno  = EIO;
+    req->u.lock.parked        = 0;
+    req->u.lock.cancel_posted = 0;
+    req->u.lock.done          = 0;
 
-    expected = 0;
+    /*
+     * WAIT so breakable cache holders are recalled and waited through: a
+     * conflicting CACHING lease is not a lock.  It is someone's read cache
+     * (possibly this very mount's own invalidation grant, whose owner
+     * identity deliberately differs from lock owners), it breaks in
+     * milliseconds, and reporting it as EAGAIN would fabricate a lock that
+     * does not exist.
+     *
+     * WAIT_HARD only for SETLKW.  Without it the executor's answer to a hard
+     * conflict IS the EAGAIN this used to pre-probe for: the claim core
+     * denies synchronously on a conflicting byte-range lock rather than
+     * queueing, and a BREAKING answer can never name one (a range claim is
+     * never revocable -- no consumer gives it a break_cb -- and the ACCESS
+     * escape that produces the other BREAKING conflicts reports the cache it
+     * escaped onto).  So the probe answered exactly what the acquire answers,
+     * one arbitration later, and is gone with its own race.
+     */
+    claim_flags = CHIMERA_VFS_COMPOUND_CLAIM_WAIT;
 
-    if (!atomic_compare_exchange_strong(&req->u.lock.phase, &expected, 2)) {
-        /* Callback already ran inline on this thread. */
-        chimera_fuse_lock_finish(req);
+    if (wait) {
+        claim_flags |= CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD;
     }
+
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    /* The kernel named an open file; the sequence borrows it, flagged as
+     * it was opened.  A claim wants only the fh, so a data handle serves
+     * the PATH want and nothing is re-opened. */
+    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
+                                       file->open_flags);
+
+    /* The claim and its ticket live in the heap entry, not the sequence and
+     * not this frame: the claim core keeps pointers into an inserted claim,
+     * so its address is its identity for as long as the lock is held. */
+    chimera_vfs_compound_add_claim(req->compound, &entry->claim, &entry->ticket,
+                                   claim_flags, 0, 0, 0, 0);
+
+    chimera_vfs_compound_set_park_cb(req->compound,
+                                     chimera_fuse_lock_park_cb, req);
+
+    /* The completion can run inside this call, replying and recycling the
+     * request, so nothing may follow. */
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_lock_sequence_complete, req);
 } /* chimera_fuse_op_setlk */
 
 /* --- FLUSH / teardown integration --- */
@@ -566,14 +685,26 @@ chimera_fuse_locks_release_owner(
     evpl_mutex_unlock(&mount->lock_lock);
 } /* chimera_fuse_locks_release_owner */
 
+/*
+ * Ask for a parked lock to be cancelled.  The cancel itself is not done here:
+ * it finishes the run inline when it takes, and the completion replies on the
+ * channel and recycles the request, both of which belong to the thread that
+ * submitted -- while an INTERRUPT arrives on whatever thread read it from the
+ * kernel's shared queue.  So this marshals the request home and the drain
+ * (chimera_fuse_lock_resume) calls the cancel there.
+ *
+ * Posting under lock_lock is what makes the pointer safe.  A request leaves
+ * parked_locks only in its own settle, which takes this lock, so while it is
+ * on the list and we hold the lock it cannot be replied to and recycled; and
+ * from the flag on, the settle defers to the drain instead of freeing
+ * underneath it.
+ */
 int
 chimera_fuse_locks_interrupt(
     struct chimera_fuse_mount *mount,
-    struct chimera_vfs_state  *state,
     uint64_t                   unique)
 {
     struct chimera_fuse_request *parked;
-    bool                         cancelled = false;
 
     evpl_mutex_lock(&mount->lock_lock);
 
@@ -589,23 +720,13 @@ chimera_fuse_locks_interrupt(
         return 0;
     }
 
-    cancelled = chimera_vfs_claim_cancel(state,
-                                         &parked->u.lock.entry->ticket);
-
-    if (cancelled) {
-        parked->u.lock.result_errno = EINTR;
+    if (!parked->u.lock.cancel_posted) {
+        parked->u.lock.cancel_posted = 1;
+        chimera_fuse_resume_post(parked);
     }
 
     evpl_mutex_unlock(&mount->lock_lock);
 
-    if (cancelled) {
-        /* The grant callback will never fire; complete with EINTR on the
-         * request's owning thread. */
-        chimera_fuse_resume_post(parked);
-    }
-
-    /* Either way the interrupt is handled: not cancelled means the grant
-     * won the race and the reply is already on its way. */
     return 1;
 } /* chimera_fuse_locks_interrupt */
 
@@ -619,19 +740,18 @@ chimera_fuse_locks_shutdown(
     struct chimera_fuse_lock_file *lf, *lftmp;
     struct chimera_fuse_lock      *lock, *ltmp;
 
-    /* Cancel parked acquires first; each cancelled request completes with
-     * EINTR on its owning thread (still alive: stop() runs before the
-     * thread pool is torn down). */
+    /* Ask for every parked acquire to be cancelled, on the same terms as an
+     * interrupt: the cancel runs on the request's own thread, which is still
+     * alive (stop() runs before the thread pool is torn down) and drains the
+     * doorbell.  Whichever of cancel and grant wins there, the request is
+     * replied to and the run's claims are its own to release. */
     evpl_mutex_lock(&mount->lock_lock);
 
     DL_FOREACH_SAFE2(mount->parked_locks, parked, ptmp, u.lock.park_next)
     {
-        if (chimera_vfs_claim_cancel(state,
-                                     &parked->u.lock.entry->ticket)) {
-            parked->u.lock.result_errno = EINTR;
-            evpl_mutex_unlock(&mount->lock_lock);
+        if (!parked->u.lock.cancel_posted) {
+            parked->u.lock.cancel_posted = 1;
             chimera_fuse_resume_post(parked);
-            evpl_mutex_lock(&mount->lock_lock);
         }
     }
 

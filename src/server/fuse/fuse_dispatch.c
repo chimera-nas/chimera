@@ -431,9 +431,7 @@ chimera_fuse_op_interrupt(
      * original request completes normally.  No reply either way: an
      * ENOSYS reply would disable interrupts connection-wide. */
     if (arglen >= sizeof(*in)) {
-        chimera_fuse_locks_interrupt(req->channel->mount,
-                                     req->thread->vfs_thread->vfs->vfs_state,
-                                     in->unique);
+        chimera_fuse_locks_interrupt(req->channel->mount, in->unique);
     }
 
     chimera_fuse_request_free(req->thread, req);
