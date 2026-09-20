@@ -440,7 +440,7 @@ main(
     struct chimera_vfs_cred         owner_cred, other_cred;
     const char                     *backend = argc > 1 ? argv[1] : "memfs";
     char                            tmpl[]  = "/tmp/vfs_aclsid_XXXXXX";
-    char                            rmcmd[400];
+
     char                           *session_dir;
     uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        root_fh_len;
@@ -841,8 +841,7 @@ main(
     evpl_destroy(ctx.evpl);
     prometheus_metrics_destroy(metrics);
 
-    snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", session_dir);
-    if (system(rmcmd) != 0) {
+    if (chimera_test_remove_tree(session_dir) != 0) {
         fprintf(stderr, "warning: could not remove %s\n", session_dir);
     }
 

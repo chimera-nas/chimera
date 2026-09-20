@@ -1315,7 +1315,7 @@ smb2_conn_reset(struct smb2_env *env)
 static inline void
 smb2_env_stop(struct smb2_env *env)
 {
-    char cmd[300];
+
 
     /* evpl_destroy sends a final DISCONNECTED to each still-registered bind,
      * so the conn structs must outlive it. */
@@ -1332,8 +1332,7 @@ smb2_env_stop(struct smb2_env *env)
     mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-    if (system(cmd) != 0) {
+    if (chimera_test_remove_tree(env->session_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
     }
 } /* smb2_env_stop */

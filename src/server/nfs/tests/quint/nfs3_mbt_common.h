@@ -1497,7 +1497,7 @@ mbt_env_start(struct mbt_env *env)
 static inline void
 mbt_env_stop(struct mbt_env *env)
 {
-    char cmd[300];
+
     int  i;
 
     if (env->portmap_conn) {
@@ -1569,8 +1569,7 @@ mbt_env_stop(struct mbt_env *env)
 
     free(env->data_buf);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-    if (system(cmd) != 0) {
+    if (chimera_test_remove_tree(env->session_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
     }
 } /* mbt_env_stop */

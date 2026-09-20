@@ -284,7 +284,7 @@ run_phase(
     char                          tmpl[]    = "/tmp/chimera_sync_deleg_XXXXXX";
     char                         *cairn_dir = mkdtemp(tmpl);
     char                          cairn_cfg[256];
-    char                          rmcmd[512];
+
 
     assert(cairn_dir != NULL);
 
@@ -347,8 +347,7 @@ run_phase(
     evpl_destroy(ctx.evpl);
     prometheus_metrics_destroy(metrics);
 
-    snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", cairn_dir);
-    if (system(rmcmd) != 0) {
+    if (chimera_test_remove_tree(cairn_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", cairn_dir);
     }
 } /* run_phase */

@@ -555,7 +555,7 @@ main(
     char                       tmpl[] = "/tmp/chimera_sqlite_kv_test_XXXXXX";
     char                      *db_dir;
     char                       sqlite_cfg[256];
-    char                       rmcmd[320];
+
 
     chimera_log_init();
 
@@ -574,15 +574,13 @@ main(
 
     run_suite("sqlite", sqlite_cfg, metrics);
 
-    snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", db_dir);
-    if (system(rmcmd) != 0) {
+    if (chimera_test_remove_tree(db_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", db_dir);
     }
 #else  /* ifdef CHIMERA_KV_TEST_SQLITE */
     (void) db_dir;
     (void) tmpl;
     (void) sqlite_cfg;
-    (void) rmcmd;
 #endif /* ifdef CHIMERA_KV_TEST_SQLITE */
 
 #ifdef CHIMERA_KV_TEST_CAIRN
@@ -592,7 +590,7 @@ main(
         char  ctmpl[] = "/tmp/chimera_cairn_kv_test_XXXXXX";
         char *cdir    = mkdtemp(ctmpl);
         char  cairn_cfg[256];
-        char  crm[320];
+
 
         assert(cdir != NULL);
         snprintf(cairn_cfg, sizeof(cairn_cfg),
@@ -600,8 +598,7 @@ main(
 
         run_suite("cairn", cairn_cfg, metrics);
 
-        snprintf(crm, sizeof(crm), "rm -rf %s", cdir);
-        if (system(crm) != 0) {
+        if (chimera_test_remove_tree(cdir) != 0) {
             fprintf(stderr, "warning: failed to remove %s\n", cdir);
         }
     }

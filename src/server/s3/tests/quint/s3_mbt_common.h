@@ -833,7 +833,7 @@ s3_mbt_env_fs_teardown(
 static inline void
 s3_mbt_env_stop(struct s3_mbt_env *env)
 {
-    char cmd[340];
+
 
     evpl_http_client_close(env->agent, env->conn);
     evpl_http_destroy(env->agent);
@@ -845,8 +845,7 @@ s3_mbt_env_stop(struct s3_mbt_env *env)
 
     free(env->body_buf);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-    if (system(cmd) != 0) {
+    if (chimera_test_remove_tree(env->session_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
     }
     if (env->pt_root[0]) {
@@ -855,8 +854,7 @@ s3_mbt_env_stop(struct s3_mbt_env *env)
         if (getenv("S3_MBT_KEEP_SCRATCH")) {
             fprintf(stderr, "keeping passthrough scratch %s\n", env->pt_root);
         } else {
-            snprintf(cmd, sizeof(cmd), "rm -rf %s", env->pt_root);
-            if (system(cmd) != 0) {
+            if (chimera_test_remove_tree(env->pt_root) != 0) {
                 fprintf(stderr, "warning: failed to remove %s\n",
                         env->pt_root);
             }
