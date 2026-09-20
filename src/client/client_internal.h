@@ -317,9 +317,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
-            int                             child_fh_len;
             unsigned int                    flags; /* CHIMERA_VFS_REMOVE_* */
-            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
             char                            path[CHIMERA_VFS_PATH_MAX];
         } remove;
 
@@ -392,8 +390,6 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
             chimera_setattr_callback_t      callback;
             void                           *private_data;
             int                             path_len;
-            int                             parent_len;
-            int                             name_offset;
             struct chimera_vfs_attrs        set_attr;
             char                            path[CHIMERA_VFS_PATH_MAX];
         } setattr;
@@ -478,14 +474,13 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
          * count even when the buffer is too small (so the caller can size a
          * retry); CHIMERA_VFS_ERANGE is returned in that case. */
         struct {
-            struct chimera_vfs_open_handle *handle;
-            chimera_setattr_callback_t      callback;
-            void                           *private_data;
-            int                             path_len;
-            struct chimera_acl             *acl_buf;
-            size_t                          acl_bufsize;
-            uint16_t                        r_acl_aces;
-            char                            path[CHIMERA_VFS_PATH_MAX];
+            chimera_setattr_callback_t callback;
+            void                      *private_data;
+            int                        path_len;
+            struct chimera_acl        *acl_buf;
+            size_t                     acl_bufsize;
+            uint16_t                   r_acl_aces;
+            char                       path[CHIMERA_VFS_PATH_MAX];
         } getacl;
 
         struct {
