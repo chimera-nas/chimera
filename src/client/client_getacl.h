@@ -10,34 +10,33 @@
 #include "vfs/sdk/vfs_acl.h"
 
 /*
- * GETACL dispatch: resolve a path, open an O_PATH handle, getattr the canonical
- * NFSv4/Windows ACL (CHIMERA_VFS_ATTR_ACL), and copy the returned ACL into the
- * caller's buffer.  The returned va_acl is valid only for the duration of the
- * getattr completion (same contract as va_fh), so it is copied out here before
- * the request is released.
+ * GETACL dispatch: OPEN_PATH the object (O_PATH, following a final symlink),
+ * GETATTR the canonical NFSv4/Windows ACL (CHIMERA_VFS_ATTR_ACL) through that
+ * handle, and copy the returned ACL into the caller's buffer.  The sequence
+ * reports the ACL BY VALUE -- a copy the op owns, valid until the compound is
+ * freed -- so it is read out in the completion before the free.
  */
 
-static void chimera_getacl_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data);
-
 static void
-chimera_getacl_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_getacl_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_client_request  *request        = private_data;
-    struct chimera_client_thread   *thread         = request->thread;
-    struct chimera_vfs_open_handle *handle         = request->getacl.handle;
-    chimera_setattr_callback_t      callback       = request->getacl.callback;
-    void                           *callback_arg   = request->getacl.private_data;
-    int                             heap_allocated = request->heap_allocated;
-    enum chimera_vfs_error          status         = error_code;
+    struct chimera_client_request        *request        = private_data;
+    struct chimera_client_thread         *thread         = request->thread;
+    chimera_setattr_callback_t            callback       = request->getacl.callback;
+    void                                 *callback_arg   = request->getacl.private_data;
+    int                                   heap_allocated = request->heap_allocated;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) || !attr->va_acl) {
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
+        if (!(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL) || !op->attr.va_acl) {
             /* Backend returned no ACL (mode-only object / backend without ACL
              * storage): report an empty ACL rather than failing. */
             request->getacl.r_acl_aces = 0;
@@ -48,7 +47,7 @@ chimera_getacl_getattr_complete(
                 status = CHIMERA_VFS_ERANGE;
             }
         } else {
-            const struct chimera_acl *acl  = attr->va_acl;
+            const struct chimera_acl *acl  = op->attr.va_acl;
             size_t                    need = chimera_acl_size(acl->num_aces);
 
             request->getacl.r_acl_aces = acl->num_aces;
@@ -61,89 +60,40 @@ chimera_getacl_getattr_complete(
         }
     }
 
+    /* The ACL copy and the OPEN's handle are the sequence's; the free below
+     * releases both, after the copy-out above. */
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }
 
-    chimera_vfs_release(thread->vfs_thread, handle);
+    chimera_vfs_compound_free(compound);
 
     callback(thread, status, callback_arg);
-} /* chimera_getacl_getattr_complete */
-
-static void
-chimera_getacl_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_setattr_callback_t    callback     = request->getacl.callback;
-        void                         *callback_arg = request->getacl.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, callback_arg);
-        return;
-    }
-
-    request->getacl.handle = oh;
-
-    chimera_vfs_getattr(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        CHIMERA_VFS_ATTR_ACL,
-        chimera_getacl_getattr_complete,
-        request);
-} /* chimera_getacl_open_complete */
-
-static void
-chimera_getacl_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_setattr_callback_t    callback     = request->getacl.callback;
-        void                         *callback_arg = request->getacl.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, callback_arg);
-        return;
-    }
-
-    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
-    request->fh_len = attr->va_fh_len;
-
-    chimera_vfs_open_fh(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->fh,
-        request->fh_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
-        chimera_getacl_open_complete,
-        request);
-} /* chimera_getacl_lookup_complete */
+} /* chimera_getacl_sequence_complete */
 
 static inline void
 chimera_dispatch_getacl(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_lookup(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->getacl.path,
-        request->getacl.path_len,
-        CHIMERA_VFS_ATTR_FH,
-        CHIMERA_VFS_LOOKUP_FOLLOW,
-        chimera_getacl_lookup_complete,
-        request);
+    struct chimera_vfs_compound *compound;
+    int                          open_idx, get_idx;
+
+    compound = chimera_client_compound_at_root(thread, request);
+
+    /* An O_PATH open resolves on every backend, path-only ones included, and
+     * is what the per-op chain opened; the GETATTR addresses its handle. */
+    open_idx = chimera_vfs_compound_add_open_path(
+        compound, request->getacl.path, request->getacl.path_len,
+        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED, NULL, 0);
+
+    get_idx = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_ACL);
+
+    if (open_idx >= 0 && get_idx >= 0) {
+        chimera_vfs_compound_op_use_handle(compound, (uint32_t) get_idx,
+                                           (uint32_t) open_idx);
+    }
+
+    chimera_vfs_compound_submit(compound, chimera_getacl_sequence_complete,
+                                request);
 } /* chimera_dispatch_getacl */
