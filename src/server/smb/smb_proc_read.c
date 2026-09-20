@@ -77,7 +77,9 @@ static void chimera_smb_read_callback(
  *
  * The FileId's handle is LENT: SMB bound granted_access to it at CREATE and
  * the byte-range check above ran against that same handle, so the sequence
- * must act on it and not on one of its own.  The descriptor array is the
+ * must act on it and not on one of its own.  The PUTHANDLE says what that
+ * handle was really opened with (open_file->open_flags), not what the READ
+ * happens to want.  The descriptor array is the
  * request's and stays the request's -- an evpl_iovec records the address of
  * the struct that owns it, so it cannot be written into the sequence and
  * copied out afterwards.
@@ -388,8 +390,7 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
                                        request->read.open_file->handle,
-                                       CHIMERA_VFS_OPEN_INFERRED |
-                                       CHIMERA_VFS_OPEN_READ_ONLY);
+                                       request->read.open_file->open_flags);
 
     chimera_vfs_compound_add_read(request->vfs_compound, NULL,
                                   request->read.offset,

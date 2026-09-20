@@ -155,6 +155,13 @@ struct chimera_smb_open_file {
     struct UT_hash_handle            hh;
     struct chimera_smb_file_id       file_id;
     struct chimera_vfs_open_handle  *handle;
+    /* What `handle` was REALLY opened with, as a CHIMERA_VFS_OPEN_* word: what
+     * every PUTHANDLE lending this handle to a VFS sequence promises about it
+     * (see chimera_vfs_compound_add_puthandle).  Stamped wherever the open is
+     * created and derived from the handle itself -- see
+     * chimera_smb_open_handle_flags -- so a re-bound handle (SET_REPARSE_POINT)
+     * carries its own description and not the create's. */
+    unsigned int                     open_flags;
     uint32_t                         desired_access;
     /* Access mask actually granted on this handle (FileAccessInformation).
      * Resolved from the object ACL at open: equals desired_access for a
@@ -299,6 +306,45 @@ struct chimera_smb_open_file {
     uint16_t                         integrity_algo;
     uint32_t                         integrity_flags;
 };
+
+/*
+ * Describe an open handle the way PUTHANDLE wants it described: the REAL flags,
+ * read off the handle rather than off whatever the create asked for.  The
+ * create's word carries disposition bits (CREATE, EXCLUSIVE, STOP_SYMLINK) that
+ * say nothing about what the handle serves, and it spells a read-write open as
+ * neither READ_ONLY nor WRITE_ONLY -- which a sequence reads as "serves
+ * neither", refusing the READ it was lent for.  The open cache's own spelling
+ * of O_RDWR is both bits (chimera_vfs_open_access_mode), and that is what a
+ * read-write handle really is.
+ *
+ * DIRECTORY comes from the open rather than the handle because a handle carries
+ * no type; the caller passes the open's own directory flag.
+ */
+static inline unsigned int
+chimera_smb_open_handle_flags(
+    const struct chimera_vfs_open_handle *handle,
+    int                                   is_directory)
+{
+    unsigned int flags = 0;
+
+    if (!handle) {
+        return 0;
+    }
+
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        flags |= CHIMERA_VFS_OPEN_PATH;
+    }
+
+    flags |= (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RO) ?
+        CHIMERA_VFS_OPEN_READ_ONLY :
+        (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY);
+
+    if (is_directory) {
+        flags |= CHIMERA_VFS_OPEN_DIRECTORY;
+    }
+
+    return flags;
+} /* chimera_smb_open_handle_flags */
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256
 #define CHIMERA_SMB_OPEN_FILE_BUCKET_MASK (CHIMERA_SMB_OPEN_FILE_BUCKETS - 1)

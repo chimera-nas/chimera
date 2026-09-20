@@ -607,8 +607,7 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
                                        request->query_directory.open_file->handle,
-                                       CHIMERA_VFS_OPEN_INFERRED |
-                                       CHIMERA_VFS_OPEN_DIRECTORY);
+                                       request->query_directory.open_file->open_flags);
 
     /* Streaming, because the reply buffer is the only place these entries are
      * ever staged: the callback marshals straight into it and the sequence

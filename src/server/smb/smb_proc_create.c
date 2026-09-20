@@ -840,10 +840,17 @@ chimera_smb_create_gen_open_file(
         memcpy(open_file->parent_fh, parent_fh, parent_fh_len);
     }
 
-    open_file->parent_fh_len  = parent_fh_len;
-    open_file->file_id.pid    = pid;
-    open_file->file_id.vid    = chimera_rand64();
-    open_file->handle         = oh;
+    open_file->parent_fh_len = parent_fh_len;
+    open_file->file_id.pid   = pid;
+    open_file->file_id.vid   = chimera_rand64();
+    open_file->handle        = oh;
+    /* What the handle was really opened with, for every PUTHANDLE that lends
+     * it to a VFS sequence.  Read off the handle, not off the create's flag
+     * word -- see chimera_smb_open_handle_flags.  Every open this server hands
+     * out is born here (the stream and durable-reconnect paths reach it with
+     * their own `oh`); the one handle that is re-bound afterwards,
+     * SET_REPARSE_POINT's, re-stamps this itself. */
+    open_file->open_flags     = chimera_smb_open_handle_flags(oh, is_directory);
     open_file->desired_access = request->create.desired_access;
     open_file->share_access   = request->create.share_access;
     open_file->flags          = delete_on_close ? CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE : 0;

@@ -189,7 +189,7 @@ chimera_smb_write_submit(
 
     chimera_vfs_compound_add_puthandle(request->vfs_compound,
                                        request->write.handle,
-                                       CHIMERA_VFS_OPEN_INFERRED);
+                                       request->write.open_file->open_flags);
 
     chimera_vfs_compound_add_write(
         request->vfs_compound,
