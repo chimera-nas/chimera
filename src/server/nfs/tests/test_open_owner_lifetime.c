@@ -44,12 +44,14 @@
  */
 
 #include "common/thread.h"
+#ifndef _WIN32
 #include <sched.h>
+#include <sys/wait.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 #ifdef _WIN32
 #include "common/platform.h"
 #else
@@ -435,10 +437,32 @@ test_adopt_prefers_published_owner(void)
 /* Run fn in a forked child and require it to die with SIGABRT (the
  * chimera_nfs_abort_if diagnostics in the get/put helpers). */
 static void
-expect_abort(void ( *fn )(void))
+expect_abort(void ( *fn )(void), unsigned test_id)
 {
+#ifdef _WIN32
+    WCHAR executable[32768], command[64];
+    STARTUPINFOW startup = { sizeof(startup) };
+    PROCESS_INFORMATION process;
+    DWORD length, status, waited;
+    (void) fn;
+    length = GetModuleFileNameW(NULL, executable, 32768);
+    CHECK(length && length < 32768);
+    swprintf(command, 64, L"chimera-death-test --death-test %u", test_id);
+    CHECK(CreateProcessW(executable, command, NULL, NULL, FALSE, 0,
+                         NULL, NULL, &startup, &process));
+    waited = WaitForSingleObject(process.hProcess, 30000);
+    if (waited != WAIT_OBJECT_0) {
+        TerminateProcess(process.hProcess, 125);
+    }
+    CHECK(waited == WAIT_OBJECT_0);
+    CHECK(GetExitCodeProcess(process.hProcess, &status));
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    CHECK(status != 0);
+#else
     pid_t pid;
     int   status;
+    (void) test_id;
 
     /* Don't let the child flush inherited stdio buffers into our output. */
     fflush(NULL);
@@ -464,6 +488,7 @@ expect_abort(void ( *fn )(void))
      * reaches raise(SIGABRT).  Either way the child must NOT have survived to
      * _exit(0) -- that (and only that) means the guard did not fire. */
     CHECK(!(WIFEXITED(status) && WEXITSTATUS(status) == 0));
+#endif
 } /* expect_abort */
 
 static void
@@ -505,10 +530,10 @@ die_lock_owner_put_underflow(void)
 static void
 test_refcount_abort_diagnostics(void)
 {
-    expect_abort(die_open_owner_get_after_free);
-    expect_abort(die_open_owner_put_underflow);
-    expect_abort(die_lock_owner_get_after_free);
-    expect_abort(die_lock_owner_put_underflow);
+    expect_abort(die_open_owner_get_after_free, 0);
+    expect_abort(die_open_owner_put_underflow, 1);
+    expect_abort(die_lock_owner_get_after_free, 2);
+    expect_abort(die_lock_owner_put_underflow, 3);
     printf("ok: refcount_abort_diagnostics\n");
 } /* test_refcount_abort_diagnostics */
 
@@ -586,7 +611,11 @@ stress_sweeper(void *arg)
 
     while (!atomic_load(&ctx->done)) {
         nfs_client_expire_state(ctx->client, ctx->table, NULL);
+#ifdef _WIN32
+        SwitchToThread();
+#else
         sched_yield();
+#endif
     }
     return NULL;
 } /* stress_sweeper */
@@ -631,8 +660,23 @@ main(
     int   argc,
     char *argv[])
 {
+#ifdef _WIN32
+    if (argc == 3 && strcmp(argv[1], "--death-test") == 0) {
+        void (*tests[])(void) = {
+            die_open_owner_get_after_free, die_open_owner_put_underflow,
+            die_lock_owner_get_after_free, die_lock_owner_put_underflow
+        };
+        unsigned id = (unsigned) strtoul(argv[2], NULL, 10);
+        CHECK(id < sizeof(tests) / sizeof(tests[0]));
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+        tests[id]();
+        return 0; /* Surviving the guard must fail the parent test. */
+    }
+#else
     (void) argc;
     (void) argv;
+#endif
     test_open_owner_borrow_survives_sweep();
     test_lock_owner_borrow_survives_sweep();
     test_idle_expiry_frees_owners();
