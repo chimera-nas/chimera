@@ -567,6 +567,23 @@ chimera_io_uring_reap(
                                                   &request->getattr.r_attr,
                                                   request->getattr.handle->vfs_private,
                                                   stx);
+
+                    /* A getattr by handle knows its own file handle: echo it
+                     * when asked (map_attrs_statx fills only stat/statfs/EA),
+                     * mirroring the linux backend and the engine backends.
+                     * Without it a caller that requests ATTR_FH on a bare
+                     * getattr -- e.g. the S3 copy ETag -- receives none. */
+                    if ((request->getattr.r_attr.va_req_mask &
+                         CHIMERA_VFS_ATTR_FH) &&
+                        request->getattr.handle->fh_len > 0) {
+                        memcpy(request->getattr.r_attr.va_fh,
+                               request->getattr.handle->fh,
+                               request->getattr.handle->fh_len);
+                        request->getattr.r_attr.va_fh_len =
+                            request->getattr.handle->fh_len;
+                        request->getattr.r_attr.va_set_mask |=
+                            CHIMERA_VFS_ATTR_FH;
+                    }
                 }
                 break;
             case CHIMERA_VFS_OP_OPEN_AT:
