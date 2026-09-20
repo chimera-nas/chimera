@@ -697,10 +697,16 @@ struct chimera_vfs_compound_dirent {
 
 struct chimera_vfs_compound_op {
     uint8_t                               type;
-    /* CHIMERA_VFS_UNSET until the op has run. */
+    /* CHIMERA_VFS_UNSET until the op has run -- and still UNSET afterwards for
+     * an op that did not run: one behind a failure, or one a gate skipped. */
     enum chimera_vfs_error                status;
 
     /* ---- arguments ---- */
+    /* A gate set this: the executor runs PAST this op without dispatching it.
+     * Only a gate consulted on an EARLIER op may set it -- see the gate's
+     * contract, which is also where the idempotence rule that makes an edited
+     * sequence re-runnable lives. */
+    uint8_t                               skip;
     uint8_t                               arg_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                              arg_fh_len;
     char                                  name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
@@ -1160,6 +1166,40 @@ struct chimera_vfs_compound_op {
  * remembering that it was asked: it may be asked again for the same op if the
  * sequence is ever retried, and the answer has to be the same question asked
  * twice rather than a step taken twice.
+ *
+ * IT MAY ALSO EDIT THE OPS THAT HAVE NOT RUN.  Beyond replacing the status of
+ * the op it is being consulted on, the gate may write into the ARGUMENTS of any
+ * op at a HIGHER index than that one -- a SETATTR's set_attr size, a READ or
+ * WRITE count or offset, a SEEK offset, a CLONE or COPY length, a claim's flags
+ * -- and may set an op's `skip`, which makes the executor run past it without
+ * dispatching it at all: its status is left CHIMERA_VFS_UNSET, its results are
+ * untouched, and it is not counted among the ops that ran.  A skipped op that a
+ * later op addresses by chimera_vfs_compound_op_use_handle is a caller error
+ * and aborts, rather than handing that op a NULL handle to act on.
+ *
+ * This is what turns a question a caller can only answer once an earlier op has
+ * answered into ONE sequence instead of two: SMB2's SET_INFO ALLOCATION (the
+ * size to set is a function of the size just read), a READ_PLUS-driven read, a
+ * CLONE whose count of 0 means "to the end", COPY's range check.  An UNBOUNDED
+ * fan-out -- an xattr list and then a GETXATTR per name the list returned -- is
+ * still consecutive sequences: the gate edits the ops that are there, it does
+ * not add any.
+ *
+ * It may NOT touch an op at or BELOW its own index: those have run, and their
+ * arguments are what they ran with.  chimera_vfs_compound_op_edit, which is how
+ * a gate reaches a writable op at all, refuses one; a debug build additionally
+ * notices a gate that went around it and aborts.
+ *
+ * A skip does NOT persist: every submission starts with nothing skipped, and
+ * the gate is asked again.
+ *
+ * The idempotence rule above is unchanged, and the edits make it load-bearing a
+ * second time: the gate is consulted, and re-applies its edits, on EVERY
+ * execution of the sequence, so it must compute them from what the CALLER
+ * ALREADY HAD -- the size in the op as the caller wrote it, plus what the
+ * earlier op just reported -- and never accumulate onto what it wrote last
+ * time.  A gate that adds a delta to an op's offset gets a different sequence
+ * the second time round; one that assigns the offset gets the same one.
  */
 typedef void (*chimera_vfs_compound_gate_t)(
     struct chimera_vfs_compound *compound,
@@ -2056,7 +2096,10 @@ uint32_t
 chimera_vfs_compound_num_ops(
     const struct chimera_vfs_compound *compound);
 
-/* How many ops actually ran (index of the failure, or all of them). */
+/* How far the sequence got: the ops that ran (the index of the failure, or all
+ * of them).  An op a gate skipped did not run -- inside the count it is the
+ * CHIMERA_VFS_UNSET status that says so, and a sequence whose LAST op was
+ * skipped reports fewer than it has. */
 uint32_t
 chimera_vfs_compound_num_completed(
     const struct chimera_vfs_compound *compound);
@@ -2070,6 +2113,25 @@ const struct chimera_vfs_compound_op *
 chimera_vfs_compound_op(
     const struct chimera_vfs_compound *compound,
     uint32_t                           index);
+
+/*
+ * The WRITABLE view of op `index`, for a gate editing an op that has not run --
+ * see the gate's contract, which is where the rules are.  This is the only
+ * sanctioned way to get one, and it enforces the one rule that can be enforced
+ * exactly: it answers NULL, rather than a pointer, for anything a gate may not
+ * edit -- an index at or below the one the gate is being consulted on, an index
+ * past the end of the sequence, or a call from outside a gate altogether.  (A
+ * debug build additionally notices a caller that edited an op that has run by
+ * casting away the const above, and aborts.)
+ *
+ * Everything the gate writes through it is an ARGUMENT of an op that has not
+ * run, and everything it writes it must write again on a re-run, computed from
+ * what the caller already had.
+ */
+struct chimera_vfs_compound_op *
+chimera_vfs_compound_op_edit(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
 
 /* Create `name` in the current object; it becomes current.  `set_attr` may be
  * NULL; its struct is copied and its ACL / SIDs are BORROWED, as for OPEN.
