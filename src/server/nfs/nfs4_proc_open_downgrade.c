@@ -18,8 +18,13 @@
 #include "nfs4_state.h"
 #include "vfs/vfs_release.h"
 
-void
-chimera_nfs4_open_downgrade(
+/*
+ * Everything OPEN_DOWNGRADE does, with a current filehandle established and
+ * the reply left to the caller.  See chimera_nfs4_close_apply: the operation
+ * drives no VFS call, so a sequence applies it when its results are filled.
+ */
+nfsstat4
+chimera_nfs4_open_downgrade_apply(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
@@ -35,12 +40,6 @@ chimera_nfs4_open_downgrade(
     nfsstat4                    status;
     bool                        is_v40 = (req->minorversion == 0);
 
-    if (req->fhlen == 0) {
-        res->status = NFS4ERR_NOFILEHANDLE;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->open_stateid);
 
@@ -49,8 +48,7 @@ chimera_nfs4_open_downgrade(
                                      &state_void, &state_type);
     if (status != NFS4_OK) {
         res->status = status;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return res->status;
     }
 
     open_state = state_void;
@@ -68,16 +66,14 @@ chimera_nfs4_open_downgrade(
             evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
         if (seqid_class != NFS4_SEQID_NEW) {
             evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = NFS4ERR_BAD_SEQID;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
 
         /* RFC 7530 §9.1.4.2: reject a superseded (old) or never-issued
@@ -95,8 +91,7 @@ chimera_nfs4_open_downgrade(
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = status;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
     }
 
@@ -124,8 +119,7 @@ chimera_nfs4_open_downgrade(
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         res->status = NFS4ERR_INVAL;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return res->status;
     }
 
     open_state->share_access = args->share_access;
@@ -183,5 +177,24 @@ chimera_nfs4_open_downgrade(
 
     res->status = NFS4_OK;
     chimera_nfs4_set_current_stateid(req, &res->resok4.open_stateid);
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    return NFS4_OK;
+} /* chimera_nfs4_open_downgrade_apply */
+
+void
+chimera_nfs4_open_downgrade(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
+{
+    nfsstat4 status;
+
+    if (req->fhlen == 0) {
+        status                         = NFS4ERR_NOFILEHANDLE;
+        resop->opopen_downgrade.status = status;
+    } else {
+        status = chimera_nfs4_open_downgrade_apply(thread, req, argop, resop);
+    }
+
+    chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_open_downgrade */

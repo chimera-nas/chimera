@@ -9,8 +9,20 @@
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-void
-chimera_nfs4_close(
+
+/*
+ * Everything CLOSE does, with a current filehandle established and the reply
+ * left to the caller.
+ *
+ * Split out because CLOSE touches no VFS operation at all: it resolves a
+ * stateid the server already holds, advances a seqid, and destroys state.  So
+ * an NFSv4 COMPOUND that ends in one can run the ops in front of it as a
+ * single VFS sequence and apply this when their results are filled -- see the
+ * zero-VFS-op slots in nfs4_compound_vfs.c.  The body below is the operation;
+ * what the two entrances differ in is only who completes the request.
+ */
+nfsstat4
+chimera_nfs4_close_apply(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
@@ -23,12 +35,6 @@ chimera_nfs4_close(
     void                   *state_void;
     uint8_t                 state_type;
     nfsstat4                status;
-
-    if (req->fhlen == 0) {
-        res->status = NFS4ERR_NOFILEHANDLE;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
 
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->open_stateid);
@@ -48,13 +54,11 @@ chimera_nfs4_close(
                                           &replay) == NFS4_OK) {
             res->status       = replay.status;
             res->open_stateid = replay.stateid;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
 
         res->status = status;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return res->status;
     }
 
     struct nfs_open_state *open_state = state_void;
@@ -77,8 +81,7 @@ chimera_nfs4_close(
             evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
 
         if (seqid_class != NFS4_SEQID_NEW) {
@@ -86,8 +89,7 @@ chimera_nfs4_close(
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = NFS4ERR_BAD_SEQID;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
 
         status = nfs4_stateid_check_seqid(open_state->seqid,
@@ -97,8 +99,7 @@ chimera_nfs4_close(
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = status;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
+            return res->status;
         }
 
         evpl_mutex_unlock(&owner->lock);
@@ -146,5 +147,24 @@ chimera_nfs4_close(
     chimera_nfs4_clear_current_stateid(req);
 
     res->status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    return NFS4_OK;
+} /* chimera_nfs4_close_apply */
+
+void
+chimera_nfs4_close(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
+{
+    nfsstat4 status;
+
+    if (req->fhlen == 0) {
+        status                = NFS4ERR_NOFILEHANDLE;
+        resop->opclose.status = status;
+    } else {
+        status = chimera_nfs4_close_apply(thread, req, argop, resop);
+    }
+
+    chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_close */

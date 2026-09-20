@@ -39,12 +39,35 @@
  * Each therefore encodes as two or more VFS ops, and the map below records
  * which VFS ops belong to which NFSv4 op so a failure lands on the right one.
  *
+ * SLOTS.  Four NFSv4 operations encode to NO VFS op at all -- CLOSE, LOCKU,
+ * OPEN_DOWNGRADE and DELEGRETURN, each of which resolves a stateid the server
+ * already holds, advances a seqid and changes state without touching a
+ * backend.  A run carries a place for one and applies it, in op order, as the
+ * results are filled (nfs4_vfs_op_is_slot, nfs4_vfs_slot_apply).  The point of
+ * them is what they no longer do: a COMPOUND ending "... ; CLOSE" used to stop
+ * the run in front of the CLOSE, and now does not.
+ *
  * WHAT IS NOT IDENTICAL.  Execution stops at the first VFS failure, but the
  * checks above are NFSv4-side and are applied when the results are filled -- by
  * which time the ops after them have already run.  With one exception the
  * encodable set is read-only, and the reply is truncated at the failing op just
  * as it would be, so the wire result is unchanged; what differs is that some
  * reads were performed that the per-op path would have skipped.
+ *
+ * A slot is the same difference twice over, and is fenced twice.  Its own
+ * answer -- a 4.0 replay, a bad seqid, a stale stateid, an inexpressible
+ * downgrade -- lands after every VFS op in the run has executed, so nothing
+ * that MUTATES may follow one (the may_fail_late rule, which LOCKT used to be
+ * the only user of).  And its EFFECT on NFSv4 state lands after the ops behind
+ * it were authorized against that state, so nothing that carries a stateid or
+ * reads live claim state may follow one either: a READ behind a CLOSE of the
+ * stateid it names would otherwise succeed where the per-op path answers
+ * NFS4ERR_BAD_STATEID.  That second fence is nfs4_vfs_op_reads_state.
+ *
+ * The 4.1 current-stateid lifecycle moves with them: it is applied op by op as
+ * the results are filled (nfs4_vfs_current_stateid_step) rather than replayed
+ * for the whole run before it is submitted, because a slot RESOLVES the
+ * current stateid when it is applied and the ops that SET it do so then too.
  *
  * The exception is SETXATTR and REMOVEXATTR, which mutate.  A sequence that
  * fails partway leaves the earlier ones applied -- exactly as the per-op path
@@ -200,6 +223,13 @@ struct nfs4_vfs_op {
     uint32_t                        readdir_mark;
     int                             readdir_have_mark;
 
+    /* A SLOT: an NFSv4 op the run carries a place for but which encodes to no
+     * VFS op at all (CLOSE, LOCKU, OPEN_DOWNGRADE, DELEGRETURN).  Its vfs
+     * range is empty -- vfs_lo = vfs_hi + 1 -- so the completion's "every VFS
+     * op inside a filled NFSv4 op ran" walk simply finds nothing to check, and
+     * its vfs_res is -1 because it has no result to read. */
+    int                             is_slot;
+
     uint32_t                        res_index; /* index into the COMPOUND's arg/res arrays        */
     int                             vfs_lo; /* first VFS op belonging to this NFSv4 op         */
     int                             vfs_hi; /* last VFS op belonging to this NFSv4 op          */
@@ -293,11 +323,78 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_WRITE_SAME:
         case OP_VERIFY:
         case OP_NVERIFY:
+        /* The zero-VFS-op slots -- see nfs4_vfs_op_is_slot. */
+        case OP_CLOSE:
+        case OP_LOCKU:
+        case OP_OPEN_DOWNGRADE:
+        case OP_DELEGRETURN:
             return 1;
         default:
             return 0;
     } /* switch */
 } /* nfs4_vfs_op_encodable */
+
+/*
+ * Does this op drive no VFS call at all?
+ *
+ * Four do.  Each resolves a stateid the server already holds, advances a
+ * seqid and changes state, and touches no backend -- so a run can carry the
+ * operation without adding anything to the VFS sequence and apply it, in op
+ * order, when the sequence's results are filled.  What that buys is that a
+ * COMPOUND ending in "... ; CLOSE" no longer has to stop the run in front of
+ * the CLOSE: the ops before it stay one sequence.
+ *
+ * The cost is the same one every NFSv4-side check in this file pays: a slot's
+ * decisions are made after every VFS op in the run has already executed.  So
+ * a slot is treated exactly as LOCKT used to be -- nothing that mutates may
+ * follow one (may_fail_late), and nothing that reads or is authorized against
+ * NFSv4 state may follow one either, because the slot's own effect on that
+ * state lands later than the op that read it.  See nfs4_vfs_op_reads_state.
+ */
+static int
+nfs4_vfs_op_is_slot(uint32_t argop)
+{
+    switch (argop) {
+        case OP_CLOSE:
+        case OP_LOCKU:
+        case OP_OPEN_DOWNGRADE:
+        case OP_DELEGRETURN:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* nfs4_vfs_op_is_slot */
+
+/*
+ * Does this op's VFS work depend on NFSv4 state a slot behind it would change?
+ *
+ * Every one of these either carries a stateid the encoder resolves when the
+ * sequence is BUILT (the I/O ops, SETATTR and the v4.2 sparse ops, through
+ * nfs4_vfs_io_authorize / nfs4_vfs_setattr_authorize) or reads live claim
+ * state while the sequence RUNS (LOCKT's probe).  Both happen before a slot
+ * in the same run applies, so a CLOSE, LOCKU, OPEN_DOWNGRADE or DELEGRETURN
+ * in front of one of these would be honoured after it rather than before it:
+ * a READ behind a CLOSE of the very stateid it names would succeed where the
+ * op-at-a-time path answers NFS4ERR_BAD_STATEID.  So the run ends at a slot
+ * whenever one of these follows, and the per-op path takes it from there.
+ */
+static int
+nfs4_vfs_op_reads_state(uint32_t argop)
+{
+    switch (argop) {
+        case OP_READ:
+        case OP_WRITE:
+        case OP_SETATTR:
+        case OP_ALLOCATE:
+        case OP_DEALLOCATE:
+        case OP_SEEK:
+        case OP_WRITE_SAME:
+        case OP_LOCKT:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* nfs4_vfs_op_reads_state */
 
 /*
  * Does this op touch the reply buffer at a moment the two paths do not share?
@@ -796,14 +893,6 @@ nfs4_vfs_op_fill(
                 return NFS4ERR_SERVERFAULT;
             }
 
-            /* install_state and everything after it -- the delegation offer,
-             * the completion, the 4.0 seqid advance -- read the OPEN's
-             * arguments and result through req->index.  The fill loop has not
-             * moved it yet, so move it here.  Safe because an OPEN is always
-             * the last op of its sequence: nothing after this reads it as
-             * anything else. */
-            req->index = (int) map->res_index;
-
             /* Capture the file handle before install_state, which may release
              * the handle when it coalesces onto an existing open state. */
             memcpy(req->fh, handle->fh, handle->fh_len);
@@ -1218,6 +1307,75 @@ nfs4_vfs_op_fill(
 } /* nfs4_vfs_op_fill */
 
 /*
+ * Apply a slot: the whole of an NFSv4 operation that drives no VFS call.
+ *
+ * These run in fill order, so their effects land in the order the COMPOUND
+ * wrote them relative to each other and to the fills of the VFS-backed ops --
+ * but after every VFS op in the run has executed.  That is what the scan's
+ * refusals in front of a slot exist to make safe (nfs4_vfs_op_is_slot).
+ *
+ * Each writes its own result and hands the status back; the caller treats it
+ * exactly as it treats a fill's.
+ */
+static nfsstat4
+nfs4_vfs_slot_apply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
+{
+    switch (argop->argop) {
+        case OP_CLOSE:
+            return chimera_nfs4_close_apply(thread, req, argop, resop);
+        case OP_LOCKU:
+            return chimera_nfs4_locku_apply(thread, req, argop, resop);
+        case OP_OPEN_DOWNGRADE:
+            return chimera_nfs4_open_downgrade_apply(thread, req, argop, resop);
+        case OP_DELEGRETURN:
+            return chimera_nfs4_delegreturn_apply(thread, req, argop, resop);
+        default:
+            return NFS4ERR_SERVERFAULT;
+    } /* switch */
+} /* nfs4_vfs_slot_apply */
+
+/*
+ * The NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2) for one op,
+ * applied before that op's result is filled -- which is where the per-op
+ * dispatcher applies it too, immediately before it dispatches.
+ *
+ * Only the ops that CLEAR or CARRY it are here.  The ops that SET it (OPEN,
+ * and the slots) do so from their own bodies as they are applied, so they are
+ * already in the right place in this order.  That ordering is the whole
+ * reason this is done op by op rather than replayed in bulk before the
+ * sequence is submitted: with a CLOSE inside the run, "OPEN; PUTFH x;
+ * CLOSE(current)" would otherwise clear at build time and set at fill time.
+ */
+static void
+nfs4_vfs_current_stateid_step(
+    struct nfs_request *req,
+    uint32_t            argop)
+{
+    switch (argop) {
+        case OP_PUTFH:
+        case OP_LOOKUP:
+        case OP_LOOKUPP:
+        case OP_CREATE:
+            chimera_nfs4_clear_current_stateid(req);
+            break;
+        case OP_SAVEFH:
+            req->saved_current_stateid_valid = req->current_stateid_valid;
+            req->saved_current_stateid       = req->current_stateid;
+            break;
+        case OP_RESTOREFH:
+            req->current_stateid_valid = req->saved_current_stateid_valid;
+            req->current_stateid       = req->saved_current_stateid;
+            break;
+        default:
+            break;
+    } /* switch */
+} /* nfs4_vfs_current_stateid_step */
+
+/*
  * Give back everything the sequence borrowed on the caller's behalf: the
  * handles its I/O ops resolved from stateids, and the payload of any WRITE it
  * carried.
@@ -1455,6 +1613,17 @@ nfs4_vfs_compound_complete(
         memset(resop, 0, sizeof(*resop));
         resop->resop = argop->argop;
 
+        /* Everything a fill or a slot runs reads the COMPOUND's arguments and
+         * writes its result through req->index -- install_state does, and so
+         * does every per-op body a slot reuses unchanged.  The post-loop
+         * assignment below is what the dispatcher finally sees; this is what
+         * each op sees while it is being filled. */
+        req->index = (int) map->res_index;
+
+        /* The 4.1 current-stateid lifecycle, in op order -- see
+         * nfs4_vfs_current_stateid_step. */
+        nfs4_vfs_current_stateid_step(req, argop->argop);
+
         /* The same reply-buffer headroom gate the per-op dispatcher applies
          * before it runs an operation -- applied here after the whole run has
          * executed, which is only acceptable because a run that mutates is
@@ -1502,7 +1671,9 @@ nfs4_vfs_compound_complete(
             break;
         }
 
-        status = nfs4_vfs_op_fill(req, compound, ctx, map, argop, resop);
+        status = map->is_slot ?
+            nfs4_vfs_slot_apply(thread, req, argop, resop) :
+            nfs4_vfs_op_fill(req, compound, ctx, map, argop, resop);
 
         if (status != NFS4_OK) {
             fail_res = map->res_index;
@@ -2157,6 +2328,9 @@ chimera_nfs4_compound_try_vfs(
      * means nothing is open on the current object -- see nfs4_vfs_open_for. */
     unsigned int                    cur_open_flags = 0;
     int                             may_fail_late  = 0;
+    /* Set once the run carries a zero-VFS-op slot: what follows it is bounded
+     * by nfs4_vfs_op_reads_state as well as by may_fail_late. */
+    int                             state_slot = 0;
     /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
      * always the last op of its run. */
     int                             open_at = -1;
@@ -2239,6 +2413,18 @@ chimera_nfs4_compound_try_vfs(
             break;
         }
 
+        /* A slot changes NFSv4 state only once every VFS op in the run has
+         * executed, so an op whose own VFS work was decided against that
+         * state -- authorized from a stateid when the sequence was built, or
+         * reading live claim state while it ran -- must not sit behind one.
+         * The run ends at the slot and the per-op path takes over, which is
+         * where the two orderings agree again. */
+        if (state_slot && nfs4_vfs_op_reads_state(argop->argop)) {
+            nenc = i;
+            stop = 1;
+            break;
+        }
+
         /* An upper bound on the VFS ops one NFSv4 op encodes to.  Counted up
          * front: a sequence discovered to be too long only once it was half
          * built would have to be abandoned after staging xattr names into the
@@ -2277,6 +2463,12 @@ chimera_nfs4_compound_try_vfs(
             case OP_LINK:
                 /* Cursor work, or two objects named by file handle: no open. */
                 vfs_ops += 1;
+                break;
+            case OP_CLOSE:
+            case OP_LOCKU:
+            case OP_OPEN_DOWNGRADE:
+            case OP_DELEGRETURN:
+                /* A slot: nothing at all -- see nfs4_vfs_op_is_slot. */
                 break;
             default:
                 /* open + the op */
@@ -2635,6 +2827,44 @@ chimera_nfs4_compound_try_vfs(
                  * behind a LOCKT has to be refused any more. */
                 break;
             }
+
+            case OP_CLOSE:
+            case OP_LOCKU:
+            case OP_OPEN_DOWNGRADE:
+            case OP_DELEGRETURN:
+
+                /* A run cannot BEGIN with a slot.  The sequence always seeds
+                 * the current object with a PUTFH of its own, and every map
+                 * covers the VFS ops from where the last one ended -- so the
+                 * op at `first` is what the seed's own failure lands on.  A
+                 * slot has no VFS ops to cover it with, and a slot is the one
+                 * op that does not care whether the handle is good (CLOSE
+                 * resolves a stateid, not a name), so a run led by one would
+                 * answer NFS4ERR_STALE where the per-op path answers OK.  It
+                 * also buys nothing: what a slot is for is not ending the run
+                 * that came before it. */
+                if (i == first) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* Everything it can answer -- a replay, a bad
+                 * seqid, a stale stateid, an inexpressible downgrade -- is
+                 * decided when it is applied, which is after every VFS op in
+                 * the run has executed.  So nothing that mutates may follow
+                 * it (its failure would truncate a reply whose change had
+                 * already been made) and nothing whose own VFS work was
+                 * settled against the state it changes may follow it either.
+                 *
+                 * Nothing bounds a slot from IN FRONT.  Two slots in a row
+                 * are applied in order, so even a 4.0 seqid chain across them
+                 * (OPEN_DOWNGRADE n; CLOSE n+1 on one open_owner) classifies
+                 * against the seqid the one before it advanced -- which is
+                 * exactly what the op-at-a-time path does. */
+                may_fail_late = 1;
+                state_slot    = 1;
+                break;
 
             case OP_ALLOCATE:
             case OP_DEALLOCATE:
@@ -3268,6 +3498,19 @@ chimera_nfs4_compound_try_vfs(
         map->vfs_aux     = -1;
         map->gate_status = 0;
 
+        /* A slot adds no VFS op: it takes an EMPTY vfs range, no result op,
+         * and leaves `next` and `idx` where they were, so the op after it
+         * encodes exactly where it would have with the slot not there at all.
+         * The completion's "every VFS op inside a filled NFSv4 op ran" walk
+         * then has nothing to walk for it, which is the invariant unchanged
+         * rather than an exception to it.  See nfs4_vfs_op_is_slot. */
+        if (nfs4_vfs_op_is_slot(argop->argop)) {
+            map->is_slot = 1;
+            map->vfs_res = -1;
+            map->vfs_hi  = next - 1;
+            continue;
+        }
+
         switch (argop->argop) {
             case OP_PUTFH:
                 if (i == first) {
@@ -3869,37 +4112,16 @@ chimera_nfs4_compound_try_vfs(
 
     ctx->num_ops = k;
 
-    /* NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2): an op that
-     * changes the current filehandle clears the current stateid, and
-     * SAVEFH/RESTOREFH carry it alongside the saved filehandle.  The per-op
-     * dispatcher applies this before dispatching each op; replaying the whole
-     * sequence's worth here, in order, is the same thing -- the value never
-     * leaves the request, so applying it up front rather than as each op runs
-     * is not observable.
-     *
-     * Only the ops the sequence CARRIES.  Anything past nenc is dispatched op
-     * by op afterwards and the dispatcher applies this to it then; doing it
-     * here as well would apply it twice, and out of order with the ops in
-     * between. */
-    for (i = first; i < nenc; i++) {
-        switch (req->args_compound->argarray[i].argop) {
-            case OP_PUTFH:
-            case OP_LOOKUP:
-            case OP_LOOKUPP:
-                chimera_nfs4_clear_current_stateid(req);
-                break;
-            case OP_SAVEFH:
-                req->saved_current_stateid_valid = req->current_stateid_valid;
-                req->saved_current_stateid       = req->current_stateid;
-                break;
-            case OP_RESTOREFH:
-                req->current_stateid_valid = req->saved_current_stateid_valid;
-                req->current_stateid       = req->saved_current_stateid;
-                break;
-            default:
-                break;
-        } /* switch */
-    }
+    /* The 4.1 current-stateid lifecycle used to be replayed here, for the
+     * whole run at once, on the grounds that the value never leaves the
+     * request and so when it moves is not observable.  It is observable now:
+     * a slot resolves the current stateid when it is APPLIED, and the ops
+     * that set it (OPEN, and the slots themselves) do so then too, so a bulk
+     * replay before the sequence ran would clear at build time what a CLOSE
+     * behind an OPEN is entitled to read.  It is applied op by op in the fill
+     * loop instead -- nfs4_vfs_current_stateid_step.  (Only for the ops the
+     * run carries: anything past nenc is dispatched op by op afterwards and
+     * the dispatcher applies it then.) */
 
     chimera_vfs_compound_set_gate(compound, nfs4_vfs_compound_gate, ctx);
 
