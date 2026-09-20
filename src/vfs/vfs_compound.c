@@ -1514,14 +1514,53 @@ chimera_vfs_compound_op_use_handle(
      * the same NULL, arrived at a different way, and the addressing op would
      * dereference it three frames down in a backend.  The type is known right
      * here, so the sequence is refused at build and answered EINVAL at submit
-     * rather than crashing mid-run. */
-    if (!chimera_vfs_compound_op_produces_handle(compound->ops[from].type)) {
+     * rather than crashing mid-run.
+     *
+     * An op the CALLER has skipped is the same NULL again -- it will not run,
+     * so it will produce nothing -- and is refused on the same terms.  The
+     * other order of the two calls is refused by op_set_skip. */
+    if (!chimera_vfs_compound_op_produces_handle(compound->ops[from].type) ||
+        compound->ops[from].skip_build) {
         compound->build_failed = 1;
         return;
     }
 
     compound->ops[index].handle_from = (int) from;
 } /* chimera_vfs_compound_op_use_handle */
+
+/*
+ * The caller's own skip -- see the declaration for the precedence rule.
+ *
+ * It is a separate field from the gate's and not the same one set early,
+ * because submit clears the gate's: sharing the field would mean a sequence
+ * submitted twice ran a different shape the second time, silently.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_compound_op_set_skip(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    int                          skip)
+{
+    uint32_t i;
+
+    if (index >= compound->num_ops) {
+        return;
+    }
+
+    /* An op that produces the handle a later op addresses cannot be skipped:
+     * that op would be handed NULL.  Refused at build, the way use_handle
+     * refuses a source that never had a handle to give. */
+    if (skip) {
+        for (i = index + 1; i < compound->num_ops; i++) {
+            if (compound->ops[i].handle_from == (int) index) {
+                compound->build_failed = 1;
+                return;
+            }
+        }
+    }
+
+    compound->ops[index].skip_build = skip ? 1 : 0;
+} /* chimera_vfs_compound_op_set_skip */
 
 /*
  * The name-op setters.  Each names an op that already exists and must be of
@@ -4920,13 +4959,18 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
     struct chimera_vfs_open_handle *target, *range_src, *range_dst;
     unsigned int                    open_flags;
 
-    /* An op a gate skipped is run PAST, not run: nothing is dispatched, its
-     * status stays CHIMERA_VFS_UNSET and its results are untouched, and it does
-     * not count among the ops that ran.  Nothing is cleared on the way through
+    /* A skipped op is run PAST, not run: nothing is dispatched, its status
+     * stays CHIMERA_VFS_UNSET and its results are untouched, and it does not
+     * count among the ops that ran.  Nothing is cleared on the way through
      * either -- the per-op scratch below was cleared when the sequence advanced
-     * off the last op that actually ran. */
+     * off the last op that actually ran.
+     *
+     * The two skips are ORed and neither clears the other: the caller's was
+     * decided when the sequence was built and survives submission, the gate's
+     * is decided on every execution. */
     while (compound->index < compound->num_ops &&
-           compound->ops[compound->index].skip) {
+           (compound->ops[compound->index].skip ||
+            compound->ops[compound->index].skip_build)) {
         compound->index++;
     }
 
@@ -6252,7 +6296,11 @@ chimera_vfs_compound_submit(
     /* A gate's edits are re-applied on every execution, and a skip is one of
      * them: the last run's is cleared so the gate decides again, rather than
      * an op staying skipped because it was skipped once.  This is the READDIR
-     * reset rule applied to the sequence itself. */
+     * reset rule applied to the sequence itself.
+     *
+     * The CALLER's skip is not one of the gate's edits and is not cleared: it
+     * is an argument of the sequence as built, like a READ's offset, and a
+     * sequence submitted twice has to be the same sequence both times. */
     for (uint32_t i = 0; i < compound->num_ops; i++) {
         compound->ops[i].skip = 0;
     }
