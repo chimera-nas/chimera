@@ -639,6 +639,50 @@ chimera_nfs4_delegpurge(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
 
+/*
+ * The four NFSv4 operations that drive no VFS call at all: each resolves a
+ * stateid the server already holds, advances a seqid, and changes state.
+ *
+ * Each is reachable from two entrances.  The per-op handler above completes
+ * the request itself; these apply the operation and hand the status back, so
+ * the VFS-sequence driver can carry the operation as a SLOT -- an NFSv4 op
+ * the run holds a place for and applies in order when the sequence's results
+ * are filled, which is what lets the ops in front of it be one VFS sequence
+ * instead of ending at the first CLOSE.  See nfs4_compound_vfs.c.
+ *
+ * All three that address the current filehandle assume it is established: the
+ * per-op handler answers NFS4ERR_NOFILEHANDLE before calling, and a sequence
+ * only ever runs with a current object.  Every one of them writes its own
+ * result, including on the failure paths.
+ */
+nfsstat4
+chimera_nfs4_close_apply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+nfsstat4
+chimera_nfs4_locku_apply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+nfsstat4
+chimera_nfs4_open_downgrade_apply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+nfsstat4
+chimera_nfs4_delegreturn_apply(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
 void
 chimera_nfs4_setclientid(
     struct chimera_server_nfs_thread *thread,

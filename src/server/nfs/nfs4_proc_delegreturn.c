@@ -14,8 +14,13 @@
  * backing cache claim (which lets any conflicting acquirer that
  * triggered a recall make progress) and tear the delegation state down.
  */
-void
-chimera_nfs4_delegreturn(
+/*
+ * Everything DELEGRETURN does, with the reply left to the caller.  See
+ * chimera_nfs4_close_apply: the operation drives no VFS call, so a sequence
+ * applies it when its results are filled.
+ */
+nfsstat4
+chimera_nfs4_delegreturn_apply(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
@@ -38,8 +43,7 @@ chimera_nfs4_delegreturn(
 
     if (status != NFS4_OK) {
         res->status = status;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return res->status;
     }
 
     /* A delegation stateid designates state held only by the client it was
@@ -52,8 +56,7 @@ chimera_nfs4_delegreturn(
         nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
         res->status = status;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+        return res->status;
     }
 
     deleg = state_void;
@@ -77,7 +80,18 @@ chimera_nfs4_delegreturn(
                             thread->vfs_thread);
 
     res->status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    return NFS4_OK;
+} /* chimera_nfs4_delegreturn_apply */
+
+void
+chimera_nfs4_delegreturn(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop)
+{
+    chimera_nfs4_compound_complete(
+        req, chimera_nfs4_delegreturn_apply(thread, req, argop, resop));
 } /* chimera_nfs4_delegreturn */
 
 /*
