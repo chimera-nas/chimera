@@ -63,7 +63,7 @@ chimera_posix_mknod(
     }
 
     chimera_posix_completion_init(&comp, &req);
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode             = CHIMERA_CLIENT_OP_MKNOD;
     req.mknod.callback     = chimera_posix_mknod_callback;

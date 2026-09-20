@@ -238,13 +238,12 @@ chimera_s3_get_metadata_done(
     }
 } /* chimera_s3_get_metadata_done */
 
-static void
-chimera_s3_get_open_callback(
-    enum chimera_vfs_error          error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_open_callback,
+    (enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+    void                           *private_data),
+    (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -266,13 +265,12 @@ chimera_s3_get_open_callback(
 
 } /* chimera_s3_get_open_callback */
 
-static void
-chimera_s3_get_lookup_callback(
-    enum chimera_vfs_error    error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_lookup_callback,
+    (enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    void                     *private_data),
+    (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -419,13 +417,12 @@ chimera_s3_get(
  * intentionally omitted; clients that request only those attributes still get
  * a well-formed 200 response.
  */
-static void
-chimera_s3_get_object_attributes_lookup_callback(
-    enum chimera_vfs_error    error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_object_attributes_lookup_callback,
+    (enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    void                     *private_data),
+    (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;

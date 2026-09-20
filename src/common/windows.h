@@ -139,3 +139,16 @@ static inline int chimera_windows_machine_identity(char *buffer, size_t capacity
     errno = EIO;
     return -1;
 }
+
+/* Bounded byte search used by protocol parsers; empty needles match first. */
+static inline void *memmem(const void *haystack, size_t haystack_size,
+                           const void *needle, size_t needle_size)
+{
+    const unsigned char *bytes = haystack;
+    if (!needle_size) { return (void *) haystack; }
+    if (needle_size > haystack_size) { return NULL; }
+    for (size_t i = 0; i <= haystack_size - needle_size; i++) {
+        if (!memcmp(bytes + i, needle, needle_size)) { return (void *) (bytes + i); }
+    }
+    return NULL;
+}

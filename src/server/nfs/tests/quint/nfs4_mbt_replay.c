@@ -30,6 +30,7 @@
  * nfs4_replay.py, in git history -- compared raw bytes.)
  */
 
+#include "common/compiler.h"
 #include "common/test_host.h"
 #include "common/getopt.h"
 #include <jansson.h>
@@ -111,7 +112,7 @@ static void
 mism_add(
     struct mism *m,
     const char  *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static void
 mism_add(
@@ -571,7 +572,7 @@ caps_mismatch(
     struct mism   *m,
     const char    *feature,
     const char    *fmt,
-    ...) __attribute__((format(printf, 4, 5)));
+    ...) CHIMERA_PRINTF(4, 5);
 
 static int
 caps_mismatch(

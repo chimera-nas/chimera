@@ -96,13 +96,12 @@ chimera_s3_list_buckets(
 
 /* --------------------------------------------------------------- CreateBucket */
 
-static void
-chimera_s3_create_bucket_mkdir_cb(
-    enum chimera_vfs_error    error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_create_bucket_mkdir_cb,
+    (enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    void                     *private_data),
+    (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -142,13 +141,12 @@ chimera_s3_create_bucket_mkdir_cb(
     }
 } /* chimera_s3_create_bucket_mkdir_cb */
 
-static void
-chimera_s3_create_bucket_lookup_cb(
-    enum chimera_vfs_error    error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_create_bucket_lookup_cb,
+    (enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    void                     *private_data),
+    (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;

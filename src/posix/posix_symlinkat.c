@@ -64,7 +64,7 @@ chimera_posix_symlinkat(
     }
 
     req.symlink.path[path_len] = '\0';
-    slash                      = rindex(req.symlink.path, '/');
+    slash                      = strrchr(req.symlink.path, '/');
 
     req.symlink.path_len   = path_len;
     req.symlink.parent_len = slash ? slash - req.symlink.path : path_len;

@@ -60,7 +60,7 @@ chimera_posix_open(
 
     chimera_posix_completion_init(&comp, &req);
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode            = CHIMERA_CLIENT_OP_OPEN;
     req.open.callback     = chimera_posix_open_callback;

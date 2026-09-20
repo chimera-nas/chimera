@@ -15,7 +15,7 @@ chimera_remove(
     struct chimera_client_request *request;
     const char                    *slash;
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     request = chimera_client_request_alloc(thread);
 

@@ -11,6 +11,10 @@
 #define CHIMERA_NORETURN __declspec(noreturn)
 #define CHIMERA_NOINLINE __declspec(noinline)
 #define CHIMERA_UNUSED
+#define CHIMERA_PRINTF(fmt, args)
+#define CHIMERA_PACK_BEGIN __pragma(pack(push, 1))
+#define CHIMERA_PACK_END __pragma(pack(pop))
+#define CHIMERA_PACKED
 #define CHIMERA_EXPECT(x, value) (x)
 #define chimera_bswap32 _byteswap_ulong
 #define chimera_bswap64 _byteswap_uint64
@@ -41,6 +45,10 @@ static inline unsigned chimera_ctz64(uint64_t x)
 #define CHIMERA_NORETURN __attribute__((noreturn))
 #define CHIMERA_NOINLINE __attribute__((noinline))
 #define CHIMERA_UNUSED __attribute__((unused))
+#define CHIMERA_PRINTF(fmt, args) __attribute__((format(printf, fmt, args)))
+#define CHIMERA_PACK_BEGIN
+#define CHIMERA_PACK_END
+#define CHIMERA_PACKED __attribute__((packed))
 #define CHIMERA_EXPECT(x, value) __builtin_expect((x), (value))
 #define chimera_bswap32 __builtin_bswap32
 #define chimera_bswap64 __builtin_bswap64

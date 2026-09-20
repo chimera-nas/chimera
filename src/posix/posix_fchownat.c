@@ -152,7 +152,7 @@ chimera_posix_fchownat(
         }
 
         req.setattr.path[path_len] = '\0';
-        slash                      = rindex(req.setattr.path, '/');
+        slash                      = strrchr(req.setattr.path, '/');
 
         req.setattr.parent_handle = NULL;
         req.setattr.path_len      = path_len;

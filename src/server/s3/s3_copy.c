@@ -746,7 +746,7 @@ chimera_s3_copy_open_src_callback(
 
     /* Resolve the destination directory and key from the request path,
      * exactly as PutObject does, then create the destination there. */
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
 
     if (slash) {
         dirpath       = request->path;

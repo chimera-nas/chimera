@@ -33,6 +33,7 @@
  * details.
  */
 
+#include "common/compiler.h"
 #include "common/getopt.h"
 #include <jansson.h>
 
@@ -74,7 +75,7 @@ static void
 mism_add(
     struct mism *m,
     const char  *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static void
 mism_add(

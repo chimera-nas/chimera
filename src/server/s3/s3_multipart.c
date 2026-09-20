@@ -368,7 +368,7 @@ static inline void
 chimera_s3_mp_append(
     char      **p,
     const char *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static inline void
 chimera_s3_mp_append(
@@ -521,13 +521,15 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
      * tmp_name + dir_fh).  Cannot use chimera_s3_compute_etag because we
      * don't have the file's mtime attribute yet. */
     {
+        CHIMERA_PACK_BEGIN
         struct {
             int64_t size;
             int32_t part_number;
             int32_t tmp_name_len;
             uint8_t dir_fh[CHIMERA_VFS_FH_SIZE];
             char    tmp_name[64];
-        } __attribute__((packed)) seed;
+        } CHIMERA_PACKED seed;
+        CHIMERA_PACK_END
         XXH128_hash_t h;
 
         memset(&seed, 0, sizeof(seed));
@@ -753,15 +755,14 @@ chimera_s3_upload_part_recv(
     goto again;
 } /* chimera_s3_upload_part_recv */
 
-static void
-chimera_s3_upload_part_create_unlinked_callback(
-    enum chimera_vfs_error          error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_unlinked_callback,
+    (enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
     struct chimera_vfs_attrs       *set_attr,
     struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
+    void                           *private_data),
+    (error_code, oh, set_attr, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -785,17 +786,16 @@ chimera_s3_upload_part_create_unlinked_callback(
     chimera_s3_upload_part_recv(evpl, request);
 } /* chimera_s3_upload_part_create_unlinked_callback */
 
-static void
-chimera_s3_upload_part_create_callback(
-    enum chimera_vfs_error          error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_callback,
+    (enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
     struct chimera_vfs_attrs       *set_attr,
     struct chimera_vfs_attrs       *attr,
     struct chimera_vfs_attrs       *dir_pre_attr,
     struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
+    void                           *private_data),
+    (error_code, oh, set_attr, attr, dir_pre_attr, dir_post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -819,13 +819,12 @@ chimera_s3_upload_part_create_callback(
     chimera_s3_upload_part_recv(evpl, request);
 } /* chimera_s3_upload_part_create_callback */
 
-static void
-chimera_s3_upload_part_open_dir_callback(
-    enum chimera_vfs_error          error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_open_dir_callback,
+    (enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+    void                           *private_data),
+    (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_vfs_module       *module;
@@ -886,13 +885,12 @@ chimera_s3_upload_part_open_dir_callback(
     }
 } /* chimera_s3_upload_part_open_dir_callback */
 
-static void
-chimera_s3_upload_part_lookup_callback(
-    enum chimera_vfs_error    error_code,
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_lookup_callback,
+    (enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    void                     *private_data),
+    (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -959,7 +957,7 @@ chimera_s3_upload_part(
     request->multipart.upload  = upload;
     request->multipart.is_copy = 0;
 
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
 
     if (slash) {
         dirpathlen    = slash - request->path;
@@ -1509,7 +1507,7 @@ chimera_s3_upc_open_src_callback(
 
     ctx->src_handle = oh;
 
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
     if (slash) {
         dirpathlen    = slash - request->path;
         request->name = slash + 1;
@@ -3094,7 +3092,7 @@ chimera_s3_complete_multipart_upload_body_done(
 
     /* Create the final object using the same dir-open + create pattern as
      * PUT. Compute parent dir from object key. */
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
     if (slash) {
         dirpathlen    = slash - request->path;
         request->name = slash + 1;

@@ -6690,10 +6690,10 @@ chimera_smb_parse_create(
                              request->create.parent_path_len);
         if (colon) {
             *colon = '\0';
-            slash  = rindex(request->create.parent_path, '\\');
+            slash  = strrchr(request->create.parent_path, '\\');
             *colon = ':';
         } else {
-            slash = rindex(request->create.parent_path, '\\');
+            slash = strrchr(request->create.parent_path, '\\');
         }
     }
 

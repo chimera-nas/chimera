@@ -66,7 +66,7 @@ chimera_posix_mkdirat(
         }
 
         req.mkdir.path[path_len] = '\0';
-        slash                    = rindex(req.mkdir.path, '/');
+        slash                    = strrchr(req.mkdir.path, '/');
 
         req.mkdir.parent_handle = NULL;
         req.mkdir.path_len      = path_len;

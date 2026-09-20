@@ -32,6 +32,7 @@
  * trace fails with a report of the step, the mismatches, and recent
  * history. */
 
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,7 +61,7 @@ struct mism {
     char msg[MBT_MAX_MISM][MBT_MISM_LEN];
 };
 
-__attribute__((format(printf, 2, 3)))
+CHIMERA_PRINTF(2, 3)
 static void
 mism_add(
     struct mism *m,

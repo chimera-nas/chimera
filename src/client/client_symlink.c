@@ -22,7 +22,7 @@ chimera_symlink(
         return;
     }
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     request = chimera_client_request_alloc(thread);
 

@@ -46,7 +46,7 @@ chimera_posix_mkdir(
 
     chimera_posix_completion_init(&comp, &req);
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode             = CHIMERA_CLIENT_OP_MKDIR;
     req.mkdir.callback     = chimera_posix_mkdir_callback;
@@ -111,7 +111,7 @@ chimera_posix_mkdir(
                         if (tgt[0] == '/') {
                             return chimera_posix_mkdir(tgt, mode);
                         } else {
-                            const char *ls   = rindex(link, '/');
+                            const char *ls   = strrchr(link, '/');
                             int         dlen = ls ? (int) (ls - link) : 0;
 
                             if (snprintf(full, sizeof(full), "%.*s/%s", dlen,

@@ -24,6 +24,7 @@
  * that is the mode used when (re)deriving the model's constants.
  */
 
+#include "common/compiler.h"
 #include "common/getopt.h"
 
 #include "nfs_aux_mbt_common.h"
@@ -44,7 +45,7 @@ static int dump;
 static void
 fail(
     const char *fmt,
-    ...) __attribute__((format(printf, 1, 2)));
+    ...) CHIMERA_PRINTF(1, 2);
 
 static void
 fail(
