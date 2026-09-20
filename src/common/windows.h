@@ -38,15 +38,7 @@ struct iovec { void *iov_base; size_t iov_len; };
 #define strdup _strdup
 #define strtok_r strtok_s
 #define alloca _alloca
-#define close(...) _close(__VA_ARGS__)
-#define read(...) _read(__VA_ARGS__)
-#define write(...) _write(__VA_ARGS__)
-#define unlink(...) _unlink(__VA_ARGS__)
-#define rmdir(...) _rmdir(__VA_ARGS__)
-#define getpid(...) _getpid(__VA_ARGS__)
-#define fileno(...) _fileno(__VA_ARGS__)
-#define isatty(...) _isatty(__VA_ARGS__)
-#define fsync(...) _commit(__VA_ARGS__)
+static inline int fsync(int fd) { return _commit(fd); }
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
