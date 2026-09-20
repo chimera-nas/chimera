@@ -31,12 +31,13 @@
  * squash policy.  Refusing is always safe: the request is untouched and the
  * per-op path runs.
  *
- * INJECTED OPS.  Three NFSv4 operations do more VFS work than their
+ * INJECTED OPS.  Several NFSv4 operations do more VFS work than their
  * VFS-compound counterpart: PUTFH stats the handle it validates (the zero-link
  * staleness rule), READLINK stats the object before reading it (the symlink
- * type gate), and COMMIT stats it before flushing (the regular-file gate).
- * Each therefore encodes as two VFS ops, and the map below records which VFS
- * ops belong to which NFSv4 op so a failure lands on the right one.
+ * type gate), COMMIT stats it before flushing (the regular-file gate), and
+ * LOCKT stats it before asking the claim layer whether its range is free.
+ * Each therefore encodes as two or more VFS ops, and the map below records
+ * which VFS ops belong to which NFSv4 op so a failure lands on the right one.
  *
  * WHAT IS NOT IDENTICAL.  Execution stops at the first VFS failure, but the
  * checks above are NFSv4-side and are applied when the results are filled -- by
@@ -186,8 +187,11 @@ nfs4_vfs_readdir_max_entries(
 } /* nfs4_vfs_readdir_max_entries */
 
 struct nfs4_vfs_op {
-    /* VERIFY/NVERIFY: the status the gate decided, which no errno encodes. */
-    nfsstat4                        verify_status;
+    /* The status the gate decided, for the answers no errno encodes:
+     * VERIFY/NVERIFY's NFS4ERR_SAME and NOT_SAME, and LOCKT's NFS4ERR_DENIED.
+     * The gate fails the op with whatever errno is nearest and leaves the real
+     * answer here; the completion reads it back in preference. */
+    nfsstat4                        gate_status;
 
     /* READDIR, which marshals its page entry by entry as the sequence produces
      * it: the entry list being built, and the reply-buffer mark it started
@@ -216,6 +220,12 @@ struct nfs4_vfs_op {
      * holds a reference to for as long as the sequence runs.  Borrowed by the
      * VFS op; released here when the sequence is over, whatever the outcome. */
     struct chimera_vfs_open_handle *io_handle;
+    /* LOCKT: the range probe the CLAIM_TEST op asks.  A probe is never
+     * inserted, so the claim core keeps no pointer into it once the op has
+     * answered -- but the executor reads it while the op runs, so it lives
+     * here, on memory that outlives the sequence, rather than on the build's
+     * stack (vfs_compound.h, add_claim_test). */
+    struct chimera_vfs_claim        probe;
 };
 
 struct nfs4_vfs_compound_ctx {
@@ -456,6 +466,70 @@ nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
             return slack;
     } /* switch */
 } /* nfs4_vfs_op_reply_bound */
+
+/*
+ * Build the range probe a LOCKT asks, from its arguments alone.
+ *
+ * Everything it needs is on the wire or in the client table, so it is built
+ * when the sequence is -- which is what lets the probe itself be an op the
+ * sequence executes rather than a question asked once every result is in.
+ */
+static void
+nfs4_vfs_lockt_init_probe(
+    struct nfs_request       *req,
+    const struct LOCKT4args  *args,
+    struct chimera_vfs_claim *probe)
+{
+    struct chimera_claim_owner owner;
+
+    memset(&owner, 0, sizeof(owner));
+    owner.proto = CHIMERA_CLAIM_PROTO_NFSV4;
+
+    /* RFC 8881 §2.4: in 4.1+ the client is the session's, not the one in
+     * lock_owner4, which clients routinely leave zero or stale.  LOCK
+     * registers under the server-assigned id, so keying the probe on the wire
+     * field would make the caller's own locks look foreign. */
+    if (req->minorversion > 0 && req->session &&
+        req->session->client_unified) {
+        owner.client_key = req->session->client_unified->client_id;
+    } else {
+        owner.client_key = args->owner.clientid;
+    }
+    owner.owner_lo = XXH3_64bits(args->owner.owner.data,
+                                 args->owner.owner.len);
+    owner.owner_hi = 0;
+
+    /* NFSv4 and the claim core both use UINT64_MAX as the "to EOF" sentinel,
+     * so the wire length passes through unchanged. */
+    chimera_vfs_claim_init_range(probe,
+                                 !(args->locktype == READ_LT ||
+                                   args->locktype == READW_LT),
+                                 /*smb=*/ false,
+                                 args->offset, args->length,
+                                 &owner);
+} /* nfs4_vfs_lockt_init_probe */
+
+/* The holder a LOCKT's probe reported, as the operation's denied body. */
+static void
+nfs4_vfs_lockt_fill_denied(
+    struct nfs_request                      *req,
+    struct LOCKT4res                        *res,
+    const struct chimera_vfs_claim_conflict *conflict)
+{
+    res->denied.offset = conflict->offset;
+    /* conflict.length already uses UINT64_MAX for a to-EOF holder, so it maps
+     * directly to the NFSv4 denied length. */
+    res->denied.length = conflict->length;
+    /* WRITE_LT iff the holder writes: a write delegation (CW) must report
+     * WRITE_LT though it holds no LW. */
+    res->denied.locktype = (conflict->used & (CHIMERA_CLAIM_W |
+                                              CHIMERA_CLAIM_CW |
+                                              CHIMERA_CLAIM_LW))
+        ? WRITE_LT : READ_LT;
+    nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
+                           conflict, &res->denied.owner,
+                           req->encoding->dbuf);
+} /* nfs4_vfs_lockt_fill_denied */
 
 /* The NFSv4 op a given VFS op carries the result of. */
 static struct nfs4_vfs_op *
@@ -917,89 +991,12 @@ nfs4_vfs_op_fill(
         }
 
         case OP_LOCKT:
-        {
-            struct LOCKT4args                *largs     = &argop->oplockt;
-            struct LOCKT4res                 *lres      = &resop->oplockt;
-            struct chimera_vfs_state         *vfs_state =
-                req->thread->vfs->vfs_state;
-            struct chimera_vfs_file_state    *file_state;
-            struct chimera_vfs_claim          probe;
-            struct chimera_claim_owner        owner;
-            struct chimera_vfs_claim_conflict conflict;
-            enum chimera_vfs_claim_result     result;
-
-            /* RFC 7530 §16.11.4: byte-range locking is defined only for regular
-             * files.  A directory is NFS4ERR_ISDIR, anything else INVAL. */
-            if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-                !S_ISREG(vop->attr.va_mode)) {
-                return chimera_nfs4_data_nonreg_status(vop->attr.va_mode);
-            }
-
-            file_state = chimera_vfs_state_get(vfs_state, vop->fh,
-                                               (int) vop->fh_len,
-                                               chimera_vfs_hash(vop->fh,
-                                                                vop->fh_len),
-                                               false);
-
-            if (!file_state) {
-                /* No state on this file means no lock could conflict. */
-                lres->status = NFS4_OK;
-                return NFS4_OK;
-            }
-
-            memset(&owner, 0, sizeof(owner));
-            owner.proto = CHIMERA_CLAIM_PROTO_NFSV4;
-
-            /* RFC 8881 §2.4: in 4.1+ the client is the session's, not the one
-             * in lock_owner4, which clients routinely leave zero or stale.
-             * LOCK registers under the server-assigned id, so keying the probe
-             * on the wire field would make the caller's own locks look foreign.
-             */
-            if (req->minorversion > 0 && req->session &&
-                req->session->client_unified) {
-                owner.client_key = req->session->client_unified->client_id;
-            } else {
-                owner.client_key = largs->owner.clientid;
-            }
-            owner.owner_lo = XXH3_64bits(largs->owner.owner.data,
-                                         largs->owner.owner.len);
-            owner.owner_hi = 0;
-
-            chimera_vfs_claim_init_range(&probe,
-                                         !(largs->locktype == READ_LT ||
-                                           largs->locktype == READW_LT),
-                                         /*smb=*/ false,
-                                         largs->offset, largs->length,
-                                         &owner);
-
-            memset(&conflict, 0, sizeof(conflict));
-            conflict.length = UINT64_MAX;
-
-            result = chimera_vfs_claim_test(file_state, &probe, &conflict);
-
-            if (result == CHIMERA_CLAIM_GRANTED) {
-                lres->status = NFS4_OK;
-            } else {
-                lres->status        = NFS4ERR_DENIED;
-                lres->denied.offset = conflict.offset;
-                lres->denied.length = conflict.length;
-                /* WRITE_LT iff the holder writes: a write delegation (CW) must
-                 * report WRITE_LT though it holds no LW. */
-                lres->denied.locktype = (conflict.used & (CHIMERA_CLAIM_W |
-                                                          CHIMERA_CLAIM_CW |
-                                                          CHIMERA_CLAIM_LW))
-                    ? WRITE_LT : READ_LT;
-                nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
-                                       &conflict, &lres->denied.owner,
-                                       req->encoding->dbuf);
-            }
-
-            chimera_vfs_state_put(vfs_state, file_state);
-
-            /* DENIED is a successful query result, and travels as the op's
-             * status the same way it does on the per-op path. */
-            return lres->status;
-        }
+            /* The probe ran as a CLAIM_TEST op inside the sequence, and it
+             * answered GRANTED -- a denial is the gate's business (see
+             * nfs4_vfs_compound_gate), because a denied LOCKT truncates the
+             * COMPOUND and nothing behind it may run. */
+            resop->oplockt.status = NFS4_OK;
+            return NFS4_OK;
 
         case OP_SETATTR:
         {
@@ -1298,20 +1295,45 @@ nfs4_vfs_compound_gate(
             continue;
         }
 
-        if (req->args_compound->argarray[map->res_index].argop != OP_READDIR) {
-            break;
-        }
-
         vop = chimera_vfs_compound_op(compound, index);
 
-        /* RFC 7530 16.24.4, applied here so it stops the sequence rather than
-         * being discovered once the ops behind it have already run. */
-        if (!vop->eof && map->readdir_cursor.entries == NULL) {
-            *status = CHIMERA_VFS_ERANGE;
-            return;
-        }
+        switch (req->args_compound->argarray[map->res_index].argop) {
+            case OP_READDIR:
+                /* RFC 7530 16.24.4, applied here so it stops the sequence
+                 * rather than being discovered once the ops behind it have
+                 * already run. */
+                if (!vop->eof && map->readdir_cursor.entries == NULL) {
+                    *status = CHIMERA_VFS_ERANGE;
+                }
+                break;
 
+            case OP_LOCKT:
+                /* The CLAIM_TEST answered.  A conflict is NFS4ERR_DENIED,
+                 * which is a successful query result on the wire but an ERROR
+                 * status in a COMPOUND: it truncates the reply there, and
+                 * nothing behind it runs.  Failing the op here is what makes
+                 * that true -- which is what lets a mutating op sit behind a
+                 * LOCKT in the same sequence at all.  The conflict itself is
+                 * read back off the op in the completion, where the reply
+                 * buffer the owner string is copied into is being written. */
+                if (vop->claim_result != CHIMERA_CLAIM_GRANTED) {
+                    map->gate_status = NFS4ERR_DENIED;
+                    *status          = CHIMERA_VFS_EAGAIN;
+                }
+                break;
+
+            default:
+                break;
+        } /* switch */
+
+        /* Not a return: an op whose result IS its gate stat -- VERIFY and
+         * NVERIFY, whose map points both vfs_res and vfs_aux at the one
+         * getattr -- still has to reach the loop below. */
         break;
+    }
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
     }
 
     for (k = 0; k < ctx->num_ops; k++) {
@@ -1353,11 +1375,27 @@ nfs4_vfs_compound_gate(
                 if (vs != NFS4_OK) {
                     /* Carried out of band: the answer is an NFSv4 status with
                      * no errno that means it, and the fill reads it back. */
-                    map->verify_status = vs;
-                    *status            = CHIMERA_VFS_EINVAL;
+                    map->gate_status = vs;
+                    *status          = CHIMERA_VFS_EINVAL;
                 }
                 break;
             }
+
+            case OP_LOCKT:
+                /* RFC 7530 §16.11.4: byte-range locking is defined only for
+                 * regular files.  A directory is NFS4ERR_ISDIR, a symlink
+                 * NFS4ERR_SYMLINK, anything else NFS4ERR_INVAL -- distinctions
+                 * no errno carries, so the answer goes out of band and the op
+                 * fails with the nearest one.  Ahead of the probe, so a
+                 * CLAIM_TEST never runs against an object the operation is not
+                 * defined for. */
+                if ((aux->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+                    !S_ISREG(aux->attr.va_mode)) {
+                    map->gate_status =
+                        chimera_nfs4_data_nonreg_status(aux->attr.va_mode);
+                    *status = CHIMERA_VFS_EINVAL;
+                }
+                break;
 
             case OP_COMMIT:
             /* RFC 7530 §16.4 for COMMIT, RFC 7862 §15.1/15.4/15.11 for the
@@ -1441,11 +1479,21 @@ nfs4_vfs_compound_complete(
                 /* VERIFY and NVERIFY answer with NFS4ERR_NOT_SAME or
                  * NFS4ERR_SAME, which no errno encodes; the gate recorded the
                  * real answer when it failed the op. */
-                status = map->verify_status ? map->verify_status :
+                status = map->gate_status ? map->gate_status :
                     nfs4_vfs_op_errno(argop, vop, req);
                 resop->opillegal.status = status;
-                fail_res                = map->res_index;
-                failed                  = 1;
+
+                /* A denied LOCKT still has a body: the holder that refused it.
+                 * Filled here rather than in the gate because copying the
+                 * owner string allocates from the reply buffer, which nothing
+                 * may touch while the sequence is still running. */
+                if (argop->argop == OP_LOCKT && status == NFS4ERR_DENIED) {
+                    nfs4_vfs_lockt_fill_denied(req, &resop->oplockt,
+                                               &vop->conflict);
+                }
+
+                fail_res = map->res_index;
+                failed   = 1;
                 break;
             }
         }
@@ -2213,7 +2261,9 @@ chimera_nfs4_compound_try_vfs(
                 vfs_ops += 4;
                 break;
             case OP_READLINK:
-                /* open + getattr + readlink */
+            /* open + getattr + readlink */
+            case OP_LOCKT:
+                /* open + getattr (the type gate) + the claim probe */
                 vfs_ops += 3;
                 break;
             case OP_PUTFH:
@@ -2556,11 +2606,33 @@ chimera_nfs4_compound_try_vfs(
                     break;
                 }
 
-                /* The probe itself reads live claim state and reports DENIED,
-                 * which is an answer rather than a failure -- but it is still
-                 * decided when the result is filled, so nothing that mutates
-                 * may sit behind it. */
-                may_fail_late = 1;
+                /* RFC 7530 §9.1.4: the lock-owner names a clientid, and one
+                 * the server has no record of is NFS4ERR_STALE_CLIENTID.
+                 * 4.1+ identifies the client through the session instead.
+                 * Asked here rather than skipped: the per-op path asks it,
+                 * and a run that carried the LOCKT without it answered a
+                 * probe for a client that does not exist. */
+                if (req->minorversion == 0) {
+                    struct nfs4_session *s = nfs4_session_find_by_clientid(
+                        &thread->shared->nfs4_shared_clients,
+                        la->owner.clientid);
+
+                    if (!s) {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
+
+                    /* RFC 7530 §9.5: LOCKT is a clientid-bearing operation
+                     * and renews all of the client's leases. */
+                    nfs_client_touch(s->client_unified);
+                    nfs4_session_put(s);
+                }
+
+                /* The probe is an op of the run now (a CLAIM_TEST), so its
+                 * answer arrives in order with everything else and a denial
+                 * stops the sequence where it stands -- which is why nothing
+                 * behind a LOCKT has to be refused any more. */
                 break;
             }
 
@@ -3191,10 +3263,10 @@ chimera_nfs4_compound_try_vfs(
 
         argop = &req->args_compound->argarray[i];
 
-        map->res_index     = i;
-        map->vfs_lo        = next;
-        map->vfs_aux       = -1;
-        map->verify_status = 0;
+        map->res_index   = i;
+        map->vfs_lo      = next;
+        map->vfs_aux     = -1;
+        map->gate_status = 0;
 
         switch (argop->argop) {
             case OP_PUTFH:
@@ -3368,10 +3440,11 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_LOCKT:
-                /* All LOCKT asks of the VFS is the object's type; everything
-                 * else it needs -- the claim state on the file -- is memory the
-                 * server already holds, and is read when the result is
-                 * filled. */
+                /* The type gate, and then the probe itself.  A CLAIM_TEST is
+                 * arbitrated per file and reads only the object's handle, so
+                 * it shares the metadata open the gate's stat needs -- which
+                 * is also the open the per-op path uses (PATH|NOFOLLOW), and
+                 * not a data open, which of a FIFO would block. */
                 if (nfs4_vfs_open_for(compound, &cur_open_flags,
                                       NFS4_VFS_OPEN_META) < 0) {
                     goto refuse;
@@ -3379,6 +3452,14 @@ chimera_nfs4_compound_try_vfs(
 
                 idx = chimera_vfs_compound_add_getattr(
                     compound, CHIMERA_VFS_ATTR_MODE);
+                map->vfs_aux = idx;
+
+                if (idx >= 0) {
+                    nfs4_vfs_lockt_init_probe(req, &argop->oplockt,
+                                              &map->probe);
+                    idx = chimera_vfs_compound_add_claim_test(compound,
+                                                              &map->probe, 0);
+                }
                 map->vfs_res = idx;
                 break;
 
