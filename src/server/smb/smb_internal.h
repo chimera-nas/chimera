@@ -954,7 +954,6 @@ struct chimera_smb_request {
             struct evpl_iovec               output_iov;
             /* Reparse point fields */
             struct chimera_smb_open_file   *rp_open_file;
-            struct chimera_vfs_open_handle *rp_parent_handle;
             uint32_t                        rp_reparse_tag;
             uint64_t                        rp_nfs_type;
             uint32_t                        rp_device_major;
@@ -963,11 +962,12 @@ struct chimera_smb_request {
             char                            rp_target[CHIMERA_VFS_PATH_MAX];
             struct chimera_vfs_attrs        rp_set_attr;
             /* SET_REPARSE replaces the original object with a freshly-created
-             * special file (symlink/device); its file handle is captured here so
-             * the open's VFS handle can be re-bound to the new inode, keeping the
-             * client's open valid for a following GET_REPARSE / handle op. */
-            uint8_t                         rp_new_fh[CHIMERA_VFS_FH_SIZE + 16];
-            uint32_t                        rp_new_fh_len;
+             * special file (symlink/device) and re-opens it in the same
+             * sequence, so the client's open can be re-bound to the new inode.
+             * This is that sequence's CREATE index: the last op whose failure
+             * means the SET itself failed -- anything behind it failing leaves
+             * the reparse point set and only the re-bind undone. */
+            uint32_t                        rp_create_index;
             /* GET response buffer.  Sized for the largest layout: a SYMLINK-tag
              * SYMBOLIC_LINK_REPARSE_BUFFER (20-byte header + Substitute and Print
              * names, each up to the full UTF-16 target). */
