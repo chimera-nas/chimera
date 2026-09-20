@@ -13,11 +13,15 @@
  * a remainder that is not fully expressible is refused here and dispatched
  * exactly as before.
  *
- * WHERE THE SEQUENCE ENDS.  Usually at the end of the COMPOUND.  One op ends it
- * early: an OPEN (see nfs4_vfs_op_ends_run) is always the last op the sequence
- * carries, and whatever followed it is dispatched op by op afterwards.  Handing
- * the dispatcher back a req->index short of the end is not a special case --
- * that is what every per-op handler does when it completes.
+ * WHERE THE SEQUENCE ENDS.  Usually at the end of the COMPOUND.  A few ops end
+ * it early (nfs4_vfs_op_ends_run): a SECINFO, a LOCK, and an OPEN that could
+ * still earn a delegation -- the one part of an OPEN that can suspend the
+ * request is the CB_NULL probe its grant attempt may park on, so an OPEN that
+ * cannot reach that probe is carried like any other op and the run goes on
+ * past it.  Whatever follows a run-ending op is dispatched op by op
+ * afterwards.  Handing the dispatcher back a req->index short of the end is
+ * not a special case -- that is what every per-op handler does when it
+ * completes.
  *
  * WHY IT LIVES INSIDE THE DISPATCH LOOP.  The attempt is made just before each
  * op is dispatched, not once at compound entry.  A 4.1+ COMPOUND always opens
@@ -273,6 +277,20 @@ struct nfs4_vfs_op {
      * here, on memory that outlives the sequence, rather than on the build's
      * stack (vfs_compound.h, add_claim_test). */
     struct chimera_vfs_claim        probe;
+    /* OPEN: the SHARE reservation the run takes for it.  Unlike the probe
+     * above this one IS inserted, so the claim core keeps pointers into it
+     * and it has to outlive the run AND the claim -- which is why it is
+     * heap-allocated here and adopted by the open state, rather than being a
+     * field of a state that does not exist when the run is built. */
+    struct nfs4_share_lease        *share;
+    /* OPEN: the open_owner the reservation is taken for, resolved when the
+     * sequence is built so the gate can read the client's existing opens
+     * without resolving anything itself.  A reference of ours, dropped when
+     * the sequence is over whatever the outcome. */
+    struct nfs_open_owner          *open_owner;
+    /* OPEN: the gate found an open this owner already holds on the object,
+     * so this OPEN coalesces onto it and takes no reservation of its own. */
+    int                             open_coalesce;
 };
 
 struct nfs4_vfs_compound_ctx {
@@ -295,6 +313,17 @@ struct nfs4_vfs_compound_ctx {
 
     int                      open_present;
     uint32_t                 open_res_index;
+    /* The OPEN's own VFS ops, beyond the open itself: the CLAIM that takes
+     * its share reservation, and the SETATTR that applies an UNCHECKED4
+     * size-0 create's truncate to a file that already existed.  -1 when the
+     * run carries neither; 0 is a real VFS op index (the seed PUTFH's) and
+     * can never be either of these. */
+    int                      open_claim_op;
+    int                      open_setattr_op;
+    /* Whether the OPEN is the last op the run carries.  It is, and only is,
+     * when the OPEN could still earn a delegation -- see
+     * nfs4_vfs_open_may_delegate. */
+    int                      open_ends_run;
 
     /* The LOCK this sequence carries, if any.  Like the OPEN, every way out
      * of it goes through its own completion -- the RFC 7530 §9.1.7 seqid
@@ -425,6 +454,15 @@ nfs4_vfs_op_reads_state(uint32_t argop)
         case OP_WRITE_SAME:
         case OP_LOCKT:
         case OP_LOCK:
+        /* An OPEN reads live claim state while the sequence runs, for the
+         * same reason LOCKT does: its share reservation is a CLAIM op, and
+         * the arbiter answers it in op order inside the run.  A CLOSE in
+         * front of it applies its own effect -- destroying the state and
+         * releasing the reservation it held -- only when the results are
+         * filled, so an OPEN behind a CLOSE of the very open that denies it
+         * would be told SHARE_DENIED where the op-at-a-time path, which
+         * closes first, succeeds. */
+        case OP_OPEN:
             return 1;
         default:
             return 0;
@@ -473,14 +511,19 @@ nfs4_vfs_op_stages_early(uint32_t argop)
  * created would leave the file behind.  See chimera_nfs4_compound_try_vfs for
  * the rule this feeds.
  *
- * An OPEN counts only when it creates: an open of what is already there
- * changes nothing that a refusal before the fill does not undo (the handle is
- * released with the sequence, and no state was installed).
+ * An OPEN counts whether or not it creates, and for the reason a LOCK does:
+ * its share reservation is taken by a CLAIM op of the run and is the caller's
+ * from the completion callback on, so a headroom refusal at the OPEN's own
+ * fill -- before install_state has handed the reservation to an open state --
+ * would leave it inserted with nobody owning it.  (Before the reservation was
+ * an op of the run, an OPEN that only opened undid itself completely: the
+ * handle went back with the sequence and no state was installed.)
  */
 static int
 nfs4_vfs_op_mutates(const struct nfs_argop4 *argop)
 {
     switch (argop->argop) {
+        case OP_OPEN:
         case OP_CREATE:
         case OP_REMOVE:
         case OP_RENAME:
@@ -493,8 +536,6 @@ nfs4_vfs_op_mutates(const struct nfs_argop4 *argop)
         case OP_DEALLOCATE:
         case OP_WRITE_SAME:
             return 1;
-        case OP_OPEN:
-            return argop->opopen.openhow.opentype == OPEN4_CREATE;
         /* A LOCK changes nothing in the filesystem, but its CLAIM inserts a
          * claim that is the caller's from the completion callback on, and a
          * headroom refusal at the fill would leave it inserted with nobody
@@ -510,17 +551,75 @@ nfs4_vfs_op_mutates(const struct nfs_argop4 *argop)
 } /* nfs4_vfs_op_mutates */
 
 /*
+ * Could this OPEN still earn a delegation once the run is over?
+ *
+ * The question is not whether one WILL be granted -- that is settled by the
+ * CB_NULL probe, and the probe stays where it is (see
+ * chimera_nfs4_open_grant_delegation).  It is whether the grant attempt can
+ * get as far as the probe at all, which is decidable here because every arm
+ * of the grant that declines BEFORE the probe reads only the configuration,
+ * the client, and the operation's own arguments.
+ *
+ * An OPEN that answers no here cannot park and cannot grant, so the whole of
+ * what it still owes after its result is filled is memory, and the run can
+ * carry ops behind it.  One that answers yes is made the last op of its run:
+ * the probe can DEFER, which parks the OPEN, and a fill loop with results
+ * still to fill behind it cannot be suspended.
+ */
+static int
+nfs4_vfs_open_may_delegate(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct nfs_argop4          *argop)
+{
+    const struct OPEN4args *args = &argop->opopen;
+    uint32_t                want;
+
+    if (!chimera_server_config_get_nfs4_delegations(thread->shared->config)) {
+        return 0;
+    }
+
+    if (!req->session || !req->session->client_unified) {
+        return 0;
+    }
+
+    if (args->claim.claim != CLAIM_NULL && args->claim.claim != CLAIM_FH) {
+        return 0;
+    }
+
+    /* RFC 8881 §18.16: an explicit "no delegation wanted" (or a bare cancel)
+     * declines ahead of the probe. */
+    want = args->share_access & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK;
+
+    if (want == OPEN4_SHARE_ACCESS_WANT_NO_DELEG ||
+        want == OPEN4_SHARE_ACCESS_WANT_CANCEL) {
+        return 0;
+    }
+
+    if ((args->share_access & (OPEN4_SHARE_ACCESS_READ |
+                               OPEN4_SHARE_ACCESS_WRITE)) == 0) {
+        return 0;
+    }
+
+    return 1;
+} /* nfs4_vfs_open_may_delegate */
+
+/*
  * Does this op end the encodable run, whatever follows it?
  *
- * OPEN does.  Everything the OPEN still owes once the object is open --
- * installing the open state, taking the share reservation, offering a
- * delegation, an UNCHECKED4 truncate -- happens when its result is filled, and
- * two of those can suspend: the delegation grant parks on an in-flight CB_NULL
- * probe, and the truncate is another VFS call.  A fill loop with ops still to
- * fill behind it cannot be suspended, so the OPEN is made the last op in the
- * sequence and completes the request itself; whatever followed it in the
- * COMPOUND is dispatched op by op from there, which is what the dispatcher
- * does anyway when it is handed back a req->index short of the end.
+ * An OPEN used to, always.  Everything it still owed once the object was open
+ * -- installing the open state, taking the share reservation, offering a
+ * delegation, an UNCHECKED4 truncate -- happened when its result was filled,
+ * and two of those could suspend: the delegation grant parks on an in-flight
+ * CB_NULL probe, and the truncate was another VFS call.
+ *
+ * The truncate is an op of the run now (a SETATTR through the handle the OPEN
+ * produced, which is also what puts it in front of a delegation grant rather
+ * than behind one), and the share reservation is a CLAIM op.  What is left is
+ * the probe, and only an OPEN that could reach it -- nfs4_vfs_open_may_
+ * delegate -- still ends the run.  With delegations off, which is the common
+ * configuration, no OPEN does, and "PUTFH; OPEN; GETFH; GETATTR" is one
+ * sequence.
  */
 static int
 nfs4_vfs_op_ends_run(uint32_t argop)
@@ -549,7 +648,7 @@ nfs4_vfs_op_ends_run(uint32_t argop)
      *
      * It costs nothing.  Linux and pynfs send [SEQUENCE;] PUTFH; LOCK with
      * nothing behind it, and the model's LOCK steps are single-op. */
-    return argop == OP_OPEN || argop == OP_SECINFO || argop == OP_LOCK;
+    return argop == OP_SECINFO || argop == OP_LOCK;
 } /* nfs4_vfs_op_ends_run */
 
 /*
@@ -898,13 +997,99 @@ nfs4_vfs_op_errno(
     return chimera_nfs4_errno_to_nfsstat4(err);
 } /* nfs4_vfs_op_errno */
 
+/*
+ * Everything an OPEN settles before the object it names has been opened.
+ *
+ * Two things, and both for the same reason LOCK's prepare exists: they are
+ * pure functions of the operation's arguments and the client table, and the
+ * ops that depend on them are ops of the run.  The open_owner is resolved so
+ * the gate can read this client's existing opens on the object without
+ * resolving anything from inside a gate; the share reservation is BUILT so
+ * the CLAIM op that takes it has a claim to take -- the claim core keeps
+ * pointers into an inserted claim, so it cannot be a copy made later.
+ *
+ * Returns 0 when the OPEN cannot be carried (no client, or no reservation to
+ * take, both of which the op-at-a-time path answers for), leaving nothing
+ * pinned.
+ */
+static int
+nfs4_vfs_open_prepare(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct nfs_argop4          *argop,
+    struct nfs4_vfs_op               *map)
+{
+    const struct OPEN4args *args   = &argop->opopen;
+    struct nfs_client      *client = req->session ?
+        req->session->client_unified : NULL;
+    bool                    created = false;
+
+    (void) thread;
+
+    if (!client) {
+        return 0;
+    }
+
+    /* The adopt candidate is the 4.0 entry's pin, exactly as install_state
+     * passes it: a lease sweep that unpublished the owner mid-flight
+     * republishes the SAME struct, which is what keeps the seqid bookkeeping
+     * and this open state on one object. */
+    map->open_owner = nfs_open_owner_find_or_adopt(client,
+                                                   req->open_4_0_owner,
+                                                   args->owner.owner.data,
+                                                   args->owner.owner.len,
+                                                   &created);
+
+    if (!map->open_owner) {
+        return 0;
+    }
+
+    map->share = chimera_nfs4_open_share_lease_build(args, client,
+                                                     args->share_access,
+                                                     args->share_deny);
+
+    if (!map->share) {
+        /* The scan admits no OPEN whose share_access is empty, so this is an
+         * allocation failure; the op-at-a-time path reports it. */
+        nfs_open_owner_put(map->open_owner);
+        map->open_owner = NULL;
+        return 0;
+    }
+
+    return 1;
+} /* nfs4_vfs_open_prepare */
+
+/*
+ * Give back everything a prepared OPEN holds, for every way it can end
+ * without its state being installed: the build gave up, the sequence stopped
+ * in front of the OPEN, or the OPEN's own group failed.
+ *
+ * No seqid advances here -- that is the OPEN's own wrapper's business, and it
+ * runs (or deliberately does not) on its own terms.
+ */
+static void
+nfs4_vfs_open_abandon(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs4_vfs_op               *map)
+{
+    if (map->share) {
+        nfs4_share_lease_free(thread->vfs->vfs_state, map->share);
+        map->share = NULL;
+    }
+
+    if (map->open_owner) {
+        nfs_open_owner_put(map->open_owner);
+        map->open_owner = NULL;
+    }
+} /* nfs4_vfs_open_abandon */
+
 /* Fill one NFSv4 result from the VFS ops that produced it. */
 static nfsstat4
 nfs4_vfs_op_fill(
     struct nfs_request           *req,
     struct chimera_vfs_compound  *compound,
     struct nfs4_vfs_compound_ctx *ctx,
-    const struct nfs4_vfs_op     *map,
+    struct nfs4_vfs_op           *map,
     struct nfs_argop4            *argop,
     struct nfs_resop4            *resop)
 {
@@ -921,38 +1106,63 @@ nfs4_vfs_op_fill(
             struct OPEN4res                *ores  = &resop->opopen;
             struct chimera_vfs_open_handle *handle;
             uint32_t                        install_rflags = 0;
+            struct nfs4_share_lease        *share          = NULL;
+            bool                            deferred;
             int                             rc;
 
-            if (vop->existed && nfs4_vfs_open_is_exclusive(oargs)) {
-                /* An exclusive create that collided.  The object was opened so
-                 * that this one question could be asked of it, and the answer
-                 * settles the OPEN by itself: carrying this verifier is what
-                 * makes the object ours, and nothing else about it matters.
-                 *
-                 * In particular its TYPE does not: no object that is not a
-                 * regular file can be carrying a verifier an exclusive create
-                 * stamped, so a directory or a symlink here is not a type
-                 * error, it is just somebody else's name (RFC 7530 §16.16.4).
-                 */
-                if (!nfs4_vfs_open_verifier_matches(oargs, &vop->attr)) {
-                    return NFS4ERR_EXIST;
-                }
-            } else if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-                       !S_ISREG(vop->attr.va_mode)) {
-                /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular
-                 * file.  The type gate before the open catches this for the
-                 * modes that ask for it; a GUARDED4 create does not, so the
-                 * object it opened is classified here, exactly as the per-op
-                 * path does on its own open completion. */
-                return chimera_nfs4_open_nonreg_status(req->minorversion,
-                                                       vop->attr.va_mode);
-            }
+            /* The verifier and type rules ran in the gate, in front of the
+             * CLAIM and the SETATTR behind this op -- see there. */
 
             handle = chimera_vfs_compound_take_handle(
                 compound, (uint32_t) map->vfs_res);
 
             if (!handle) {
                 return NFS4ERR_SERVERFAULT;
+            }
+
+            /* The share reservation.  A granted CLAIM's file state is the
+             * caller's, and taking it is what says the reservation is held;
+             * on a coalesce the gate spared the CLAIM and there is nothing to
+             * take.
+             *
+             * take_file_state answering NULL for a CLAIM that WAS granted
+             * means the run failed behind the OPEN and the executor's abort
+             * release took the reservation back before this callback -- right
+             * for a claim nobody has been told about, and this reply has not
+             * been written yet, so the OPEN simply arbitrates again for the
+             * result it is in the middle of writing.  (The other way out, the
+             * one LOCK takes, is to end the run; a claim taken for an op whose
+             * result is already committed cannot be re-arbitrated, and one
+             * taken for the op currently being filled can.) */
+            if (map->open_coalesce) {
+                /* Nothing was asked for and nothing is held. */
+                nfs4_vfs_open_abandon(req->thread, map);
+            } else if (map->share && ctx->open_claim_op >= 0) {
+                const struct chimera_vfs_compound_op *cvop =
+                    chimera_vfs_compound_op(compound,
+                                            (uint32_t) ctx->open_claim_op);
+                struct chimera_vfs_file_state        *fs =
+                    chimera_vfs_compound_take_file_state(
+                        compound, (uint32_t) ctx->open_claim_op);
+
+                if (fs) {
+                    status = chimera_nfs4_open_share_status(
+                        map->share, fs, cvop->claim_result);
+                } else {
+                    status = chimera_nfs4_open_share_lease_acquire(
+                        req, map->share, handle);
+                }
+
+                if (status != NFS4_OK) {
+                    chimera_vfs_release(req->thread->vfs_thread, handle);
+                    nfs4_vfs_open_abandon(req->thread, map);
+                    return status;
+                }
+
+                share = map->share;
+                /* install_state owns it from here, on every one of its own
+                 * exits. */
+                map->share = NULL;
             }
 
             /* Capture the file handle before install_state, which may release
@@ -973,11 +1183,13 @@ nfs4_vfs_op_fill(
                                                      map->open_by_name ?
                                                      &vop->attr : NULL,
                                                      vop->created,
-                                                     NULL, 0,
+                                                     NULL, 0, share,
                                                      &ores->resok4.stateid,
                                                      &install_rflags);
 
             if (status != NFS4_OK) {
+                /* install_state gave the reservation back on its way out. */
+                nfs4_vfs_open_abandon(req->thread, map);
                 return status;
             }
 
@@ -1030,19 +1242,45 @@ nfs4_vfs_op_fill(
                 ores->resok4.cinfo.after  = 0;
             }
 
-            /* An UNCHECKED4 size-0 create of a name that was already there.
-             * Applied by chimera_nfs4_open_complete, after the share
-             * reservation is held, so an OPEN that fails does not empty the
-             * file on its way to failing. */
-            req->open_trunc_pending = map->open_trunc_if_existed &&
-                vop->existed;
+            /* An UNCHECKED4 size-0 create of a name that was already there is
+             * a SETATTR op of the run now, behind the CLAIM that reserves the
+             * share -- so it still does not empty a file for an OPEN that
+             * fails, and it is now also in front of a delegation grant rather
+             * than behind one, which is where a truncate belongs. */
+            req->open_trunc_pending = false;
 
-            /* The rest of the OPEN -- the delegation offer and that truncate --
-             * can suspend, so it runs once the sequence has been freed.  Copy
-             * out what it needs; vop does not outlive the compound. */
+            /* The owner reference the build took; install_state resolved its
+             * own. */
+            if (map->open_owner) {
+                nfs_open_owner_put(map->open_owner);
+                map->open_owner = NULL;
+            }
+
             ctx->open_filled   = 1;
             ctx->open_has_attr = map->open_by_name;
             ctx->open_attr     = vop->attr;
+
+            if (ctx->open_ends_run) {
+                /* The OPEN still owes a delegation decision that can park on
+                 * an in-flight CB_NULL probe, so it runs once the sequence has
+                 * been freed -- which is why the attributes it takes were
+                 * copied out above.  See nfs4_vfs_compound_complete. */
+                return NFS4_OK;
+            }
+
+            /* No delegation can be earned (nfs4_vfs_open_may_delegate said
+             * so when the run was built), so the whole of what is left is
+             * memory and it happens here, while req->index still names the
+             * OPEN: the decline the reply owes, and the RFC 7530 §9.1.7
+             * wrapper.  The ops behind the OPEN are filled after it, and the
+             * generic completion hands the request on once. */
+            deferred = chimera_nfs4_open_grant_delegation(
+                req, ores, map->open_by_name ? &vop->attr : NULL);
+
+            chimera_nfs_abort_if(deferred,
+                                 "NFSv4 OPEN: a run carried an OPEN that then parked");
+
+            chimera_nfs4_open_settle(req, NFS4_OK);
 
             return NFS4_OK;
         }
@@ -1483,6 +1721,15 @@ nfs4_vfs_compound_give_back(
             ctx->ops[k].io_handle = NULL;
         }
 
+        /* A prepared OPEN whose state was never installed: the reservation it
+         * built and the owner reference it took go back.  The fill clears
+         * both as it hands them on, so this is the ways it did not run --
+         * the sequence stopped in front of the OPEN, or its own group
+         * failed.  No seqid advances: that is the OPEN's own wrapper's. */
+        if (argop->argop == OP_OPEN) {
+            nfs4_vfs_open_abandon(thread, &ctx->ops[k]);
+        }
+
         if (argop->argop == OP_WRITE && argop->opwrite.data.niov) {
             evpl_iovecs_release(thread->evpl, argop->opwrite.data.iov,
                                 argop->opwrite.data.niov);
@@ -1544,6 +1791,94 @@ nfs4_vfs_compound_gate(
                     *status = CHIMERA_VFS_ERANGE;
                 }
                 break;
+
+            case OP_OPEN:
+            {
+                const struct OPEN4args         *oargs =
+                    &req->args_compound->argarray[map->res_index].opopen;
+                struct chimera_vfs_compound_op *edit;
+                nfsstat4                        ps;
+                int                             coalesce = 0;
+
+                /* Everything an OPEN can refuse for, asked here rather than
+                 * when the result is filled -- because what is behind it in
+                 * the run is the CLAIM that reserves the share and the
+                 * SETATTR that empties the file, and neither may run for an
+                 * OPEN that is about to fail.  (That ordering is why an OPEN
+                 * that fails still leaves an existing file's contents alone,
+                 * which is the rule the deferred truncate existed for.) */
+                if (vop->existed && nfs4_vfs_open_is_exclusive(oargs)) {
+                    /* An exclusive create that collided.  Carrying this
+                     * OPEN's verifier is what makes the object ours; nothing
+                     * else about it matters, its TYPE included -- no object
+                     * that is not a regular file can be carrying a verifier
+                     * an exclusive create stamped, so a directory here is
+                     * somebody else's name, not a type error (RFC 7530
+                     * §16.16.4). */
+                    if (!nfs4_vfs_open_verifier_matches(oargs, &vop->attr)) {
+                        map->gate_status = NFS4ERR_EXIST;
+                        *status          = CHIMERA_VFS_EEXIST;
+                        break;
+                    }
+                } else if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+                           !S_ISREG(vop->attr.va_mode)) {
+                    /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a
+                     * regular file.  The type gate in front of the open
+                     * catches this for the modes that ask for it; a GUARDED4
+                     * create does not, so the object it opened is classified
+                     * here. */
+                    map->gate_status = chimera_nfs4_open_nonreg_status(
+                        req->minorversion, vop->attr.va_mode);
+                    *status = CHIMERA_VFS_EINVAL;
+                    break;
+                }
+
+                /* The NFSv4 rules that outrank a share conflict, and whether
+                 * this OPEN coalesces onto one this owner already holds. */
+                ps = chimera_nfs4_open_precheck(
+                    req, oargs,
+                    req->session ? req->session->client_unified : NULL,
+                    map->open_owner,
+                    map->open_by_name ? &vop->attr : NULL,
+                    vop->created,
+                    vop->fh, (uint16_t) vop->fh_len,
+                    &coalesce);
+
+                if (ps != NFS4_OK) {
+                    map->gate_status = ps;
+                    *status          = CHIMERA_VFS_EACCES;
+                    break;
+                }
+
+                map->open_coalesce = coalesce;
+
+                /* A coalesce takes no reservation -- the first OPEN of this
+                 * (owner, fh) keeps the one it took -- so the CLAIM op has
+                 * nothing to ask and is spared.  Computed from what the OPEN
+                 * just reported rather than accumulated, so a re-run of the
+                 * sequence makes the same decision. */
+                if (ctx->open_claim_op >= 0) {
+                    edit = chimera_vfs_compound_op_edit(
+                        compound, (uint32_t) ctx->open_claim_op);
+
+                    if (edit) {
+                        edit->skip = coalesce ? 1 : 0;
+                    }
+                }
+
+                /* An UNCHECKED4 size-0 create only truncates when the name
+                 * was already there; a create that made the object applied
+                 * the size with the open. */
+                if (ctx->open_setattr_op >= 0) {
+                    edit = chimera_vfs_compound_op_edit(
+                        compound, (uint32_t) ctx->open_setattr_op);
+
+                    if (edit) {
+                        edit->skip = vop->existed ? 0 : 1;
+                    }
+                }
+                break;
+            }
 
             case OP_LOCKT:
                 /* The CLAIM_TEST answered.  A conflict is NFS4ERR_DENIED,
@@ -1721,6 +2056,16 @@ nfs4_vfs_compound_complete(
         for (j = map->vfs_lo; j <= map->vfs_hi; j++) {
             vop = chimera_vfs_compound_op(compound, (uint32_t) j);
 
+            /* An op the gate spared did not run and is not meant to have: an
+            * OPEN's group carries a CLAIM that a coalesce makes pointless
+            * and a truncate that only a name already there earns, and the
+            * gate decides both from what the OPEN reported.  Its status is
+            * left UNSET, which is exactly what the check below reads as a
+            * hole in the run, so it is stepped over rather than excepted. */
+            if (vop && vop->skip) {
+                continue;
+            }
+
             chimera_nfs_abort_if(vop == NULL || vop->status == CHIMERA_VFS_UNSET,
                                  "NFSv4 compound: VFS op %d never ran", j);
 
@@ -1728,6 +2073,22 @@ nfs4_vfs_compound_complete(
                 /* VERIFY and NVERIFY answer with NFS4ERR_NOT_SAME or
                  * NFS4ERR_SAME, which no errno encodes; the gate recorded the
                  * real answer when it failed the op. */
+                if (argop->argop == OP_OPEN && j == ctx->open_claim_op) {
+                    /* A refused share CLAIM.  The arbiter answered, and what
+                     * it answered is the OPEN's result: BREAKING is a holder
+                     * the break has been kicked for, which RFC 7530 §10.2
+                     * answers NFS4ERR_DELAY, and anything else is
+                     * NFS4ERR_SHARE_DENIED.  The lease owns nothing either
+                     * way -- the executor put the file state -- and
+                     * give_back frees it. */
+                    status = chimera_nfs4_open_share_status(
+                        map->share, NULL, vop->claim_result);
+                    resop->opopen.status = status;
+                    fail_res             = map->res_index;
+                    failed               = 1;
+                    break;
+                }
+
                 if (argop->argop == OP_LOCK && j == ctx->lock_claim_op) {
                     /* A refused CLAIM: the arbiter answered, and what it
                      * answered is the operation's result, not a failure of
@@ -1894,11 +2255,14 @@ nfs4_vfs_compound_complete(
         req->open_4_0_owner = NULL;
     }
 
-    if (!failed && ctx->open_filled) {
-        /* The OPEN's own tail.  It can park on a CB_NULL probe and it can issue
-         * a truncate, so it owns the completion from here; nothing of the
-         * sequence may still be needed, which is why the attributes it takes
-         * were copied out of the compound before this. */
+    if (!failed && ctx->open_filled && ctx->open_ends_run) {
+        /* The OPEN's own tail, for the one shape that still has one: an OPEN
+         * that could earn a delegation, whose grant can park on a CB_NULL
+         * probe.  It owns the completion from here, so nothing of the
+         * sequence may still be needed -- which is why the attributes it
+         * takes were copied out of the compound before this.  An OPEN that
+         * could not earn one settled itself in its own fill, and leaves
+         * through the generic completion below like any other op. */
         struct chimera_vfs_attrs fattr        = ctx->open_attr;
         int                      ctx_has_attr = ctx->open_has_attr;
         struct OPEN4res         *ores         =
@@ -2468,6 +2832,9 @@ chimera_nfs4_compound_try_vfs(
      * always the last op of its run. */
     int                             lock_at       = -1;
     int                             lock_prepared = 0;
+    /* Whether that OPEN is the last op the run carries -- see
+     * nfs4_vfs_open_may_delegate. */
+    int                             open_ends_run = 0;
     /* Index of a SETATTR whose size change has to be authorized before the
      * sequence runs, or -1. */
     int                             setattr_at = -1;
@@ -3349,19 +3716,14 @@ chimera_nfs4_compound_try_vfs(
                     }
                 }
 
-                /* 4.0 classifies the open_owner's seqid before any VFS work,
-                 * and that classification can answer the OPEN outright -- a
-                 * replay is served from the owner's cached reply.  Answering
-                 * outright means running none of the sequence, so nothing may
-                 * precede the OPEN in it; the seqid advance on the way out
-                 * needs no such rule, because both paths leave through the same
-                 * chimera_nfs4_open_finish. */
-                if (req->minorversion == 0 && i != first) {
-                    {
-                        nenc = i;
-                        stop = 1;
-                        break;
-                    }
+                /* One OPEN to a run.  The request carries one open_owner
+                 * pin, one share reservation and one delegation decision,
+                 * and a second OPEN would need its own of each; the
+                 * op-at-a-time path takes it from there. */
+                if (open_at >= 0) {
+                    nenc = i;
+                    stop = 1;
+                    break;
                 }
 
                 /* Only the two claims that are an ordinary open of a name or of
@@ -3472,24 +3834,24 @@ chimera_nfs4_compound_try_vfs(
                 }
 
                 /* A delegation grant can park on an in-flight CB_NULL probe,
-                 * which suspends the OPEN.  The fill can absorb that only
-                 * because the OPEN is last; but the probe is also *kicked* by
-                 * the grant attempt, and which OPEN kicks it is observable
+                 * which suspends the OPEN, and the probe is also *kicked* by
+                 * the grant attempt -- which OPEN kicks it being observable
                  * (the kicking OPEN gets no delegation, the next one does).
-                 * Rather than move that, leave any OPEN that could earn a
-                 * delegation to the per-op path. */
-                if (chimera_server_config_get_nfs4_delegations(
-                        thread->shared->config)) {
-                    {
-                        nenc = i;
-                        stop = 1;
-                        break;
-                    }
+                 * The probe therefore stays exactly where it is, and an OPEN
+                 * that could still reach it is made the last op of the run so
+                 * the fill can hand the whole tail over.  An OPEN that could
+                 * not is carried like any other op and the run goes on past
+                 * it -- which, with delegations off, is every OPEN. */
+                open_ends_run = nfs4_vfs_open_may_delegate(thread, req, argop);
+
+                open_at = (int) i;
+
+                if (open_ends_run) {
+                    nenc = i + 1;
                 }
 
-                /* Everything after an OPEN is dispatched op by op. */
-                open_at = (int) i;
-                nenc    = i + 1;
+                /* The object the OPEN opened is the current one now. */
+                cur_moved = 1;
                 break;
             }
 
@@ -3508,7 +3870,8 @@ chimera_nfs4_compound_try_vfs(
         stages_early |= nfs4_vfs_op_stages_early(argop->argop);
         mutates      |= nfs4_vfs_op_mutates(argop);
 
-        if (nfs4_vfs_op_ends_run(argop->argop)) {
+        if (nfs4_vfs_op_ends_run(argop->argop) ||
+            (argop->argop == OP_OPEN && open_ends_run)) {
             break;
         }
     }
@@ -3685,14 +4048,23 @@ chimera_nfs4_compound_try_vfs(
 
         if (chimera_nfs4_open_4_0_entry(thread, req, (uint32_t) open_at,
                                         &entry_status)) {
-            /* Answered without any VFS work.  The OPEN is the first op of the
-             * run, so there is nothing before it that still had to happen. */
-            req->index = open_at;
-            chimera_nfs4_compound_complete(req, entry_status);
-            return 1;
-        }
+            /* Answered without any VFS work -- a replay, a bad seqid, a stale
+             * clientid.  Nothing it did mutates and nothing was pinned, so
+             * the OPEN simply drops out of the run and the op-at-a-time path
+             * reaches the same answer, producing the seqid advance that goes
+             * with it.  The same shape a prepare that answers instead of
+             * preparing takes for LOCK, and what lets an OPEN sit anywhere in
+             * a 4.0 run rather than only at the front of one. */
+            nenc          = (uint32_t) open_at;
+            open_at       = -1;
+            open_ends_run = 0;
 
-        open_4_0_pinned = 1;
+            if (nenc <= first) {
+                return 0;
+            }
+        } else {
+            open_4_0_pinned = 1;
+        }
     }
 
     compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
@@ -3700,10 +4072,13 @@ chimera_nfs4_compound_try_vfs(
     ctx = calloc(1, sizeof(*ctx));
     chimera_nfs_abort_if(ctx == NULL, "Failed to allocate NFSv4 compound context");
     ctx->req = req;
-    /* 0 is a real VFS op index -- the seed PUTFH's -- so "no LOCK" has to be
-     * said with something else. */
-    ctx->lock_claim_op = -1;
-    ctx->lock_fh_op    = -1;
+    /* 0 is a real VFS op index -- the seed PUTFH's -- so "no LOCK" and "no
+     * share CLAIM" have to be said with something else. */
+    ctx->lock_claim_op   = -1;
+    ctx->lock_fh_op      = -1;
+    ctx->open_claim_op   = -1;
+    ctx->open_setattr_op = -1;
+    ctx->open_ends_run   = open_ends_run;
 
     /* Seed the current object.  When the remainder opens with a PUTFH this is
      * that PUTFH; otherwise it re-states the COMPOUND's current filehandle and
@@ -4136,6 +4511,9 @@ chimera_nfs4_compound_try_vfs(
                 break;
 
             case OP_OPEN:
+            {
+                int open_idx;
+
                 /* A named OPEN resolves in the current directory; an unnamed
                 * one re-opens the current object and needs nothing first. */
                 if (nfs4_vfs_open_is_named(argop) &&
@@ -4146,14 +4524,77 @@ chimera_nfs4_compound_try_vfs(
 
                 ctx->open_present   = 1;
                 ctx->open_res_index = i;
-                idx                 = nfs4_vfs_add_open_op(req, compound,
-                                                           argop, map);
+
+                /* Everything the OPEN settles before anything is open: the
+                 * open_owner the gate reads, and the share reservation the
+                 * CLAIM below takes. */
+                if (!nfs4_vfs_open_prepare(thread, req, argop, map)) {
+                    goto refuse;
+                }
+
+                idx          = nfs4_vfs_add_open_op(req, compound, argop, map);
                 map->vfs_res = idx;
+                open_idx     = idx;
+
+                if (idx < 0) {
+                    goto refuse;
+                }
+
+                /* The cross-protocol SHARE reservation, arbitrated inside the
+                 * run rather than out of band once the result is filled --
+                 * with TRY, which is the wait=false the out-of-band acquire
+                 * asked for, so BREAKING comes back as the op's result and
+                 * becomes NFS4ERR_DELAY.  It addresses the handle the OPEN
+                 * produced rather than the sequence's cursor: a claim is
+                 * arbitrated per file, and that is the file.  The gate spares
+                 * it when the OPEN turns out to coalesce onto an open this
+                 * owner already holds. */
+                idx = chimera_vfs_compound_add_claim(
+                    compound, &map->share->claim, &map->share->ticket,
+                    CHIMERA_VFS_COMPOUND_CLAIM_TRY, 0, 0, 0, 0);
+
+                if (idx < 0) {
+                    goto refuse;
+                }
+
+                chimera_vfs_compound_op_use_handle(compound, (uint32_t) idx,
+                                                   (uint32_t) open_idx);
+                ctx->open_claim_op = idx;
+
+                /* An UNCHECKED4 create that asked for size 0 truncates a name
+                 * that was already there.  An op of the run now, behind the
+                 * CLAIM -- so the file is still not emptied for an OPEN that
+                 * fails -- and through the handle the OPEN just produced, so
+                 * it is authorized by the access this OPEN was granted rather
+                 * than re-checked against the file's mode, which is the
+                 * ftruncate(2) rule and the same grant a WRITE would use.
+                 * The gate skips it unless the name resolved to something. */
+                if (map->open_trunc_if_existed) {
+                    struct chimera_vfs_attrs trunc;
+
+                    memset(&trunc, 0, sizeof(trunc));
+                    trunc.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+                    trunc.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
+                    trunc.va_size     = 0;
+
+                    idx = chimera_vfs_compound_add_setattr(compound, NULL,
+                                                           &trunc, 0, 0);
+
+                    if (idx < 0) {
+                        goto refuse;
+                    }
+
+                    chimera_vfs_compound_op_use_handle(compound,
+                                                       (uint32_t) idx,
+                                                       (uint32_t) open_idx);
+                    ctx->open_setattr_op = idx;
+                }
 
                 /* The opened object is the current one now, and the handle the
                  * OPEN produced is its own -- not the sequence's cursor. */
                 cur_open_flags = 0;
                 break;
+            }
 
             case OP_SAVEFH:
                 idx          = chimera_vfs_compound_add_savefh(compound);
@@ -4425,6 +4866,10 @@ chimera_nfs4_compound_try_vfs(
             chimera_vfs_release(thread->vfs_thread, ctx->ops[k].io_handle);
             ctx->ops[k].io_handle = NULL;
         }
+
+        /* A prepared OPEN, whose reservation was never taken and whose owner
+         * reference the op-at-a-time path is about to resolve again. */
+        nfs4_vfs_open_abandon(thread, &ctx->ops[k]);
     }
 
     chimera_vfs_compound_free(compound);

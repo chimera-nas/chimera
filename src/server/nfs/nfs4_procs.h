@@ -260,8 +260,55 @@ chimera_nfs4_open_install_state(
     bool                            file_created,
     const uint8_t                  *base_fh,
     int                             base_fh_len,
+    struct nfs4_share_lease        *share,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags);
+
+/* The SHARE reservation an OPEN asks for, and the three things a caller does
+ * with it: build it from the wire (before anything is open, which is what
+ * lets a sequence take it as a CLAIM op), take it against a handle, and read
+ * an arbitration answer back as an NFSv4 status.  See the definitions. */
+struct nfs4_share_lease *
+chimera_nfs4_open_share_lease_build(
+    const struct OPEN4args *args,
+    struct nfs_client      *client,
+    uint32_t                share_access,
+    uint32_t                share_deny);
+
+nfsstat4
+chimera_nfs4_open_share_lease_acquire(
+    struct nfs_request             *req,
+    struct nfs4_share_lease        *share,
+    struct chimera_vfs_open_handle *handle);
+
+nfsstat4
+chimera_nfs4_open_share_status(
+    struct nfs4_share_lease       *share,
+    struct chimera_vfs_file_state *file_state,
+    enum chimera_vfs_claim_result  result);
+
+/* The rules that outrank a share conflict, plus whether this OPEN coalesces
+ * -- asked from a sequence's gate, before its CLAIM op runs. */
+nfsstat4
+chimera_nfs4_open_precheck(
+    struct nfs_request             *req,
+    const struct OPEN4args         *args,
+    struct nfs_client              *client,
+    struct nfs_open_owner          *owner,
+    const struct chimera_vfs_attrs *attr,
+    bool                            file_created,
+    const uint8_t                  *fh,
+    uint16_t                        fh_len,
+    int                            *out_coalesce);
+
+/* The OPEN's RFC 7530 §9.1.7 wrapper without the hand-off: the seqid advance,
+ * the encoder's owner pin, and the 4.1 current stateid.  For a sequenced OPEN
+ * that is not the last op of its COMPOUND, where the wrapper runs as the
+ * OPEN's result is filled and the generic completion hands the request on. */
+void
+chimera_nfs4_open_settle(
+    struct nfs_request *req,
+    nfsstat4            status);
 
 /* RFC 7530 §9.1.7 entry-time seqid classification for a 4.0 OPEN.  True when
  * the OPEN is answered outright (replay, bad seqid, stale clientid) with

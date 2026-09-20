@@ -1297,14 +1297,9 @@ open_state_cleanup(
     (void) table;
 
     /* Release the cross-protocol SHARE reservation, if held. */
-    if (vfs_state && state->share_claim_held) {
-        chimera_vfs_claim_release(vfs_state, state->share_file_state,
-                                  &state->share_claim);
-        state->share_claim_held = false;
-    }
-    if (vfs_state && state->share_file_state) {
-        chimera_vfs_state_put(vfs_state, state->share_file_state);
-        state->share_file_state = NULL;
+    if (vfs_state && state->share) {
+        nfs4_share_lease_free(vfs_state, state->share);
+        state->share = NULL;
     }
 
     /* Drop the base-file stream holder taken for a named-attribute open. */
@@ -1720,6 +1715,35 @@ nfs4_range_lease_insert(
     lock_state->range_leases = rl;
     return rl;
 } /* nfs4_range_lease_insert */
+
+/*
+ * Release the SHARE reservation `share` holds and free it.
+ *
+ * Both halves are conditional because a lease can exist without either: one
+ * built for a sequenced OPEN whose CLAIM was never reached holds no claim and
+ * owns no file state, and freeing it is the whole of giving it back.
+ */
+void
+nfs4_share_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_share_lease  *share)
+{
+    if (!share) {
+        return;
+    }
+
+    if (vfs_state && share->held) {
+        chimera_vfs_claim_release(vfs_state, share->file_state, &share->claim);
+        share->held = false;
+    }
+
+    if (vfs_state && share->file_state) {
+        chimera_vfs_state_put(vfs_state, share->file_state);
+        share->file_state = NULL;
+    }
+
+    free(share);
+} /* nfs4_share_lease_free */
 
 /* Release the claim backing `rl` and free it.  Caller has already
  * unlinked it from lock_state->range_leases. */

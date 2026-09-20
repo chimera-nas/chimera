@@ -152,7 +152,7 @@ chimera_nfs4_open_downgrade_apply(
      * of the standing ones (checked above), which is what shrink requires.
      * Done outside owner->lock: shrink pumps the claim waiters, whose
      * completions take that lock. */
-    if (open_state->share_claim_held) {
+    if (open_state->share && open_state->share->held) {
         uint8_t granted = 0, denied = 0;
 
         if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
@@ -168,8 +168,8 @@ chimera_nfs4_open_downgrade_apply(
             denied |= CHIMERA_CLAIM_W;
         }
 
-        chimera_vfs_claim_shrink(open_state->share_file_state,
-                                 &open_state->share_claim, granted, denied);
+        chimera_vfs_claim_shrink(open_state->share->file_state,
+                                 &open_state->share->claim, granted, denied);
     }
 
     nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,

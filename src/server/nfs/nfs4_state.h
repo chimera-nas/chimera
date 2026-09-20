@@ -32,6 +32,32 @@ struct nfs4_range_lease {
     struct nfs4_range_lease           *next;
 };
 
+/*
+ * One held NFSv4 SHARE reservation, on the same terms as the range lease
+ * above and for the same reason: the claim core keeps pointers INTO a claim
+ * once it is inserted, so the claim's ADDRESS is its identity and no copy
+ * will do.  It used to be a field of the open_state, which was fine while the
+ * only thing that took it was a call made after the state existed.  A
+ * sequenced OPEN arbitrates the share as an op of the run -- before the OPEN
+ * has returned a handle, and so before there is an open_state to embed it in
+ * -- so the lease is allocated first and the state adopts it.
+ */
+struct nfs4_share_lease {
+    struct chimera_vfs_claim           claim;
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_vfs_file_state     *file_state;
+    /* The claim is inserted.  Clear for a lease that was built but never
+     * granted, which is a free() and nothing else. */
+    bool                               held;
+};
+
+/* Release whatever a share lease holds and free it.  Safe on a lease that was
+ * built and never granted, and on NULL. */
+void
+nfs4_share_lease_free(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs4_share_lease  *share);
+
 struct nfs_lock_state;
 
 /* Byte-range lock interval management (POSIX merge on LOCK / split on LOCKU).
@@ -346,10 +372,11 @@ struct nfs_open_state {
 
     /* Claim-core ACCESS reservation (NFS4_OPEN construct) for cross-protocol
      * (NLM/SMB) share-mode coordination.  Held while the open_state is alive;
-     * released in open_state_cleanup. */
-    struct chimera_vfs_claim        share_claim;
-    struct chimera_vfs_file_state  *share_file_state;
-    bool                            share_claim_held;
+     * released in open_state_cleanup.  Referenced rather than embedded: a
+     * sequenced OPEN takes it as a CLAIM op of the run, before this state
+     * exists, and the claim's address is its identity (see
+     * struct nfs4_share_lease).  NULL for an open that reserved nothing. */
+    struct nfs4_share_lease        *share;
 
     /* For an NFSv4 named-attribute (stream) open: a stream_holder taken on the
      * BASE file's vfs_state so a cross-protocol base delete-on-close defers while

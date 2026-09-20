@@ -21,52 +21,97 @@
 #include "vfs/vfs_idmap.h"
 
 /*
- * Acquire a cross-protocol SHARE reservation in the claim core for a freshly
- * created open_state.  Upstream's nfs_client_check_share_conflict already
- * enforces share-mode conflicts *among NFSv4 owners of the same client*;
- * this adds the NLM/SMB dimension so an NFSv4 OPEN that denies read/write
- * collides with an SMB open holding that access (and vice versa).
+ * The claim-core SHARE reservation an OPEN asks for, built from the
+ * operation's arguments and the client that sent them.
  *
- * Returns NFS4_OK on success (claim stored on the state, released at
- * open_state_cleanup), NFS4ERR_SHARE_DENIED on cross-protocol conflict.
+ * Everything here is a pure function of the wire and the client table, which
+ * is why it is separable from taking it: a sequenced OPEN builds the lease
+ * when the sequence is BUILT and lets a CLAIM op of the run do the
+ * arbitration, and the op-at-a-time path below builds it and acquires in the
+ * same breath.  The lease is heap-allocated because the claim core keeps
+ * pointers into a claim it has inserted (see struct nfs4_share_lease).
+ *
+ * Returns NULL when the OPEN reserves nothing at all -- which the scan makes
+ * unreachable for a sequence (share_access must carry READ or WRITE) but the
+ * op-at-a-time path still has to tolerate.
  */
-static nfsstat4
-chimera_nfs4_open_acquire_share(
-    struct nfs_request    *req,
-    struct nfs_open_state *state)
+SYMBOL_EXPORT struct nfs4_share_lease *
+chimera_nfs4_open_share_lease_build(
+    const struct OPEN4args *args,
+    struct nfs_client      *client,
+    uint32_t                share_access,
+    uint32_t                share_deny)
 {
-    struct OPEN4args               *args      = &req->args_compound->argarray[req->index].opopen;
-    struct chimera_vfs_state       *vfs_state = req->thread->vfs->vfs_state;
-    struct chimera_vfs_open_handle *handle    = state->handle;
-    struct chimera_vfs_file_state  *file_state;
-    struct chimera_claim_owner      owner;
-    enum chimera_vfs_claim_result   result;
-    uint8_t                         granted = 0;
-    uint8_t                         denied  = 0;
+    struct nfs4_share_lease   *share;
+    struct chimera_claim_owner owner;
+    uint8_t                    granted = 0;
+    uint8_t                    denied  = 0;
 
-    /* share_access MUST request at least one of READ or WRITE (RFC 7530
-     * §16.16.5 / §9.9); a value with neither base mode is invalid. */
-    if ((args->share_access &
-         (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE)) == 0) {
-        return NFS4ERR_INVAL;
-    }
-
-    if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+    if (share_access & OPEN4_SHARE_ACCESS_READ) {
         granted |= CHIMERA_CLAIM_R;
     }
-    if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+    if (share_access & OPEN4_SHARE_ACCESS_WRITE) {
         granted |= CHIMERA_CLAIM_W;
     }
-    if (args->share_deny & OPEN4_SHARE_DENY_READ) {
+    if (share_deny & OPEN4_SHARE_DENY_READ) {
         denied |= CHIMERA_CLAIM_R;
     }
-    if (args->share_deny & OPEN4_SHARE_DENY_WRITE) {
+    if (share_deny & OPEN4_SHARE_DENY_WRITE) {
         denied |= CHIMERA_CLAIM_W;
     }
 
     if (granted == 0 && denied == 0) {
-        return NFS4_OK;
+        return NULL;
     }
+
+    share = calloc(1, sizeof(*share));
+
+    if (!share) {
+        return NULL;
+    }
+
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    owner.client_key = client->client_id;
+    /* The open-owner string as it arrived, which is what the open_owner this
+     * OPEN resolves to is keyed on -- so a lease built before the state
+     * exists and one built from the state carry the same owner. */
+    owner.owner_lo = XXH3_64bits(args->owner.owner.data,
+                                 args->owner.owner.len);
+    owner.owner_hi = 0;
+
+    chimera_vfs_claim_init_nfs4_open(&share->claim, granted, denied, &owner);
+    /* Courteous server: report this share reservation dead once the owning
+     * client's lease lapses, so a conflicting open reclaims it; reclaim flags
+     * the client for sweep teardown. */
+    share->claim.is_alive_cb = nfs_client_lease_alive;
+    share->claim.revoked_cb  = nfs_client_lease_revoked_cb;
+    share->claim.cb_private  = client;
+
+    return share;
+} /* chimera_nfs4_open_share_lease_build */
+
+/*
+ * Take a built lease against `handle`, the op-at-a-time way.
+ *
+ * Also the sequenced path's fallback: a run that fails AFTER the OPEN's CLAIM
+ * was granted has the claim released out from under it by the executor's abort
+ * release, which happens before the completion callback -- so the OPEN's fill
+ * finds its file state gone and arbitrates again, here, for the result it is
+ * in the middle of writing.  That is the asymmetry with LOCK, which ends its
+ * run rather than re-arbitrate: a claim taken for an op whose result is
+ * already committed cannot be re-arbitrated, and one taken for the op
+ * currently being filled can.
+ */
+SYMBOL_EXPORT nfsstat4
+chimera_nfs4_open_share_lease_acquire(
+    struct nfs_request             *req,
+    struct nfs4_share_lease        *share,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_state      *vfs_state = req->thread->vfs->vfs_state;
+    struct chimera_vfs_file_state *file_state;
+    enum chimera_vfs_claim_result  result;
 
     file_state = chimera_vfs_state_get(vfs_state,
                                        handle->fh, handle->fh_len,
@@ -75,40 +120,88 @@ chimera_nfs4_open_acquire_share(
         return NFS4ERR_SERVERFAULT;
     }
 
-    memset(&owner, 0, sizeof(owner));
-    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
-    owner.client_key = state->owner->client->client_id;
-    owner.owner_lo   = XXH3_64bits(state->owner->owner,
-                                   state->owner->owner_len);
-    owner.owner_hi = 0;
-
-    chimera_vfs_claim_init_nfs4_open(&state->share_claim, granted, denied,
-                                     &owner);
-    /* Courteous server: report this share reservation dead once the owning
-     * client's lease lapses, so a conflicting open reclaims it; reclaim flags
-     * the client for sweep teardown. */
-    state->share_claim.is_alive_cb = nfs_client_lease_alive;
-    state->share_claim.revoked_cb  = nfs_client_lease_revoked_cb;
-    state->share_claim.cb_private  = state->owner->client;
-
     result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
-                                           &state->share_claim, NULL);
+                                           &share->claim, NULL);
+
+    return chimera_nfs4_open_share_status(share, file_state, result);
+} /* chimera_nfs4_open_share_lease_acquire */
+
+/*
+ * What an arbitration answer means to an OPEN, and what the lease owns
+ * afterwards.  Shared by the acquire above and by the sequenced path, whose
+ * answer comes back on a CLAIM op of the run rather than from a call.
+ */
+SYMBOL_EXPORT nfsstat4
+chimera_nfs4_open_share_status(
+    struct nfs4_share_lease       *share,
+    struct chimera_vfs_file_state *file_state,
+    enum chimera_vfs_claim_result  result)
+{
+    if (result == CHIMERA_CLAIM_GRANTED) {
+        share->file_state = file_state;
+        share->held       = true;
+        return NFS4_OK;
+    }
+
+    /* Not granted: the lease owns nothing.  The caller frees it. */
+    share->file_state = NULL;
+
     if (result == CHIMERA_CLAIM_BREAKING) {
         /* The conflict is a breakable holder -- an NFSv4 delegation being
-         * recalled (try_acquire already kicked the break).  Tell the client to
-         * retry; by the next attempt the delegation's DELEGRETURN should have
-         * released the claim and the SHARE will be granted (RFC 7530 §10.2
-         * recommends NFS4ERR_DELAY while a recall is outstanding). */
-        chimera_vfs_state_put(vfs_state, file_state);
+         * recalled (the arbitration already kicked the break).  Tell the
+         * client to retry; by the next attempt the delegation's DELEGRETURN
+         * should have released the claim and the SHARE will be granted (RFC
+         * 7530 §10.2 recommends NFS4ERR_DELAY while a recall is
+         * outstanding). */
         return NFS4ERR_DELAY;
     }
-    if (result != CHIMERA_CLAIM_GRANTED) {
-        chimera_vfs_state_put(vfs_state, file_state);
-        return NFS4ERR_SHARE_DENIED;
+
+    return NFS4ERR_SHARE_DENIED;
+} /* chimera_nfs4_open_share_status */
+
+/*
+ * Acquire a cross-protocol SHARE reservation in the claim core for a freshly
+ * created open_state.  Upstream's nfs_client_check_share_conflict already
+ * enforces share-mode conflicts *among NFSv4 owners of the same client*;
+ * this adds the NLM/SMB dimension so an NFSv4 OPEN that denies read/write
+ * collides with an SMB open holding that access (and vice versa).
+ *
+ * Returns NFS4_OK on success (lease stored on the state, released at
+ * open_state_cleanup), NFS4ERR_SHARE_DENIED on cross-protocol conflict.
+ */
+static nfsstat4
+chimera_nfs4_open_acquire_share(
+    struct nfs_request    *req,
+    struct nfs_open_state *state)
+{
+    struct OPEN4args         *args      = &req->args_compound->argarray[req->index].opopen;
+    struct chimera_vfs_state *vfs_state = req->thread->vfs->vfs_state;
+    struct nfs4_share_lease  *share;
+    nfsstat4                  status;
+
+    /* share_access MUST request at least one of READ or WRITE (RFC 7530
+     * §16.16.5 / §9.9); a value with neither base mode is invalid. */
+    if ((args->share_access &
+         (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE)) == 0) {
+        return NFS4ERR_INVAL;
     }
 
-    state->share_file_state = file_state;
-    state->share_claim_held = true;
+    share = chimera_nfs4_open_share_lease_build(args, state->owner->client,
+                                                args->share_access,
+                                                args->share_deny);
+
+    if (!share) {
+        return NFS4_OK;
+    }
+
+    status = chimera_nfs4_open_share_lease_acquire(req, share, state->handle);
+
+    if (status != NFS4_OK) {
+        nfs4_share_lease_free(vfs_state, share);
+        return status;
+    }
+
+    state->share = share;
     return NFS4_OK;
 } /* chimera_nfs4_open_acquire_share */
 
@@ -407,6 +500,14 @@ chimera_nfs4_open_grant_delegation(
  * On entry, `handle` must be a +1 reference returned by chimera_vfs_open_at
  * or chimera_vfs_open_fh.  On create, ownership transfers to the new
  * open_state; on coalesce, the function calls chimera_vfs_release on it.
+ *
+ * `share` is a SHARE reservation already granted for this OPEN, whose
+ * ownership passes here -- the sequenced path, where the arbitration was a
+ * CLAIM op of the run.  NULL means "take it here", which is what the
+ * op-at-a-time path does.  Either way it ends up on the new state, is
+ * released on a coalesce (the first OPEN of this (owner, fh) keeps the
+ * reservation, which is the rule this path has always followed), and is
+ * given back on every error.
  */
 SYMBOL_EXPORT nfsstat4
 chimera_nfs4_open_install_state(
@@ -416,6 +517,7 @@ chimera_nfs4_open_install_state(
     bool                            file_created,
     const uint8_t                  *base_fh,
     int                             base_fh_len,
+    struct nfs4_share_lease        *share,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags)
 {
@@ -430,6 +532,7 @@ chimera_nfs4_open_install_state(
 
     if (!client) {
         chimera_vfs_release(req->thread->vfs_thread, handle);
+        nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
         return NFS4ERR_STALE_CLIENTID;
     }
     if (client->expired) {
@@ -457,6 +560,7 @@ chimera_nfs4_open_install_state(
         if (required &&
             !chimera_vfs_access_allowed(attr, &req->cred, required)) {
             chimera_vfs_release(req->thread->vfs_thread, handle);
+            nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
             return NFS4ERR_ACCESS;
         }
     }
@@ -532,7 +636,15 @@ chimera_nfs4_open_install_state(
         /* The SHARE reservation acquired on the first OPEN of this
          * (owner, fh) stays in force.  Broadening share bits on
          * coalesce is not re-checked cross-protocol in this pass —
-         * upstream's intra-client check is likewise coalesce-exempt. */
+         * upstream's intra-client check is likewise coalesce-exempt.
+         *
+         * A sequence that took one anyway -- because a coalesce is a fact
+         * about a file handle the OPEN had not yet resolved when the run was
+         * built -- gives it straight back.  The gate spares the CLAIM op
+         * whenever it can see the coalesce coming, so this is the narrow
+         * case where it could not. */
+        nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
+        share = NULL;
     } else {
         struct nfs_open_state *new_state;
 
@@ -552,14 +664,22 @@ chimera_nfs4_open_install_state(
             goto err_release_handle;
         }
 
-        /* Cross-protocol SHARE coordination.  On conflict, tear the
-         * just-created state back down (releasing the handle) and fail. */
-        status = chimera_nfs4_open_acquire_share(req, new_state);
-        if (status != NFS4_OK) {
-            nfs_open_state_destroy(new_state,
-                                   &req->thread->shared->nfs4_state_table,
-                                   req->thread->vfs_thread);
-            goto err_put_owner;
+        /* Cross-protocol SHARE coordination.  Already arbitrated when the
+         * caller handed one over -- a CLAIM op of the run took it, and the
+         * state simply adopts it.  Otherwise it is taken here.  On conflict,
+         * tear the just-created state back down (releasing the handle) and
+         * fail. */
+        if (share) {
+            new_state->share = share;
+            share            = NULL;
+        } else {
+            status = chimera_nfs4_open_acquire_share(req, new_state);
+            if (status != NFS4_OK) {
+                nfs_open_state_destroy(new_state,
+                                       &req->thread->shared->nfs4_state_table,
+                                       req->thread->vfs_thread);
+                goto err_put_owner;
+            }
         }
 
         /* Named-attribute (stream) open: take a stream holder on the BASE file so
@@ -596,9 +716,94 @@ chimera_nfs4_open_install_state(
  err_release_handle:
     chimera_vfs_release(req->thread->vfs_thread, handle);
  err_put_owner:
+    nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
     nfs_open_owner_put(owner);
     return status;
 } /* chimera_nfs4_open_install_state */
+
+/*
+ * The part of installing an OPEN's state that has to be settled BEFORE the
+ * share reservation is arbitrated -- asked separately so a sequenced OPEN can
+ * ask it from its gate, while the object it opened is in hand and before the
+ * CLAIM op that takes the reservation has run.
+ *
+ * It answers the two questions whose answers OUTRANK a share conflict, in the
+ * order install_state asks them (so NFS4ERR_ACCESS still beats
+ * NFS4ERR_SHARE_DENIED), plus one the arbitration itself depends on: whether
+ * this OPEN will COALESCE onto an open this owner already holds on the
+ * object.  A coalesce takes no new reservation -- the first OPEN's stays in
+ * force -- so a sequence that knows the answer here can spare its CLAIM op
+ * rather than take a reservation it would immediately give back.
+ *
+ * Everything it reads is memory the server already holds, it changes nothing,
+ * and asking it twice asks the same question: the gate's contract exactly.
+ * install_state asks all of it again afterwards, which is what keeps the two
+ * entrances one body of rules rather than two.
+ */
+SYMBOL_EXPORT nfsstat4
+chimera_nfs4_open_precheck(
+    struct nfs_request             *req,
+    const struct OPEN4args         *args,
+    struct nfs_client              *client,
+    struct nfs_open_owner          *owner,
+    const struct chimera_vfs_attrs *attr,
+    bool                            file_created,
+    const uint8_t                  *fh,
+    uint16_t                        fh_len,
+    int                            *out_coalesce)
+{
+    struct nfs_open_state *existing;
+    nfsstat4               status;
+
+    *out_coalesce = 0;
+
+    if (!client || !owner) {
+        return NFS4ERR_STALE_CLIENTID;
+    }
+
+    /* The object's ACL against the requested share access -- install_state's
+     * own check, verbatim, including why a create skips it. */
+    if (attr && !file_created) {
+        uint32_t required = 0;
+
+        if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+            required |= CHIMERA_ACE_READ_DATA;
+        }
+        if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+            required |= CHIMERA_ACE_WRITE_DATA;
+        }
+
+        if (required &&
+            !chimera_vfs_access_allowed(attr, &req->cred, required)) {
+            return NFS4ERR_ACCESS;
+        }
+    }
+
+    /* RFC 7530 §9.10: share-mode conflict against opens by *other* owners on
+     * this client. */
+    status = nfs_client_check_share_conflict(client, owner, fh, fh_len,
+                                             args->share_access,
+                                             args->share_deny);
+    if (status != NFS4_OK) {
+        return status;
+    }
+
+    existing = nfs_open_owner_find_state(owner, fh, fh_len);
+
+    if (existing) {
+        /* RFC 7530 §9.9: a same-owner re-open is still a distinct share
+         * request -- it must not ask for access the existing open denies, nor
+         * deny access the existing open holds. */
+        if ((existing->share_access & args->share_deny) ||
+            (args->share_access & existing->share_deny)) {
+            return NFS4ERR_SHARE_DENIED;
+        }
+
+        *out_coalesce = 1;
+    }
+
+    return NFS4_OK;
+} /* chimera_nfs4_open_precheck */
 
 /*
  * RFC 7530 §9.1.7 OPEN completion: advance open_owner.seqid and cache the
@@ -634,8 +839,19 @@ chimera_nfs4_open_nonreg_status(
     return NFS4ERR_WRONG_TYPE;
 } /* chimera_nfs4_open_nonreg_status */
 
-static void
-chimera_nfs4_open_finish(
+/*
+ * Everything chimera_nfs4_open_finish does except hand the request on: the
+ * RFC 7530 §9.1.7 seqid advance and replay record, the encoder's owner pin,
+ * and the 4.1 current stateid.
+ *
+ * Split out because an OPEN that a VFS sequence carries is no longer
+ * necessarily the last op of its COMPOUND.  When it is not, the OPEN's
+ * wrapper has to run as its RESULT is filled -- while req->index still names
+ * the OPEN -- and the ops behind it are filled afterwards, with the generic
+ * completion handing the request on once.
+ */
+SYMBOL_EXPORT void
+chimera_nfs4_open_settle(
     struct nfs_request *req,
     nfsstat4            status)
 {
@@ -677,6 +893,14 @@ chimera_nfs4_open_finish(
             &req->res_compound.resarray[req->index].opopen;
         chimera_nfs4_set_current_stateid(req, &res->resok4.stateid);
     }
+} /* chimera_nfs4_open_settle */
+
+static void
+chimera_nfs4_open_finish(
+    struct nfs_request *req,
+    nfsstat4            status)
+{
+    chimera_nfs4_open_settle(req, status);
 
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_open_finish */
@@ -885,7 +1109,7 @@ chimera_nfs4_open_exclusive_verify(
 
         status = chimera_nfs4_open_install_state(req, handle, attr,
                                                  handle->r_created,
-                                                 NULL, 0,
+                                                 NULL, 0, NULL,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -983,7 +1207,7 @@ chimera_nfs4_open_at_complete(
 
         status = chimera_nfs4_open_install_state(req, handle, attr,
                                                  handle->r_created,
-                                                 NULL, 0,
+                                                 NULL, 0, NULL,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -1191,7 +1415,7 @@ chimera_nfs4_open_claim_fh_complete(
         uint32_t install_rflags = 0;
 
         status = chimera_nfs4_open_install_state(req, handle, NULL, false,
-                                                 NULL, 0,
+                                                 NULL, 0, NULL,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -1656,7 +1880,7 @@ chimera_nfs4_open_attrdir_stream_complete(
 
         status = chimera_nfs4_open_install_state(req, oh, attr,
                                                  oh->r_created,
-                                                 base_fh, base_fh_len,
+                                                 base_fh, base_fh_len, NULL,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
