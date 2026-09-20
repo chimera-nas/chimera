@@ -867,6 +867,23 @@ struct chimera_smb_request {
              * any more -- the sequence owned it and released it with the run. */
             uint8_t                            seq_parent_fh[CHIMERA_VFS_FH_SIZE];
             uint32_t                           seq_parent_fh_len;
+            /* The caching grant's TEMPLATE and the arguments that shape it,
+             * hoisted ahead of the run.  A coalition grant's standing claim is
+             * the core-allocated grant's own, so what the CLAIM op takes is
+             * only ever a template -- but the executor still reads it where it
+             * stands, so it lives on the request and outlives the run.
+             *
+             * The construct and the mode depend on whether the object turns out
+             * to be a directory, which no caller knows before the open: the run
+             * is built at the non-directory mode and the gate re-derives both
+             * once the OPEN has reported the type. */
+            struct chimera_vfs_claim           seq_grant_tmpl;
+            struct chimera_claim_owner         seq_grant_owner;
+            struct chimera_vfs_pending_acquire seq_grant_ticket;
+            uint8_t                            seq_grant_want;
+            uint8_t                            seq_grant_is_v2;
+            uint8_t                            seq_grant_cap_strict;
+            uint8_t                            seq_via_rqls;
         } create;
 
         struct  {
