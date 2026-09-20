@@ -89,36 +89,6 @@ chimera_stat_sequence_complete(
     chimera_stat_lookup_complete(status, &attr, private_data);
 } /* chimera_stat_sequence_complete */
 
-/*
- * A directory descriptor has to BE a directory, and that has to be answered
- * from the descriptor itself rather than from how the walk behind it failed:
- * resolving a path through a regular file surfaces as ENOTDIR on some backends
- * and ENOENT on others (the SMB proxy), and POSIX owes fstatat() ENOTDIR
- * either way.  The gate asks the question of the GETATTR the sequence already
- * ran, so it costs no extra round trip.
- */
-static void
-chimera_stat_dircheck_gate(
-    struct chimera_vfs_compound *compound,
-    uint32_t                     index,
-    enum chimera_vfs_error      *status,
-    void                        *private_data)
-{
-    struct chimera_client_request        *request = private_data;
-    const struct chimera_vfs_compound_op *op;
-
-    if (*status != CHIMERA_VFS_OK || (int) index != request->gate_index) {
-        return;
-    }
-
-    op = chimera_vfs_compound_op(compound, index);
-
-    if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISDIR(op->attr.va_mode)) {
-        *status = CHIMERA_VFS_ENOTDIR;
-    }
-} /* chimera_stat_dircheck_gate */
-
 static inline void
 chimera_dispatch_stat(
     struct chimera_client_thread  *thread,
@@ -133,28 +103,13 @@ chimera_dispatch_stat(
      * chimera_fstatat() is the entry point that sets it -- an earlier version
      * of this function assumed chimera_stat() was the only caller, resolved
      * every path from the root, and so answered fstatat(dfd, "b") for the
-     * WRONG directory whenever dfd was not the root. */
+     * WRONG directory whenever dfd was not the root.  The descriptor is lent
+     * and checked to be a directory by the shared prelude -- see
+     * chimera_client_compound_at_dir for why it is lent rather than named. */
     if (request->stat.handle) {
-        compound = chimera_vfs_compound_alloc(thread->vfs_thread,
-                                              chimera_client_req_cred(request));
-        request->compound = compound;
-
-        /* PUTHANDLE, not PUTFH: the descriptor is a handle we already hold,
-         * and the GETATTR below has to ask the LIVE inode.  Naming it by
-         * filehandle instead would make the executor re-open it, which a
-         * path-only backend cannot do at all -- only the mount root is
-         * re-openable over the SMB proxy -- and which would answer from a
-         * re-resolved name even where it works, so a directory unlinked while
-         * the fd stayed open would look like ENOENT instead of the directory
-         * it still is.  The flags are what the descriptor was really opened
-         * with -- see open_flags on the request. */
-        chimera_vfs_compound_add_puthandle(compound, request->stat.handle,
-                                           request->stat.open_flags);
-
-        request->gate_index =
-            chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
-        chimera_vfs_compound_set_gate(compound, chimera_stat_dircheck_gate,
-                                      request);
+        compound = chimera_client_compound_at_dir(thread, request,
+                                                  request->stat.handle,
+                                                  request->stat.open_flags);
     } else {
         compound = chimera_client_compound_at_root(thread, request);
     }

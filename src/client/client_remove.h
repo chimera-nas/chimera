@@ -62,116 +62,34 @@ chimera_dispatch_remove(
                                 request);
 } /* chimera_dispatch_remove */
 
-static void
-chimera_remove_dispatch_at_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *thread         = request->thread;
-    chimera_remove_callback_t      callback       = request->remove.callback;
-    void                          *callback_arg   = request->remove.private_data;
-    int                            heap_allocated = request->heap_allocated;
-
-    if (heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
-
-    /* Note: parent handle is NOT released - caller owns it */
-    callback(thread, error_code, callback_arg);
-} /* chimera_remove_dispatch_at_complete */
-
-static void
-chimera_remove_at_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request = private_data;
-    struct chimera_client_thread  *thread  = request->thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        /* Child doesn't exist or other error - return immediately */
-        chimera_remove_callback_t callback       = request->remove.callback;
-        void                     *callback_arg   = request->remove.private_data;
-        int                       heap_allocated = request->heap_allocated;
-
-        if (heap_allocated) {
-            chimera_client_request_free(thread, request);
-        }
-        callback(thread, error_code, callback_arg);
-        return;
-    }
-
-    /* Enforce the caller's type assertion (rmdir vs unlink) before the
-     * backend remove, exactly as the path-based chimera_vfs_remove does at
-     * its own child resolve: NFSv4 REMOVE is type-agnostic on the wire and
-     * NFSv3 would silly-rename an open directory, so by the time the backend
-     * answers, the wrong-type removal has already happened.  The resolve
-     * above fetched the mode, so this adds no round trip. */
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        int is_dir = S_ISDIR(attr->va_mode);
-
-        if (((request->remove.flags & CHIMERA_VFS_REMOVE_ISDIR) && !is_dir) ||
-            ((request->remove.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && is_dir)) {
-            chimera_remove_callback_t callback       = request->remove.callback;
-            void                     *callback_arg   = request->remove.private_data;
-            int                       heap_allocated = request->heap_allocated;
-
-            if (heap_allocated) {
-                chimera_client_request_free(thread, request);
-            }
-            callback(thread,
-                     is_dir ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR,
-                     callback_arg);
-            return;
-        }
-    }
-
-    /* Save the child FH for the remove call */
-    request->remove.child_fh_len = attr->va_fh_len;
-    memcpy(request->remove.child_fh, attr->va_fh, attr->va_fh_len);
-
-    /* Now call remove with the child FH */
-    chimera_vfs_remove_at(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->remove.parent_handle,
-        request->remove.path,
-        request->remove.path_len,
-        request->remove.child_fh,
-        request->remove.child_fh_len,
-        request->remove.flags,
-        0,
-        0,
-        NULL,
-        chimera_remove_dispatch_at_complete,
-        request);
-} /* chimera_remove_at_lookup_complete */
-
+/*
+ * unlinkat(2) with a real directory descriptor: the descriptor is lent and
+ * checked to be a directory, then the same REMOVE_PATH the path form issues
+ * from the root resolves the relative path from it -- see
+ * chimera_client_compound_at_dir.  The path remove resolves the doomed
+ * object itself: it enforces the rmdir-vs-unlink assertion in `flags` for
+ * every backend (the NFSv4 proxy's REMOVE is type-agnostic on the wire), and
+ * hands the backend the child's fh as the object to recall leases on and, on
+ * a path-only mount, to evict from the open caches -- what the per-op chain
+ * this replaced looked the child up for.  The descriptor is the caller's and
+ * is not released.
+ */
 static inline void
 chimera_dispatch_remove_at(
-    struct chimera_client_thread   *thread,
-    struct chimera_vfs_open_handle *parent_handle,
-    struct chimera_client_request  *request)
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
-    /* Save parent handle for use in callback */
-    request->remove.parent_handle = parent_handle;
+    struct chimera_vfs_compound *compound;
 
-    /* First lookup the child to get its FH for silly rename optimization.
-     * Use NOFOLLOW (0) because we want the FH of the symlink itself,
-     * not the target it points to. */
-    chimera_vfs_lookup_at(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        parent_handle,
-        request->remove.path,
-        request->remove.path_len,
-        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
-        0,
-        chimera_remove_at_lookup_complete,
-        request);
+    compound = chimera_client_compound_at_dir(thread, request,
+                                              request->remove.parent_handle,
+                                              request->remove.dir_open_flags);
+
+    chimera_vfs_compound_add_remove_path(compound,
+                                         request->remove.path,
+                                         request->remove.path_len,
+                                         request->remove.flags);
+
+    chimera_vfs_compound_submit(compound, chimera_remove_sequence_complete,
+                                request);
 } /* chimera_dispatch_remove_at */

@@ -6,7 +6,7 @@
 #include "posix_test_common.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
+#define AT_FDCWD     -100
 #endif /* ifndef AT_FDCWD */
 
 /* A cached write-only open must not satisfy a later reader (or an O_RDWR
@@ -231,6 +231,172 @@ test_directory_read_after_chmod(struct posix_test_env *env)
         posix_test_fail(env);
     }
 } /* test_directory_read_after_chmod */
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR 0x200
+#endif /* ifndef AT_REMOVEDIR */
+
+/*
+ * The real-dirfd family: openat / mkdirat / unlinkat relative to a directory
+ * descriptor, with a single-component name, an interior component
+ * (openat(dfd, "a/b")), a descriptor that is not a directory (ENOTDIR), an
+ * empty path (ENOENT), and unlinkat's rmdir-vs-unlink assertion.
+ */
+static void
+test_real_dirfd(struct posix_test_env *env)
+{
+    chimera_posix_stat_t st;
+    int         dfd, fd, rc;
+
+    rc = chimera_posix_mkdir("/test/openat_dir", 0755);
+    if (rc != 0) {
+        fprintf(stderr, "mkdir openat_dir failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    /* A plain O_RDONLY open of the directory -- no O_DIRECTORY -- is the
+     * common way a program gets a dirfd, and has to serve every *at() call. */
+    dfd = chimera_posix_open("/test/openat_dir", O_RDONLY);
+    if (dfd < 0) {
+        fprintf(stderr, "open openat_dir failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    fd = chimera_posix_openat(dfd, "one", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "openat(dfd, one) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+
+    rc = chimera_posix_fstatat(AT_FDCWD, "/test/openat_dir/one", &st, 0);
+    if (rc != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "openat(dfd, one) did not create the file: %s\n",
+                strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_mkdirat(dfd, "sub", 0755);
+    if (rc != 0) {
+        fprintf(stderr, "mkdirat(dfd, sub) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    /* An interior component below the descriptor. */
+    fd = chimera_posix_openat(dfd, "sub/two", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "openat(dfd, sub/two) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+
+    rc = chimera_posix_fstatat(dfd, "sub/two", &st, 0);
+    if (rc != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "fstatat(dfd, sub/two) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_mkdirat(dfd, "sub/deeper", 0755);
+    if (rc != 0) {
+        fprintf(stderr, "mkdirat(dfd, sub/deeper) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    /* Re-opening an existing file through the descriptor. */
+    fd = chimera_posix_openat(dfd, "sub/two", O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "openat(dfd, sub/two) re-open failed: %s\n",
+                strerror(errno));
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+
+    /* An empty path names nothing. */
+    fd = chimera_posix_openat(dfd, "", O_RDONLY);
+    if (fd >= 0 || errno != ENOENT) {
+        fprintf(stderr, "openat(dfd, \"\") expected ENOENT, got fd=%d errno=%s\n",
+                fd, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    /* unlinkat's type assertion: unlink of a directory, rmdir of a file. */
+    rc = chimera_posix_unlinkat(dfd, "sub/deeper", 0);
+    if (rc == 0 || (errno != EISDIR && errno != EPERM)) {
+        fprintf(stderr, "unlinkat(dfd, sub/deeper, 0) expected EISDIR, got rc=%d errno=%s\n",
+                rc, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_unlinkat(dfd, "sub/two", AT_REMOVEDIR);
+    if (rc == 0 || errno != ENOTDIR) {
+        fprintf(stderr, "unlinkat(dfd, sub/two, AT_REMOVEDIR) expected ENOTDIR, got rc=%d errno=%s\n",
+                rc, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_unlinkat(dfd, "sub/deeper", AT_REMOVEDIR);
+    if (rc != 0) {
+        fprintf(stderr, "unlinkat(dfd, sub/deeper, AT_REMOVEDIR) failed: %s\n",
+                strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_unlinkat(dfd, "sub/two", 0);
+    if (rc != 0) {
+        fprintf(stderr, "unlinkat(dfd, sub/two) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_unlinkat(dfd, "sub", AT_REMOVEDIR);
+    if (rc != 0) {
+        fprintf(stderr, "unlinkat(dfd, sub, AT_REMOVEDIR) failed: %s\n",
+                strerror(errno));
+        posix_test_fail(env);
+    }
+
+    /* A descriptor that is not a directory. */
+    fd = chimera_posix_openat(dfd, "one", O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "openat(dfd, one) re-open failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_openat(fd, "x", O_RDONLY);
+    if (rc >= 0 || errno != ENOTDIR) {
+        fprintf(stderr, "openat(filefd, x) expected ENOTDIR, got rc=%d errno=%s\n",
+                rc, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_mkdirat(fd, "x", 0755);
+    if (rc == 0 || errno != ENOTDIR) {
+        fprintf(stderr, "mkdirat(filefd, x) expected ENOTDIR, got rc=%d errno=%s\n",
+                rc, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_unlinkat(fd, "x", 0);
+    if (rc == 0 || errno != ENOTDIR) {
+        fprintf(stderr, "unlinkat(filefd, x) expected ENOTDIR, got rc=%d errno=%s\n",
+                rc, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    chimera_posix_close(fd);
+
+    rc = chimera_posix_unlinkat(dfd, "one", 0);
+    if (rc != 0) {
+        fprintf(stderr, "unlinkat(dfd, one) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    chimera_posix_close(dfd);
+
+    rc = chimera_posix_rmdir("/test/openat_dir");
+    if (rc != 0) {
+        fprintf(stderr, "rmdir openat_dir failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+} /* test_real_dirfd */
 
 int
 main(
@@ -286,6 +452,7 @@ main(
     test_open_rights_after_chmod(&env);
     test_failed_unlink_then_open_io(&env);
     test_directory_read_after_chmod(&env);
+    test_real_dirfd(&env);
 
     fprintf(stderr, "openat tests passed\n");
 

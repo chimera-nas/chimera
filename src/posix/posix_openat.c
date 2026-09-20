@@ -32,11 +32,11 @@ chimera_posix_openat_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    // If we have a parent handle (from a real fd), use open_at dispatch
+    /* A real dirfd resolves relative to the descriptor; AT_FDCWD and an
+     * absolute path take the path-based open from the export root. */
     if (request->open.parent_handle) {
-        chimera_dispatch_open_at(thread, request->open.parent_handle, request);
+        chimera_dispatch_open_at(thread, request);
     } else {
-        // Use the normal path-based open
         chimera_dispatch_open(thread, request);
     }
 } /* chimera_posix_openat_exec */
@@ -65,12 +65,20 @@ chimera_posix_openat(
         va_end(ap);
     }
 
+    /* An empty path names nothing (POSIX, absent AT_EMPTY_PATH).  Refused
+     * here because a nameless OPEN in a sequence means "the current object"
+     * -- the directory itself -- which is not what openat(dfd, "") means. */
+    if (pathname[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     /* An absolute path ignores dirfd entirely (POSIX), so it takes the
      * path-based route whatever dirfd holds; only a relative path walks from
-     * the descriptor.  Handing an absolute path to the *_at form would have
-     * it rejected as a name containing '/'. */
+     * the descriptor.  A relative path may have interior components
+     * (openat(dfd, "a/b")); the dispatcher walks them. */
     if (dirfd == AT_FDCWD || pathname[0] == '/') {
         // For AT_FDCWD with relative path, prepend "/"
         // For absolute path, use as-is
@@ -109,10 +117,11 @@ chimera_posix_openat(
         path_len = strlen(pathname);
         memcpy(req.open.path, pathname, path_len);
 
-        req.open.parent_handle = dir_entry->handle;
-        req.open.path_len      = path_len;
-        req.open.parent_len    = 0;
-        req.open.name_offset   = 0;
+        req.open.parent_handle  = dir_entry->handle;
+        req.open.dir_open_flags = chimera_posix_fd_open_flags(dir_entry);
+        req.open.path_len       = path_len;
+        req.open.parent_len     = 0;
+        req.open.name_offset    = 0;
     }
 
     req.opcode            = CHIMERA_CLIENT_OP_OPEN;

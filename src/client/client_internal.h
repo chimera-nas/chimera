@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <sys/stat.h>
 #include "common/compiler.h"
 #include "common/thread.h"
 #ifdef _WIN32
@@ -162,8 +163,13 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
             char                    fsname[256];
         } rmfs;
 
+        /* `parent_handle`, where an operation has one, is the *at() family's
+         * directory descriptor and `dir_open_flags` what it was really opened
+         * with; `path` is then RELATIVE to it.  NULL is AT_FDCWD (and any
+         * absolute path), resolved from the export root. */
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
             chimera_open_callback_t         callback;
             void                           *private_data;
             unsigned int                    flags;
@@ -176,6 +182,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
             chimera_mkdir_callback_t        callback;
             void                           *private_data;
             int                             path_len;
@@ -304,6 +311,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
             chimera_remove_callback_t       callback;
             void                           *private_data;
             int                             path_len;
@@ -598,6 +606,87 @@ chimera_client_compound_at_root(
 
     return compound;
 } /* chimera_client_compound_at_root */
+
+/*
+ * A directory descriptor has to BE a directory, and that has to be answered
+ * from the descriptor itself rather than from how the walk behind it failed:
+ * resolving a path through a regular file surfaces as ENOTDIR on some backends
+ * and ENOENT on others (the SMB proxy), and POSIX owes every *at() call
+ * ENOTDIR either way.  The gate asks the question of the GETATTR the sequence
+ * already ran (request->gate_index), so it costs no extra round trip.
+ */
+static inline void
+chimera_client_dircheck_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_client_request        *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+
+    if (*status != CHIMERA_VFS_OK || (int) index != request->gate_index) {
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound, index);
+
+    if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(op->attr.va_mode)) {
+        *status = CHIMERA_VFS_ENOTDIR;
+    }
+} /* chimera_client_dircheck_gate */
+
+/*
+ * Start a sequence at an *at() family's directory descriptor.
+ *
+ * PUTHANDLE, not PUTFH: the descriptor is a handle we already hold, and the
+ * GETATTR that follows has to ask the LIVE inode.  Naming it by filehandle
+ * instead would make the executor re-open it, which would answer from a
+ * re-resolved name, so a directory unlinked while the fd stayed open would
+ * look like ENOENT instead of the directory it still is.  The flags lent
+ * are what the descriptor was really opened with.
+ *
+ * What follows the prelude is a PATH op -- LOOKUP_PATH, OPEN_PATH,
+ * CREATE_PATH, REMOVE_PATH -- resolving the caller's relative path against
+ * the descriptor's file handle, which the PUTHANDLE made current.  Not a
+ * name op through the lent handle, for three reasons that are one reason:
+ * the path walk is what the path-based entry points already run from the
+ * root.  It follows a symlink in the final component (a named OPEN through
+ * open_at does not, and fchmodat(dfd, "link") then changed the link rather
+ * than its target); it takes interior components (openat(dfd, "a/b")) on
+ * every backend, where a name op takes one name; and on a path-only mount
+ * it rebases onto the descriptor's interned path, where a LOOKUP_PATH of the
+ * interior would leave an object the name op could not re-open.  REMOVE_PATH
+ * additionally resolves the child itself and enforces the rmdir-vs-unlink
+ * assertion in the VFS core for every backend -- the NFSv4 proxy's REMOVE is
+ * type-agnostic on the wire -- which a REMOVE by name would leave to the
+ * backend.
+ */
+static inline struct chimera_vfs_compound *
+chimera_client_compound_at_dir(
+    struct chimera_client_thread   *thread,
+    struct chimera_client_request  *request,
+    struct chimera_vfs_open_handle *dir_handle,
+    unsigned int                    dir_open_flags)
+{
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          chimera_client_req_cred(request));
+
+    request->compound = compound;
+
+    chimera_vfs_compound_add_puthandle(compound, dir_handle, dir_open_flags);
+
+    request->gate_index =
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+
+    chimera_vfs_compound_set_gate(compound, chimera_client_dircheck_gate,
+                                  request);
+
+    return compound;
+} /* chimera_client_compound_at_dir */
 
 static inline struct chimera_client_request *
 chimera_client_request_alloc(struct chimera_client_thread *thread)

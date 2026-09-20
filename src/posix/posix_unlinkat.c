@@ -32,11 +32,11 @@ chimera_posix_unlinkat_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    // If we have a parent handle (from a real fd), use remove_at dispatch
+    /* A real dirfd resolves relative to the descriptor; AT_FDCWD and an
+     * absolute path take the path-based remove from the export root. */
     if (request->remove.parent_handle) {
-        chimera_dispatch_remove_at(thread, request->remove.parent_handle, request);
+        chimera_dispatch_remove_at(thread, request);
     } else {
-        // Use the normal path-based remove
         chimera_dispatch_remove(thread, request);
     }
 } /* chimera_posix_unlinkat_exec */
@@ -54,6 +54,12 @@ chimera_posix_unlinkat(
     struct chimera_posix_fd_entry  *dir_entry = NULL;
     int                             path_len;
     const char                     *slash;
+
+    /* An empty path names nothing -- see openat. */
+    if (pathname[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
 
     chimera_posix_completion_init(&comp, &req);
 
@@ -92,10 +98,11 @@ chimera_posix_unlinkat(
         path_len = strlen(pathname);
         memcpy(req.remove.path, pathname, path_len);
 
-        req.remove.parent_handle = dir_entry->handle;
-        req.remove.path_len      = path_len;
-        req.remove.parent_len    = 0;
-        req.remove.name_offset   = 0;
+        req.remove.parent_handle  = dir_entry->handle;
+        req.remove.dir_open_flags = chimera_posix_fd_open_flags(dir_entry);
+        req.remove.path_len       = path_len;
+        req.remove.parent_len     = 0;
+        req.remove.name_offset    = 0;
     }
 
     req.opcode = CHIMERA_CLIENT_OP_REMOVE;
