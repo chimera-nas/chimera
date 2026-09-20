@@ -105,16 +105,15 @@ chimera_smb_cancel(struct chimera_smb_request *request)
 
         if (parked && parked->smb2_hdr.command == SMB2_LOCK &&
             parked->lock.parked && parked->lock.open_file) {
-            struct chimera_smb_request *abort =
-                chimera_smb_lock_abort_parked(request->compound->thread,
-                                              parked->lock.open_file);
-
-            /* abort_parked clears open_file->parked_lock_req and returns the same
-             * request; complete it with CANCELLED rather than the abort default
-             * (RANGE_NOT_LOCKED). */
-            if (abort) {
-                chimera_smb_lock_park_finish(abort, SMB2_STATUS_CANCELLED);
-            }
+            /* Post the cancel against the LOCK's VFS sequence, asking for
+             * STATUS_CANCELLED rather than the close / teardown default
+             * (RANGE_NOT_LOCKED).  Nothing of the parked LOCK completes in this
+             * call: which of the cancel and an in-flight grant wins is the claim
+             * core's arbitration, and either way the LOCK replies from its own
+             * sequence's completion on the thread that submitted it. */
+            chimera_smb_lock_cancel_parked(request->compound->thread,
+                                           parked->lock.open_file,
+                                           SMB2_STATUS_CANCELLED);
         } else if (parked && parked->async.pipe_read) {
             /* A blocking named-pipe READ never completes on its own, so a
              * CANCEL resolves it with STATUS_CANCELLED.  complete_request
