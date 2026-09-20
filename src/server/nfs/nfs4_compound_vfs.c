@@ -82,6 +82,18 @@
  * mutates is encoded only when nothing that could fail on an NFSv4-side check
  * precedes it in the same sequence.
  *
+ * WHAT A STATEID STILL COSTS.  An OPEN inside a run produces a stateid, and
+ * an op behind it that presents the "current stateid" would have to be
+ * authorized against state that does not exist when the sequence is built.
+ * The OBJECT is reachable -- chimera_vfs_compound_op_use_handle names the
+ * handle an earlier op produced, which is how an OPEN's own truncate reaches
+ * it -- but the OWNER is not: an operation under an open stateid is
+ * attributed to that open's handle, and a sequence has no way to say "the
+ * handle op N will produce".  Those ops are therefore still refused at
+ * themselves and dispatched op by op, after the OPEN's fill has set the
+ * current stateid.  See the refusals in the READ/WRITE and SETATTR arms of
+ * the scan.
+ *
  * The dispatcher's reply-buffer headroom test (NFS4ERR_RESOURCE) is one more
  * check that this path can only apply after the fact, and it gets the same
  * treatment from the other side: a run that mutates is built only when the
@@ -3486,9 +3498,10 @@ chimera_nfs4_compound_try_vfs(
                 }
 
                 /* The same two stateid rules READ and WRITE have, and for the
-                 * same reasons: a current stateid is what the op before this
-                 * one left, and a special stateid is authorized against the
-                 * object the sequence starts from. */
+                 * same reasons: a current stateid needs an io_owner the
+                 * sequence cannot derive (see the SETATTR case), and a special
+                 * stateid is authorized against the object the sequence starts
+                 * from. */
                 if (chimera_nfs4_stateid_is_current(sid)) {
                     nenc = i;
                     stop = 1;
@@ -3516,8 +3529,8 @@ chimera_nfs4_compound_try_vfs(
                     break;
                 }
 
-                /* See the SETATTR case: substituting the current stateid means
-                 * knowing what the op before this one left. */
+                /* See the SETATTR case: substituting the current stateid
+                 * needs an io_owner the sequence cannot derive. */
                 if (chimera_nfs4_stateid_is_current(sid)) {
                     nenc = i;
                     stop = 1;
@@ -3575,9 +3588,28 @@ chimera_nfs4_compound_try_vfs(
                 }
 
                 /* The "current stateid" (RFC 8881 §16.2.3.1.2) means whatever
-                 * the op before this one left, which the sequence applies in
-                 * bulk rather than between ops -- so it is not a value this
-                 * path can substitute correctly. */
+                 * the op before this one left.
+                 *
+                 * An OPEN in the same run produces one -- and now sits inside
+                 * the run rather than ending it, so "PUTFH; OPEN; WRITE(current)"
+                 * is a shape this path could be asked to carry.  It still
+                 * cannot.  The object is reachable: the op addresses the
+                 * handle the OPEN produced, which is what
+                 * chimera_vfs_compound_op_use_handle names and what the
+                 * truncate behind an OPEN already does.  What is NOT reachable
+                 * is who the I/O belongs to: an operation under an open
+                 * stateid is attributed to (client, that handle's fh_hash)
+                 * (nfs4_vfs_io_authorize), and the handle does not exist when
+                 * the sequence is built.  The executor takes io_owner as a
+                 * value the caller supplies (vfs_compound.c:2414, :2459) and
+                 * never derives owner_lo from a handle_from target, so there
+                 * is nothing to fill it with -- and a stateid operation that
+                 * arbitrates against its own client's reservation is denied,
+                 * and recalls the delegation it is being done under.
+                 *
+                 * So these stay refused, whole rather than half: the op-at-a-
+                 * time path runs them after the OPEN's fill has set the
+                 * current stateid, and reaches the right answer. */
                 if (chimera_nfs4_stateid_is_current(&sa->stateid)) {
                     nenc = i;
                     stop = 1;
@@ -3635,7 +3667,21 @@ chimera_nfs4_compound_try_vfs(
                  * before unlinking it -- to recall a delegation on it (RFC 7530
                  * §10.4.4), or to learn the data-server backing it has to
                  * delete afterwards.  Both are decisions about the object being
-                 * removed that the sequence has no way to reach. */
+                 * removed that the sequence has no way to reach.
+                 *
+                 * The delegation half is now ALMOST expressible: a RECALL op
+                 * with CHIMERA_VFS_COMPOUND_RECALL_NOWAIT is exactly the
+                 * chimera_vfs_claim_break_caching the per-op path calls, and
+                 * reports the same boolean.  What is missing is a way to reach
+                 * the victim without moving the cursor off the directory the
+                 * REMOVE then needs: resolving it takes a LOOKUP, a LOOKUP
+                 * makes the victim current, and a REMOVE resolves its name in
+                 * whatever is current.  The clean shape is for the recall to
+                 * happen inside remove_at, driven by the lease-recall bit
+                 * remove_flags already documents (vfs_compound.h, the REMOVE
+                 * op and its adder) and which vfs_proc_remove.c does not
+                 * implement -- a VFS-core change, not one this file can make.
+                 * Until then both halves keep the whole REMOVE out. */
                 if (chimera_server_config_get_nfs4_delegations(
                         thread->shared->config) ||
                     chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
@@ -3669,7 +3715,14 @@ chimera_nfs4_compound_try_vfs(
                  * has REMOVE's problem too: a delegation on the displaced
                  * object to recall, or a data server backing it to delete.
                  * Both are decisions about an object the sequence never names.
-                 */
+                 *
+                 * RENAME has it twice -- the source is recalled as well as the
+                 * target -- and once more besides: the target LOOKUP finding
+                 * NOTHING is the ordinary case and must not fail the run,
+                 * which a gate cannot express.  It may fail an op that
+                 * succeeded; it may not pass one that failed
+                 * (chimera_vfs_compound_gate_t).  See the REMOVE case for the
+                 * recall the VFS core would have to own. */
                 if (chimera_server_config_get_nfs4_delegations(
                         thread->shared->config) ||
                     chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
@@ -3932,7 +3985,10 @@ chimera_nfs4_compound_try_vfs(
 
     /* RFC 7530/8881 §10.4.3: when another client holds a write delegation the
      * GETATTR must query it via CB_GETATTR and combine the answer.  That query
-     * only ever runs for a client reached through a session. */
+     * only ever runs for a client reached through a session.  Expressible as
+     * an ends-run GETATTR whose fill parks on the CB_GETATTR, the way an OPEN
+     * that could earn a delegation ends its run -- but the combine itself
+     * lives in nfs4_proc_getattr.c and the split belongs with it. */
     if (have_getattr &&
         chimera_server_config_get_nfs4_delegations(thread->shared->config) &&
         req->session && req->session->client_unified) {
