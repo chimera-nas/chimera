@@ -85,10 +85,10 @@ static uint32_t
 portmap_netid_to_prot(const xdr_string *netid)
 {
     if (netid->len == 3 && memcmp(netid->str, "tcp", 3) == 0) {
-        return IPPROTO_TCP;
+        return PMAP_IPPROTO_TCP;
     }
     if (netid->len == 3 && memcmp(netid->str, "udp", 3) == 0) {
-        return IPPROTO_UDP;
+        return PMAP_IPPROTO_UDP;
     }
     return 0;
 } /* portmap_netid_to_prot */

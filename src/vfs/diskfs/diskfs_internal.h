@@ -5386,7 +5386,7 @@ diskfs_map_attrs(
         attr->va_ctime.tv_sec  = inode->ctime_sec;
         attr->va_ctime.tv_nsec = inode->ctime_nsec;
         attr->va_ino           = inode->inum;
-        attr->va_dev           = (42UL << 32) | 42;
+        attr->va_dev           = (42ULL << 32) | 42;
         attr->va_rdev          = inode->rdev;
 
         /* diskfs persists DOS attributes natively (in-memory + on-disk

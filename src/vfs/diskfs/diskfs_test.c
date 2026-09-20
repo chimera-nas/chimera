@@ -309,7 +309,14 @@ diskfs_test_inode(
     if (fd < 0) {
         return -1;
     }
+#ifdef _WIN32
+    /* This private descriptor is used only by this snapshot read. */
+    _setmode(fd, _O_BINARY);
+    rc = _lseeki64(fd, (int64_t) off, SEEK_SET) < 0 ? -1 :
+        _read(fd, blk, sizeof(blk));
+#else
     rc = pread(fd, blk, sizeof(blk), (off_t) off);
+#endif
     close(fd);
     if (rc != (ssize_t) sizeof(blk)) {
         return -1;

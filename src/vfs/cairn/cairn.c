@@ -2038,7 +2038,7 @@ cairn_map_attrs(
         attr->va_mtime = inode->mtime;
         attr->va_ctime = inode->ctime;
         attr->va_ino   = inode->inum;
-        attr->va_dev   = (42UL << 32) | 42;
+        attr->va_dev   = (42ULL << 32) | 42;
         attr->va_rdev  = inode->rdev;
 
         /* cairn persists DOS attributes natively, so report them alongside

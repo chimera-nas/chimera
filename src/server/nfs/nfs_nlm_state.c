@@ -19,46 +19,6 @@
 #endif
 #include <time.h>
 
-/*
- * Recursively create path components, equivalent to mkdir -p.
- * Returns 0 on success, -1 on error (errno set).  EEXIST is not an error.
- */
-static int
-mkdir_p(
-    const char *path,
-    mode_t      mode)
-{
-    size_t plen = strlen(path) + 1;
-    char  *tmp  = malloc(plen);
-    char  *p;
-    size_t len;
-
-    if (!tmp) {
-        return -1;
-    }
-    memcpy(tmp, path, plen);
-    len = plen - 1;
-    if (len > 0 && tmp[len - 1] == '/') {
-        tmp[len - 1] = '\0';
-    }
-    for (p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-                free(tmp);
-                return -1;
-            }
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-        free(tmp);
-        return -1;
-    }
-    free(tmp);
-    return 0;
-} /* mkdir_p */
-
 #include "nfs_nlm_state.h"
 #include "vfs/vfs_release.h"
 #include "nfs_internal.h"

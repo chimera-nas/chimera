@@ -31,12 +31,7 @@
 #endif
 #include <xxhash.h>
 
-/* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC
- * protocol constants, colliding with <netinet/in.h>'s IPPROTO_* enum-macros.
- * This file does not use them, so drop the system macros before the XDR
- * headers redefine them. */
-#undef IPPROTO_TCP
-#undef IPPROTO_UDP
+#include "common/socket.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
@@ -110,9 +105,8 @@ nfs4_cb_addr_reachable(
     int         port)
 {
     struct sockaddr_in sin;
-    int                fd;
+    chimera_socket_t   fd;
     int                rc;
-    int                flags;
     bool               ok = false;
 
     memset(&sin, 0, sizeof(sin));
@@ -123,32 +117,31 @@ nfs4_cb_addr_reachable(
     }
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    if (fd == CHIMERA_INVALID_SOCKET) {
         return false;
     }
 
     /* Non-blocking so the probe below never stalls the caller.  SOCK_NONBLOCK
      * as a socket() type flag is a Linux extension, so set O_NONBLOCK
      * explicitly instead. */
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
+    if (chimera_socket_nonblocking(fd) < 0) {
+        chimera_socket_close(fd);
         return false;
     }
 
     do {
         rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
-    } while (rc < 0 && errno == EINTR);
+    } while (rc < 0 && chimera_socket_interrupted());
 
     if (rc == 0) {
         ok = true;
-    } else if (errno == EINPROGRESS || errno == EALREADY) {
+    } else if (chimera_socket_connect_pending()) {
         /* Connection underway; treat as reachable.  evpl will redo its own
          * connect immediately after, which the listening peer accepts. */
         ok = true;
     }
 
-    close(fd);
+    chimera_socket_close(fd);
     return ok;
 } /* nfs4_cb_addr_reachable */
 
