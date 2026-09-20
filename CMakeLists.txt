@@ -282,6 +282,9 @@ function(add_test)
     math(EXPR _last "${ARGC} - 1")
     foreach(_i RANGE ${_last})
         set(_a "${ARGV${_i}}")
+        if(WIN32 AND _a STREQUAL "${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh")
+            continue()
+        endif()
         # Old test helpers pass build-directory paths instead of target names.
         # Native multi-config generators put executables in bin/<config>.
         if(WIN32 AND IS_ABSOLUTE "${_a}")
@@ -705,6 +708,11 @@ else()
     message(STATUS "PyNFS testing disabled")
 endif()
 
+if(WIN32)
+    set(CHIMERA_NULL_DEVICE NUL)
+else()
+    set(CHIMERA_NULL_DEVICE /dev/null)
+endif()
 add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)

@@ -74,3 +74,13 @@ if(MSVC)
     target_link_libraries(native_host_fixture_test PRIVATE bcrypt)
 endif()
 add_test(NAME chimera/native/host_fixture COMMAND native_host_fixture_test)
+
+if(WIN32)
+    add_executable(native_watchdog_test ../watchdog_test.c)
+    target_include_directories(native_watchdog_test PRIVATE
+        "${CHIMERA_SOURCE_ROOT}/src" "${CHIMERA_SOURCE_ROOT}/ext/libevpl/include")
+    target_compile_options(native_watchdog_test PRIVATE /experimental:c11atomics)
+    add_test(NAME chimera/native/watchdog_cancel COMMAND native_watchdog_test)
+    add_test(NAME chimera/native/watchdog_expire COMMAND native_watchdog_test expire)
+    set_tests_properties(chimera/native/watchdog_expire PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+endif()

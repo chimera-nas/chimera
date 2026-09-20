@@ -120,7 +120,7 @@ mbt_add_krb5(ctl_mbt_replay)
 # above still build and run -- they need no corpus -- and only the replay
 # ctest is skipped, with a message rather than in silence.
 
-find_program(QUINT_BIN quint)
+find_program(QUINT_BIN NAMES quint.cmd quint)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 # The probes above need no corpus and always run.  Only the replay and the
@@ -165,7 +165,7 @@ set(CTL_QNT
 set(CTL_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/ctlTest.stamp)
 add_custom_command(OUTPUT ${CTL_SELFTEST}
     COMMAND ${QUINT_BIN} test --backend=typescript
-            --main=ctlTestRef ${CTL_Q}/ctlTest.qnt > /dev/null
+            --main=ctlTestRef ${CTL_Q}/ctlTest.qnt > ${CHIMERA_NULL_DEVICE}
     COMMAND ${CMAKE_COMMAND} -E touch ${CTL_SELFTEST}
     DEPENDS ${CTL_QNT} ${CTL_Q}/ctlTest.qnt
     COMMENT "model self-test: ctlTest"
@@ -211,7 +211,7 @@ foreach(b ${CTL_BATCHES})
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
                 --invariant=inv
-                --out-itf=${CTL_T}/${naming}.itf.json > /dev/null
+                --out-itf=${CTL_T}/${naming}.itf.json > ${CHIMERA_NULL_DEVICE}
         DEPENDS ${CTL_QNT} ${CTL_SELFTEST}
         COMMENT "generate ${ntraces} ctl traces ${prof}/${flavor} steps=${steps}"
         VERBATIM)

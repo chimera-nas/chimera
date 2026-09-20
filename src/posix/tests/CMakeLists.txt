@@ -4,10 +4,6 @@
 
 add_subdirectory(quint)
 
-# FSX - File System Exerciser ported to Chimera POSIX API
-add_executable(posix_fsx fsx.c)
-target_link_libraries(posix_fsx chimera_posix chimera_client chimera_server)
-
 # Tests that fork() cannot use the in-process transport: an inproc name is
 # reachable only from the process that registered it, and these initialise a
 # fresh client in each child after fork(), so a child would have no way to
@@ -101,6 +97,42 @@ set(POSIX_TEST_PROGRAMS
     test_copy_range
     test_write_same
 )
+
+# The native runner reuses the virtual-filesystem tests and in-process NFS
+# fixtures. Unix fork/exec, mmap, and shell-driven stress harnesses stay below.
+if(WIN32)
+    set(_native_backends memfs diskfs)
+    if(CAIRN_ENABLED)
+        list(APPEND _native_backends cairn)
+    endif()
+    foreach(prog ${POSIX_TEST_PROGRAMS})
+        add_posix_testprog(${prog})
+        string(REGEX REPLACE "^test_" "" test_name ${prog})
+        foreach(backend ${_native_backends})
+            foreach(prefix "" "nfs3_" "nfs4_")
+                add_test(NAME chimera/posix/${test_name}_${prefix}${backend}
+                    COMMAND posix_${prog} -b ${prefix}${backend})
+                set_tests_properties(chimera/posix/${test_name}_${prefix}${backend}
+                    PROPERTIES TIMEOUT 180)
+            endforeach()
+        endforeach()
+    endforeach()
+    foreach(prog test_lease_deny test_lease_recall test_lock_project
+                 test_lock_seek_end test_lock_posix_semantics)
+        add_posix_testprog(${prog})
+        add_test(NAME chimera/posix/${prog}_memfs COMMAND posix_${prog} -b memfs)
+    endforeach()
+    foreach(prog test_diskfs_enospc test_diskfs_reclaim test_diskfs_evict)
+        add_posix_testprog(${prog})
+        add_test(NAME chimera/posix/${prog}_diskfs COMMAND posix_${prog} -b diskfs)
+        set_tests_properties(chimera/posix/${prog}_diskfs PROPERTIES TIMEOUT 900)
+    endforeach()
+    return()
+endif()
+
+# FSX's reference-file/mmap and process harness requires a Unix host.
+add_executable(posix_fsx fsx.c)
+target_link_libraries(posix_fsx chimera_posix chimera_client chimera_server)
 
 # Create test programs
 foreach(prog ${POSIX_TEST_PROGRAMS})

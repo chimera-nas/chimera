@@ -26,6 +26,84 @@
 #ifndef CHIMERA_MBT_WATCHDOG_H
 #define CHIMERA_MBT_WATCHDOG_H
 
+#ifdef _WIN32
+#include "common/platform.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static SRWLOCK mbt_watchdog_lock = SRWLOCK_INIT;
+static PTP_TIMER mbt_watchdog_timer;
+static char mbt_watchdog_trace_copy[2048];
+static char mbt_watchdog_tag_copy[256];
+static int mbt_watchdog_step_copy = -1;
+
+static VOID CALLBACK
+mbt_watchdog_expired(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_TIMER timer)
+{
+    char report[2560];
+    DWORD written;
+    int length;
+    (void) instance; (void) context; (void) timer;
+    AcquireSRWLockShared(&mbt_watchdog_lock);
+    length = snprintf(report, sizeof(report),
+        "\n*** MBT WATCHDOG: timed out ***\n  trace: %s\n  step: %d (%s)\n",
+        mbt_watchdog_trace_copy, mbt_watchdog_step_copy, mbt_watchdog_tag_copy);
+    ReleaseSRWLockShared(&mbt_watchdog_lock);
+    if (length > 0) {
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), report,
+                  (DWORD) (length < sizeof(report) ? length : sizeof(report) - 1),
+                  &written, NULL);
+    }
+    TerminateProcess(GetCurrentProcess(), 124);
+}
+
+static inline void
+mbt_watchdog_at(const char *trace, int step, const char *tag)
+{
+    /* Own the strings: the timer runs on a different native thread. */
+    AcquireSRWLockExclusive(&mbt_watchdog_lock);
+    snprintf(mbt_watchdog_trace_copy, sizeof(mbt_watchdog_trace_copy), "%s", trace ? trace : "(none)");
+    snprintf(mbt_watchdog_tag_copy, sizeof(mbt_watchdog_tag_copy), "%s", tag ? tag : "(none)");
+    mbt_watchdog_step_copy = step;
+    ReleaseSRWLockExclusive(&mbt_watchdog_lock);
+}
+
+static void mbt_watchdog_cleanup(void)
+{
+    SetThreadpoolTimer(mbt_watchdog_timer, NULL, 0, 0);
+    WaitForThreadpoolTimerCallbacks(mbt_watchdog_timer, TRUE);
+    CloseThreadpoolTimer(mbt_watchdog_timer);
+}
+
+static inline void mbt_watchdog_arm(unsigned int seconds)
+{
+    ULARGE_INTEGER relative;
+    FILETIME due;
+    if (!mbt_watchdog_timer) {
+        setvbuf(stdout, NULL, _IOLBF, 0);
+        mbt_watchdog_timer = CreateThreadpoolTimer(mbt_watchdog_expired, NULL, NULL);
+        if (!mbt_watchdog_timer || atexit(mbt_watchdog_cleanup)) { abort(); }
+    }
+    SetThreadpoolTimer(mbt_watchdog_timer, NULL, 0, 0);
+    WaitForThreadpoolTimerCallbacks(mbt_watchdog_timer, TRUE);
+    if (seconds) {
+        relative.QuadPart = 0 - (uint64_t) seconds * 10000000ULL;
+        due.dwLowDateTime = relative.LowPart;
+        due.dwHighDateTime = relative.HighPart;
+        SetThreadpoolTimer(mbt_watchdog_timer, &due, 0, 0);
+    }
+}
+
+static inline void mbt_watchdog_disarm(void)
+{
+    if (mbt_watchdog_timer) {
+        SetThreadpoolTimer(mbt_watchdog_timer, NULL, 0, 0);
+        WaitForThreadpoolTimerCallbacks(mbt_watchdog_timer, TRUE);
+    }
+    mbt_watchdog_at(NULL, -1, NULL);
+}
+#else
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -124,5 +202,7 @@ mbt_watchdog_disarm(void)
     alarm(0);
     mbt_watchdog_at(NULL, -1, NULL);
 } /* mbt_watchdog_disarm */
+
+#endif /* _WIN32 */
 
 #endif /* CHIMERA_MBT_WATCHDOG_H */

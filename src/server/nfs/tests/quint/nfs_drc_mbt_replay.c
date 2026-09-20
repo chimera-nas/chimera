@@ -35,6 +35,7 @@
  * trace independent of its predecessors; trace_setup() carries the details.
  */
 
+#include "common/mbt_watchdog.h"
 #include "common/getopt.h"
 #include <jansson.h>
 
@@ -753,7 +754,7 @@ run_trace(
     /* Backstop for a server deadlock: with everything in one process a hung
      * reply spins in the pump forever; SIGALRM's default disposition kills the
      * test with a nonzero status. */
-    alarm(180);
+    mbt_watchdog_arm(180);
 
     o = calloc(1, sizeof(*o));
     mbt_env_fs_setup(env, fsname);
@@ -847,7 +848,7 @@ run_trace(
     }
     free(o);
     json_decref(root);
-    alarm(0);
+    mbt_watchdog_disarm();
     return failed;
 } /* run_trace */
 

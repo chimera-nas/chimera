@@ -43,7 +43,7 @@ target_link_libraries(diskfs_mbt_replay
 # with a message.  -DREQUIRE_DISKFS_MBT=ON makes the absence a configure error.
 # ---------------------------------------------------------------------------
 
-find_program(QUINT_BIN quint)
+find_program(QUINT_BIN NAMES quint.cmd quint)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 if(NOT QUINT_BIN)
@@ -81,7 +81,7 @@ set(DFS_QUINT_BACKEND typescript)
 set(DFS_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/diskfsTest.stamp)
 add_custom_command(OUTPUT ${DFS_SELFTEST}
     COMMAND ${QUINT_BIN} test --backend=${DFS_QUINT_BACKEND}
-            --main=diskfsTestRef ${DFS_Q}/diskfsTest.qnt > /dev/null
+            --main=diskfsTestRef ${DFS_Q}/diskfsTest.qnt > ${CHIMERA_NULL_DEVICE}
     COMMAND ${CMAKE_COMMAND} -E touch ${DFS_SELFTEST}
     DEPENDS ${DFS_QNT} ${DFS_Q}/diskfsTest.qnt
     COMMENT "model self-test: diskfsTest"
@@ -129,7 +129,7 @@ foreach(b ${DFS_BATCHES})
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
                 --invariant=inv
-                --out-itf=${DFS_T}/${naming}.itf.json > /dev/null
+                --out-itf=${DFS_T}/${naming}.itf.json > ${CHIMERA_NULL_DEVICE}
         DEPENDS ${DFS_QNT} ${DFS_SELFTEST}
         COMMENT "generate ${ntraces} diskfs traces ${prof}/${flavor} steps=${steps}"
         VERBATIM)
