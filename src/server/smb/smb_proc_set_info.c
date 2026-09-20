@@ -8,8 +8,6 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
 
 /*
@@ -418,6 +416,7 @@ struct chimera_smb_ea_apply {
     uint32_t                          name_len;
     uint8_t                           list[4096];
     char                              name[CHIMERA_VFS_XATTR_NAME_MAX];
+    struct chimera_vfs_compound      *compound;
 };
 
 static void chimera_smb_ea_apply_step(
@@ -437,26 +436,36 @@ chimera_smb_ea_apply_finish(
     done(status, arg);
 } /* chimera_smb_ea_apply_finish */
 
+/* PUTHANDLE, SETXATTR or REMOVEXATTR -- one sequence per EA.
+ *
+ * The list is the client's and its length is the client's too, so the fan-out
+ * is unbounded: the gate edits the ops that are there, it does not add any, and
+ * a sequence holds at most CHIMERA_VFS_COMPOUND_MAX_OPS.  So this is the
+ * honest shape, consecutive sequences within the one request -- and it is also
+ * the one that keeps the per-entry status, which the apply needs: an EA that
+ * fails stops the apply THERE and reports its own error, where a batched run
+ * would report only the first failure's index. */
 static void
-chimera_smb_ea_apply_op_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+chimera_smb_ea_apply_op_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_ea_apply *a = private_data;
+    enum chimera_vfs_error       status;
 
-    (void) pre_attr;
-    (void) post_attr;
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    a->compound = NULL;
 
     /* Deleting an EA that does not exist is a no-op success. */
-    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_ENODATA) {
-        chimera_smb_ea_apply_finish(a, chimera_smb_ea_status(error_code));
+    if (status != CHIMERA_VFS_OK && status != CHIMERA_VFS_ENODATA) {
+        chimera_smb_ea_apply_finish(a, chimera_smb_ea_status(status));
         return;
     }
 
     chimera_smb_ea_apply_step(a);
-} /* chimera_smb_ea_apply_op_cb */
+} /* chimera_smb_ea_apply_op_complete */
 
 static void
 chimera_smb_ea_apply_step(struct chimera_smb_ea_apply *a)
@@ -517,40 +526,63 @@ chimera_smb_ea_apply_step(struct chimera_smb_ea_apply *a)
         a->name_len = (uint32_t) n;
     }
 
+    a->compound = chimera_vfs_compound_alloc(a->thread->vfs_thread, a->cred);
+
+    /* Derived from the handle rather than taken from an open: the apply engine
+     * is handed a handle and nothing else (the CREATE ExtA path has no
+     * chimera_smb_open_file yet).  The xattr ops want INFERRED|PATH, which
+     * every handle serves and which needs no DIRECTORY bit. */
+    chimera_vfs_compound_add_puthandle(
+        a->compound, a->handle, chimera_smb_open_handle_flags(a->handle, 0));
+
     if (entry.value_len == 0) {
-        chimera_vfs_remove_xattr(a->thread->vfs_thread, a->cred, a->handle,
-                                 a->name, a->name_len,
-                                 chimera_smb_ea_apply_op_cb, a);
+        chimera_vfs_compound_add_removexattr(a->compound, a->name,
+                                             a->name_len);
     } else {
-        chimera_vfs_set_xattr(a->thread->vfs_thread, a->cred, a->handle,
-                              CHIMERA_VFS_XATTR_EITHER, a->name, a->name_len,
-                              entry.value, entry.value_len,
-                              chimera_smb_ea_apply_op_cb, a);
+        /* `value` points into ea_buf, which the caller holds for the whole
+         * apply -- the borrowing the adder documents. */
+        chimera_vfs_compound_add_setxattr(a->compound, CHIMERA_VFS_XATTR_EITHER,
+                                          a->name, a->name_len,
+                                          entry.value, entry.value_len);
     }
+
+    chimera_vfs_compound_submit(a->compound,
+                                chimera_smb_ea_apply_op_complete, a);
 } /* chimera_smb_ea_apply_step */
 
+/* PUTHANDLE, LISTXATTRS: the existing user.* names, so each set can match
+ * case-insensitively and reuse the stored spelling.  The page is the
+ * compound's, so it is copied out before the sequence is freed. */
 static void
-chimera_smb_ea_apply_list_cb(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
+chimera_smb_ea_apply_list_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_ea_apply *a = private_data;
+    struct chimera_smb_ea_apply          *a = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
 
-    (void) names;       /* == a->list (the buffer we passed) */
-    (void) count;
-    (void) eof;
-    (void) cookie;
+    status = chimera_vfs_compound_status(compound);
 
     /* On error (e.g. ERANGE) just skip case canonicalization. */
-    a->list_len = (error_code == CHIMERA_VFS_OK) ? names_len : 0;
-    a->ea_off   = 0;
+    a->list_len = 0;
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
+        if (op->buffer_len && op->buffer_len <= sizeof(a->list)) {
+            memcpy(a->list, op->buffer, op->buffer_len);
+            a->list_len = op->buffer_len;
+        }
+    }
+
+    chimera_vfs_compound_free(compound);
+    a->compound = NULL;
+
+    a->ea_off = 0;
     chimera_smb_ea_apply_step(a);
-} /* chimera_smb_ea_apply_list_cb */
+} /* chimera_smb_ea_apply_list_complete */
 
 void
 chimera_smb_ea_apply(
@@ -587,9 +619,15 @@ chimera_smb_ea_apply(
 
     /* List the existing user.* names first so each set can match case-
      * insensitively and reuse the stored spelling. */
-    chimera_vfs_list_xattrs(thread->vfs_thread, cred, handle, 0,
-                            a->list, sizeof(a->list),
-                            chimera_smb_ea_apply_list_cb, a);
+    a->compound = chimera_vfs_compound_alloc(thread->vfs_thread, cred);
+
+    chimera_vfs_compound_add_puthandle(a->compound, handle,
+                                       chimera_smb_open_handle_flags(handle, 0));
+
+    chimera_vfs_compound_add_listxattrs(a->compound, 0, sizeof(a->list));
+
+    chimera_vfs_compound_submit(a->compound,
+                                chimera_smb_ea_apply_list_complete, a);
 } /* chimera_smb_ea_apply */
 
 static void

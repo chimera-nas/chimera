@@ -749,15 +749,11 @@ chimera_smb_acl_to_sd(
 /* ------------------------------------------------------------------ */
 
 static void
-chimera_smb_set_security_setattr_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_set_security_finish(
+    struct chimera_smb_request *request,
+    enum chimera_vfs_error      error_code)
 {
-    struct chimera_smb_request *request = private_data;
-    unsigned int                status;
+    unsigned int status;
 
     /* A successful security-descriptor change is an attribute change on the
      * object; fire a CHANGE_NOTIFY (ATTRS_CHANGED, which the SECURITY/ALL
@@ -793,7 +789,27 @@ chimera_smb_set_security_setattr_callback(
     } /* switch */
 
     chimera_smb_complete_request(request, status);
-} /* chimera_smb_set_security_setattr_callback */
+} /* chimera_smb_set_security_finish */
+
+/* PUTHANDLE, SETATTR(in_handle) with the decoded descriptor.  The ACL rides on
+ * set_attr by reference and is BORROWED for the life of the run, so the
+ * request's acl_storage -- where the decode put it -- has to stay untouched
+ * until the completion, which it does: nothing re-decodes after the submit. */
+static void
+chimera_smb_set_security_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_set_security_finish(request, status);
+} /* chimera_smb_set_security_sequence_complete */
 
 void
 chimera_smb_parse_sd_to_attrs(
@@ -936,15 +952,21 @@ chimera_smb_set_security_dispatch(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_vfs_setattr(
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->set_info.open_file->handle,
-        vfs_attrs,
-        0,
-        0,
-        chimera_smb_set_security_setattr_callback,
-        request);
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->set_info.open_file->handle,
+                                       request->set_info.open_file->open_flags);
+
+    chimera_vfs_compound_add_setattr(request->vfs_compound,
+                                     request->set_info.open_file->handle,
+                                     vfs_attrs, 0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_security_sequence_complete,
+                                request);
 } /* chimera_smb_set_security_dispatch */
 
 /* Fan-out join: once the unresolved SIDs are warm, re-decode (now resolving
