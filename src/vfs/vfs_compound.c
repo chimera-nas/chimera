@@ -177,6 +177,17 @@ struct chimera_vfs_compound {
     uint8_t                         gating;
     uint32_t                        gate_index;
 
+    /* A CLOSE(CLOSE_DOC) whose release fired the delete-on-close: what the
+     * release handed back (the parent, the name, the arming credential, and
+     * the backend close it detached from the cache), the parent handle opened
+     * to unlink through, and the doomed object's own fh, which the unlink
+     * matches on.  Live only between the release and the unlink's completion
+     * -- one op, one at a time -- and cleared with everything else on reset. */
+    struct chimera_vfs_doc_info     close_doc;
+    struct chimera_vfs_open_handle *close_doc_parent;
+    uint8_t                         close_doc_child_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                        close_doc_child_fh_len;
+
     /* Last: see the note on ->next.  This array is the whole reason a compound
     * is recycled rather than malloc'd per request -- it is by far the largest
     * thing in the struct, and only the ops a sequence actually used are ever
@@ -1005,10 +1016,32 @@ chimera_vfs_compound_add_gethandle(struct chimera_vfs_compound *compound)
 } /* chimera_vfs_compound_add_gethandle */
 
 SYMBOL_EXPORT int
-chimera_vfs_compound_add_close(struct chimera_vfs_compound *compound)
+chimera_vfs_compound_add_close(
+    struct chimera_vfs_compound *compound,
+    unsigned int                 flags,
+    const uint8_t               *parent_lease_skip)
 {
-    return chimera_vfs_compound_add_simple(
-        compound, CHIMERA_VFS_COMPOUND_OP_CLOSE);
+    struct chimera_vfs_compound_op *op;
+    int                             index;
+
+    op = chimera_vfs_compound_next_op(compound,
+                                      CHIMERA_VFS_COMPOUND_OP_CLOSE, &index);
+
+    if (!op) {
+        return -1;
+    }
+
+    op->close_flags = flags;
+
+    /* Copied, like every other lease key here: a caller assembling one in a
+     * stack buffer should not have to keep it alive across the submission. */
+    if (parent_lease_skip) {
+        memcpy(op->parent_lease_skip, parent_lease_skip,
+               sizeof(op->parent_lease_skip));
+        op->parent_lease_skip_valid = 1;
+    }
+
+    return index;
 } /* chimera_vfs_compound_add_close */
 
 SYMBOL_EXPORT int
@@ -4040,6 +4073,91 @@ chimera_vfs_compound_open_current_callback(
 } /* chimera_vfs_compound_open_current_callback */
 
 /*
+ * A CLOSE(CLOSE_DOC) is over: close the backend handle the release detached
+ * from the cache, and report what the unlink did.
+ *
+ * The order is the whole reason this lives inside the op.  The unlink
+ * addresses the object and must precede the backend close -- a backend that
+ * has closed its handle has let go of what the unlink names -- and there is no
+ * way to express "unlink, then close the handle the release took away" as two
+ * ops, because the second addresses nothing the cursors hold.
+ *
+ * The op itself still succeeds.  A CLOSE ends the handle, which it did; what
+ * the unlink did is `doc_status`, for the caller to map.
+ */
+static void
+chimera_vfs_compound_close_doc_finish(
+    struct chimera_vfs_compound *compound,
+    enum chimera_vfs_error       doc_status)
+{
+    struct chimera_vfs_compound_op *op = &compound->ops[compound->index];
+
+    op->doc_status = doc_status;
+
+    chimera_vfs_close_ref_dispatch(compound->thread,
+                                   &compound->close_doc.close_ref, NULL, NULL);
+
+    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+} /* chimera_vfs_compound_close_doc_finish */
+
+static void
+chimera_vfs_compound_close_doc_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound *compound = private_data;
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    chimera_vfs_release(compound->thread, compound->close_doc_parent);
+    compound->close_doc_parent = NULL;
+
+    chimera_vfs_compound_close_doc_finish(compound, error_code);
+} /* chimera_vfs_compound_close_doc_remove_callback */
+
+/*
+ * The doomed object's parent is open; unlink the name the arming recorded.
+ *
+ * MATCHED against the doomed object's own file handle: by the time a
+ * delete-on-close fires, the name may belong to something else that was
+ * created after the last open of the original closed, and the caller asked for
+ * ITS object to go.  A name that no longer resolves to it is left alone and
+ * the unlink reports OK, which is the outcome the caller wanted either way.
+ */
+static void
+chimera_vfs_compound_close_doc_parent_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct chimera_vfs_compound    *compound = private_data;
+    struct chimera_vfs_compound_op *op       = &compound->ops[compound->index];
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* The parent is not reachable, so the name cannot be unlinked through
+         * it.  The backend handle is still closed -- it was detached from the
+         * cache and nothing else will -- and the caller is told why. */
+        chimera_vfs_compound_close_doc_finish(compound, error_code);
+        return;
+    }
+
+    compound->close_doc_parent = handle;
+
+    chimera_vfs_remove_at_match_fh(
+        compound->thread, &compound->close_doc.cred,
+        handle,
+        compound->close_doc.name, compound->close_doc.name_len,
+        compound->close_doc_child_fh, (int) compound->close_doc_child_fh_len,
+        0, 0,
+        op->parent_lease_skip_valid ? op->parent_lease_skip : NULL,
+        chimera_vfs_compound_close_doc_remove_callback,
+        compound);
+} /* chimera_vfs_compound_close_doc_parent_callback */
+
+/*
  * The flags this op needs the current object opened with, or 0 if it addresses
  * the current object without a handle at all.
  *
@@ -5057,22 +5175,101 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_CLOSE:
-            if (!compound->handle) {
+        {
+            struct chimera_vfs_open_handle *closing = compound->handle;
+            struct chimera_vfs_state       *vfs_state;
+            struct chimera_vfs_file_state  *file;
+            uint64_t                        fh_hash;
+            int                             fired;
+
+            if (!closing) {
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                 break;
             }
 
             /* Provenance does not matter: CLOSE ends the handle, borrowed or
              * not, which is what a protocol CLOSE of a client's open means. */
-            chimera_vfs_release(compound->thread, compound->handle);
+            if (!(op->close_flags & CHIMERA_VFS_COMPOUND_CLOSE_DOC)) {
+                chimera_vfs_release(compound->thread, closing);
+
+                compound->handle          = NULL;
+                compound->handle_borrowed = 0;
+                compound->handle_taken    = 0;
+                compound->handle_flags    = 0;
+                compound->handle_explicit = 0;
+                compound->handle_nameless = 0;
+
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+                break;
+            }
+
+            /* The doomed object, read off the handle before the release, which
+             * may free it: the unlink matches on this fh, and the delete-
+             * pending check below asks about this file. */
+            vfs_state = compound->thread->vfs->vfs_state;
+            fh_hash   = closing->fh_hash;
+
+            compound->close_doc_child_fh_len = closing->fh_len;
+            memcpy(compound->close_doc_child_fh, closing->fh, closing->fh_len);
+            memset(&compound->close_doc, 0, sizeof(compound->close_doc));
+
+            fired = chimera_vfs_release_doc(compound->thread, closing,
+                                            &compound->close_doc);
 
             compound->handle          = NULL;
             compound->handle_borrowed = 0;
             compound->handle_taken    = 0;
             compound->handle_flags    = 0;
+            compound->handle_explicit = 0;
+            compound->handle_nameless = 0;
 
-            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+            if (!fired) {
+                /* Not the last reference, or the flag was never armed: an
+                 * ordinary release, and nothing to report. */
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
+                break;
+            }
+
+            /* A named stream still holds this base file open.  Removing it now
+             * would pull the object out from under the stream, so the removal
+             * waits: the file is marked delete-pending -- which is what makes a
+             * name open of it, or of one of its streams, answer "this is going
+             * away" -- and the stream's own last close performs it.  The
+             * backend handle the release detached is still closed here. */
+            file = chimera_vfs_state_get(vfs_state,
+                                         compound->close_doc_child_fh,
+                                         (uint8_t) compound->close_doc_child_fh_len,
+                                         fh_hash, false);
+
+            if (file) {
+                if (chimera_vfs_state_stream_holders(file) > 0) {
+                    chimera_vfs_state_set_delete_pending(file);
+                    op->doc_base_deferred = 1;
+                }
+                chimera_vfs_state_put(vfs_state, file);
+            }
+
+            /* ...and a handle armed with no name to unlink (the parent was not
+             * recorded) has nothing to do either. */
+            if (op->doc_base_deferred || compound->close_doc.parent_fh_len == 0) {
+                chimera_vfs_compound_close_doc_finish(compound, CHIMERA_VFS_OK);
+                break;
+            }
+
+            op->doc_fired = 1;
+
+            /* Under the credential the flag was ARMED with, not the one
+             * closing: the client that asked for the deletion is the one whose
+             * rights it is done on, and the last close may well be another's. */
+            chimera_vfs_open_fh(compound->thread, &compound->close_doc.cred,
+                                compound->close_doc.parent_fh,
+                                compound->close_doc.parent_fh_len,
+                                CHIMERA_VFS_OPEN_INFERRED |
+                                CHIMERA_VFS_OPEN_PATH,
+                                chimera_vfs_compound_close_doc_parent_callback,
+                                compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE:
             if (!compound->handle) {

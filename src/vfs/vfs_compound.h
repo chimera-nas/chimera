@@ -762,6 +762,9 @@ struct chimera_vfs_compound_op {
     char                                  new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
     uint32_t                              new_name_len;
     unsigned int                          open_flags; /* OPEN: CHIMERA_VFS_OPEN_*           */
+    /* CLOSE: CHIMERA_VFS_COMPOUND_CLOSE_* -- whether this close honours the
+     * handle's delete-on-close.  See the adder. */
+    unsigned int                          close_flags;
     /* REMOVE, RENAME: CHIMERA_VFS_REMOVE_* -- the type assertion and the
      * lease-recall request, which are the caller's to make. */
     unsigned int                          remove_flags;
@@ -798,11 +801,12 @@ struct chimera_vfs_compound_op {
     uint8_t                               child_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                              child_fh_len;
     uint8_t                               child_fh_match;
-    /* RENAME, REMOVE, LINK: the directory lease to spare from the break the
-     * op raises -- the operating open's own ParentLeaseKey, so a client does
-     * not break the lease it holds on the directory it is changing.  Valid
-     * only when parent_lease_skip_valid is set; the executor passes NULL
-     * otherwise, which breaks every directory lease as NFS and S3 do. */
+    /* RENAME, REMOVE, LINK -- and the unlink a CLOSE(CLOSE_DOC) performs: the
+     * directory lease to spare from the break the op raises -- the operating
+     * open's own ParentLeaseKey, so a client does not break the lease it holds
+     * on the directory it is changing.  Valid only when
+     * parent_lease_skip_valid is set; the executor passes NULL otherwise,
+     * which breaks every directory lease as NFS and S3 do. */
     uint8_t                               parent_lease_skip[16];
     uint8_t                               parent_lease_skip_valid;
     /* RENAME, LINK: the operating handle whose own file lease the source
@@ -1141,6 +1145,21 @@ struct chimera_vfs_compound_op {
      * break is still outstanding, the boolean NFSv4 turns into
      * NFS4ERR_DELAY.  0 is the same answer in both: nothing in the way. */
     uint8_t                             recall_still_open;
+
+    /* ---- CLOSE(CHIMERA_VFS_COMPOUND_CLOSE_DOC) ---- */
+    /* The release was the last reference on a handle armed for delete-on-
+     * close, so this CLOSE performed the unlink -- see the adder. */
+    uint8_t                             doc_fired;
+    /* ...or did not, because a named stream still holds the base open: the
+     * base is left marked delete-pending and its removal waits for the
+     * stream's own last close, which the caller drives. */
+    uint8_t                             doc_base_deferred;
+    /* The unlink's VFS status, for the caller to map to its own protocol --
+     * MS-FSA wants a non-empty directory's ENOTEMPTY reported to the client
+     * (the object survived), not swallowed.  It is NOT the op's status: the
+     * CLOSE itself succeeded, and the handle is gone either way.  OK when
+     * doc_fired is clear. */
+    enum chimera_vfs_error doc_status;
 };
 
 /*
@@ -1848,14 +1867,55 @@ int
 chimera_vfs_compound_add_gethandle(
     struct chimera_vfs_compound *compound);
 
+/* CLOSE honours the handle's delete-on-close: on the last reference, unlink the
+ * name the flag was armed with (matching the doomed child's fh, sparing
+ * `parent_lease_skip`) and then close the backend handle that release detached.
+ * Without it a CLOSE is the bare release it always was. */
+#define CHIMERA_VFS_COMPOUND_CLOSE_DOC (1U << 0)
+
 /* End the current OPEN HANDLE and empty the slot.
  *
  * Provenance does not matter: a handle lent with PUTHANDLE is closed too, which
  * is exactly what an SMB2 or NFSv4 CLOSE of a client's open means.  The caller
- * must not release that handle afterwards. */
+ * must not release that handle afterwards.
+ *
+ * CLOSE PERFORMS THE DELETE-ON-CLOSE UNLINK.  With CHIMERA_VFS_COMPOUND_CLOSE_
+ * DOC the executor releases through chimera_vfs_release_doc, and when that says
+ * this was the LAST reference on a handle armed for delete-on-close it goes on
+ * to do what the arming asked for: open the recorded parent, unlink the
+ * recorded name -- only while that name still resolves to the doomed object, so
+ * an unlink this late cannot destroy something else that has since taken the
+ * name -- and then dispatch the backend close that the release detached from
+ * the cache.  All of it inside the op, because the unlink addresses an object
+ * and must happen BEFORE the backend close the run owns; a caller cannot get
+ * between them.  The unlink runs under the credential the flag was armed with,
+ * which is the one that asked for the deletion, and spares
+ * `parent_lease_skip` (16 bytes, or NULL to spare none) -- the closing handle's
+ * own ParentLeaseKey when it is the handle that armed the flag, so a client
+ * does not break the directory lease whose cached view is coherent with the
+ * removal it caused, and nothing when some other open triggers the removal.
+ *
+ * The op reports what happened in `doc_fired`, `doc_status` and
+ * `doc_base_deferred` -- see the results.  None of it changes the op's OWN
+ * status: the handle is gone whatever the unlink did, which is what a CLOSE
+ * means, and a caller that must tell its client the object survived reads
+ * doc_status (SMB maps ENOTEMPTY to STATUS_DIRECTORY_NOT_EMPTY; swallowing it
+ * makes a recursive client teardown believe it worked).
+ *
+ * SETTING AND CLEARING the delete-on-close flag stays OUT OF BAND
+ * (chimera_vfs_set_delete_on_close / _clear_delete_on_close): it addresses
+ * nothing through the cursors and mutates nothing the run holds, so by THE RULE
+ * it is not a sequence op.  What is in band is the unlink the flag eventually
+ * causes, which addresses an object.
+ *
+ * A CLOSE without the flag releases and reports nothing, even on a handle that
+ * IS armed: the arming caller is the one that asked for the unlink, and a CLOSE
+ * that did not ask does not perform it. */
 int
 chimera_vfs_compound_add_close(
-    struct chimera_vfs_compound *compound);
+    struct chimera_vfs_compound *compound,
+    unsigned int                 flags,
+    const uint8_t               *parent_lease_skip);
 
 /* Park the current OPEN HANDLE in the saved slot, and take it back.  Both MOVE:
  * the source slot is empty afterwards.  Anything the destination slot held is
