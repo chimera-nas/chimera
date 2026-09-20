@@ -1094,7 +1094,8 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
     chimera_vfs_compound_add_lookup(request->vfs_compound,
                                     rename_info->new_name,
                                     rename_info->new_name_len,
-                                    CHIMERA_VFS_ATTR_MODE, 0);
+                                    CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH |
+                                    CHIMERA_VFS_ATTR_DOS_ATTRIBUTES, 0);
 
     chimera_vfs_compound_submit(request->vfs_compound,
                                 chimera_smb_set_info_rename_resolve_complete,
