@@ -34,6 +34,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 
 struct chimera_smb_durable_recover_ctx {
     struct chimera_server_smb_shared *shared;
@@ -167,62 +168,51 @@ chimera_smb_durable_forget(
 
 /* Fire-and-forget context for a delete-on-close unlink issued while a parked
  * durable open is torn down.  Unlike the CLOSE path there is no request to
- * complete, so the doc_info is copied here and freed in the final callback. */
+ * complete, so the doc_info is copied here and freed in the final callback --
+ * and it is this context, not a request, that OWNS the sequence: the compound
+ * lives exactly as long as the context does, and the completion frees both.
+ * The credential the run executes under lives here too, which the submission
+ * requires (it must outlive the run). */
 struct chimera_smb_durable_doc {
-    struct chimera_vfs_thread      *vfs_thread;
-    struct chimera_vfs_doc_info     doc_info;
-    struct chimera_vfs_open_handle *parent_handle;
+    struct chimera_vfs_thread  *vfs_thread;
+    struct chimera_vfs_doc_info doc_info;
     /* FH of the file this delete-on-close targets, so the async remove only
      * unlinks the name while it still resolves to THIS object -- not a fresh
      * file another opener created with the same name in the meantime (the
      * grace-timer reap of a DELETE_ON_CLOSE handle can land arbitrarily late
      * under load). */
-    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
-    int                             file_fh_len;
+    uint8_t                     file_fh[CHIMERA_VFS_FH_SIZE];
+    int                         file_fh_len;
 };
 
+/* The reap's unlink, as one run:
+ *
+ *   PUTFH(recorded parent) -> OPEN_CURRENT(PATH) -> REMOVE(name, match fh)
+ *
+ * The two callbacks this replaces threaded a parent handle between them by
+ * hand, and the parent open is now the sequence's: it is released with the run
+ * whichever way the unlink went, so the failure arm that used to have to
+ * remember to release it cannot forget.  The guarded remove is the op's own
+ * knob (op_set_remove_match), which is what makes the inode-scoping a property
+ * of the REMOVE rather than of which VFS entry point was picked. */
 static void
-chimera_smb_durable_doc_remove_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_durable_doc_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_durable_doc *ctx = private_data;
+    struct chimera_smb_durable_doc *ctx    = private_data;
+    enum chimera_vfs_error          status = chimera_vfs_compound_status(compound);
 
-    if (error_code) {
-        chimera_smb_debug("durable delete-on-close: remove_at failed for '%.*s' (error %d)",
-                          ctx->doc_info.name_len, ctx->doc_info.name, error_code);
+    if (status != CHIMERA_VFS_OK) {
+        chimera_smb_debug("durable delete-on-close: unlink of '%.*s' failed (error %d)",
+                          ctx->doc_info.name_len, ctx->doc_info.name, status);
     }
-    chimera_vfs_release(ctx->vfs_thread, ctx->parent_handle);
+
+    chimera_vfs_compound_free(compound);
     chimera_vfs_close_ref_dispatch(ctx->vfs_thread, &ctx->doc_info.close_ref,
                                    NULL, NULL);
     free(ctx);
-} /* chimera_smb_durable_doc_remove_cb */
-
-static void
-chimera_smb_durable_doc_open_parent_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_durable_doc *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_debug("durable delete-on-close: open parent failed for '%.*s' (error %d)",
-                          ctx->doc_info.name_len, ctx->doc_info.name, error_code);
-        chimera_vfs_close_ref_dispatch(ctx->vfs_thread, &ctx->doc_info.close_ref,
-                                       NULL, NULL);
-        free(ctx);
-        return;
-    }
-    ctx->parent_handle = oh;
-    chimera_vfs_remove_at_match_fh(ctx->vfs_thread, &ctx->doc_info.cred, oh,
-                                   ctx->doc_info.name, ctx->doc_info.name_len,
-                                   ctx->file_fh, ctx->file_fh_len, 0, 0,
-                                   NULL, /* parent_lease_skip */
-                                   chimera_smb_durable_doc_remove_cb, ctx);
-} /* chimera_smb_durable_doc_open_parent_cb */
+} /* chimera_smb_durable_doc_complete */
 
 /*
  * Release a parked durable open's VFS handle honoring delete-on-close: if the
@@ -237,9 +227,11 @@ chimera_smb_durable_release_handle(
 {
     struct chimera_smb_durable_doc *ctx;
     struct chimera_vfs_doc_info     doc_info;
+    struct chimera_vfs_compound    *compound;
     uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
     int                             file_fh_len;
     int                             need_doc;
+    int                             idx;
 
     if (!open_file->handle) {
         return;
@@ -257,17 +249,50 @@ chimera_smb_durable_release_handle(
         return;
     }
 
-    ctx                = malloc(sizeof(*ctx));
-    ctx->vfs_thread    = thread->vfs_thread;
-    ctx->doc_info      = doc_info;
-    ctx->parent_handle = NULL;
-    ctx->file_fh_len   = file_fh_len;
+    ctx              = malloc(sizeof(*ctx));
+    ctx->vfs_thread  = thread->vfs_thread;
+    ctx->doc_info    = doc_info;
+    ctx->file_fh_len = file_fh_len;
     memcpy(ctx->file_fh, file_fh, file_fh_len);
 
-    chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred,
-                        ctx->doc_info.parent_fh, ctx->doc_info.parent_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_smb_durable_doc_open_parent_cb, ctx);
+    /* The credential is the context's, which is what lets it outlive the
+     * submission: the arming open recorded it and this reap runs under it. */
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          &ctx->doc_info.cred);
+
+    chimera_vfs_compound_add_putfh(compound, ctx->doc_info.parent_fh,
+                                   ctx->doc_info.parent_fh_len);
+
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+
+    idx = chimera_vfs_compound_add_remove(compound,
+                                          ctx->doc_info.name,
+                                          ctx->doc_info.name_len,
+                                          0, 0, 0);
+
+    if (idx < 0) {
+        /* The recorded name does not fit a sequence's own bound: a run that
+         * cannot express the unlink is not submitted half-built. */
+        chimera_vfs_compound_free(compound);
+        chimera_vfs_close_ref_dispatch(ctx->vfs_thread,
+                                       &ctx->doc_info.close_ref, NULL, NULL);
+        free(ctx);
+        return;
+    }
+
+    /* Unlink the name only while it still resolves to THIS object: the reap of
+     * a delete-on-close handle can land arbitrarily late, and a name that now
+     * belongs to something else must be left alone.  No directory lease is
+     * spared -- the client that armed the flag is gone. */
+    chimera_vfs_compound_op_set_remove_match(compound, (uint32_t) idx,
+                                             ctx->file_fh,
+                                             (uint32_t) ctx->file_fh_len,
+                                             1, NULL);
+
+    chimera_vfs_compound_submit(compound, chimera_smb_durable_doc_complete,
+                                ctx);
 } /* chimera_smb_durable_release_handle */
 
 /* Purge a parked (disconnected) *durable* open by persistent id when a new,
@@ -1020,6 +1045,11 @@ chimera_smb_durable_recover_share(
 
     ctx->shared = thread->shared;
 
+    /* Stays a per-op call, and is the one in src/server/smb that does: a
+     * key-value search is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, enumerates a backend's KV store
+     * rather than a namespace, and streams its answers through a per-record
+     * callback that no sequence result can hold. */
     chimera_vfs_search_keys_at(thread->vfs_thread, NULL, fh, fh_len,
                                CHIMERA_SMB_DURABLE_KEY_PREFIX,
                                CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN,
