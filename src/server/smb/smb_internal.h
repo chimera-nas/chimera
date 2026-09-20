@@ -19,8 +19,10 @@
 #else
 #include <netinet/in.h>
 #endif
+#ifdef CHIMERA_HAVE_GSSAPI
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_krb5.h>
+#endif
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "common/macros.h"
@@ -1279,7 +1281,9 @@ struct chimera_smb_session_handle {
     uint8_t                            is_channel;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
+#ifdef CHIMERA_HAVE_GSSAPI
     gss_ctx_id_t                       ctx;
+#endif
 };
 
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
@@ -1320,11 +1324,13 @@ struct chimera_smb_notify_request;
 #define CHIMERA_SMB_MAX_CREDITS                     8192
 
 struct chimera_smb_conn {
+#ifdef CHIMERA_HAVE_GSSAPI
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
     OM_uint32                          gss_flags;
     gss_ctx_id_t                       nascent_ctx;
     gss_buffer_desc                    gss_output;
+#endif
     struct smb_ntlm_ctx                ntlm_ctx;
     struct smb_gssapi_ctx              gssapi_ctx;
     uint8_t                           *ntlm_output;
@@ -1714,8 +1720,10 @@ struct chimera_server_smb_shared {
      * at startup from a stable per-host id (see chimera_smb_server_init).  The
      * LSARPC/SAMR services issue domain-relative SIDs under this. */
     uint32_t                          machine_domain_sub[3];
+#ifdef CHIMERA_HAVE_GSSAPI
     gss_name_t                        svc;
     gss_cred_id_t                     srv_cred;
+#endif
     struct chimera_vfs               *vfs;
     struct prometheus_metrics        *metrics;
     struct evpl_endpoint             *endpoint;
@@ -2798,6 +2806,7 @@ chimera_smb_conn_free(
     {
         HASH_DELETE(hh, conn->session_handles, session_handle);
 
+#ifdef CHIMERA_HAVE_GSSAPI
         if (session_handle->ctx != GSS_C_NO_CONTEXT) {
 
             chimera_smb_debug("chimera_smb_conn_free freeing context for "
@@ -2807,6 +2816,7 @@ chimera_smb_conn_free(
                                    &session_handle->ctx, NULL);
             session_handle->ctx = GSS_C_NO_CONTEXT;
         }
+#endif
 
         if (session_handle->session) {
             /* A bound additional channel is going away; free its slot so the
@@ -2838,6 +2848,7 @@ chimera_smb_conn_free(
      * current session -- which then aborts in chimera_smb_logoff. */
     conn->last_session_handle = NULL;
 
+#ifdef CHIMERA_HAVE_GSSAPI
     if (conn->nascent_ctx != GSS_C_NO_CONTEXT) {
         gss_delete_sec_context(&conn->gss_minor, &conn->nascent_ctx, NULL);
         conn->nascent_ctx = GSS_C_NO_CONTEXT;
@@ -2848,6 +2859,7 @@ chimera_smb_conn_free(
         conn->gss_output.value  = NULL;
         conn->gss_output.length = 0;
     }
+#endif
 
     if (conn->ntlm_output) {
         free(conn->ntlm_output);

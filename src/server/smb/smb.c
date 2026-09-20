@@ -338,6 +338,7 @@ chimera_smb_server_init(
         shared->machine_domain_sub[2] = (uint32_t) h.high64;
     }
 
+#ifdef CHIMERA_HAVE_GSSAPI
     shared->svc      = GSS_C_NO_NAME;
     shared->srv_cred = GSS_C_NO_CREDENTIAL;
 
@@ -349,6 +350,7 @@ chimera_smb_server_init(
 
     gss_import_name(&min, &name, GSS_C_NT_HOSTBASED_SERVICE, &shared->svc);
     //gss_acquire_cred(&min, shared->svc, 0, GSS_C_NO_OID_SET, GSS_C_ACCEPT, &shared->srv_cred, NULL, NULL);
+#endif
 
     shared->endpoint = chimera_tcp_flavor_endpoint_create(shared->tcp_flavor, "0.0.0.0",
                                                           shared->config.port);
@@ -415,6 +417,7 @@ chimera_smb_server_destroy(void *data)
         free(share);
     }
 
+#ifdef CHIMERA_HAVE_GSSAPI
     uint32_t min;
 
     if (shared->svc != GSS_C_NO_NAME) {
@@ -424,6 +427,7 @@ chimera_smb_server_destroy(void *data)
     if (shared->srv_cred != GSS_C_NO_CREDENTIAL) {
         gss_release_cred(&min, &shared->srv_cred);
     }
+#endif
 
     evpl_mutex_destroy(&shared->threads_lock);
 
@@ -2778,12 +2782,14 @@ chimera_smb_server_accept(
     conn->bind              = bind;
     conn->protocol          = evpl_bind_get_protocol(bind);
     conn->smbvers           = conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? 2 : 0;
+#ifdef CHIMERA_HAVE_GSSAPI
     conn->gss_flags         = 0;
     conn->gss_major         = 0;
     conn->gss_minor         = 0;
     conn->gss_output.value  = NULL;
     conn->gss_output.length = 0;
     conn->nascent_ctx       = GSS_C_NO_CONTEXT;
+#endif
     conn->ntlm_output       = NULL;
     conn->ntlm_output_len   = 0;
     smb_ntlm_ctx_init(&conn->ntlm_ctx);

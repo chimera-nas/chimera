@@ -408,7 +408,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         HASH_ADD(hh, conn->session_handles, session_id, sizeof(uint64_t), session_handle);
 
+#ifdef CHIMERA_HAVE_GSSAPI
         session_handle->ctx = GSS_C_NO_CONTEXT;
+#endif
 
         request->compound->conn->last_session_handle = session_handle;
 
