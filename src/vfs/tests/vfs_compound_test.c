@@ -6992,6 +6992,126 @@ main(
     TEST_PASS("a gate rewrites and skips the ops ahead of it, is refused the "
               "ones behind it, and re-applies both on a second execution");
 
+    /* ---- the caller's own skip, decided at build ----
+     * The same effect as a gate's, and the opposite lifetime: a gate's is
+     * cleared by every submit so it is decided afresh per execution, and this
+     * one is an argument of the sequence as built, so a compound submitted
+     * twice runs the same shape both times.  They are ORed, and neither clears
+     * the other. */
+    {
+        struct chimera_vfs_attrs sattr;
+        struct edit_gate_ctx     g;
+        int                      i_ga1, i_ga2, i_ga3, i_open, i_uh;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        /* The middle op is skipped before the run starts: it never dispatches,
+         * its status stays UNSET, and it is not counted. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_ga1 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga2 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga3 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_set_skip(cp, (uint32_t) i_ga2, 1);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga1)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_op(cp, i_ga3)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_num_completed(cp) == 4);
+
+        /* Submitted again WITHOUT rebuilding: submit clears the gate's skip
+         * and not this one, so the second run is the same run. */
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_op(cp, i_ga3)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* Both skips at once, on different ops: each is run past, and a gate
+         * skipping an op the caller already skipped changes nothing. */
+        memset(&g, 0, sizeof(g));
+        g.at         = 1;
+        g.size_index = EDIT_GATE_NONE;
+        g.skip_index = 2;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_ga1 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga2 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        i_ga3 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        assert(i_ga1 == 1 && i_ga2 == 2 && i_ga3 == 3);
+        chimera_vfs_compound_op_set_skip(cp, (uint32_t) i_ga3, 1);
+        chimera_vfs_compound_set_gate(cp, edit_gate, &g);
+
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga1)->status == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_ga2)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_op(cp, i_ga3)->status == CHIMERA_VFS_UNSET);
+        /* The last op skipped: the count reports fewer than the sequence has. */
+        assert(chimera_vfs_compound_num_completed(cp) == 2);
+        chimera_vfs_compound_free(cp);
+
+        /* Clearing it puts the op back. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_ga1 = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_set_skip(cp, (uint32_t) i_ga1, 1);
+        chimera_vfs_compound_op_set_skip(cp, (uint32_t) i_ga1, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_ga1)->status == CHIMERA_VFS_OK);
+        chimera_vfs_compound_free(cp);
+
+        /* An op whose handle a later op addresses cannot be skipped -- it
+         * would produce none.  Refused in either order. */
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "bskip", 5,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        i_uh = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_uh,
+                                           (uint32_t) i_open);
+        chimera_vfs_compound_op_set_skip(cp, (uint32_t) i_open, 1);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_num_completed(cp) == 0);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "bskip", 5,
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, NULL, 0, 0, 0);
+        i_uh = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_set_skip(cp, (uint32_t) i_open, 1);
+        chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_uh,
+                                           (uint32_t) i_open);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        chimera_vfs_compound_free(cp);
+    }
+    TEST_PASS("a build-time skip runs past an op, survives resubmission, "
+              "ORs with a gate's, and is refused on a use_handle source");
+
     /* ---- CLOSE performs the delete-on-close unlink ----
      * Arming the flag is out of band; the unlink it eventually causes is the
      * CLOSE's, because it addresses an object and has to happen before the

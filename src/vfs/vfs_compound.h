@@ -727,8 +727,15 @@ struct chimera_vfs_compound_op {
     /* A gate set this: the executor runs PAST this op without dispatching it.
      * Only a gate consulted on an EARLIER op may set it -- see the gate's
      * contract, which is also where the idempotence rule that makes an edited
-     * sequence re-runnable lives. */
+     * sequence re-runnable lives.  Cleared by every submit, so the gate's
+     * decision is made afresh on each execution. */
     uint8_t                               skip;
+    /* The CALLER set this, before submitting -- see
+     * chimera_vfs_compound_op_set_skip.  Identical in effect, different in
+     * lifetime: it is an argument of the sequence as built and survives
+     * submission, where `skip` does not.  The two are ORed and neither can
+     * clear the other. */
+    uint8_t                               skip_build;
     uint8_t                               arg_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                              arg_fh_len;
     char                                  name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
@@ -1250,8 +1257,9 @@ struct chimera_vfs_compound_op {
  * a gate reaches a writable op at all, refuses one; a debug build additionally
  * notices a gate that went around it and aborts.
  *
- * A skip does NOT persist: every submission starts with nothing skipped, and
- * the gate is asked again.
+ * A GATE's skip does NOT persist: every submission clears it, and the gate is
+ * asked again.  A CALLER's does -- see chimera_vfs_compound_op_set_skip, which
+ * is also where the precedence between the two is stated.
  *
  * The idempotence rule above is unchanged, and the edits make it load-bearing a
  * second time: the gate is consulted, and re-applies its edits, on EVERY
@@ -2127,6 +2135,38 @@ chimera_vfs_compound_op_use_handle(
     uint32_t                     index,
     uint32_t                     from);
 
+/* Run PAST op `index` without dispatching it: its status stays
+ * CHIMERA_VFS_UNSET, its results are untouched, and it is not counted among the
+ * ops that ran -- the gate's skip, decided at BUILD time instead.
+ *
+ * A caller that already knows the answer should be allowed to say so.  Two run
+ * shapes deciding the same question -- does this run need the truncate, does it
+ * need the grant -- one by appending the op conditionally and one by a gate
+ * that skips it, are two spellings of one thing, and the conditional append
+ * moves every later op's index with it.  A fixed shape whose unwanted ops are
+ * skipped keeps the indices the caller wrote down.
+ *
+ * PRECEDENCE, because there are now two skips and they must not be able to
+ * disagree.  They are ORed: an op is run past if EITHER says so, and neither
+ * can clear the other.  A gate's skip is cleared by every submit, so its
+ * decision is re-made per execution; this one is an argument of the sequence as
+ * built and is NOT cleared, so a compound submitted twice skips the same op
+ * both times without the caller rebuilding it.  A gate setting `skip` on an op
+ * already skipped here changes nothing, and a gate cannot un-skip one -- the
+ * gate contract gives it no way to clear a skip at all.
+ *
+ * An op skipped here may not be the source of a later use_handle, for the
+ * reason use_handle refuses a source that leaves no handle: it would produce
+ * none.  Either order of the two calls is refused, and the sequence fails to
+ * build.
+ *
+ * An index past the end is ignored, as the setters ignore one. */
+void
+chimera_vfs_compound_op_set_skip(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    int                          skip);
+
 /* Register a veto consulted as each op finishes -- see
  * chimera_vfs_compound_gate_t.  Optional; without one the sequence is governed
  * by the ops' own statuses alone. */
@@ -2315,9 +2355,9 @@ chimera_vfs_compound_num_ops(
     const struct chimera_vfs_compound *compound);
 
 /* How far the sequence got: the ops that ran (the index of the failure, or all
- * of them).  An op a gate skipped did not run -- inside the count it is the
- * CHIMERA_VFS_UNSET status that says so, and a sequence whose LAST op was
- * skipped reports fewer than it has. */
+ * of them).  A skipped op -- a gate's or the caller's -- did not run: inside
+ * the count it is the CHIMERA_VFS_UNSET status that says so, and a sequence
+ * whose LAST op was skipped reports fewer than it has. */
 uint32_t
 chimera_vfs_compound_num_completed(
     const struct chimera_vfs_compound *compound);
