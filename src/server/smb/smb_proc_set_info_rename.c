@@ -8,16 +8,32 @@
 #include "smb_procs.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_claim.h"
 
-/* Forward declaration */
-static void chimera_smb_set_info_rename_check_dest_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data);
+/*
+ * SET_INFO FileRenameInformation, as the consecutive sequences it is.
+ *
+ * A rename is not one sequence because three of its four steps ask a question
+ * whose ANSWER decides whether the next step exists at all, and two of those
+ * fan out by a count nothing knows before the first answer:
+ *
+ *   1. resolve the destination parent and probe the destination name
+ *      (PUTFH, [LOOKUP_PATH], LOOKUP)
+ *   2. for a DIRECTORY rename, enumerate the source's children that hold a
+ *      live share reservation (PUTFH, READDIR page) and RECALL each one's
+ *      caching lease (RECALL per child), then re-scan for one opened during
+ *      the break wave
+ *   3. break the destination parent's directory lease with a deny probe
+ *      (PUTFH, OPEN_CURRENT, CLAIM)
+ *   4. the rename itself (PUTFH src parent, SAVEFH, PUTFH dst parent, RENAME)
+ *
+ * The per-child recall count is the directory's, so step 2 cannot be folded
+ * into one run; the deny probe has to be RELEASED whichever way it resolves,
+ * which is out of band and so cannot sit inside the run that renames.  The
+ * post-rename repath of every open of the file, and the sharemode re-key, stay
+ * out of band for the ordinary reason: they mutate nothing the run holds.
+ */
 
 /* The new path a rename gives every open of the file. */
 struct chimera_smb_rename_path {
@@ -52,15 +68,10 @@ chimera_smb_rename_repath_cb(
 } /* chimera_smb_rename_repath_cb */
 
 static void
-chimera_smb_set_info_rename_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *fromdir_pre_attr,
-    struct chimera_vfs_attrs *fromdir_post_attr,
-    struct chimera_vfs_attrs *todir_pre_attr,
-    struct chimera_vfs_attrs *todir_post_attr,
-    void                     *private_data)
+chimera_smb_set_info_rename_finish(
+    struct chimera_smb_request *request,
+    enum chimera_vfs_error      error_code)
 {
-    struct chimera_smb_request     *request     = private_data;
     struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
 
@@ -80,18 +91,16 @@ chimera_smb_set_info_rename_callback(
          * claim on the file and points it back at itself -- and it spans
          * sessions and trees, which the SMB layer's own per-tree open-file
          * hashes cannot. */
-        struct chimera_vfs_open_handle *new_parent = rename_info->new_parent_handle
-                                                     ? rename_info->new_parent_handle
-                                                     : request->set_info.parent_handle;
-        struct chimera_smb_rename_path  newpath;
+        struct chimera_smb_rename_path newpath;
 
         newpath.parent_fh_len = open_file->parent_fh_len;
         memcpy(newpath.parent_fh, open_file->parent_fh,
                open_file->parent_fh_len);
 
-        if (new_parent) {
-            newpath.parent_fh_len = new_parent->fh_len;
-            memcpy(newpath.parent_fh, new_parent->fh, new_parent->fh_len);
+        if (request->set_info.dst_parent_fh_len) {
+            newpath.parent_fh_len = request->set_info.dst_parent_fh_len;
+            memcpy(newpath.parent_fh, request->set_info.dst_parent_fh,
+                   request->set_info.dst_parent_fh_len);
         }
 
         newpath.name_len = rename_info->new_name_len;
@@ -128,16 +137,6 @@ chimera_smb_set_info_rename_callback(
 
     }
 
-    if (request->set_info.parent_handle) {
-        chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
-        request->set_info.parent_handle = NULL;
-    }
-
-    if (rename_info->new_parent_handle) {
-        chimera_vfs_release(request->compound->thread->vfs_thread, rename_info->new_parent_handle);
-        rename_info->new_parent_handle = NULL;
-    }
-
     chimera_smb_open_file_release(request, open_file);
 
     /* Map the rename_at failure (if any) back to the SMB status the client
@@ -161,7 +160,7 @@ chimera_smb_set_info_rename_callback(
     } /* switch */
 
     chimera_smb_complete_request(request, status);
-} /* chimera_smb_set_info_rename_callback */
+} /* chimera_smb_set_info_rename_finish */
 
 /* Release the transient destination-parent dir-lease conflict probe (if it was
  * inserted) and drop the file-state reference taken for it. */
@@ -182,69 +181,116 @@ chimera_smb_set_info_rename_dp_release(struct chimera_smb_request *request)
     }
 } /* chimera_smb_set_info_rename_dp_release */
 
-/* Issue the rename once the destination parent's directory lease (if any) has
- * yielded its HANDLE caching. */
+static void
+chimera_smb_set_info_rename_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_set_info_rename_finish(request, status);
+} /* chimera_smb_set_info_rename_sequence_complete */
+
+/* PUTFH(src parent), SAVEFH, PUTFH(dst parent), RENAME.
+ *
+ * Issued once the destination parent's directory lease (if any) has yielded its
+ * HANDLE caching.  RENAME reads the SAVED file handle for the source directory
+ * and the CURRENT one for the target, which is what rename_at takes, so neither
+ * directory is opened. */
 static void
 chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
 {
-    struct chimera_smb_open_file   *open_file      = request->set_info.open_file;
-    char                           *dest_name      = request->set_info.rename_info.new_name;
-    size_t                          dest_name_len  = request->set_info.rename_info.new_name_len;
-    struct chimera_vfs_open_handle *dest_parent_oh = request->set_info.rename_info.new_parent_handle
-                                                     ? request->set_info.rename_info.new_parent_handle
-                                                     : request->set_info.parent_handle;
+    struct chimera_smb_open_file *open_file = request->set_info.open_file;
+    int                           index;
 
-    chimera_vfs_rename_at(
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        open_file->parent_fh,
-        open_file->parent_fh_len,
-        open_file->name,
-        open_file->name_len,
-        dest_parent_oh->fh,
-        dest_parent_oh->fh_len,
-        dest_name,
-        dest_name_len,
-        NULL,
-        0,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                   open_file->parent_fh,
+                                   open_file->parent_fh_len);
+    chimera_vfs_compound_add_savefh(request->vfs_compound);
+
+    chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                   request->set_info.dst_parent_fh,
+                                   request->set_info.dst_parent_fh_len);
+
+    index = chimera_vfs_compound_add_rename(
+        request->vfs_compound,
+        open_file->name, open_file->name_len,
+        request->set_info.rename_info.new_name,
+        request->set_info.rename_info.new_name_len,
+        0, 0, 0);
+
+    chimera_vfs_compound_op_set_rename_opts(
+        request->vfs_compound, index,
+        NULL, 0,
+        /* Self-exempt the renamer's own file lease from the source recall
+         * (renaming a file it holds a lease on must not break it). */
+        open_file->handle,
+        /* ...and the directory lease named by the operating open's
+         * ParentLeaseKey (dirlease.rename correct-parent-leaskey case). */
+        open_file->parent_lease_key,
         /* The open carries the object's type, and it is the only layer that
          * does -- so it is the only one that can tell a file rename from a
          * directory one for the name filters (MS-FSCC 2.7.1). */
         (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY)
-        ? CHIMERA_VFS_RENAME_SRC_IS_DIR : 0,
-        0,
-        0,
-        /* Self-exempt the directory lease named by the operating open's
-         * ParentLeaseKey (dirlease.rename correct-parent-leaskey case). */
-        open_file->parent_lease_key,
-        /* ...and self-exempt the renamer's own file lease from the source
-         * recall (renaming a file it holds a lease on must not break it). */
-        open_file->handle,
-        chimera_smb_set_info_rename_callback,
-        request);
+        ? CHIMERA_VFS_RENAME_SRC_IS_DIR : 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_rename_sequence_complete,
+                                request);
 } /* chimera_smb_set_info_rename_emit */
 
-/* Resume after the destination-parent dir-lease conflict probe resolves.
+/*
+ * PUTFH(dst parent), OPEN_CURRENT, CLAIM(deny probe, WAIT).
+ *
+ * Its own run, not an op ahead of the rename: the probe has to be RELEASED
+ * however it resolves -- it was only ever a way to fire the break and read the
+ * answer -- and a release is out of band by the rule, so it cannot sit behind
+ * an op in the same sequence.
+ *
  * GRANTED: no conflicting handle-leased opener remains (none, or it closed in
  * response to the RH->R break) -> proceed with the rename.  DENIED: a holder
- * kept its handle open -> SHARING_VIOLATION (MS-SMB2 dirlease.rename_dst_parent). */
+ * kept its handle open -> SHARING_VIOLATION (MS-SMB2 dirlease.rename_dst_parent).
+ */
 static void
-chimera_smb_set_info_rename_dp_cb(
-    enum chimera_vfs_claim_result            result,
-    struct chimera_vfs_claim                *claim,
-    const struct chimera_vfs_claim_conflict *conflict,
-    void                                    *private_data)
+chimera_smb_set_info_rename_dp_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    enum chimera_vfs_claim_result         result;
 
-    (void) claim;
-    (void) conflict;
+    status = chimera_vfs_compound_status(compound);
+    op     = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+    result = op->claim_result;
 
-    if (result == CHIMERA_CLAIM_GRANTED) {
-        /* claim_acquire inserted the probe; drop it (its only purpose was to
+    /* The claim is the caller's once the run finished OK, and what releasing it
+     * needs is the file state the op resolved. */
+    request->set_info.dp_file_state =
+        chimera_vfs_compound_take_file_state(
+            compound, chimera_vfs_compound_num_ops(compound) - 1);
+
+    request->set_info.dp_probe_active =
+        (request->set_info.dp_file_state != NULL);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status == CHIMERA_VFS_OK && result == CHIMERA_CLAIM_GRANTED) {
+        /* The acquire inserted the probe; drop it (its only purpose was to
          * break the dir lease / detect the conflict) and rename. */
-        request->set_info.dp_probe_active = 1;
         chimera_smb_set_info_rename_dp_release(request);
         chimera_smb_set_info_rename_emit(request);
         return;
@@ -252,53 +298,50 @@ chimera_smb_set_info_rename_dp_cb(
 
     chimera_smb_set_info_rename_dp_release(request);
 
-    if (request->set_info.rename_info.new_parent_handle) {
-        chimera_vfs_release(vfs_thread,
-                            request->set_info.rename_info.new_parent_handle);
-        request->set_info.rename_info.new_parent_handle = NULL;
-    }
-    if (request->set_info.parent_handle) {
-        chimera_vfs_release(vfs_thread, request->set_info.parent_handle);
-        request->set_info.parent_handle = NULL;
-    }
     chimera_smb_open_file_release(request, request->set_info.open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
-} /* chimera_smb_set_info_rename_dp_cb */
+} /* chimera_smb_set_info_rename_dp_complete */
 
 static void
 chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
 {
-    struct chimera_smb_open_file   *open_file      = request->set_info.open_file;
-    struct chimera_vfs_thread      *vfs_thread     = request->compound->thread->vfs_thread;
-    struct chimera_vfs_state       *vfs_state      = vfs_thread->vfs->vfs_state;
-    struct chimera_vfs_open_handle *dest_parent_oh = request->set_info.rename_info.new_parent_handle
-                                                     ? request->set_info.rename_info.new_parent_handle
-                                                     : request->set_info.parent_handle;
-    struct chimera_vfs_file_state  *fs;
-    struct chimera_claim_owner      dp_owner;
+    struct chimera_smb_open_file     *open_file  = request->set_info.open_file;
+    struct chimera_server_smb_thread *thread     = request->compound->thread;
+    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_vfs_state         *vfs_state  = vfs_thread->vfs->vfs_state;
+    struct chimera_vfs_file_state    *fs;
+    struct chimera_claim_owner        dp_owner;
 
     request->set_info.dp_probe_active = 0;
     request->set_info.dp_file_state   = NULL;
 
     /* A rename INTO a directory must break that directory's lease HANDLE caching
-     * (RH->R): a conflicting handle-leased opener (one holding the dst parent
-     * open with DELETE access) may close in response and free the rename, else
-     * the rename fails SHARING_VIOLATION (MS-SMB2; dirlease.rename_dst_parent).
-     * Model it as a transient deny-only probe (deny=D) on the dst parent: it
-     * conflicts ONLY with a DELETE-access holder, so it is inert for ordinary
-     * renames into a leased directory (dirlease.rename holders take no DELETE
-     * access).  No dst-parent state => no lease => rename directly. */
-    fs = dest_parent_oh ? chimera_vfs_state_get(vfs_state, dest_parent_oh->fh,
-                                                dest_parent_oh->fh_len,
-                                                dest_parent_oh->fh_hash, false)
-                        : NULL;
+    * (RH->R): a conflicting handle-leased opener (one holding the dst parent
+    * open with DELETE access) may close in response and free the rename, else
+    * the rename fails SHARING_VIOLATION (MS-SMB2; dirlease.rename_dst_parent).
+    * Model it as a transient deny-only probe (deny=D) on the dst parent: it
+    * conflicts ONLY with a DELETE-access holder, so it is inert for ordinary
+    * renames into a leased directory (dirlease.rename holders take no DELETE
+    * access).  No dst-parent state => no lease => rename directly.
+    *
+    * The look-up is a synchronous question answered from memory, and it is
+    * asked here rather than by the run so that a destination parent nothing
+    * has a state for costs neither a sequence nor a state allocation -- which
+    * an unconditional CLAIM would make (it resolves the state, creating one). */
+    fs = chimera_vfs_state_get(vfs_state,
+                               request->set_info.dst_parent_fh,
+                               request->set_info.dst_parent_fh_len,
+                               chimera_vfs_hash(request->set_info.dst_parent_fh,
+                                                request->set_info.dst_parent_fh_len),
+                               false);
 
     if (!fs) {
         chimera_smb_set_info_rename_emit(request);
         return;
     }
 
-    request->set_info.dp_file_state = fs;
+    /* The run resolves the state for itself; this one was only the question. */
+    chimera_vfs_state_put(vfs_state, fs);
 
     /* Self-exempt the directory lease named by the operating open's
      * ParentLeaseKey: a rename issued under the dst parent's own lease must not
@@ -316,13 +359,30 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
                                       CHIMERA_CLAIM_D, &dp_owner);
     request->set_info.dp_probe.policy_tag = open_file->file_id.pid;
 
-    struct chimera_server_smb_thread *thread = request->compound->thread;
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
 
-    chimera_vfs_claim_acquire(request->compound->thread->vfs_thread,
-                              vfs_state, fs, &request->set_info.dp_probe,
-                              &request->set_info.dp_ticket, true,
-                              false /* wait_hard */,
-                              chimera_smb_set_info_rename_dp_cb, NULL, request);
+    chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                   request->set_info.dst_parent_fh,
+                                   request->set_info.dst_parent_fh_len);
+
+    /* A CLAIM takes its claim against the current OPEN, and wants a PATH one:
+     * the probe uses only the file it refers to. */
+    chimera_vfs_compound_add_open_current(request->vfs_compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+
+    chimera_vfs_compound_add_claim(request->vfs_compound,
+                                   &request->set_info.dp_probe,
+                                   &request->set_info.dp_ticket,
+                                   CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                   CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL,
+                                   0, 0, 0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_rename_dp_complete,
+                                request);
 
     /* If the probe parked on a dir-lease break, that break targets the dst
      * parent's holder on THIS connection (the rename's own conn is mid-compound,
@@ -364,54 +424,58 @@ chimera_smb_set_info_rename_recall_free(struct chimera_smb_request *request)
 static void
 chimera_smb_set_info_rename_recall_deny(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
-
     chimera_smb_set_info_rename_recall_free(request);
 
-    if (request->set_info.rename_info.new_parent_handle) {
-        chimera_vfs_release(vfs_thread,
-                            request->set_info.rename_info.new_parent_handle);
-        request->set_info.rename_info.new_parent_handle = NULL;
-    }
-    if (request->set_info.parent_handle) {
-        chimera_vfs_release(vfs_thread, request->set_info.parent_handle);
-        request->set_info.parent_handle = NULL;
-    }
     chimera_smb_open_file_release(request, request->set_info.open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
 } /* chimera_smb_set_info_rename_recall_deny */
 
-/* Per-child recall completion.  A holder that kept the file open (still_open) --
- * because it acked the handle-lease break without closing, or never held a lease
- * to break -- denies the rename IMMEDIATELY: matching Windows, the scan stops at
- * the first non-releasing open and does not break any further contained holders.
- * Otherwise advance to the next child. */
+/* Per-child RECALL completion.  A holder that kept the file open
+ * (recall_still_open) -- because it acked the handle-lease break without
+ * closing, or never held a lease to break -- denies the rename IMMEDIATELY:
+ * matching Windows, the scan stops at the first non-releasing open and does not
+ * break any further contained holders.  Otherwise advance to the next child. */
 static void
-chimera_smb_set_info_rename_recall_cb(
-    enum chimera_vfs_error error_code,
-    int                    still_open,
-    void                  *private_data)
+chimera_smb_set_info_rename_recall_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    int                                   still_open;
 
-    if (error_code != CHIMERA_VFS_OK || still_open) {
+    status = chimera_vfs_compound_status(compound);
+    op     = chimera_vfs_compound_op(compound, 0);
+
+    still_open = op->recall_still_open;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK || still_open) {
         chimera_smb_set_info_rename_recall_deny(request);
         return;
     }
 
     request->set_info.recall_child_idx++;
     chimera_smb_set_info_rename_recall_next(request);
-} /* chimera_smb_set_info_rename_recall_cb */
+} /* chimera_smb_set_info_rename_recall_complete */
 
-/* Drive the per-child recall loop.  When every collected child has released, run
- * a second enumeration pass (recall_final) to catch a child opened DURING the
- * break wave: such a racing open denies the rename.  The second pass finding no
- * open child lets the rename proceed. */
+/*
+ * RECALL(child fh, retain CR|CW) -- one sequence per child, because the number
+ * of children is the directory's and nothing knows it before the scan.
+ *
+ * The op carries the child's file handle rather than addressing a cursor, which
+ * is the shape that spares nothing and breaks every holder: a directory rename
+ * invalidates a contained open's cached handle, not its data, so the retain
+ * floor is R|W (a single RWH->RW break, not a cascade that would strip the
+ * write cache first).  The op PARKS until the recall drains.
+ */
 static void
 chimera_smb_set_info_rename_recall_next(struct chimera_smb_request *request)
 {
-    struct chimera_server_smb_thread *thread     = request->compound->thread;
-    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_server_smb_thread *thread = request->compound->thread;
     struct chimera_smb_rename_recall *rc;
 
     if (request->set_info.recall_child_idx >= request->set_info.recall_child_count) {
@@ -429,11 +493,15 @@ chimera_smb_set_info_rename_recall_next(struct chimera_smb_request *request)
 
     rc = &request->set_info.recall_children[request->set_info.recall_child_idx];
 
-    chimera_vfs_recall_caching_fh(vfs_thread,
-                                  &request->session_handle->session->cred,
-                                  rc->fh, rc->fh_len,
-                                  chimera_smb_set_info_rename_recall_cb,
-                                  request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_recall(request->vfs_compound, rc->fh, rc->fh_len,
+                                    CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_rename_recall_complete,
+                                request);
 
     /* The contained holder is on another connection; if its break was deferred
      * for reply-before-break ordering, flush it now so it actually fires while
@@ -442,11 +510,32 @@ chimera_smb_set_info_rename_recall_next(struct chimera_smb_request *request)
     chimera_smb_lease_break_flush(thread);
 } /* chimera_smb_set_info_rename_recall_next */
 
-/* readdir callback: collect each child that currently has a live share holder
+/* The streaming READDIR's reset: wind the collection back to exactly what it
+ * held when this page was built, so re-executing the page is a first run from
+ * the caller's side.  It is what makes the append below reversible, which is
+ * the contract on a streaming enumeration. */
+static void
+chimera_smb_set_info_rename_recall_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    (void) compound;
+    (void) index;
+
+    request->set_info.recall_child_count = request->set_info.recall_child_mark;
+    request->set_info.recall_deny        = request->set_info.recall_deny_mark;
+} /* chimera_smb_set_info_rename_recall_reset */
+
+/* readdir append: collect each child that currently has a live share holder
  * (a real protocol open) so its caching lease can be recalled before the
  * directory rename. */
 static int
-chimera_smb_set_info_rename_recall_readdir_cb(
+chimera_smb_set_info_rename_recall_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
     uint64_t                        inum,
     uint64_t                        cookie,
     const char                     *name,
@@ -458,6 +547,8 @@ chimera_smb_set_info_rename_recall_readdir_cb(
     struct chimera_vfs_thread        *vfs_thread = request->compound->thread->vfs_thread;
     struct chimera_smb_rename_recall *rc;
 
+    (void) compound;
+    (void) index;
     (void) inum;
     (void) cookie;
 
@@ -496,24 +587,36 @@ chimera_smb_set_info_rename_recall_readdir_cb(
     rc->fh_len = attrs->va_fh_len;
 
     return 0;
-} /* chimera_smb_set_info_rename_recall_readdir_cb */
+} /* chimera_smb_set_info_rename_recall_append */
+
+static void chimera_smb_set_info_rename_recall_page(
+    struct chimera_smb_request *request,
+    uint64_t                    cookie,
+    uint64_t                    verifier);
 
 static void
-chimera_smb_set_info_rename_recall_readdir_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
+chimera_smb_set_info_rename_recall_page_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              cookie, verifier;
+    uint32_t                              eof;
 
-    (void) handle;
-    (void) attr;
+    status = chimera_vfs_compound_status(compound);
+    op     = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
 
-    if (error_code != CHIMERA_VFS_OK) {
+    cookie   = op->r_cookie;
+    verifier = op->r_verifier;
+    eof      = op->eof;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK) {
         /* Could not enumerate (e.g. the dir handle lacks list access): fall back
          * to the plain rename rather than failing one that would have worked. */
         chimera_smb_set_info_rename_recall_free(request);
@@ -523,19 +626,7 @@ chimera_smb_set_info_rename_recall_readdir_complete(
 
     if (!eof) {
         request->set_info.recall_readdir_cookie = cookie;
-        chimera_vfs_readdir(
-            request->compound->thread->vfs_thread,
-            &request->session_handle->session->cred,
-            request->set_info.open_file->handle,
-            CHIMERA_VFS_ATTR_FH,
-            0,
-            cookie,
-            verifier,
-            0,
-            NULL, 0,
-            chimera_smb_set_info_rename_recall_readdir_cb,
-            chimera_smb_set_info_rename_recall_readdir_complete,
-            request);
+        chimera_smb_set_info_rename_recall_page(request, cookie, verifier);
         return;
     }
 
@@ -554,7 +645,63 @@ chimera_smb_set_info_rename_recall_readdir_complete(
 
     request->set_info.recall_child_idx = 0;
     chimera_smb_set_info_rename_recall_next(request);
-} /* chimera_smb_set_info_rename_recall_readdir_complete */
+} /* chimera_smb_set_info_rename_recall_page_complete */
+
+/*
+ * PUTHANDLE(source directory), READDIR(streaming) -- one sequence per page.
+ *
+ * A streaming READDIR reads ONE page and reports where it stopped, so a
+ * directory larger than a page is walked by consecutive sequences, as it was by
+ * consecutive readdirs before.  It stages nothing of the compound's: the
+ * collection is the request's array, and `reset` winds it back before every
+ * execution.
+ */
+static void
+chimera_smb_set_info_rename_recall_page(
+    struct chimera_smb_request *request,
+    uint64_t                    cookie,
+    uint64_t                    verifier)
+{
+    struct chimera_smb_open_file *open_file = request->set_info.open_file;
+
+    /* The operating connection can disconnect while a child recall is parked
+     * (the peer timed out); its teardown releases open_file->handle.  Abort the
+     * scan cleanly rather than lending a NULL directory handle to the sequence
+     * (recall_deny releases the open file and replies). */
+    if (!open_file || !open_file->handle) {
+        chimera_smb_set_info_rename_recall_deny(request);
+        return;
+    }
+
+    /* Where the collection stands as this page is built: what the reset winds
+     * back to. */
+    request->set_info.recall_child_mark = request->set_info.recall_child_count;
+    request->set_info.recall_deny_mark  = request->set_info.recall_deny;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       open_file->handle,
+                                       open_file->open_flags);
+
+    chimera_vfs_compound_add_readdir_stream(
+        request->vfs_compound,
+        cookie,
+        verifier,
+        CHIMERA_VFS_ATTR_FH, /* per-entry attr: need the child FH */
+        0,                   /* dir_attr_mask                     */
+        0,                   /* flags: no EMIT_DOT                */
+        NULL, 0,             /* match everything                  */
+        chimera_smb_set_info_rename_recall_reset,
+        chimera_smb_set_info_rename_recall_append,
+        request);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_rename_recall_page_complete,
+                                request);
+} /* chimera_smb_set_info_rename_recall_page */
 
 /* Enumerate the source directory, collecting children that currently have a
  * live share holder.  Used for both the initial collect-and-recall pass and the
@@ -564,28 +711,7 @@ chimera_smb_set_info_rename_recall_scan(struct chimera_smb_request *request)
 {
     chimera_smb_set_info_rename_recall_free(request);
 
-    /* The operating connection can disconnect while a child recall is parked
-     * (the peer timed out); its teardown releases open_file->handle.  Abort the
-     * scan cleanly rather than dereferencing a NULL directory handle in readdir
-     * (recall_deny releases the parent handles + the open file and replies). */
-    if (!request->set_info.open_file || !request->set_info.open_file->handle) {
-        chimera_smb_set_info_rename_recall_deny(request);
-        return;
-    }
-
-    chimera_vfs_readdir(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->set_info.open_file->handle,
-        CHIMERA_VFS_ATTR_FH, /* per-entry attr: need the child FH */
-        0,                   /* dir_attr_mask */
-        0,                   /* cookie */
-        0,                   /* verifier */
-        0,                   /* flags: no EMIT_DOT */
-        NULL, 0,             /* match everything */
-        chimera_smb_set_info_rename_recall_readdir_cb,
-        chimera_smb_set_info_rename_recall_readdir_complete,
-        request);
+    chimera_smb_set_info_rename_recall_page(request, 0, 0);
 } /* chimera_smb_set_info_rename_recall_scan */
 
 /* Entry point: for a directory rename, enumerate the source directory's
@@ -628,9 +754,9 @@ chimera_smb_set_info_rename_recall_children(struct chimera_smb_request *request)
      * deny ACCESS_DENIED, and the destination-parent dir-lease probe would
      * conflict with the source's own DELETE handle and deny SHARING_VIOLATION.
      * Go straight to rename_at, which returns EINVAL. */
-    if (rename_info->new_parent_handle &&
-        rename_info->new_parent_handle->fh_len == open_file->handle->fh_len &&
-        memcmp(rename_info->new_parent_handle->fh, open_file->handle->fh,
+    if (rename_info->new_parent_len &&
+        request->set_info.dst_parent_fh_len == open_file->handle->fh_len &&
+        memcmp(request->set_info.dst_parent_fh, open_file->handle->fh,
                open_file->handle->fh_len) == 0) {
         chimera_smb_set_info_rename_emit(request);
         return;
@@ -639,17 +765,72 @@ chimera_smb_set_info_rename_recall_children(struct chimera_smb_request *request)
     chimera_smb_set_info_rename_recall_scan(request);
 } /* chimera_smb_set_info_rename_recall_children */
 
-static void
-chimera_smb_set_info_rename_check_dest_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request     *request     = private_data;
-    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
 
-    if (error_code == CHIMERA_VFS_OK) {
+/*
+ * PUTFH(tree root), [LOOKUP_PATH(destination parent)], LOOKUP(destination name).
+ *
+ * Resolving the destination parent and asking whether the destination name is
+ * already taken are one sequence: the second resolves in what the first found,
+ * which is the chaining the cursor was made for.  Nothing is OPENED -- the
+ * rename, and the deny probe that may precede it, take file handles -- so the
+ * per-op chain's open of the destination parent goes with it.
+ *
+ * The final LOOKUP is ALLOWED to fail: "the destination does not exist" is the
+ * common answer and the one the rename wants.  It is the last op, so its
+ * failure is simply where the run stopped, and the ops before it kept their
+ * results -- which is how the destination parent's file handle survives a
+ * destination that is not there.
+ */
+static void
+chimera_smb_set_info_rename_resolve_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request     = private_data;
+    struct chimera_smb_rename_info       *rename_info = &request->set_info.rename_info;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint32_t                              nops, parent_index;
+    uint32_t                              dest_mode = 0;
+    int                                   dest_exists;
+
+    status = chimera_vfs_compound_status(compound);
+    nops   = chimera_vfs_compound_num_ops(compound);
+
+    /* The op that established the destination parent: the path lookup when the
+     * client named one, else the PUTFH of the tree root. */
+    parent_index = nops - 2;
+
+    if (status != CHIMERA_VFS_OK &&
+        chimera_vfs_compound_num_completed(compound) < nops) {
+        /* The run stopped BEFORE the destination lookup, so what failed is the
+         * destination parent's path.  num_completed COUNTS the failing op, so
+         * "it stopped early" is < nops and not <= the parent's index: the
+         * lookup's own failure is the common "the name is not taken" answer and
+         * leaves the count at nops. */
+        chimera_vfs_compound_free(compound);
+        request->vfs_compound = NULL;
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound, parent_index);
+
+    request->set_info.dst_parent_fh_len = op->fh_len;
+    memcpy(request->set_info.dst_parent_fh, op->fh, op->fh_len);
+
+    dest_exists = (status == CHIMERA_VFS_OK);
+
+    if (dest_exists) {
+        op        = chimera_vfs_compound_op(compound, nops - 1);
+        dest_mode = op->attr.va_mode;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (dest_exists) {
         /* Destination exists.  A non-directory destination is overwritten only
          * when ReplaceIfExists is set (POSIX rename always sets it, so this
          * COLLISION only fires for an SMB caller that cleared it).  A directory
@@ -658,128 +839,24 @@ chimera_smb_set_info_rename_check_dest_callback(
          * and FILE_IS_A_DIRECTORY when the source is not itself a directory.
          * (The SMB "rename a file INTO a directory" shell behaviour is not
          * rename(2) and is deliberately not applied here.) */
-        if (!S_ISDIR(attr->va_mode) && !rename_info->replace_if_exist) {
-            if (rename_info->new_parent_handle) {
-                chimera_vfs_release(request->compound->thread->vfs_thread,
-                                    rename_info->new_parent_handle);
-            }
-            if (request->set_info.parent_handle) {
-                chimera_vfs_release(request->compound->thread->vfs_thread,
-                                    request->set_info.parent_handle);
-            }
+        if (!S_ISDIR(dest_mode) && !rename_info->replace_if_exist) {
             chimera_smb_open_file_release(request, request->set_info.open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_COLLISION);
+            chimera_smb_complete_request(request,
+                                         SMB2_STATUS_OBJECT_NAME_COLLISION);
             return;
         }
         /* Fall through: rename_at replaces the destination per POSIX. */
     }
+
     /* Destination doesn't exist or we're overwriting - proceed with rename.
      * For a directory rename, first break the handle leases of any files open
      * inside the source directory (smb2.lease.rename_dir_openfile). */
     chimera_smb_set_info_rename_recall_children(request);
-} /* chimera_smb_set_info_rename_check_dest_callback */
-
-static void
-chimera_smb_set_info_rename_open_dest_parent_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_request     *request       = private_data;
-    struct chimera_smb_rename_info *rename_info   = &request->set_info.rename_info;
-    char                           *dest_name     = rename_info->new_name;
-    size_t                          dest_name_len = rename_info->new_name_len;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
-        return;
-    }
-
-    if (rename_info->new_parent_len) {
-        /* We looked up a parent path, store it */
-        rename_info->new_parent_handle = oh;
-    } else {
-        /* Simple rename - tree root */
-        request->set_info.parent_handle = oh;
-    }
-
-    /* Check if destination exists */
-    chimera_vfs_lookup_at(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        oh,
-        dest_name,
-        dest_name_len,
-        CHIMERA_VFS_ATTR_MODE,
-        0,
-        chimera_smb_set_info_rename_check_dest_callback,
-        request);
-
-} /* chimera_smb_set_info_rename_open_dest_parent_callback */
-
-static void
-chimera_smb_set_info_rename_lookup_dest_parent_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
-        return;
-    }
-
-    chimera_vfs_open_fh(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        attr->va_fh,
-        attr->va_fh_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-        chimera_smb_set_info_rename_open_dest_parent_callback,
-        request);
-} /* chimera_smb_set_info_rename_lookup_dest_parent_callback */
-
-static void
-chimera_smb_set_info_rename_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_request     *request       = private_data;
-    struct chimera_smb_rename_info *rename_info   = &request->set_info.rename_info;
-    char                           *dest_name     = rename_info->new_name;
-    size_t                          dest_name_len = rename_info->new_name_len;
-
-    request->set_info.parent_handle = oh;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    /* Check if destination exists */
-    chimera_vfs_lookup_at(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        oh,
-        dest_name,
-        dest_name_len,
-        CHIMERA_VFS_ATTR_MODE,
-        0,
-        chimera_smb_set_info_rename_check_dest_callback,
-        request);
-
-} /* chimera_smb_set_info_rename_open_callback */
+} /* chimera_smb_set_info_rename_resolve_complete */
 
 void
 chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread      *vfs_thread  = request->compound->thread->vfs_thread;
     struct chimera_smb_tree        *tree        = request->tree;
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
     struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
@@ -788,7 +865,7 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
      * not opened with DELETE access, the rename MUST fail with ACCESS_DENIED
      * (the rename removes the old name from its parent and adds a new one, so
      * the source handle's GrantedAccess must include DELETE).  Gate here, ahead
-     * of the destination-existence probe — otherwise a target collision would
+     * of the destination-existence probe -- otherwise a target collision would
      * surface as OBJECT_NAME_COLLISION and mask the real authorization error. */
     if (!(open_file->granted_access & SMB2_DELETE)) {
         chimera_smb_open_file_release(request, open_file);
@@ -796,31 +873,33 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
         return;
     }
 
+    request->set_info.dst_parent_fh_len = 0;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                   tree->fh, tree->fh_len);
+
     if (rename_info->new_parent_len) {
-        /* Moving to a different directory - lookup the new parent path */
-        chimera_vfs_lookup(
-            vfs_thread,
-            &request->session_handle->session->cred,
-            tree->fh,
-            tree->fh_len,
-            rename_info->new_parent,
-            rename_info->new_parent_len,
-            CHIMERA_VFS_ATTR_FH,
-            0,
-            chimera_smb_set_info_rename_lookup_dest_parent_callback,
-            request);
-    } else {
-        /* Destination is in tree root (no parent path specified) */
-        chimera_vfs_open_fh(
-            vfs_thread,
-            &request->session_handle->session->cred,
-            tree->fh,
-            tree->fh_len,
-            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-            chimera_smb_set_info_rename_open_callback,
-            request);
+        /* Moving to a different directory - resolve the new parent path */
+        chimera_vfs_compound_add_lookup_path(request->vfs_compound,
+                                             rename_info->new_parent,
+                                             rename_info->new_parent_len,
+                                             CHIMERA_VFS_ATTR_FH, 0);
     }
+
+    chimera_vfs_compound_add_lookup(request->vfs_compound,
+                                    rename_info->new_name,
+                                    rename_info->new_name_len,
+                                    CHIMERA_VFS_ATTR_MODE, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_rename_resolve_complete,
+                                request);
 } /* chimera_smb_set_info_rename_process */
+
 
 
 /* Parse functions for SET_INFO SMB2_FILE_RENAME_INFO
@@ -845,10 +924,8 @@ chimera_smb_parse_rename_info(
     uint16_t                        name16[SMB_FILENAME_MAX];  /* UTF-16LE bytes */
     uint32_t                        name_len;
 
-    /* Initialize the new_parent_handle to NULL */
-    rename_info->new_parent_handle = NULL;
-
     int                             prc = 0;
+
     prc |= evpl_iovec_cursor_try_get_uint8(cursor, &rename_info->replace_if_exist);
     prc |= evpl_iovec_cursor_try_skip(cursor, 7); /* Reserved */
     prc |= evpl_iovec_cursor_try_get_uint64(cursor, &root_dir);

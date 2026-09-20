@@ -385,12 +385,11 @@ struct chimera_smb_conn;
 #define CHIMERA_SMB_MAX_FILE_SIZE             0xfffffff0000ULL
 
 struct chimera_smb_rename_info {
-    uint8_t                         replace_if_exist;
-    struct chimera_vfs_open_handle *new_parent_handle;
-    char                            new_parent[SMB_FILENAME_MAX];
-    int                             new_parent_len;
-    char                           *new_name;
-    int                             new_name_len;
+    uint8_t replace_if_exist;
+    char    new_parent[SMB_FILENAME_MAX];
+    int     new_parent_len;
+    char   *new_name;
+    int     new_name_len;
 };
 
 /* One child of a directory being renamed that holds a live share reservation;
@@ -1160,7 +1159,12 @@ struct chimera_smb_request {
             uint32_t                           addl_info;
             uint32_t                           flags;
             struct chimera_smb_open_file      *open_file;
-            struct chimera_vfs_open_handle    *parent_handle;
+            /* The destination parent a rename or a hard link resolved, as a
+             * file handle rather than an open one: the RENAME and LINK ops take
+             * file handles and open nothing, and the rename's own runs are
+             * consecutive, so there is no handle to hold between them. */
+            uint8_t                            dst_parent_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                           dst_parent_fh_len;
             struct chimera_smb_file_id         file_id;
             struct chimera_smb_attrs           attrs;
             struct chimera_vfs_attrs           vfs_attrs;
@@ -1195,6 +1199,12 @@ struct chimera_smb_request {
             uint32_t                           recall_child_idx;
             uint64_t                           recall_readdir_cookie;
             uint8_t                            recall_deny;
+            /* What the collection held when the in-flight enumeration page was
+             * built.  The streaming READDIR's reset winds back to exactly this,
+             * which is what makes the append reversible (and so re-runnable)
+             * across a page that is re-executed. */
+            uint32_t                           recall_child_mark;
+            uint8_t                            recall_deny_mark;
             /* Second enumeration pass: after the contained holders have been
              * broken and released, re-scan for a child opened DURING the break
              * wave (which races the rename and must deny it). */

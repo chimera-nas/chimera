@@ -168,130 +168,88 @@ chimera_smb_set_info_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_set_info_error_status */
 
+/*
+ * FileLinkInformation: PUTFH(source), SAVEFH, PUTFH(tree root),
+ * [LOOKUP_PATH(destination parent)], LINK(new name).
+ *
+ * LINK reads the SAVED file handle for the object and the CURRENT one for the
+ * directory, which is what link_at takes -- so nothing here is opened at all,
+ * where the per-op chain opened the destination parent for the sole purpose of
+ * handing link_at its file handle.  The destination parent's own path, when the
+ * client gave one, is resolved by the path-walking LOOKUP whose per-op twin the
+ * chain called; a failure there is the path, not the link.
+ */
 static void
-chimera_smb_set_info_link_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_pre_attr,
-    struct chimera_vfs_attrs *r_dir_post_attr,
-    void                     *private_data)
+chimera_smb_set_info_link_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+    uint32_t                    completed, nops, smb_status;
 
-    if (request->set_info.parent_handle) {
-        chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
-        request->set_info.parent_handle = NULL;
-    }
+    status    = chimera_vfs_compound_status(compound);
+    completed = chimera_vfs_compound_num_completed(compound);
+    nops      = chimera_vfs_compound_num_ops(compound);
 
-    if (request->set_info.rename_info.new_parent_handle) {
-        chimera_vfs_release(request->compound->thread->vfs_thread,
-                            request->set_info.rename_info.new_parent_handle);
-        request->set_info.rename_info.new_parent_handle = NULL;
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK && completed < nops) {
+        /* The destination parent path did not resolve. */
+        smb_status = SMB2_STATUS_OBJECT_PATH_NOT_FOUND;
+    } else {
+        smb_status = chimera_smb_set_info_error_status(status);
     }
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
-
-    chimera_smb_complete_request(request,
-                                 chimera_smb_set_info_error_status(error_code));
-} /* chimera_smb_set_info_link_callback */
-
-static void
-chimera_smb_set_info_link_open_dir_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_request     *request     = private_data;
-    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
-    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
-
-    if (rename_info->new_parent_len) {
-        rename_info->new_parent_handle = oh;
-    } else {
-        request->set_info.parent_handle = oh;
-    }
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    chimera_vfs_link_at(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        open_file->handle->fh,
-        open_file->handle->fh_len,
-        oh->fh,
-        oh->fh_len,
-        rename_info->new_name,
-        rename_info->new_name_len,
-        rename_info->replace_if_exist,
-        0,
-        0,
-        0,
-        /* SMB rename via link: self-exempt the directory lease named by the
-         * operating open's ParentLeaseKey (dirlease.rename correct-parent case). */
-        open_file->parent_lease_key,
-        /* ...and self-exempt the linker's own file lease from the source recall. */
-        open_file->handle,
-        chimera_smb_set_info_link_callback,
-        request);
-} /* chimera_smb_set_info_link_open_dir_callback */
-
-static void
-chimera_smb_set_info_link_lookup_parent_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->set_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_PATH_NOT_FOUND);
-        return;
-    }
-
-    chimera_vfs_open_fh(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        attr->va_fh,
-        attr->va_fh_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-        chimera_smb_set_info_link_open_dir_callback,
-        request);
-} /* chimera_smb_set_info_link_lookup_parent_callback */
+    chimera_smb_complete_request(request, smb_status);
+} /* chimera_smb_set_info_link_sequence_complete */
 
 static void
 chimera_smb_set_info_link_process(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread      *vfs_thread  = request->compound->thread->vfs_thread;
     struct chimera_smb_tree        *tree        = request->tree;
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+    int                             index;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                   open_file->handle->fh,
+                                   open_file->handle->fh_len);
+    chimera_vfs_compound_add_savefh(request->vfs_compound);
+
+    chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                   tree->fh, tree->fh_len);
 
     if (rename_info->new_parent_len) {
-        chimera_vfs_lookup(
-            vfs_thread,
-            &request->session_handle->session->cred,
-            tree->fh,
-            tree->fh_len,
-            rename_info->new_parent,
-            rename_info->new_parent_len,
-            CHIMERA_VFS_ATTR_FH,
-            0,
-            chimera_smb_set_info_link_lookup_parent_callback,
-            request);
-    } else {
-        chimera_vfs_open_fh(
-            vfs_thread,
-            &request->session_handle->session->cred,
-            tree->fh,
-            tree->fh_len,
-            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-            chimera_smb_set_info_link_open_dir_callback,
-            request);
+        chimera_vfs_compound_add_lookup_path(request->vfs_compound,
+                                             rename_info->new_parent,
+                                             rename_info->new_parent_len,
+                                             CHIMERA_VFS_ATTR_FH, 0);
     }
+
+    index = chimera_vfs_compound_add_link(request->vfs_compound,
+                                          rename_info->new_name,
+                                          rename_info->new_name_len,
+                                          0, 0, 0);
+
+    chimera_vfs_compound_op_set_link_opts(
+        request->vfs_compound, index,
+        rename_info->replace_if_exist,
+        /* SMB rename via link: self-exempt the directory lease named by the
+         * operating open's ParentLeaseKey (dirlease.rename correct-parent case). */
+        open_file->parent_lease_key,
+        /* ...and self-exempt the linker's own file lease from the source recall. */
+        open_file->handle);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_link_sequence_complete,
+                                request);
 } /* chimera_smb_set_info_link_process */
 
 /*
@@ -387,17 +345,56 @@ chimera_smb_set_info_allocation(struct chimera_smb_request *request)
  * the reply (the client checks lease_break_info.count synchronously right after
  * smb2_setinfo_file -- smb2.lease.unlink). */
 static void
-chimera_smb_set_info_doc_recall_callback(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+chimera_smb_set_info_doc_recall_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
-    (void) error_code;
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_set_info_doc_recall_callback */
+} /* chimera_smb_set_info_doc_recall_complete */
+
+/*
+ * PUTHANDLE, RECALL(CHIMERA_CLAIM_CR).
+ *
+ * The PARKING shape, not NOWAIT: the protocol needs the break to have been
+ * ACKNOWLEDGED before the SetInfo reply goes out, because the client reads
+ * lease_break_info.count synchronously on the next line after smb2_setinfo_file
+ * (smb2.lease.unlink).  A NOWAIT recall would kick the break and reply into the
+ * race it is supposed to close.  Nothing else in the run depends on the answer,
+ * so `recall_still_open` is not read: a peer that acked without closing keeps
+ * its open, and a delete-on-close that the object outlives is decided at the
+ * last close, not here.
+ *
+ * The recall addresses the lent handle, so that handle's own lease is spared --
+ * the operating client must not break the lease it holds on the file it is
+ * marking (chimera_vfs_recall_handle_lease's io_handle, expressed as the op
+ * addressing a handle).
+ */
+static void
+chimera_smb_set_info_doc_recall(struct chimera_smb_request *request)
+{
+    struct chimera_smb_open_file *open_file = request->set_info.open_file;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       open_file->handle,
+                                       open_file->open_flags);
+
+    chimera_vfs_compound_add_recall(request->vfs_compound, NULL, 0,
+                                    CHIMERA_CLAIM_CR, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_info_doc_recall_complete,
+                                request);
+} /* chimera_smb_set_info_doc_recall */
 
 /* ---- FILE_FULL_EA_INFORMATION apply engine (shared by SetInfo and CREATE
  * ExtA): applies a client EA list to the VFS xattr store one entry at a time
@@ -640,8 +637,7 @@ chimera_smb_set_ea(struct chimera_smb_request *request)
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
-    request->set_info.open_file     = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
-    request->set_info.parent_handle = NULL;
+    request->set_info.open_file = chimera_smb_open_file_resolve(request, &request->set_info.file_id);
     /* Default change-notify event for this SET_INFO; info classes that mutate
      * size override it below.  Cleared here since the request is pooled. */
     request->set_info.notify_mask = 0;
@@ -832,12 +828,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                              * is spared.  This PARKS until the recall drains (the
                              * peer's break is acked), then replies -- so the break
                              * deterministically precedes the SetInfo reply. */
-                            chimera_vfs_recall_handle_lease(
-                                request->compound->thread->vfs_thread,
-                                &request->session_handle->session->cred,
-                                request->set_info.open_file->handle,
-                                chimera_smb_set_info_doc_recall_callback,
-                                request);
+                            chimera_smb_set_info_doc_recall(request);
                             break;
                         }
                     } else {
