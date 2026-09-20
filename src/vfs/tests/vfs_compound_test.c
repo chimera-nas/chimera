@@ -296,6 +296,28 @@ remote_release_main(void *arg)
     return NULL;
 } /* remote_release_main */
 
+/* The park notification.  It counts itself -- "exactly once per submission"
+ * is most of the contract -- and keeps the op index it was handed, which is
+ * the whole of what a front end needs to emit its interim. */
+struct park_rec {
+    int      calls;
+    uint32_t index;
+};
+
+static void
+park_rec_cb(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct park_rec *p = private_data;
+
+    (void) compound;
+
+    p->calls++;
+    p->index = index;
+} /* park_rec_cb */
+
 /* A FIND's three callbacks, staging into a request-local array the way the
 * S3 consumers do: `reset` truncates it (and counts itself), `filter` prunes
 * one named subtree, `append` copies each path in -- or refuses the Nth. */
@@ -385,6 +407,29 @@ find_append(
 
     return 0;
 } /* find_append */
+
+/* Run a trivial sequence to completion.  Two jobs: it drains the thread's
+ * doorbell, so anything a cancelled run wrongly posted would have arrived by
+ * the time it returns, and it gives that drain a wakeup of its own to wait
+ * for rather than spinning the event loop blind.  It costs exactly one
+ * completion, which is what makes "nothing else completed" checkable. */
+static void
+pump_probe(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *fh,
+    uint32_t                       fh_len)
+{
+    struct chimera_vfs_compound *cp;
+
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_putfh(cp, fh, (int) fh_len);
+    chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+    chimera_vfs_compound_submit(cp, compound_cb, ctx);
+    wait_done(ctx);
+    assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+    chimera_vfs_compound_free(cp);
+} /* pump_probe */
 
 static int
 find_has(
@@ -3121,6 +3166,438 @@ main(
         chimera_vfs_release(ctx.vfs_thread, oh);
     }
     TEST_PASS("a LOCK granted from another thread completes on the submitting one");
+
+    /* ---- the park notification, and cancelling a parked CLAIM ----
+     * A front end with a client on the other end of a blocking lock needs two
+     * things the sequence did not give it: to be told that it is waiting, so
+     * it can emit its interim, and to be able to stop waiting.  Four shapes
+     * here: a grant that never parks says nothing; a park says so ONCE and
+     * names the op; a cancel completes the run ECANCELED at that op and
+     * abort-releases what an earlier CLAIM in the same run took; and the
+     * holder letting go afterwards does not resurrect it. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           claim_a, claim_b, claim_c, claim_d;
+        struct chimera_vfs_pending_acquire ticket_b, ticket_c, ticket_d;
+        struct chimera_claim_owner         owner_a, owner_b, owner_c;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_file_state     *fs, *fs_b;
+        struct park_rec                    park;
+        int                                i_open, i_keep, i_lock, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "pk", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 31;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.owner_lo = 32;
+        memset(&owner_c, 0, sizeof(owner_c));
+        owner_c.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_c.owner_lo = 33;
+
+        /* A grant that never parks tells the caller nothing. */
+        chimera_vfs_claim_init_range(&claim_b, true, false, 0, 16, &owner_b);
+        memset(&park, 0, sizeof(park));
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b,
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                0, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(park.calls == 0);
+        fs_b = chimera_vfs_compound_take_file_state(cp, (uint32_t) i_lock);
+        assert(fs_b != NULL);
+        chimera_vfs_compound_free(cp);
+
+        /* Now a run that parks behind it, with a CLAIM in front of the parked
+         * one that IS granted -- that is what the abort release has to undo --
+         * and a GETATTR behind it that must never run. */
+        chimera_vfs_claim_init_range(&claim_c, true, false, 32, 16, &owner_c);
+        chimera_vfs_claim_init_range(&claim_d, true, false, 0, 16, &owner_c);
+        memset(&park, 0, sizeof(park));
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, oh,
+                                           CHIMERA_VFS_OPEN_READ_ONLY |
+                                           CHIMERA_VFS_OPEN_WRITE_ONLY);
+        i_keep = chimera_vfs_compound_add_claim(cp, &claim_c, &ticket_c,
+                                                CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+                                                0, 0, 0, 0);
+        i_lock = chimera_vfs_compound_add_claim(cp, &claim_d, &ticket_d,
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                0, 0, 0, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+
+        /* Parked, and said so once, naming the op that parked. */
+        assert(ctx.callbacks == 0);
+        assert(!ctx.done);
+        assert(park.calls == 1);
+        assert(park.index == (uint32_t) i_lock);
+
+        /* Stop waiting.  The completion runs inside the call. */
+        assert(chimera_vfs_compound_cancel(cp) != 0);
+        assert(ctx.callbacks == 1);
+        assert(ctx.done);
+        ctx.done = 0;
+
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ECANCELED);
+        op = chimera_vfs_compound_op(cp, i_lock);
+        assert(op->status == CHIMERA_VFS_ECANCELED);
+        /* The op it stopped at ran; the one behind it did not. */
+        assert(chimera_vfs_compound_num_completed(cp) == (uint32_t) i_lock + 1);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        /* The CLAIM in front of it was granted and has been released with the
+         * run: the arbiter did say GRANTED, and the file state is gone. */
+        op = chimera_vfs_compound_op(cp, i_keep);
+        assert(op->status == CHIMERA_VFS_OK);
+        assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
+        assert(chimera_vfs_compound_take_file_state(cp, (uint32_t) i_keep) ==
+               NULL);
+        assert(park.calls == 1);
+        chimera_vfs_compound_free(cp);
+
+        /* Released for real, not merely forgotten: another owner takes it. */
+        chimera_vfs_claim_init_range(&claim_a, true, false, 32, 16, &owner_a);
+        assert(chimera_vfs_claim_try_acquire(state, fs, &claim_a, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs, &claim_a);
+
+        /* The holder letting go afterwards has nothing to grant: the ticket
+         * left the queue with the cancel, and no second completion arrives. */
+        chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs_b, &claim_b);
+        pump_probe(&ctx, &cred, root_fh, root_fh_len);
+        assert(ctx.callbacks == 2);
+
+        chimera_vfs_state_put(state, fs_b);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("park_cb fires once for a parked CLAIM and not for a grant; "
+              "cancel completes ECANCELED and abort-releases the run's claims");
+
+    /* ---- cancel versus the grant, raced ----
+     * The whole of the arbitration is chimera_vfs_claim_cancel's return
+     * value, and this is the case it exists for: a holder releasing on one
+     * thread at the same instant as a cancel on the submitting one.  Either
+     * outcome is correct; what may never happen is both, or neither.  Looped,
+     * because a race proved once is a race not proved. */
+    {
+        struct chimera_vfs_state          *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs           sattr;
+        struct chimera_vfs_open_handle    *oh;
+        struct chimera_vfs_claim           claim_a, claim_b;
+        struct chimera_vfs_pending_acquire ticket_b;
+        struct chimera_claim_owner         owner_a, owner_b;
+        struct chimera_vfs_claim_conflict  conflict;
+        struct chimera_vfs_file_state     *fs, *fs_b;
+        struct remote_release              rr;
+        struct park_rec                    park;
+        pthread_t                          tid;
+        int                                cancels = 0, grants = 0;
+        int                                joined;
+        int                                i_open, i_lock, iter;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "rz", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        memset(&owner_a, 0, sizeof(owner_a));
+        owner_a.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_a.owner_lo = 41;
+        memset(&owner_b, 0, sizeof(owner_b));
+        owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_b.owner_lo = 42;
+
+        for (iter = 0; iter < 100; iter++) {
+            chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16,
+                                         &owner_a);
+            assert(chimera_vfs_claim_try_acquire(state, fs, &claim_a,
+                                                 &conflict) ==
+                   CHIMERA_CLAIM_GRANTED);
+
+            chimera_vfs_claim_init_range(&claim_b, true, false, 0, 16,
+                                         &owner_b);
+            memset(&park, 0, sizeof(park));
+
+            cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+            chimera_vfs_compound_add_puthandle(cp, oh,
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY);
+            i_lock = chimera_vfs_compound_add_claim(cp, &claim_b, &ticket_b,
+                                                    CHIMERA_VFS_COMPOUND_CLAIM_WAIT |
+                                                    CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD,
+                                                    0, 0, 0, 0);
+            ctx.callbacks = 0;
+            chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+            chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+            assert(ctx.callbacks == 0);
+            assert(park.calls == 1);
+
+            /* The holder lets go from another thread; we cancel here.  On odd
+             * iterations the release is allowed to finish first, so the "the
+             * grant owns the completion" arm is taken whatever the scheduler
+             * does -- the pump dequeues the ticket and fires the callback
+             * inline, so a cancel behind it can only lose.  On even ones we
+             * cancel straight into the race and take whichever side wins. */
+            rr.vfs   = ctx.vfs;
+            rr.fs    = fs;
+            rr.claim = &claim_a;
+            assert(pthread_create(&tid, NULL, remote_release_main, &rr) == 0);
+
+            joined = 0;
+            if (iter & 1) {
+                assert(pthread_join(tid, NULL) == 0);
+                joined = 1;
+            }
+
+            if (chimera_vfs_compound_cancel(cp)) {
+                /* We took it back: the completion already ran, here. */
+                cancels++;
+                assert(!joined);
+                assert(ctx.callbacks == 1);
+                assert(ctx.done);
+                ctx.done = 0;
+                assert(chimera_vfs_compound_status(cp) ==
+                       CHIMERA_VFS_ECANCELED);
+                assert(chimera_vfs_compound_op(cp, i_lock)->status ==
+                       CHIMERA_VFS_ECANCELED);
+                assert(chimera_vfs_compound_take_file_state(
+                           cp, (uint32_t) i_lock) == NULL);
+                assert(pthread_join(tid, NULL) == 0);
+                chimera_vfs_compound_free(cp);
+            } else {
+                /* The grant owns the completion; it comes home as promised. */
+                grants++;
+                if (!joined) {
+                    assert(pthread_join(tid, NULL) == 0);
+                }
+                wait_done(&ctx);
+                assert(ctx.callbacks == 1);
+                assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+                assert(chimera_vfs_compound_op(cp, i_lock)->claim_result ==
+                       CHIMERA_CLAIM_GRANTED);
+                fs_b = chimera_vfs_compound_take_file_state(cp,
+                                                            (uint32_t) i_lock);
+                assert(fs_b != NULL);
+                chimera_vfs_compound_free(cp);
+                chimera_vfs_claim_release_ranged(ctx.vfs_thread, state, fs_b,
+                                                 &claim_b);
+                chimera_vfs_state_put(state, fs_b);
+            }
+
+            /* One completion, whichever way it went -- and the park was
+             * reported once either way. */
+            assert(ctx.callbacks == 1);
+            assert(park.calls == 1);
+        }
+
+        /* Which side wins a true race is the scheduler's business, so the
+         * split is not asserted -- what is, is that every iteration produced
+         * exactly one completion (checked above), and that the grant arm was
+         * really taken: the odd iterations force it. */
+        assert(cancels + grants == 100);
+        assert(grants >= 50);
+
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("a grant racing a cancel produces exactly one completion, "
+              "whichever wins");
+
+    /* ---- the park notification and cancel on a parked RECALL ----
+     * A RECALL parks on the recall drain rather than on a pending acquire, so
+     * it is taken back through the other core entrance -- and what it leaves
+     * behind is the point: the breaks it already kicked STAY kicked, because
+     * a recall hands nobody anything.  NOWAIT never parks and so never
+     * reports one. */
+    {
+        struct chimera_vfs_state         *state = ctx.vfs->vfs_state;
+        struct chimera_vfs_attrs          sattr;
+        struct chimera_vfs_open_handle   *oh;
+        struct chimera_vfs_claim          deleg, oplock;
+        struct chimera_claim_owner        owner_n, owner_s;
+        struct chimera_vfs_claim_conflict conflict;
+        struct chimera_vfs_file_state    *fs;
+        struct break_rec                  rec_d, rec;
+        struct park_rec                   park;
+        int                               i_open, i_rc, i_ga;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "rk", 2,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY |
+                                               CHIMERA_VFS_OPEN_WRITE_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        oh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(oh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        fs = chimera_vfs_state_get(state, oh->fh, (uint8_t) oh->fh_len,
+                                   oh->fh_hash, true);
+        assert(fs != NULL);
+
+        /* NOWAIT against a holder it really does recall -- another client's
+         * write delegation, the NFS4ERR_DELAY shape.  It kicks the break and
+         * answers inside submit: no park, so nothing to report, even though
+         * the holder is left in the way. */
+        memset(&owner_n, 0, sizeof(owner_n));
+        owner_n.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner_n.client_key = 0xD2;
+        owner_n.owner_lo   = 4;
+        chimera_vfs_claim_init_delegation(&deleg, true, &owner_n);
+        memset(&rec_d, 0, sizeof(rec_d));
+        deleg.break_cb   = break_rec_cb;
+        deleg.cb_private = &rec_d;
+        assert(chimera_vfs_claim_try_acquire(state, fs, &deleg, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        memset(&park, 0, sizeof(park));
+        cp   = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        i_rc = chimera_vfs_compound_add_recall(cp, oh->fh, oh->fh_len, 0,
+                                               CHIMERA_VFS_COMPOUND_RECALL_NOWAIT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        assert(ctx.callbacks == 1);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_op(cp, i_rc)->recall_still_open == 1);
+        assert(rec_d.fired == 1);
+        assert(park.calls == 0);
+        /* Cancelling a run that never parked is legal and does nothing. */
+        assert(chimera_vfs_compound_cancel(cp) == 0);
+        assert(ctx.callbacks == 1);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_claim_release(state, fs, &deleg);
+
+        /* Another client's batch oplock (RWH).  The parking form with the
+         * rename floor breaks the handle cache once and parks on the ack. */
+        memset(&owner_s, 0, sizeof(owner_s));
+        owner_s.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner_s.client_key = 0x5C;
+        owner_s.owner_lo   = 3;
+        chimera_vfs_claim_init_oplock(&oplock,
+                                      CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                                      CHIMERA_CLAIM_H,
+                                      &owner_s);
+        memset(&rec, 0, sizeof(rec));
+        oplock.break_cb   = break_rec_cb;
+        oplock.cb_private = &rec;
+        assert(chimera_vfs_claim_try_acquire(state, fs, &oplock, &conflict) ==
+               CHIMERA_CLAIM_GRANTED);
+
+        memset(&park, 0, sizeof(park));
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, oh->fh, (int) oh->fh_len);
+        i_rc = chimera_vfs_compound_add_recall(cp, NULL, 0,
+                                               CHIMERA_CLAIM_CR |
+                                               CHIMERA_CLAIM_CW, 0);
+        i_ga          = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_set_park_cb(cp, park_rec_cb, &park);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+
+        assert(ctx.callbacks == 0);
+        assert(!ctx.done);
+        assert(park.calls == 1);
+        assert(park.index == (uint32_t) i_rc);
+        assert(rec.fired == 1);
+        assert(oplock.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+
+        assert(chimera_vfs_compound_cancel(cp) != 0);
+        assert(ctx.callbacks == 1);
+        assert(ctx.done);
+        ctx.done = 0;
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ECANCELED);
+        assert(chimera_vfs_compound_op(cp, i_rc)->status ==
+               CHIMERA_VFS_ECANCELED);
+        assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
+        assert(park.calls == 1);
+        chimera_vfs_compound_free(cp);
+
+        /* What the abandoned recall kicked is still kicked: the holder is
+         * BREAKING, and its break was fired once and not retracted. */
+        assert(oplock.break_state == CHIMERA_CLAIM_BREAK_BREAKING);
+        assert(rec.fired == 1);
+
+        /* And the ack that would have resumed it resumes nothing. */
+        chimera_vfs_claim_ack(&oplock, CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW);
+        pump_probe(&ctx, &cred, root_fh, root_fh_len);
+        assert(ctx.callbacks == 2);
+
+        chimera_vfs_claim_release(state, fs, &oplock);
+        chimera_vfs_state_put(state, fs);
+        chimera_vfs_release(ctx.vfs_thread, oh);
+    }
+    TEST_PASS("a parked RECALL reports its park and is cancellable; the breaks "
+              "it kicked stay kicked, and NOWAIT never parks");
 
     /* ---- REMOVE that matches its victim ----
      * The name-op setters ride behind the adder, so a caller that has no lease

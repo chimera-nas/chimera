@@ -97,6 +97,13 @@
  * advance until it completes.  Nothing is held that would not otherwise be
  * held, because the ops are the same ops.
  *
+ * A caller that has a client waiting on the other end wants to know, and
+ * sometimes wants to stop waiting: chimera_vfs_compound_set_park_cb asks to
+ * be told the first time the run parks, and chimera_vfs_compound_cancel
+ * abandons a parked run and completes it CHIMERA_VFS_ECANCELED.  Which parks
+ * are visible to either -- the ones the executor drives itself, not the ones
+ * an ordinary op takes below it -- is on the park callback's own contract.
+ *
  * ADDRESSING SOMETHING OTHER THAN CURRENT.  Ops address the current object,
  * which is what makes a sequence a sequence.  One kind of caller cannot: a
  * protocol whose request names an object by something it resolved itself -- an
@@ -376,9 +383,20 @@ enum chimera_vfs_compound_op_type {
      *   A CLAIM that did not reach GRANTED inserted nothing and owns
      *     nothing: its file state is put in the op's callback.
      *
-     * There is no third outcome: a sequence cannot be torn down while it is
-     * in flight, so "aborted" and "finished with a failure" are the same
-     * thing here. */
+     * There is no third outcome.  A sequence cannot be torn down from
+     * outside, and the one way it stops early that is not an op failing --
+     * chimera_vfs_compound_cancel on a parked run -- is the second case
+     * above: the run finishes CHIMERA_VFS_ECANCELED, and the claims the
+     * CLAIMs before the parked one inserted are released with it.  The
+     * cancelled CLAIM itself never reached GRANTED, so it is the third case
+     * and has nothing to release.
+     *
+     * PARKING AND CANCEL.  A CLAIM that waits parks the run, and that park is
+     * one of the two the executor reports through the park callback and can
+     * take back through chimera_vfs_compound_cancel.  A ticket that queued is
+     * cancellable until the moment the claim core answers it; which of the
+     * two wins is the core's own arbitration, never a guess -- see the cancel
+     * call's contract. */
     CHIMERA_VFS_COMPOUND_OP_CLAIM_TEST,
     CHIMERA_VFS_COMPOUND_OP_CLAIM,
     /* Create an anonymous, unlinked object in the directory the current FILE
@@ -1153,6 +1171,55 @@ typedef void (*chimera_vfs_compound_callback_t)(
     struct chimera_vfs_compound *compound,
     void                        *private_data);
 
+/*
+ * The sequence has PARKED, and the caller may want to say so.
+ *
+ * Fires ONCE per submission, on the submitting thread, the first time any op
+ * in the run parks -- and not at all for a run that never parks.  `index` is
+ * the op that parked.  A front end uses it to emit the interim its client is
+ * waiting for (an SMB2 STATUS_PENDING, an NLM4_BLOCKED) and to arm a deadline
+ * timer whose expiry calls chimera_vfs_compound_cancel.  Nothing else about
+ * the run changes: the completion still fires exactly once, later, however
+ * the park ends.
+ *
+ * WHICH PARKS ARE OBSERVABLE.  The two the executor itself drives, which are
+ * also exactly the two it can cancel:
+ *
+ *   a CLAIM whose TICKET QUEUED.  The acquire could not answer, so the claim
+ *     core queued the ticket on the file's pending list to be answered when
+ *     the conflicting holder finishes breaking (WAIT) or lets go (WAIT_HARD).
+ *     The lease-break park and the hard-conflict park are the same park:
+ *     both are that one queued ticket, and both are cancellable.
+ *
+ *   a parking RECALL whose recall did not drain inside the call.  The op is
+ *     waiting on the io-wait ticket the claim core parked for it.
+ *
+ * WHICH ARE NOT.  An ORDINARY op -- a READ, a WRITE, a REMOVE, a RENAME --
+ * can also park inside the claim layer: on the implicit claim's own break,
+ * where chimera_vfs_io_try parks the request on the file's io-wait queue, or
+ * on the namespace recall a name op fires.  The executor cannot see it.  It
+ * called an ordinary per-op entrance and is waiting for that op's callback,
+ * and the core offers no hook on the way in -- the parking happens several
+ * frames below, on a request the executor does not hold.  Such a park does
+ * not fire this callback and cannot be cancelled; the run simply waits, as it
+ * would outside a sequence.  Nor is one invented for it: a hook that made the
+ * executor's own request pointer reach into the io-wait queue for every op
+ * would put the whole per-op path under the cancel contract to buy the one
+ * consumer nothing -- no front end cancels a READ.
+ *
+ * A CLAIM_TEST projected to a backend arbiter (TEST_BACKEND) suspends the run
+ * too, and is likewise neither reported nor cancellable: the projection is a
+ * question already asked of a backend, with no ticket to take back.
+ *
+ * The callback must not submit, cancel or free anything of this compound's.
+ * It runs from inside the very acquire that is parking, before the executor
+ * has finished recording the park; cancelling from inside it aborts.
+ */
+typedef void (*chimera_vfs_compound_park_cb_t)(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data);
+
 /* Allocate a sequence.  `cred` must outlive the submission. */
 struct chimera_vfs_compound *
 chimera_vfs_compound_alloc(
@@ -1547,9 +1614,13 @@ chimera_vfs_compound_add_find(
  * `recall_still_open` is the break-outstanding boolean.
  *
  * A parking RECALL is a PARKING op: nothing behind it runs until the recall
- * drains, and the sequence cannot yet be told it parked nor be cancelled
- * while it is -- the park callback and chimera_vfs_compound_cancel arrive
- * with the CLAIM op, and this op is where they attach. */
+ * drains.  It is one of the two parks the executor reports through the park
+ * callback, and one of the two chimera_vfs_compound_cancel can take back --
+ * the wait is abandoned, the run completes CHIMERA_VFS_ECANCELED, and the
+ * breaks the recall already kicked STAY KICKED.  That is safe for the reason
+ * an abandoned acquire is: a recall hands nobody anything, so its victims
+ * were given nothing to act on.  NOWAIT never parks, so it never fires the
+ * park callback and there is nothing to cancel. */
 int
 chimera_vfs_compound_add_recall(
     struct chimera_vfs_compound *compound,
@@ -1882,6 +1953,15 @@ chimera_vfs_compound_set_gate(
     chimera_vfs_compound_gate_t  gate,
     void                        *private_data);
 
+/* Register the park notification -- see chimera_vfs_compound_park_cb_t.
+ * Optional; without one a run that parks simply waits in silence.  Set it
+ * before submitting: a run can park inside chimera_vfs_compound_submit. */
+void
+chimera_vfs_compound_set_park_cb(
+    struct chimera_vfs_compound   *compound,
+    chimera_vfs_compound_park_cb_t park_cb,
+    void                          *private_data);
+
 /* Execute the sequence.  The callback fires exactly once, on the submitting
  * thread, when execution has stopped -- because every op ran or because one
  * failed.  The compound stays valid until the caller frees it. */
@@ -1890,6 +1970,64 @@ chimera_vfs_compound_submit(
     struct chimera_vfs_compound    *compound,
     chimera_vfs_compound_callback_t callback,
     void                           *private_data);
+
+/*
+ * Abandon a PARKED run: stop waiting, and complete it with
+ * CHIMERA_VFS_ECANCELED reported at the op that was parked.
+ *
+ * Called ONLY from the submitting thread -- the thread that will run, or is
+ * running, the completion -- and only while the run is parked, which is what
+ * the park callback tells the caller.  This is the deadline pattern: the
+ * park callback emits the protocol's interim and arms a timer on the
+ * submitting thread; the timer, if it fires first, calls this.  An SMB2
+ * CANCEL, a FUSE INTERRUPT, an NLM CANCEL, and a session teardown are the
+ * same shape.  The caller maps ECANCELED to its own cancelled status.
+ *
+ * Returns non-zero when the cancel TOOK, and 0 when it did not.  There is no
+ * third answer, and both are ordinary:
+ *
+ *   NON-ZERO.  We took the park back and the run is over.  The completion
+ *     callback has ALREADY RUN, inside this call, with the status
+ *     CHIMERA_VFS_ECANCELED and the parked op's own status the same; the
+ *     compound is the caller's to read and free exactly as after any other
+ *     completion.  Whatever the parked op was waiting for will never be
+ *     handed to it: a cancelled CLAIM is never granted, and a cancelled
+ *     RECALL's continuation never runs.  The breaks a cancelled RECALL
+ *     already kicked stay kicked -- a recall hands nobody anything, so
+ *     abandoning the wait costs its victims nothing they could have acted
+ *     on.  Every claim an EARLIER CLAIM in the run inserted is abort-released
+ *     before the completion, on the ordinary rule (see RELEASE AND TRANSFER
+ *     on the CLAIM op): a run that ends any way but OK leaves nothing
+ *     inserted.  The parked CLAIM itself inserted nothing and releases
+ *     nothing -- and nothing answered it, so its `claim_result` and
+ *     `conflict` say nothing either: read its `status`, and
+ *     chimera_vfs_compound_take_file_state(), which answers NULL for it.
+ *
+ *   ZERO.  The cancel lost the race and did nothing.  Either the run was not
+ *     parked (it never parked, it has already finished, or it is suspended on
+ *     something that is not a cancellable park -- see the park callback), or
+ *     the answer the park was waiting for is already in flight and OWNS the
+ *     completion: the grant is running, or about to run, on whatever thread
+ *     released the conflict.  Either way the caller must not free the
+ *     compound here.  It waits for the completion, which will arrive on the
+ *     submitting thread carrying whatever the run actually did.
+ *
+ * The arbitration is the claim core's, not a guess made here:
+ * chimera_vfs_claim_cancel's (and chimera_vfs_claim_recall_cancel's) return
+ * value decides which of the two it is, exactly as the SMB LOCK abort and the
+ * NLM CANCEL path already rely on, and the caller never races the callback by
+ * hand.  So the completion fires EXACTLY ONCE for a submission whatever the
+ * timing: a holder releasing on another thread at the same moment as this
+ * call produces one outcome or the other, never both and never neither.
+ *
+ * Cancelling a run that is not parked is legal and does nothing, so a caller
+ * whose timer and whose protocol event both fire need not arbitrate between
+ * them.  Cancelling from inside the park callback is not: the run has not
+ * finished parking yet, and the executor aborts rather than corrupt it.
+ */
+int
+chimera_vfs_compound_cancel(
+    struct chimera_vfs_compound *compound);
 
 /*
  * Return a finished compound.  This releases anything the sequence still

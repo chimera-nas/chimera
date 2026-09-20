@@ -131,6 +131,31 @@ struct chimera_vfs_compound {
      * step.  Cleared whenever the sequence advances. */
     uint8_t                         recall_answered;
 
+    /* A parked RECALL's inert request, kept here for exactly as long as the
+     * park lasts: it is what chimera_vfs_claim_recall_cancel takes to unlink
+     * the io-wait ticket.  NULL whenever the run is not parked on a RECALL. */
+    struct chimera_vfs_request     *recall_request;
+
+    /* WHAT THE RUN IS PARKED ON, and whether the caller has been told.
+     *
+     * park_state is the cancel handle: it says which of the two cancellable
+     * parks the run is sitting in, and therefore which core call takes it
+     * back.  It is set as the park is entered -- before the caller's park_cb
+     * can see it -- and cleared the moment the park ends, whichever way it
+     * ends (the answer arrives, or a cancel takes it).  Nothing else is a
+     * park as far as the caller is concerned: an ordinary op parked below us
+     * in the claim layer, and a CLAIM_TEST projected to a backend arbiter,
+     * both leave this NONE, because neither is ours to take back.
+     *
+     * park_fired is the once-per-submission latch on the notification, and
+     * park_notifying guards the one thing a park callback must not do. */
+    uint8_t                         park_state;
+    uint8_t                         park_fired;
+    uint8_t                         park_notifying;
+
+    chimera_vfs_compound_park_cb_t  park_cb;
+    void                           *park_private;
+
     /* A CLAIM's handshake with its claim callback, which may answer inside
      * the acquire call or later from whichever thread released the blocker
      * (or, for a CLAIM_TEST projected to a backend arbiter, from whichever
@@ -219,6 +244,59 @@ chimera_vfs_compound_set_gate(
     compound->gate         = gate;
     compound->gate_private = private_data;
 } /* chimera_vfs_compound_set_gate */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_set_park_cb(
+    struct chimera_vfs_compound   *compound,
+    chimera_vfs_compound_park_cb_t park_cb,
+    void                          *private_data)
+{
+    compound->park_cb      = park_cb;
+    compound->park_private = private_data;
+} /* chimera_vfs_compound_set_park_cb */
+
+/* The two cancellable parks -- see park_state on the compound, and the park
+ * callback's contract in the header for why there are only two. */
+#define CHIMERA_VFS_COMPOUND_PARK_NONE   0
+#define CHIMERA_VFS_COMPOUND_PARK_CLAIM  1
+#define CHIMERA_VFS_COMPOUND_PARK_RECALL 2
+
+/*
+ * The run has parked on `what`.  Record it -- that is the cancel handle --
+ * and tell the caller, the first time only.
+ *
+ * Always on the submitting thread: a CLAIM's blocked_cb fires inside the
+ * acquire the dispatch is making, and a RECALL's park is observed by the
+ * dispatch itself when the recall call returns without answering.
+ */
+static void
+chimera_vfs_compound_parked(
+    struct chimera_vfs_compound *compound,
+    uint8_t                      what)
+{
+    compound->park_state = what;
+
+    if (!compound->park_cb || compound->park_fired) {
+        return;
+    }
+
+    compound->park_fired = 1;
+
+    /* The callback may emit and arm a timer; it may not re-enter us.  See
+     * chimera_vfs_compound_cancel, which is what the guard is for. */
+    compound->park_notifying = 1;
+    compound->park_cb(compound, compound->index, compound->park_private);
+    compound->park_notifying = 0;
+} /* chimera_vfs_compound_parked */
+
+/* A CLAIM's ticket queued: the claim core fires this exactly once, inside
+ * the acquire, iff the acquire could not answer. */
+static void
+chimera_vfs_compound_claim_blocked(void *private_data)
+{
+    chimera_vfs_compound_parked(private_data,
+                                CHIMERA_VFS_COMPOUND_PARK_CLAIM);
+} /* chimera_vfs_compound_claim_blocked */
 
 /*
  * Release everything the sequence holds and return the compound to its
@@ -2375,6 +2453,12 @@ chimera_vfs_compound_op_done(
     struct chimera_vfs_compound_op *done = &compound->ops[compound->index];
 
     compound->completed = compound->index + 1;
+
+    /* Whatever the op was parked on, it is not parked on it now -- every arm
+     * of every park ends here.  Clearing it is what makes a cancel arriving
+     * after the answer a no-op rather than a second completion. */
+    compound->park_state     = CHIMERA_VFS_COMPOUND_PARK_NONE;
+    compound->recall_request = NULL;
 
     /* Record what the op ended up addressing, so a caller describing the
      * object in its reply does not have to re-derive it. */
@@ -5328,14 +5412,13 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
              * returned without answering iff the sequence is parked. */
             if (!compound->recall_answered) {
                 /* PARKED.  Nothing behind this op runs until the last
-                 * holder acks or is revoked.
-                 *
-                 * HOOK for the park callback and cancel (the CLAIM slice):
-                 * this is where park_cb fires for a RECALL, and `request`
-                 * -- kept on the compound while parked -- is what
-                 * chimera_vfs_claim_recall_cancel takes to unpark its
-                 * io-wait ticket and keep chimera_vfs_compound_recall_
-                 * complete from ever running. */
+                 * holder acks or is revoked.  The request is kept for the
+                 * duration: it is what chimera_vfs_claim_recall_cancel
+                 * takes to unlink the io-wait ticket and keep
+                 * chimera_vfs_compound_recall_complete from ever running. */
+                compound->recall_request = request;
+                chimera_vfs_compound_parked(
+                    compound, CHIMERA_VFS_COMPOUND_PARK_RECALL);
             }
             break;
         }
@@ -5453,7 +5536,7 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 !!(op->claim_flags & CHIMERA_VFS_COMPOUND_CLAIM_WAIT),
                 !!(op->claim_flags & CHIMERA_VFS_COMPOUND_CLAIM_WAIT_HARD),
                 chimera_vfs_compound_claim_callback,
-                NULL, /* no park notification yet -- see the header */
+                chimera_vfs_compound_claim_blocked,
                 compound);
 
             expected = CHIMERA_VFS_COMPOUND_CLAIM_DISPATCHING;
@@ -5507,6 +5590,12 @@ chimera_vfs_compound_submit(
     compound->index        = 0;
     compound->completed    = 0;
 
+    /* The park notification is once per SUBMISSION, and nothing is parked
+     * before the first op runs. */
+    compound->park_fired     = 0;
+    compound->park_state     = CHIMERA_VFS_COMPOUND_PARK_NONE;
+    compound->recall_request = NULL;
+
     /* An op that could not be built is not an op the sequence may skip: a
      * shorter sequence is a different request, and one that has quietly
      * dropped the operation the caller cared about usually succeeds. */
@@ -5517,6 +5606,89 @@ chimera_vfs_compound_submit(
 
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_submit */
+
+/*
+ * Abandon a parked run -- see the contract on the declaration.
+ *
+ * The whole of the arbitration is the core call's return value, and the two
+ * cancellable parks answer it on identical terms: true means we took the
+ * park back and nothing will ever be handed to the op, false means the
+ * answer is already in flight and owns the completion.  Nothing here waits,
+ * looks at the other thread, or re-checks afterwards -- a cancel that tried
+ * to arbitrate by hand is the bug this shape exists to make impossible.
+ *
+ * The order inside the taken case matters in one place.  The parked CLAIM's
+ * file state is put and cleared BEFORE the finish, because
+ * chimera_vfs_compound_abort_claims recognizes a claim to release by
+ * (lock_file_state != NULL && claim_result == GRANTED) and CHIMERA_CLAIM_
+ * GRANTED is 0 -- the value claim_result still carries on an op that never
+ * got an answer.  Clearing the state is what says "this op inserted nothing",
+ * and it is true: a cancelled acquire never ran its callback.  The abort
+ * release then does its ordinary work on the CLAIMs BEFORE this one.
+ */
+SYMBOL_EXPORT int
+chimera_vfs_compound_cancel(struct chimera_vfs_compound *compound)
+{
+    struct chimera_vfs_state       *vfs_state =
+        compound->thread->vfs->vfs_state;
+    struct chimera_vfs_compound_op *op;
+
+    chimera_vfs_abort_if(compound->park_notifying,
+                         "compound cancelled from inside its own park callback");
+
+    switch (compound->park_state) {
+        case CHIMERA_VFS_COMPOUND_PARK_CLAIM:
+            op = &compound->ops[compound->index];
+
+            if (!chimera_vfs_claim_cancel(vfs_state, op->ticket)) {
+                /* The grant owns the completion: it is running, or about to,
+                 * on whatever thread released the conflict, and will come
+                 * home through the doorbell.  Not parked any more either
+                 * way, so a second cancel has nothing to take. */
+                compound->park_state = CHIMERA_VFS_COMPOUND_PARK_NONE;
+                return 0;
+            }
+
+            /* The acquire callback will never fire, so the request that was
+             * to carry its answer home has no answer to carry. */
+            chimera_vfs_compound_claim_resume_free(compound);
+
+            chimera_vfs_state_put(vfs_state, op->lock_file_state);
+            op->lock_file_state = NULL;
+            break;
+
+        case CHIMERA_VFS_COMPOUND_PARK_RECALL:
+            if (!chimera_vfs_claim_recall_cancel(vfs_state,
+                                                 compound->recall_request)) {
+                compound->park_state     = CHIMERA_VFS_COMPOUND_PARK_NONE;
+                compound->recall_request = NULL;
+                return 0;
+            }
+
+            /* The request is the core's from here -- finished inside the
+             * call, or by the drain that had already been handed it. */
+            compound->recall_request = NULL;
+            break;
+
+        default:
+            /* Never parked, already answered, or suspended on something that
+             * is not ours to take back.  Legal, and nothing to do. */
+            return 0;
+    } /* switch */
+
+    compound->park_state = CHIMERA_VFS_COMPOUND_PARK_NONE;
+
+    /* The op ran -- it got as far as parking -- and ECANCELED is its answer.
+     * The gate is not consulted: a cancel is not an outcome a caller vetoes,
+     * and the gate's contract is to answer from what it already has about an
+     * op that produced a result. */
+    compound->completed                   = compound->index + 1;
+    compound->ops[compound->index].status = CHIMERA_VFS_ECANCELED;
+
+    chimera_vfs_compound_finish(compound, CHIMERA_VFS_ECANCELED);
+
+    return 1;
+} /* chimera_vfs_compound_cancel */
 
 /* ---------------------------------------------------------------------- */
 /* Results                                                                */
