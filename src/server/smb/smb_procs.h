@@ -24,6 +24,14 @@ void
 chimera_smb_create_abandon_share_park(
     struct chimera_smb_request *request);
 
+/* The same, for a SEQUENCED create: abandon the run that is parked on its share
+ * CLAIM.  Whether the cancel takes or the answer already in flight wins is the
+ * claim core's arbitration; either way exactly one completion runs, and it
+ * tears the half-built open down without replying. */
+void
+chimera_smb_create_seq_abandon(
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_negotiate(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);

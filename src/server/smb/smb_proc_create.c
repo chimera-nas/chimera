@@ -123,6 +123,15 @@ chimera_smb_create_finish_with_eas(
 #define CHIMERA_SMB_CREATE_SHARE_RETRY_MAX         150    /* ~3 s total */
 #define CHIMERA_SMB_CREATE_SHARE_SPEC_RETRY_MAX    25     /* ~0.5 s total */
 
+/* How many times a sequenced create will purge a parked durable holder out of
+ * its way and run again.  The op-at-a-time path spins the same loop inside one
+ * acquire (its purge_guard); a sequence cannot, because tearing another
+ * client's open down is not something an op may do from inside a run, so each
+ * purge costs a resubmission.  The bound is the same and for the same reason:
+ * the number of parked owners a file can have is finite, and a loop that keeps
+ * finding one is a loop that is not making progress. */
+#define CHIMERA_SMB_CREATE_SEQ_PURGE_MAX           64
+
 /* ---------------------------------------------------------------------------
  * In-flight (deferred, not-yet-hashed) DH2Q creates -- tree->pending_creates.
  *
@@ -5059,6 +5068,17 @@ chimera_smb_create_lookup_parent_callback(
 static void
 chimera_smb_create_submit_open_run(struct chimera_smb_request *request);
 
+static void
+chimera_smb_create_seq_share_retry_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer);
+
+static void
+chimera_smb_create_seq_park_cb(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data);
+
 /* Reset the per-submission sequence state.  A gate must not remember it was
  * asked, and a resubmission is a first run: everything the last execution
  * derived is cleared here rather than at the end of the one before, so a
@@ -5503,6 +5523,75 @@ chimera_smb_create_gate(
     }
 } /* chimera_smb_create_gate */
 
+/* ---- the park ----
+ *
+ * The run waited: the share acquire could not be answered, so the claim core
+ * queued its ticket behind a holder that is mid-break.  The client is told the
+ * create is in flight -- it must be able to cancel it, and it must not time out
+ * across a wait that lasts until the holder acks or closes (or the break
+ * deadline revokes it).  Without the interim a conflicting open simply looks
+ * unanswered, and smbtorture's WAIT_FOR_ASYNC_RESPONSE spins to its own timeout
+ * while the test's later break ack arrives after the deadline has already
+ * revoked the lease (smb2.replay.dhv2-pending1n-vs-violation-lease-*).
+ *
+ * The create_guid is published here too: while it waits, the open is not in
+ * tree->open_files[], so only tree->pending_creates lets a replay of it be
+ * recognised as a pending create.
+ *
+ * No break waiter and no deadline: this is not the reply hold of an
+ * already-granted open (chimera_smb_create_open_finish), it is the admission
+ * itself, and the HOLDER's own break deadline in the claim core is what
+ * resolves the ticket. */
+static void
+chimera_smb_create_seq_park_cb(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    (void) compound;
+    (void) index;
+
+    request->create.seq_parked = 1;
+
+    chimera_smb_create_pending_register(request);
+    chimera_smb_async_interim_begin(request);
+} /* chimera_smb_create_seq_park_cb */
+
+/* The connection is going away under a parked run (chimera_smb_async_interim_
+ * drain), or an SMB2 CANCEL asks for it back.  Take the park back so the claim
+ * core's pump can never resume into a dead request.
+ *
+ * POSTED, not arbitrated here.  Every cancel TRIGGER a create actually has
+ * arrives somewhere other than the thread that submitted the run: a teardown
+ * runs wherever the disconnect landed, and an SMB2 CANCEL arrives on whichever
+ * channel carried it.  The inline chimera_vfs_compound_cancel runs the
+ * completion inside the call when it wins -- which would reply, free and
+ * recycle THIS request on the caller's thread, under whatever lock the caller
+ * found it holding.  So the request to cancel is marshalled to the submitting
+ * thread instead; it never blocks, never runs the completion, and never
+ * re-enters the caller.
+ *
+ * Nothing is learnt on return, and nothing needs to be: the completion still
+ * fires exactly once on the submitting thread, carrying either ECANCELED at the
+ * parked op or -- if the grant won the race -- the run's real outcome.  Either
+ * way it sees `seq_abandoned`, tears the half-built open down and replies to
+ * nobody.  The obligation this leaves is to keep the compound alive until then,
+ * which the parked-request list does: a run leaves that list in its own
+ * completion. */
+void
+chimera_smb_create_seq_abandon(struct chimera_smb_request *request)
+{
+    request->create.seq_abandoned = 1;
+
+    if (!request->vfs_compound) {
+        return;
+    }
+
+    chimera_vfs_compound_cancel_post(request->vfs_compound);
+} /* chimera_smb_create_seq_abandon */
+
 /* ---- the completion ---- */
 static void
 chimera_smb_create_run_complete(
@@ -5519,6 +5608,11 @@ chimera_smb_create_run_complete(
     enum chimera_vfs_error                status;
     int                                   failed;
     uint32_t                              smb_status;
+    /* Whether this run WAITED for the holder's answer, which decides whether a
+     * refusal may fire the handle-cache recall below: a park that came back
+     * DENIED means the holder was already asked and defended its handle. */
+    bool                                  parked = request->create.seq_parked;
+
     request->create.seq_parked = 0;
 
     status = chimera_vfs_compound_status(compound);
@@ -5601,6 +5695,72 @@ chimera_smb_create_run_complete(
              * OBJECT_NAME_NOT_FOUND (the final name). */
             smb_status = chimera_smb_create_parent_error_status(status);
         } else if (failed == request->create.seq_share_idx) {
+            const struct chimera_vfs_compound_op *sop =
+                chimera_vfs_compound_op(
+                    compound, (uint32_t) request->create.seq_share_idx);
+            uint64_t conflict_pid = sop->conflict.policy_tag;
+
+            /* The share reservation was refused.  Before that is an answer, two
+             * things can still dissolve the conflict, and both need the leaf
+             * handle the run produced -- which is why they are here and not in
+             * the run: nothing inside a sequence may reach outside it to tear
+             * another client's open down.
+             *
+             * A conflict against a DISCONNECTED durable handle must not refuse
+             * this open: MS-SMB2 has the disconnected (non-persistent) handle
+             * yield.  The conflict arrives BY VALUE carrying the holder's
+             * policy_tag -- the SMB open's persistent id, stamped on every SMB
+             * claim at build time -- so purge that open and run the sequence
+             * again.  Live, persistent and non-durable holders are left intact
+             * and still produce a real SHARING_VIOLATION. */
+            if (conflict_pid != 0 &&
+                request->create.share_conflict_retries <
+                CHIMERA_SMB_CREATE_SEQ_PURGE_MAX &&
+                chimera_smb_durable_purge_parked(thread, conflict_pid, false)) {
+                request->create.share_conflict_retries++;
+                chimera_vfs_compound_free(compound);
+                request->vfs_compound = NULL;
+                chimera_smb_create_submit_open_run(request);
+                return;
+            }
+
+            /* The durable holder is not parked YET.  If its owning connection
+             * is on its way out, the park (and the MS-SMB2 yield) is imminent
+             * but has not landed -- the disconnect-vs-conflicting-open race.
+             * Re-run on a short timer rather than deny: a CONFIRMED disconnect
+             * (observed, or already parked) gets the full budget, a SPECULATIVE
+             * one (a durable holder whose FIN may not be read yet) a short one
+             * that a later probe can upgrade.  Only a persistent or unknown
+             * holder is NONE, standing as a real SHARING_VIOLATION. */
+            if (conflict_pid != 0) {
+                uint16_t budget;
+
+                request->create.gen_share_retry =
+                    chimera_smb_durable_conn_disconnecting(thread->shared,
+                                                           conflict_pid);
+
+                budget = (request->create.gen_share_retry ==
+                          CHIMERA_SMB_DURABLE_YIELD_CONFIRMED) ?
+                    CHIMERA_SMB_CREATE_SHARE_RETRY_MAX :
+                    CHIMERA_SMB_CREATE_SHARE_SPEC_RETRY_MAX;
+
+                if (request->create.gen_share_retry !=
+                    CHIMERA_SMB_DURABLE_YIELD_NONE &&
+                    request->create.share_conflict_retries < budget) {
+                    request->create.share_conflict_retries++;
+                    /* Deferred without a hashed open: keep the create_guid
+                     * visible to a replay for the length of the retry. */
+                    chimera_smb_create_pending_register(request);
+                    chimera_vfs_compound_free(compound);
+                    request->vfs_compound = NULL;
+                    evpl_add_oneshot_timer(
+                        thread->evpl, &request->async.timer,
+                        chimera_smb_create_seq_share_retry_cb,
+                        CHIMERA_SMB_CREATE_SHARE_RETRY_INTERVAL_US);
+                    return;
+                }
+            }
+
             /* A genuine share conflict.  A handle-caching lease holder must
              * still be told to relinquish its handle cache even though this
              * open is refused -- the holder may close its deferred handle so a
@@ -5614,7 +5774,7 @@ chimera_smb_create_run_complete(
                 compound, (uint32_t) request->create.seq_open_idx);
 
             if (oh) {
-                {
+                if (!parked) {
                     struct chimera_claim_actor brk_actor = {
                         .owner     = open_file->share_lease.owner,
                         .op_handle = oh,
@@ -5888,9 +6048,16 @@ chimera_smb_create_submit_open_run(struct chimera_smb_request *request)
 
     request->create.seq_open_idx = (int8_t) idx;
 
+    /* WAIT, because this open MAY park.  A batch (handle-caching) oplock holder
+     * that is mid-break may close its deferred handle, after which the sharing
+     * conflict disappears -- so the acquire queues its ticket and the run waits
+     * for the holder's answer instead of refusing on the state of the moment
+     * (MS-SMB2 3.3.5.9; smb2.oplock.batch5, and the O6b probe).  A shape that
+     * may not park -- the mkdir, stream and pipe paths -- asks TRY and takes a
+     * BREAKING conflict as the SHARING_VIOLATION it is right now. */
     idx = chimera_vfs_compound_add_claim(
         compound, &open_file->share_lease, &request->create.gen_ticket,
-        CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+        CHIMERA_VFS_COMPOUND_CLAIM_WAIT,
         request->create.seq_pre_trigger, request->create.seq_pre_retain,
         0, 0);
     chimera_vfs_compound_op_use_handle(compound, (uint32_t) idx,
@@ -5909,10 +6076,28 @@ chimera_smb_create_submit_open_run(struct chimera_smb_request *request)
     request->create.seq_trunc_idx = (int8_t) idx;
 
     chimera_vfs_compound_set_gate(compound, chimera_smb_create_gate, request);
+    chimera_vfs_compound_set_park_cb(compound, chimera_smb_create_seq_park_cb,
+                                     request);
 
     chimera_vfs_compound_submit(compound, chimera_smb_create_run_complete,
                                 request);
 } /* chimera_smb_create_submit_open_run */
+
+/* The share-conflict retry timer: the conflicting durable holder's owning
+ * connection is on its way out, so re-run the whole sequence rather than deny.
+ * Runs on the request's own conn thread, where the timer was armed. */
+static void
+chimera_smb_create_seq_share_retry_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_smb_request *request = (struct chimera_smb_request *)
+        ((char *) timer - offsetof(struct chimera_smb_request, async.timer));
+
+    (void) evpl;
+
+    chimera_smb_create_submit_open_run(request);
+} /* chimera_smb_create_seq_share_retry_cb */
 
 /* The parent's file handle, resolved before the run that uses it.
  *

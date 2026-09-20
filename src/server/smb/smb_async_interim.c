@@ -192,6 +192,16 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
             continue;
         }
 
+        /* The same wait, taken by a SEQUENCED create: the run is parked on its
+         * share CLAIM and the executor, not this server, owns the ticket.  Ask
+         * it to abandon the run; its completion tears the half-built open down
+         * and replies to nobody. */
+        if (request->smb2_hdr.command == SMB2_CREATE &&
+            request->create.seq_parked) {
+            chimera_smb_create_seq_abandon(request);
+            continue;
+        }
+
         /* A deferred directory notification retains the parent until CREATE
          * resumes. Disconnect cancels that continuation, so release it here. */
         if (request->smb2_hdr.command == SMB2_CREATE &&
