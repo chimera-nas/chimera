@@ -10,25 +10,25 @@
 #include <errno.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/socket.h>
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <netinet/in.h>
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <arpa/inet.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <xxhash.h>
 
 #include "common/socket.h"

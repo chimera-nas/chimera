@@ -51,8 +51,8 @@ struct memkv_entry {
 };
 
 struct memkv_shard {
-    struct rb_tree  entries;
-    evpl_mutex_t lock;
+    struct rb_tree entries;
+    evpl_mutex_t   lock;
 };
 
 struct memkv_shared {

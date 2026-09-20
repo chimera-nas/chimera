@@ -32,20 +32,20 @@
 
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/time.h>
-#endif
+#endif // ifdef _WIN32
 
 #include <limits.h>
 
@@ -436,7 +436,7 @@ struct diskfs_device {
     uint64_t                  size;
     uint64_t                  max_request_size;
     char                      name[256];
-    evpl_mutex_t           lock;
+    evpl_mutex_t              lock;
 
     /* Block-mode (pNFS) device identity.  role == SM_DEV_REMOTE means this
      * device's storage lives outside this system: diskfs allocates space on it
@@ -481,8 +481,8 @@ struct diskfs_kv_entry {
 
 
 struct diskfs_kv_shard {
-    struct rb_tree  entries;
-    evpl_mutex_t lock;
+    struct rb_tree entries;
+    evpl_mutex_t   lock;
 };
 
 
@@ -770,7 +770,7 @@ struct diskfs_inode {
 
 
 struct diskfs_inode_shard {
-    evpl_mutex_t      lock;
+    evpl_mutex_t         lock;
     struct rb_tree       inodes;       /* keyed by inum */
     struct diskfs_inode *lru_head, *lru_tail; /* idle (recycle) candidates, LRU-first */
     uint32_t             ninodes;      /* resident inodes in this shard */
@@ -895,7 +895,7 @@ struct diskfs_block {
 
 
 struct diskfs_block_shard {
-    evpl_mutex_t             lock;
+    evpl_mutex_t                lock;
     struct diskfs_block       **buckets; /* [DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
 
     /* Pre-allocated fixed pool of block structs (all protected by lock); the
@@ -948,7 +948,7 @@ struct diskfs_block_cache {
     uint32_t                  shard_mask;  /* num_shards - 1 */
     uint32_t                  buffer_extra_per_shard;
     int                       buffers_ready;
-    evpl_mutex_t           prealloc_lock;
+    evpl_mutex_t              prealloc_lock;
     /* Sized for the maximum; only the first num_shards are initialised/used. */
     struct diskfs_block_shard shards[DISKFS_BLOCK_CACHE_MAX_SHARDS];
 };
@@ -1550,7 +1550,7 @@ struct diskfs_intent_log {
     int                              reg_dirty;       /* atomic (seq_cst): a channel (un)registration is pending.  Set by workers after touching pending_head / unregister_requested; the commit thread's per-iteration poll services it without waiting for the wake doorbell (which is starved while we stay in continuous poll mode under load). */
     uint32_t                         num_channels;
     struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
-    evpl_mutex_t                  registration_lock;
+    evpl_mutex_t                     registration_lock;
     struct diskfs_iq_channel        *pending_head;
 
     /* Stage C: global submission ring (Vyukov MPSC).  Workers claim a slot via
@@ -1737,13 +1737,13 @@ struct diskfs_shared {
      * this filesystem ever issued, so a stale handle can never resolve to
      * the new file.  gen_wait parks allocations that catch up to the floor
      * while an extension write is in flight (effectively never). */
-    uint64_t                    gen_next;            /* atomic */
-    uint64_t                    gen_floor;           /* atomic; durable bound */
+    uint64_t                    gen_next;         /* atomic */
+    uint64_t                    gen_floor;        /* atomic; durable bound */
     int                         gen_extend_inflight; /* atomic */
-    evpl_mutex_t             gen_lock;            /* guards gen_wait */
+    evpl_mutex_t                gen_lock;         /* guards gen_wait */
     struct diskfs_block_waiter *gen_wait;
     struct diskfs_metrics       metrics;
-    evpl_mutex_t             lock;
+    evpl_mutex_t                lock;
 };
 
 
@@ -1776,7 +1776,7 @@ struct diskfs_thread {
      * and grants it to a waiter belonging to this worker enqueues the
      * granted waiter here and rings grant_doorbell, so the continuation
      * runs back on this worker. */
-    evpl_mutex_t              grant_lock;
+    evpl_mutex_t                 grant_lock;
     struct diskfs_inode_waiter  *grant_head;
     struct diskfs_inode_waiter  *grant_tail;
     struct evpl_doorbell         grant_doorbell;
@@ -1786,7 +1786,7 @@ struct diskfs_thread {
      * waiters on finishes loading (possibly on another worker that issued the
      * read), the ready waiters are queued here.  Same-worker resumptions drain
      * via the deferral (no eventfd); cross-worker ones ring the doorbell. */
-    evpl_mutex_t              resume_lock;
+    evpl_mutex_t                 resume_lock;
     struct diskfs_block_waiter  *resume_head;
     struct diskfs_block_waiter  *resume_tail;
     struct evpl_doorbell         resume_doorbell;
@@ -2140,7 +2140,7 @@ struct diskfs_reclaim_worker {
     struct diskfs_thread      *ctx;        /* this worker's diskfs thread context */
     struct evpl_thread        *thread;
     struct evpl_doorbell       doorbell;
-    evpl_mutex_t            lock;
+    evpl_mutex_t               lock;
     struct diskfs_reclaim_job *head;
     struct diskfs_reclaim_job *tail;
     int                        condenses;  /* condense jobs in flight here */

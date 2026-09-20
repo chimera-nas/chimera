@@ -13,7 +13,7 @@
  */
 #ifndef _WIN32
 __attribute__((visibility("default")))
-#endif
+#endif /* ifndef _WIN32 */
 const char *
 __lsan_default_suppressions(void)
 {

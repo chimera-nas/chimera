@@ -49,7 +49,7 @@ struct chimera_vfs_mount_table {
     struct chimera_vfs_mount_table_entry **buckets;
     uint32_t                               num_buckets;
     uint32_t                               num_buckets_mask;
-    evpl_mutex_t                        lock;
+    evpl_mutex_t                           lock;
 };
 
 static inline struct chimera_vfs_mount_table *

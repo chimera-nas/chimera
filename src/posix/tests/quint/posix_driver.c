@@ -36,18 +36,18 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include "posix/posix_types.h"     /* struct statvfs for statvfs/fstatvfs */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
 #endif         /* struct iovec for the vectored read/write ops */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 /* makedev() (block/char device mknod) and struct statfs (statfs/fstatfs) come
  * from common/platform.h below: <sys/sysmacros.h>+<sys/vfs.h> on glibc,
  * <sys/types.h>+<sys/mount.h> on Darwin -- so this file builds on both. */
@@ -158,10 +158,10 @@ posix_module_tracks_holes(const char *module)
 
 static int
 pt_rm_cb(
-    const char        *path,
+    const char                 *path,
     const chimera_posix_stat_t *st,
-    int                type,
-    struct FTW        *ftw)
+    int                         type,
+    struct FTW                 *ftw)
 {
     (void) st;
     (void) ftw;
@@ -400,7 +400,7 @@ res_int(
 
 static void
 stat_fill(
-    json_t            *res,
+    json_t                     *res,
     const chimera_posix_stat_t *st)
 {
     const char *ftype = "unk";
@@ -682,7 +682,7 @@ handle(json_t *req)
     if (strcmp(op, "stat") == 0 || strcmp(op, "fstat") == 0 ||
         strcmp(op, "fstatat") == 0) {
         chimera_posix_stat_t st;
-        int         ret;
+        int                  ret;
 
         memset(&st, 0, sizeof(st));
         if (strcmp(op, "fstat") == 0) {
@@ -788,9 +788,9 @@ handle(json_t *req)
     }
 
     if (strcmp(op, "mknod") == 0) {
-        const char *ft   = jstr(req, "ftype");
-        mode_t      mode = (mode_t) jint(req, "mode", 0);
-        chimera_dev_t       dev  = 0;
+        const char   *ft   = jstr(req, "ftype");
+        mode_t        mode = (mode_t) jint(req, "mode", 0);
+        chimera_dev_t dev  = 0;
 
         if (ft && strcmp(ft, "fifo") == 0) {
             mode |= S_IFIFO;
@@ -1023,9 +1023,9 @@ handle(json_t *req)
     }
 
     if (strcmp(op, "copy_range") == 0) {
-        chimera_off_t   off_in  = (chimera_off_t) jint64(req, "off_in", 0);
-        chimera_off_t   off_out = (chimera_off_t) jint64(req, "off_out", 0);
-        ssize_t n       = chimera_posix_copy_file_range(
+        chimera_off_t off_in  = (chimera_off_t) jint64(req, "off_in", 0);
+        chimera_off_t off_out = (chimera_off_t) jint64(req, "off_out", 0);
+        ssize_t       n       = chimera_posix_copy_file_range(
             jint(req, "fd_in", -1), &off_in,
             jint(req, "fd_out", -1), &off_out,
             (size_t) jint64(req, "len", 0), 0);
@@ -1043,13 +1043,13 @@ handle(json_t *req)
     }
 
     if (strcmp(op, "fallocate") == 0) {
-        int   fd   = jint(req, "fd", -1);
-        int   mode = jint(req, "mode", 0);
+        int           fd   = jint(req, "fd", -1);
+        int           mode = jint(req, "mode", 0);
         chimera_off_t off  = (chimera_off_t) jint64(req, "off", 0);
         chimera_off_t len  = (chimera_off_t) jint64(req, "len", 0);
         /* mode 0 == posix_fallocate (grow); mode 1 == the
          * FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE deallocate pair. */
-        int   ret = (mode == 0)
+        int           ret = (mode == 0)
             ? chimera_posix_fallocate(fd, off, len)
             : chimera_posix_fallocate_mode(
             fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, len);

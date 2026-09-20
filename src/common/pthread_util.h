@@ -26,11 +26,11 @@ chimera_pthread_create(
     const evpl_native_thread_attr_t *attr,
     void *(*start_routine )(
         void *),
-    void                 *arg)
+    void                            *arg)
 {
     unsigned int delay = 1000;
-    int        attempt;
-    int        rc;
+    int          attempt;
+    int          rc;
 
     for (attempt = 0; ; attempt++) {
         rc = evpl_native_thread_create(thread, attr, start_routine, arg);

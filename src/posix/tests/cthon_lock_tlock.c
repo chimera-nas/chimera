@@ -259,14 +259,14 @@ fmtrange(
 
 static void
 report(
-    int   num,
-    int   sec,
-    char *what,
+    int           num,
+    int           sec,
+    char         *what,
     chimera_off_t offset,
     chimera_off_t length,
-    int   pass,
-    int   result,
-    int   fail)
+    int           pass,
+    int           result,
+    int           fail)
 {
     printf("\t%s", ((who == PARENT) ? "Parent: " : "Child:  "));
     printf("%d.%-2d - %s %s", num, sec, what, fmtrange(offset, length));
@@ -337,13 +337,13 @@ close_testfile(int cleanup)
 
 static void
 test(
-    int   num,
-    int   sec,
-    int   func,
+    int           num,
+    int           sec,
+    int           func,
     chimera_off_t offset,
     chimera_off_t length,
-    int   pass,
-    int   fail)
+    int           pass,
+    int           fail)
 {
     int result = PASS;
 

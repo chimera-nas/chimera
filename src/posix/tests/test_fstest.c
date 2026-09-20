@@ -244,7 +244,7 @@ traverse(
     }
 
     while ((de = chimera_posix_readdir(d))) {
-        char        fname[2048];
+        char                 fname[2048];
         chimera_posix_stat_t st;
 
         if (strcmp(de->d_name, ".") == 0) {

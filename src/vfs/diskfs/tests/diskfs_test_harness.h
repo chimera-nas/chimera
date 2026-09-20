@@ -23,9 +23,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include <fcntl.h>
 /* These tests use assert() (and side-effecting calls inside it, as the other
  * in-process VFS tests do) as their oracle, so keep it live even in a Release /

@@ -1716,7 +1716,7 @@ diskfs_teardown(
          * trimmed, so the next clean mount loads these snapshots with no deltas
          * left to replay. */
         uint64_t                ckpt_seq = chimera_atomic_load_n(&shared->intent_log.applied_seq,
-                                                           CHIMERA_MEMORY_ACQUIRE);
+                                                                 CHIMERA_MEMORY_ACQUIRE);
 
         if (space_map_persist(shared->space_map, &smio, ckpt_seq) != 0) {
             chimera_diskfs_error("space-map persist at unmount failed");
@@ -1729,7 +1729,7 @@ diskfs_teardown(
                                                 0, 0,
                                                 shared->intent_log.log_seq,
                                                 chimera_atomic_load_n(&shared->gen_next,
-                                                                CHIMERA_MEMORY_ACQUIRE),
+                                                                      CHIMERA_MEMORY_ACQUIRE),
                                                 shared->fs_table);
             if (rc != 0) {
                 chimera_diskfs_error("clean-superblock write at unmount failed");

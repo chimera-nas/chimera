@@ -4,11 +4,13 @@
 #include <assert.h>
 #include "common/test_host.h"
 
-int main(void)
+int
+main(void)
 {
     char directory[] = "./fixtureXXXXXX";
     char file[256], child[256];
-    int fd;
+    int  fd;
+
     assert(mkdtemp(directory));
     snprintf(child, sizeof(child), "%s/child", directory);
     assert(!chimera_test_mkdir(child, 0700));
@@ -19,7 +21,7 @@ int main(void)
     assert(!close(fd));
     {
         FILE *input = fopen(file, "rb");
-        char data[8];
+        char  data[8];
         assert(input);
         assert(fread(data, 1, sizeof(data), input) == 5);
         assert(!memcmp(data, "a\r\nb\n", 5));
@@ -28,7 +30,7 @@ int main(void)
 #ifndef _WIN32
     snprintf(file, sizeof(file), "%s/outside", child);
     assert(!symlink("../..", file));
-#endif
+#endif /* ifndef _WIN32 */
     assert(!chimera_test_remove_tree(directory));
     assert(!opendir(directory));
     assert(!setenv("CHIMERA_FIXTURE_ENV_TEST", "first", 1));
@@ -38,4 +40,4 @@ int main(void)
     assert(!strcmp(getenv("CHIMERA_FIXTURE_ENV_TEST"), "third"));
     assert(!unsetenv("CHIMERA_FIXTURE_ENV_TEST"));
     return 0;
-}
+} /* main */

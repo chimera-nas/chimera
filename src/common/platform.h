@@ -26,7 +26,7 @@
 #ifndef _WIN32
 #include <sys/random.h>
 #include <unistd.h>
-#endif
+#endif // ifndef _WIN32
 
 #ifdef _WIN32
 #include "common/windows.h"
@@ -171,36 +171,41 @@ chimera_gettid(void)
 #endif /* ifdef __APPLE__ */
 } /* chimera_gettid */
 
-static inline unsigned chimera_cpu_count(void)
+static inline unsigned
+chimera_cpu_count(void)
 {
 #ifdef _WIN32
     return GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-#else
+#else // ifdef _WIN32
     long count = sysconf(_SC_NPROCESSORS_ONLN);
     return count > 0 ? (unsigned) count : 1;
-#endif
-}
-static inline void *chimera_aligned_alloc(size_t alignment, size_t bytes)
+#endif // ifdef _WIN32
+} // chimera_cpu_count
+static inline void *
+chimera_aligned_alloc(
+    size_t alignment,
+    size_t bytes)
 {
 #ifdef _WIN32
     return _aligned_malloc(bytes, alignment);
-#else
+#else // ifdef _WIN32
     return aligned_alloc(alignment, bytes);
-#endif
-}
-static inline void chimera_aligned_free(void *ptr)
+#endif // ifdef _WIN32
+} // chimera_aligned_alloc
+static inline void
+chimera_aligned_free(void *ptr)
 {
 #ifdef _WIN32
     _aligned_free(ptr);
-#else
+#else // ifdef _WIN32
     free(ptr);
-#endif
-}
+#endif // ifdef _WIN32
+} // chimera_aligned_free
 
 #ifdef _WIN32
 typedef int64_t chimera_off_t;
 typedef uint64_t chimera_dev_t;
-#else
+#else // ifdef _WIN32
 typedef off_t chimera_off_t;
 typedef dev_t chimera_dev_t;
-#endif
+#endif // ifdef _WIN32

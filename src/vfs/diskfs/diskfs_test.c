@@ -14,9 +14,9 @@
 #include <stdio.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <time.h>
 
@@ -314,9 +314,9 @@ diskfs_test_inode(
     _setmode(fd, _O_BINARY);
     rc = _lseeki64(fd, (int64_t) off, SEEK_SET) < 0 ? -1 :
         _read(fd, blk, sizeof(blk));
-#else
+#else  /* ifdef _WIN32 */
     rc = pread(fd, blk, sizeof(blk), (off_t) off);
-#endif
+#endif /* ifdef _WIN32 */
     close(fd);
     if (rc != (ssize_t) sizeof(blk)) {
         return -1;
@@ -381,9 +381,9 @@ diskfs_test_await_reclaim(
      * not mistaken for completion. */
     while (diskfs_test_now_ms() < deadline) {
         uint64_t applied = chimera_atomic_load_n(&shared->intent_log.applied_seq,
-                                           CHIMERA_MEMORY_ACQUIRE);
+                                                 CHIMERA_MEMORY_ACQUIRE);
         uint64_t durable = chimera_atomic_load_n(&shared->intent_log.durable_seq,
-                                           CHIMERA_MEMORY_ACQUIRE);
+                                                 CHIMERA_MEMORY_ACQUIRE);
 
         if (diskfs_test_reclaim_idle(shared) && applied == durable) {
             if (++stable >= 3) {

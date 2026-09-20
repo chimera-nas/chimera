@@ -567,7 +567,7 @@ diskfs_gen_extend(struct diskfs_thread *thread)
     int                       expect = 0;
 
     if (!chimera_atomic_compare_exchange_n(&shared->gen_extend_inflight, &expect, 1,
-                                     0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
+                                           0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
         return;     /* one extension in flight at a time */
     }
 
@@ -606,7 +606,7 @@ diskfs_gen_alloc(
 {
     struct diskfs_shared *shared = thread->shared;
     uint64_t              g      = chimera_atomic_fetch_add(&shared->gen_next, 1,
-                                                      CHIMERA_MEMORY_RELAXED);
+                                                            CHIMERA_MEMORY_RELAXED);
     uint64_t              floor;
 
     chimera_diskfs_abort_if(g >= UINT32_MAX,

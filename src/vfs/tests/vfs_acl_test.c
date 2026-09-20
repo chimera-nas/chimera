@@ -8,7 +8,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #undef NDEBUG
 #include <assert.h>
 

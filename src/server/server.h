@@ -7,13 +7,13 @@
 #include <stdlib.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include "common/thread.h"
 #ifndef _WIN32
 #include <sys/resource.h>
-#endif
+#endif // ifndef _WIN32
 
 #include "evpl/evpl.h"
 #include "server_internal.h"

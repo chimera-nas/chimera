@@ -19,15 +19,15 @@ static char *filename;
 
 static void
 check_around(
-    int   fd,
+    int           fd,
     chimera_off_t where)
 {
-    char        buf;
-    int         i;
-    chimera_off_t       start    = where - 2;
-    int         numbytes = 5;
+    char                 buf;
+    int                  i;
+    chimera_off_t        start    = where - 2;
+    int                  numbytes = 5;
     chimera_posix_stat_t statbuf;
-    char        basechar = '0';
+    char                 basechar = '0';
 
     if (chimera_posix_lseek(fd, start, SEEK_SET) < 0) {
         fprintf(stderr, "can't do initial seek to 0x%x%08x: %s\n",

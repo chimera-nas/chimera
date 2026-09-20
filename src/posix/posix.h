@@ -10,22 +10,22 @@
 #include <sys/types.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #include "posix/posix_types.h"
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/uio.h>
-#endif
+#endif // ifdef _WIN32
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 
 #include "common/platform.h"
 #include "posix_types.h"
@@ -144,9 +144,9 @@ chimera_posix_mkdir(
 
 int
 chimera_posix_mknod(
-    const char *path,
-    mode_t      mode,
-    chimera_dev_t       dev);
+    const char   *path,
+    mode_t        mode,
+    chimera_dev_t dev);
 
 int
 chimera_posix_symlink(
@@ -175,24 +175,24 @@ chimera_posix_readlink(
 
 int
 chimera_posix_stat(
-    const char  *path,
+    const char           *path,
     chimera_posix_stat_t *st);
 
 int
 chimera_posix_lstat(
-    const char  *path,
+    const char           *path,
     chimera_posix_stat_t *st);
 
 int
 chimera_posix_fstat(
-    int          fd,
+    int                   fd,
     chimera_posix_stat_t *st);
 
 chimera_off_t
 chimera_posix_lseek(
-    int   fd,
+    int           fd,
     chimera_off_t offset,
-    int   whence);
+    int           whence);
 
 int64_t
 chimera_posix_lseek64(
@@ -202,10 +202,10 @@ chimera_posix_lseek64(
 
 ssize_t
 chimera_posix_pread(
-    int    fd,
-    void  *buf,
-    size_t count,
-    chimera_off_t  offset);
+    int           fd,
+    void         *buf,
+    size_t        count,
+    chimera_off_t offset);
 
 ssize_t
 chimera_posix_pread64(
@@ -231,14 +231,14 @@ chimera_posix_pread_into(
     struct evpl_iovec *iov,
     int                niov,
     size_t             count,
-    chimera_off_t              offset);
+    chimera_off_t      offset);
 
 ssize_t
 chimera_posix_pwrite(
-    int         fd,
-    const void *buf,
-    size_t      count,
-    chimera_off_t       offset);
+    int           fd,
+    const void   *buf,
+    size_t        count,
+    chimera_off_t offset);
 
 ssize_t
 chimera_posix_pwrite64(
@@ -264,7 +264,7 @@ chimera_posix_preadv(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset);
+    chimera_off_t       offset);
 
 ssize_t
 chimera_posix_preadv64(
@@ -278,7 +278,7 @@ chimera_posix_pwritev(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset);
+    chimera_off_t       offset);
 
 ssize_t
 chimera_posix_pwritev64(
@@ -292,7 +292,7 @@ chimera_posix_preadv2(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset,
+    chimera_off_t       offset,
     int                 flags);
 
 ssize_t
@@ -308,7 +308,7 @@ chimera_posix_pwritev2(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset,
+    chimera_off_t       offset,
     int                 flags);
 
 ssize_t
@@ -410,7 +410,7 @@ chimera_posix_fseek(
 int
 chimera_posix_fseeko(
     CHIMERA_FILE *stream,
-    chimera_off_t         offset,
+    chimera_off_t offset,
     int           whence);
 
 long
@@ -535,10 +535,10 @@ chimera_posix_readlinkat(
 
 int
 chimera_posix_fstatat(
-    int          dirfd,
-    const char  *pathname,
+    int                   dirfd,
+    const char           *pathname,
     chimera_posix_stat_t *statbuf,
-    int          flags);
+    int                   flags);
 
 int
 chimera_posix_faccessat(
@@ -636,26 +636,26 @@ chimera_posix_fpathconf(
 // Truncate functions
 int
 chimera_posix_truncate(
-    const char *path,
-    chimera_off_t       length);
+    const char   *path,
+    chimera_off_t length);
 
 int
 chimera_posix_ftruncate(
-    int   fd,
+    int           fd,
     chimera_off_t length);
 
 // Preallocate space for a file (posix_fallocate(3))
 int
 chimera_posix_fallocate(
-    int   fd,
+    int           fd,
     chimera_off_t offset,
     chimera_off_t len);
 
 // fallocate(2) with a mode (0 = allocate; PUNCH_HOLE|KEEP_SIZE = deallocate)
 int
 chimera_posix_fallocate_mode(
-    int   fd,
-    int   mode,
+    int           fd,
+    int           mode,
     chimera_off_t offset,
     chimera_off_t len);
 
@@ -668,8 +668,8 @@ chimera_posix_fcntl(
 
 int
 chimera_posix_lockf(
-    int   fd,
-    int   cmd,
+    int           fd,
+    int           cmd,
     chimera_off_t len);
 
 // Server-side byte-range copy. Mirrors Linux copy_file_range(2).
@@ -678,22 +678,22 @@ chimera_posix_lockf(
 // bytes copied. `flags` must be 0.
 ssize_t
 chimera_posix_copy_file_range(
-    int          fd_in,
-    chimera_off_t       *off_in,
-    int          fd_out,
-    chimera_off_t       *off_out,
-    size_t       len,
-    unsigned int flags);
+    int            fd_in,
+    chimera_off_t *off_in,
+    int            fd_out,
+    chimera_off_t *off_out,
+    size_t         len,
+    unsigned int   flags);
 
 // Reflink/COW clone of a byte range. Backend must advertise
 // CHIMERA_VFS_CAP_CLONE_RANGE; otherwise returns -1 with errno=EOPNOTSUPP.
 int
 chimera_posix_clone_file_range(
-    int    dst_fd,
-    chimera_off_t  dst_offset,
-    int    src_fd,
-    chimera_off_t  src_offset,
-    size_t len);
+    int           dst_fd,
+    chimera_off_t dst_offset,
+    int           src_fd,
+    chimera_off_t src_offset,
+    size_t        len);
 
 // NFSv4.2 WRITE_SAME: write block_count blocks of block_size bytes from offset,
 // each zero-filled with `pattern` placed at reloff_pattern. Backend must
@@ -701,13 +701,13 @@ chimera_posix_clone_file_range(
 // Returns the number of bytes written (block_size * block_count) or -1.
 ssize_t
 chimera_posix_write_same(
-    int         fd,
-    chimera_off_t       offset,
-    uint32_t    block_size,
-    uint64_t    block_count,
-    const void *pattern,
-    uint32_t    pattern_len,
-    uint32_t    reloff_pattern);
+    int           fd,
+    chimera_off_t offset,
+    uint32_t      block_size,
+    uint64_t      block_count,
+    const void   *pattern,
+    uint32_t      pattern_len,
+    uint32_t      reloff_pattern);
 
 // Sync functions
 int

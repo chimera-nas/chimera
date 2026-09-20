@@ -60,7 +60,7 @@ struct chimera_vfs_thread;
 struct chimera_server_nfs_thread;
 
 struct nfs_recovery {
-    evpl_mutex_t             lock;
+    evpl_mutex_t                lock;
     struct nfs_recovery_record *to_reclaim;       /* uthash by owner_string */
     uint32_t                    pending_reclaim;  /* count of !reclaimed records */
     uint64_t                    current_boot_id;

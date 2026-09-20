@@ -69,7 +69,7 @@ main(
     char **argv)
 {
     struct posix_test_env env;
-    chimera_posix_stat_t           st, st_share;
+    chimera_posix_stat_t  st, st_share;
     CHIMERA_DIR          *dir;
     struct dirent        *entry;
     const char           *root_data = "root-export";

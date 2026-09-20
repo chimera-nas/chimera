@@ -97,7 +97,7 @@ static int
 auto_lookup(struct info *ip)
 {
     chimera_posix_stat_t statb;
-    int         retval;
+    int                  retval;
 
     retval = chimera_posix_stat(get_name(ip), &statb);
     if (retval >= 0) {
@@ -139,8 +139,8 @@ static int
 auto_create(struct info *ip)
 {
     chimera_posix_stat_t statb;
-    int         retval;
-    int         fd;
+    int                  retval;
+    int                  fd;
 
     fd = chimera_posix_open(get_name(ip), O_RDWR | O_EXCL | O_CREAT, 0666);
     if (fd >= 0) {

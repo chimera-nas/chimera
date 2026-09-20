@@ -410,7 +410,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
 #ifdef CHIMERA_HAVE_GSSAPI
         session_handle->ctx = GSS_C_NO_CONTEXT;
-#endif
+#endif /* ifdef CHIMERA_HAVE_GSSAPI */
 
         request->compound->conn->last_session_handle = session_handle;
 

@@ -8,7 +8,7 @@
 #ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
-#endif
+#endif /* ifndef _WIN32 */
 
 #include "vfs_idmap.h"
 #include "common/macros.h"
@@ -150,9 +150,9 @@ chimera_idmap_principal_to_who(
         }
     }
 
-#else
+#else  /* ifndef _WIN32 */
     (void) domain;
-#endif
+#endif /* ifndef _WIN32 */
 
     len = snprintf(buf, buflen, "%u", p->id);
     if (len < 0 || len + 1 > buflen) {
@@ -187,9 +187,10 @@ chimera_idmap_who_to_principal(
     struct chimera_principal *p)
 {
     int         special;
+
 #ifndef _WIN32
     const char *at;
-#endif
+#endif /* ifndef _WIN32 */
 
     if (len <= 0) {
         return -1;
@@ -266,9 +267,9 @@ chimera_idmap_who_to_principal(
         }
     }
 
-#else
+#else  /* ifndef _WIN32 */
     (void) domain;
-#endif
+#endif /* ifndef _WIN32 */
 
     return -1;
 } /* chimera_idmap_who_to_principal */

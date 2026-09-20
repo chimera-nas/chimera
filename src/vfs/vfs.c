@@ -11,18 +11,18 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #ifndef _WIN32
 #include <dlfcn.h>
-#endif
+#endif /* ifndef _WIN32 */
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <utlist.h>
 
 #include "common/platform.h"
@@ -384,6 +384,7 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
 {
     char  hostname[64];
     char  machine_id[64];
+
 #ifdef _WIN32
     DWORD hostname_size = sizeof(hostname);
     if (!GetComputerNameA(hostname, &hostname_size)) {
@@ -391,7 +392,7 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
     }
     chimera_vfs_abort_if(chimera_windows_machine_identity(machine_id, sizeof(machine_id)),
                          "Could not determine the Windows machine identity");
-#else
+#else  /* ifdef _WIN32 */
     int   len;
     FILE *fp;
 
@@ -447,7 +448,7 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
         snprintf(machine_id, sizeof(machine_id), "%08lx", gethostid());
     }
 
-#endif
+#endif /* ifdef _WIN32 */
 
     /* Synthesize machine name: hostname chimera version machine-id */
     vfs->machine_name_len = snprintf(vfs->machine_name,
@@ -511,8 +512,8 @@ static void
 chimera_vfs_create_call_rcu_workers(int nworkers)
 {
     (void) nworkers; /* The native backend has one process-wide reclaim worker. */
-}
-#else
+} /* chimera_vfs_create_call_rcu_workers */
+#else  /* if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU) */
 static void
 chimera_vfs_create_call_rcu_workers(int nworkers)
 {
@@ -557,11 +558,11 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 
     free(workers);
 } /* chimera_vfs_create_call_rcu_workers */
-#endif
+#endif /* if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU) */
 
 
 /* Native builds resolve built-ins explicitly so archive members are retained.
- * External modules require a shared Chimera SDK and remain a Unix facility. */
+* External modules require a shared Chimera SDK and remain a Unix facility. */
 static struct chimera_vfs_module *
 chimera_vfs_find_module(const char *symbol)
 {
@@ -570,15 +571,15 @@ chimera_vfs_find_module(const char *symbol)
     extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
 #ifdef CHIMERA_HAVE_SQLITE_VFS
     extern struct chimera_vfs_module vfs_sqlite;
-#endif
-    struct chimera_vfs_module *builtins[] = {
-        &vfs_root, &vfs_memfs, &vfs_memkv, &vfs_nfs, &vfs_smb, &vfs_diskfs,
+#endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
+    struct chimera_vfs_module       *builtins[] = {
+        &vfs_root,   &vfs_memfs, &vfs_memkv, &vfs_nfs, &vfs_smb, &vfs_diskfs,
 #ifdef HAVE_CAIRN
         &vfs_cairn,
-#endif
+#endif /* ifdef HAVE_CAIRN */
 #ifdef CHIMERA_HAVE_SQLITE_VFS
         &vfs_sqlite,
-#endif
+#endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
     };
     for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
         if (!strncmp(symbol, "vfs_", 4) && !strcmp(symbol + 4, builtins[i]->name)) {
@@ -586,10 +587,10 @@ chimera_vfs_find_module(const char *symbol)
         }
     }
     return NULL;
-#else
+#else  /* ifdef _WIN32 */
     return dlsym(RTLD_DEFAULT, symbol);
-#endif
-}
+#endif /* ifdef _WIN32 */
+} /* chimera_vfs_find_module */
 
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
@@ -607,9 +608,10 @@ chimera_vfs_init(
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
     char                       modsym[80];
+
 #ifndef _WIN32
     void                      *handle;
-#endif
+#endif /* ifndef _WIN32 */
     const char                *effective_kv_module;
 
     /* Bring up the process-wide TSC clock before any cache/timestamp use. */
@@ -697,7 +699,7 @@ chimera_vfs_init(
 #ifdef _WIN32
                 chimera_vfs_abort_if(1, "External VFS modules require a shared-library build: %s",
                                      module_cfgs[i].module_path);
-#else
+#else  /* ifdef _WIN32 */
                 // Attempt to load the module shared object
                 handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
                 if (!handle) {
@@ -707,7 +709,7 @@ chimera_vfs_init(
                                          dlerror());
                 }
                 chimera_vfs_info("Module %s loaded from %s", module_cfgs[i].module_name, module_cfgs[i].module_path);
-#endif
+#endif /* ifdef _WIN32 */
             }
         }
 
@@ -861,12 +863,12 @@ static void
 chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 {
     rcu_barrier();
-}
-#else
+} /* chimera_vfs_free_all_cpu_call_rcu_data_parallel */
+#else  /* if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU) */
 #define CHIMERA_RCU_TEARDOWN_MAX_THREADS 64
 
 struct chimera_rcu_teardown_ctx {
-    evpl_native_thread_t              thread;
+    evpl_native_thread_t   thread;
     struct call_rcu_data **crdps;
     int                    count;
     int                    started;
@@ -992,7 +994,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
     free(ctx);
     free(crdps);
 } /* chimera_vfs_free_all_cpu_call_rcu_data_parallel */
-#endif
+#endif /* if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU) */
 
 
 SYMBOL_EXPORT void

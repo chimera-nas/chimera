@@ -5,16 +5,23 @@
 #include <evpl/evpl_platform.h>
 #include <stdio.h>
 
-static inline int chimera_backtrace(void **frames, int count)
+static inline int
+chimera_backtrace(
+    void **frames,
+    int    count)
 {
     return CaptureStackBackTrace(0, (DWORD) count, frames, NULL);
-}
+} // chimera_backtrace
 /* Address strings remain useful with the matching PDB and crash dump. */
-static inline char **chimera_backtrace_symbols(void *const *frames, int count)
+static inline char **
+chimera_backtrace_symbols(
+    void *const *frames,
+    int          count)
 {
     size_t size = sizeof(char *) + 32;
     char **symbols;
-    char *text;
+    char  *text;
+
     if (count < 0 || (size_t) count > SIZE_MAX / size) {
         return NULL;
     }
@@ -28,9 +35,9 @@ static inline char **chimera_backtrace_symbols(void *const *frames, int count)
         snprintf(symbols[i], 32, "%p", frames[i]);
     }
     return symbols;
-}
-#else
+} // chimera_backtrace_symbols
+#else // ifdef _WIN32
 #include <execinfo.h>
-#define chimera_backtrace backtrace
+#define chimera_backtrace         backtrace
 #define chimera_backtrace_symbols backtrace_symbols
-#endif
+#endif // ifdef _WIN32

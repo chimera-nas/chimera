@@ -35,12 +35,12 @@ chimera_posix_copy_file_range_exec(
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_copy_file_range(
-    int          fd_in,
-    chimera_off_t       *off_in,
-    int          fd_out,
-    chimera_off_t       *off_out,
-    size_t       len,
-    unsigned int flags)
+    int            fd_in,
+    chimera_off_t *off_in,
+    int            fd_out,
+    chimera_off_t *off_out,
+    size_t         len,
+    unsigned int   flags)
 {
     struct chimera_posix_client          *posix  = chimera_posix_get_global();
     struct chimera_posix_worker          *worker = chimera_posix_choose_worker(posix);
@@ -48,7 +48,7 @@ chimera_posix_copy_file_range(
     struct chimera_posix_fd_entry        *out_entry;
     struct chimera_client_request         req;
     struct chimera_posix_copy_range_state st;
-    chimera_off_t                                 src_off, dst_off;
+    chimera_off_t                         src_off, dst_off;
 
     if (flags != 0) {
         errno = EINVAL;

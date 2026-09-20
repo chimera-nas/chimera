@@ -619,8 +619,8 @@ chimera_vfs_io_claim_acquire(
                                          request->fh_hash, true);
             if (file &&
                 !chimera_atomic_compare_exchange_n(&handle->file_state, &expected,
-                                             file, false, CHIMERA_MEMORY_ACQ_REL,
-                                             CHIMERA_MEMORY_ACQUIRE)) {
+                                                   file, false, CHIMERA_MEMORY_ACQ_REL,
+                                                   CHIMERA_MEMORY_ACQUIRE)) {
                 chimera_vfs_state_put(state, file);
                 file = expected;
             }

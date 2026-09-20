@@ -6,20 +6,20 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/thread.h"
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/socket.h>
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <netinet/in.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "common/socket.h"
 

@@ -24,7 +24,7 @@ struct chimera_fuse_node {
 };
 
 struct chimera_fuse_node_table {
-    evpl_mutex_t           lock;
+    evpl_mutex_t              lock;
     struct chimera_fuse_node *by_id;
     struct chimera_fuse_node *by_fh;
     uint64_t                  next_nodeid;

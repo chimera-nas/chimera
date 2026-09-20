@@ -60,7 +60,7 @@ struct nlm_granter {
 
     /* Intake queue: producers (core threads) append under `lock` and ring the
      * doorbell; the granter thread drains it on its own evpl. */
-    evpl_mutex_t                   lock;
+    evpl_mutex_t                      lock;
     struct nlm_grant_intake          *intake_head;   /* singly-linked via ->next */
     struct nlm_grant_intake          *intake_tail;
     struct evpl_doorbell              doorbell;

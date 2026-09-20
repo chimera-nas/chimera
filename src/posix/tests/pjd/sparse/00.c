@@ -29,7 +29,7 @@
 * on success or -1.  (A single 1 MiB write exceeds the NFS transport limit.) */
 static int
 fill_block(
-    int   fd,
+    int           fd,
     chimera_off_t off)
 {
     char  *c = malloc(CHUNK);
@@ -65,9 +65,9 @@ all_zero(
  * all zero. */
 static int
 region_is_zero(
-    int    fd,
-    chimera_off_t  off,
-    size_t n)
+    int           fd,
+    chimera_off_t off,
+    size_t        n)
 {
     char  *c = malloc(CHUNK);
     size_t done;

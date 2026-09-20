@@ -30,13 +30,13 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <strings.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/file.h>
 #include <sys/mman.h>
 #ifdef __linux__
@@ -44,9 +44,9 @@
 #endif /* ifdef __linux__ */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <stdbool.h>
 #ifdef HAVE_ERR_H
 #include <err.h>
@@ -206,8 +206,8 @@ int                           dirpath = 0;                /* -P flag */
 int                           fd;                         /* fd for our test file */
 
 blksize_t                     block_size = 0;
-chimera_off_t                         file_size  = 0;
-chimera_off_t                         biggest    = 0;
+chimera_off_t                 file_size  = 0;
+chimera_off_t                 biggest    = 0;
 long long                     testcalls  = 0;             /* calls to function "test" */
 
 long long                     simulatedopcount     = 0; /* -b flag */
@@ -753,12 +753,12 @@ logdump(void)
 
 void
 save_buffer(
-    char *buffer,
+    char         *buffer,
     chimera_off_t bufferlength,
-    int   local_fd)
+    int           local_fd)
 {
-    chimera_off_t   ret;
-    ssize_t byteswritten;
+    chimera_off_t ret;
+    ssize_t       byteswritten;
 
     /* Note: this function operates on local file descriptors (fsxgoodfd),
      * NOT on Chimera file descriptors. Use OS calls. */
@@ -913,7 +913,7 @@ void
 check_size(void)
 {
     chimera_posix_stat_t statbuf;
-    chimera_off_t       size_by_seek;
+    chimera_off_t        size_by_seek;
 
     if (chimera_posix_fstat(fd, &statbuf)) {
         prterr("check_size: fstat");
@@ -934,7 +934,7 @@ void
 check_trunc_hack(void)
 {
     chimera_posix_stat_t statbuf;
-    chimera_off_t       offset = file_size + (chimera_off_t) 100000;
+    chimera_off_t        offset = file_size + (chimera_off_t) 100000;
 
     if (chimera_posix_ftruncate(fd, file_size)) {
         goto ftruncate_err;
@@ -1419,10 +1419,10 @@ domapwrite(
     unsigned offset,
     unsigned size)
 {
-    unsigned pg_offset;
-    unsigned map_size;
-    chimera_off_t    cur_filesize;
-    char    *p;
+    unsigned      pg_offset;
+    unsigned      map_size;
+    chimera_off_t cur_filesize;
+    char         *p;
 
     offset -= offset % writebdy;
     if (size == 0) {
@@ -2005,7 +2005,7 @@ int
 test_dedupe_range(void)
 {
     struct file_dedupe_range *fdr;
-    chimera_off_t                     new_len;
+    chimera_off_t             new_len;
     int                       error;
     int                       ret = 1;
 
@@ -3569,12 +3569,12 @@ main(
     int    argc,
     char **argv)
 {
-    int         i, style, ch;
-    char       *endp, *tmp;
-    char        logfile[PATH_MAX];
+    int                  i, style, ch;
+    char                *endp, *tmp;
+    char                 logfile[PATH_MAX];
     chimera_posix_stat_t statbuf;
-    int         o_flags = O_RDWR | O_CREAT | O_TRUNC;
-    long long   duration;
+    int                  o_flags = O_RDWR | O_CREAT | O_TRUNC;
+    long long            duration;
 
     logfile[0] = 0;
     dname[0]   = 0;
@@ -4404,8 +4404,8 @@ main(
             exit(98);
         }
     } else {
-        ssize_t ret, len = file_size;
-        chimera_off_t   off = 0;
+        ssize_t       ret, len = file_size;
+        chimera_off_t off = 0;
 
         while (len > 0) {
             ret = chimera_posix_read(fd, good_buf + off, len);

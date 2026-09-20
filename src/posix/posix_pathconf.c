@@ -5,9 +5,9 @@
 #include <errno.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <limits.h>
 
 #include "posix_internal.h"

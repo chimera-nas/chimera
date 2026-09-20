@@ -7,18 +7,18 @@
 #ifdef _WIN32
 #include <evpl/evpl_platform.h>
 #include <limits.h>
-#else
+#else // ifdef _WIN32
 #include <iconv.h>
-#endif
+#endif // ifdef _WIN32
 #include <stdint.h>
 
 struct chimera_smb_iconv_ctx {
 #ifdef _WIN32
-    int unused;
-#else
+    int     unused;
+#else // ifdef _WIN32
     iconv_t utf16le_to_utf8;
     iconv_t utf8_to_utf16le;
-#endif
+#endif // ifdef _WIN32
 };
 
 static void
@@ -26,10 +26,10 @@ chimera_smb_iconv_init(struct chimera_smb_iconv_ctx *ctx)
 {
 #ifdef _WIN32
     ctx->unused = 0;
-#else
+#else // ifdef _WIN32
     ctx->utf16le_to_utf8 = iconv_open("UTF-8", "UTF-16LE");
     ctx->utf8_to_utf16le = iconv_open("UTF-16LE", "UTF-8");
-#endif
+#endif // ifdef _WIN32
 } /* chimera_smb_iconv_init */
 
 static void
@@ -37,10 +37,10 @@ chimera_smb_iconv_destroy(struct chimera_smb_iconv_ctx *ctx)
 {
 #ifdef _WIN32
     (void) ctx;
-#else
+#else // ifdef _WIN32
     iconv_close(ctx->utf16le_to_utf8);
     iconv_close(ctx->utf8_to_utf16le);
-#endif
+#endif // ifdef _WIN32
 } /* chimera_smb_iconv_destroy */
 
 static inline int
@@ -101,7 +101,7 @@ chimera_smb_utf16le_to_utf8(
     }
     dst[count] = 0;
     return count;
-#else
+#else // ifdef _WIN32
     int    rc;
     size_t srcleft = srclen, dstleft;
     char  *dstleftp = dst;
@@ -111,7 +111,7 @@ chimera_smb_utf16le_to_utf8(
         return -1;
     }
     dstleft = dstmaxlen - 1;
-    rc = iconv(ctx->utf16le_to_utf8, &srcleftp, &srcleft, &dstleftp, &dstleft);
+    rc      = iconv(ctx->utf16le_to_utf8, &srcleftp, &srcleft, &dstleftp, &dstleft);
 
     if (rc != 0) {
         return -1;
@@ -120,7 +120,7 @@ chimera_smb_utf16le_to_utf8(
     *dstleftp = '\0';
 
     return dstleftp - dst;
-#endif
+#endif // ifdef _WIN32
 } /* smb_utf16le_to_utf8 */
 
 static inline int
@@ -146,7 +146,7 @@ chimera_smb_utf8_to_utf16le(
     count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, src, (int) srclen,
                                 (WCHAR *) dst, (int) (dstmaxlen / 2));
     return count ? count * 2 : -1;
-#else
+#else // ifdef _WIN32
     int    rc;
     size_t dstlen, srcleft = srclen, dstleft = dstmaxlen;
     char  *dstleftp = (char *) dst;
@@ -161,5 +161,5 @@ chimera_smb_utf8_to_utf16le(
     dstlen = dstmaxlen - dstleft;
 
     return dstlen;
-#endif
+#endif // ifdef _WIN32
 } /* chimera_smb_utf8_to_utf16le */

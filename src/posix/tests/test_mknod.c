@@ -5,7 +5,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include "posix_test_common.h"
 
 int
@@ -15,7 +15,7 @@ main(
 {
     struct posix_test_env env;
     int                   rc;
-    chimera_posix_stat_t           st;
+    chimera_posix_stat_t  st;
 
     posix_test_init(&env, argv, argc);
 

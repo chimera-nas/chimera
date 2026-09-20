@@ -39,7 +39,7 @@ struct chimera_vfs_rpl_cache_entry {
 struct chimera_vfs_rpl_cache_shard {
     struct chimera_vfs_rpl_cache_entry **fwd_entries; /* forward index slots */
     struct chimera_vfs_rpl_cache_entry **rev_entries; /* reverse index slots */
-    evpl_mutex_t                      entry_lock;
+    evpl_mutex_t                         entry_lock;
 };
 
 struct chimera_vfs_rpl_cache {

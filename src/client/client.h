@@ -8,12 +8,12 @@
 #include <sys/types.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/uio.h>
-#endif
+#endif // ifdef _WIN32
 
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -192,7 +192,7 @@ chimera_mknod(
     const char                   *path,
     int                           path_len,
     mode_t                        mode,
-    chimera_dev_t                         dev,
+    chimera_dev_t                 dev,
     chimera_mknod_callback_t      callback,
     void                         *private_data);
 
@@ -404,9 +404,9 @@ chimera_rename(
 
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/time.h>
-#endif
+#endif // ifdef _WIN32
 #include <stdint.h>
 
 struct chimera_stat {

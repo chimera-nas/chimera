@@ -51,10 +51,10 @@ chimera_posix_pread_exec(
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_pread(
-    int    fd,
-    void  *buf,
-    size_t count,
-    chimera_off_t  offset)
+    int           fd,
+    void         *buf,
+    size_t        count,
+    chimera_off_t offset)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);

@@ -14,10 +14,10 @@
 #include "common/getopt.h"
 #include "cthon_common.h"
 
-static int   Tflag = 0;
+static int           Tflag = 0;
 
 static chimera_off_t file_size   = 30 * 1024 * 1024; // 30MB default
-static int   buffer_size = 8192;
+static int           buffer_size = 8192;
 
 static unsigned char
 testval(chimera_off_t offset)
@@ -72,7 +72,7 @@ main(
     long                  numbufs;
     int                   i;
     struct timeval        time = { 0, 0 };
-    chimera_off_t                 size;
+    chimera_off_t         size;
 
     cthon_Myname = "cthon_special_bigfile";
 

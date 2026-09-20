@@ -8,9 +8,9 @@
 #include "common/thread.h"
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/uio.h>
-#endif
+#endif // ifdef _WIN32
 #include <utlist.h>
 
 #include "client.h"

@@ -822,8 +822,8 @@ redo_fix_owner(
     int         follow)
 {
     chimera_posix_stat_t st;
-    json_t     *node;
-    int64_t     ino, uid, gid;
+    json_t              *node;
+    int64_t              ino, uid, gid;
 
     if (!g_cur_fs) {
         return;
@@ -1410,7 +1410,7 @@ check_time(
 /* Compare a live chimera_posix_stat_t against the model's SStatR payload (res_v). */
 static void
 check_statres(
-    json_t            *rv,     /* model result value */
+    json_t                     *rv, /* model result value */
     const chimera_posix_stat_t *st)
 {
     const char   *ftag    = tf_tag(json_object_get(rv, "ftype"));
@@ -1753,10 +1753,10 @@ op_lseek(
     json_t *rv,
     json_t *res_v)
 {
-    const char *wh     = tf_tag(json_object_get(rv, "wh"));
-    int         whence = SEEK_SET;
-    chimera_off_t       rc;
-    int         e;
+    const char   *wh     = tf_tag(json_object_get(rv, "wh"));
+    int           whence = SEEK_SET;
+    chimera_off_t rc;
+    int           e;
 
     if (strcmp(wh, "WCur") == 0) {
         whence = SEEK_CUR;
@@ -1858,7 +1858,7 @@ op_read_family(
 {
     int64_t        fd  = rfd(pid, tf_field(rv, "fd"));
     size_t         len = (size_t) tf_field(rv, "len");
-    chimera_off_t          off = (chimera_off_t) tf_field(rv, "off");
+    chimera_off_t  off = (chimera_off_t) tf_field(rv, "off");
     unsigned char *buf = malloc(len ? len : 1);
     ssize_t        n;
     int            e;
@@ -1913,7 +1913,7 @@ op_write_family(
     int64_t        off  = tf_field(res_v, "off");
     int64_t        len  = tf_field(rv, "len");
     int64_t        pat  = tf_field(rv, "pat");
-    chimera_off_t          poff = (chimera_off_t) tf_field(rv, "off");
+    chimera_off_t  poff = (chimera_off_t) tf_field(rv, "off");
     unsigned char *buf  = malloc(len ? len : 1);
     ssize_t        n;
     int64_t        i;
@@ -2012,11 +2012,11 @@ op_stat(
     json_t *rv,
     json_t *res_v)
 {
-    int64_t     dfd    = tf_field(rv, "dfd");
-    int         follow = tf_bool(rv, "follow");
+    int64_t              dfd    = tf_field(rv, "dfd");
+    int                  follow = tf_bool(rv, "follow");
     chimera_posix_stat_t st;
-    char        path[8192];
-    int         rc, e;
+    char                 path[8192];
+    int                  rc, e;
 
     memset(&st, 0, sizeof(st));
     apply_cred(pid);
@@ -2041,7 +2041,7 @@ op_fstat(
     json_t *res_v)
 {
     chimera_posix_stat_t st;
-    int         rc, e;
+    int                  rc, e;
 
     memset(&st, 0, sizeof(st));
     apply_cred(pid);
@@ -2129,11 +2129,11 @@ op_mknod(
     json_t *rv,
     json_t *res_v)
 {
-    const char *ft   = ftype_of(tf_tag(json_object_get(rv, "ft")));
-    mode_t      mode = (mode_t) tf_field(rv, "mode");
-    chimera_dev_t       dev  = 0;
-    char        path[8192];
-    int         rc, e;
+    const char   *ft   = ftype_of(tf_tag(json_object_get(rv, "ft")));
+    mode_t        mode = (mode_t) tf_field(rv, "mode");
+    chimera_dev_t dev  = 0;
+    char          path[8192];
+    int           rc, e;
 
     if (strcmp(ft, "fifo") == 0) {
         mode |= S_IFIFO;
@@ -2532,10 +2532,10 @@ op_copy_range(
     json_t *rv,
     json_t *res_v)
 {
-    chimera_off_t   off_in  = (chimera_off_t) tf_field(rv, "offIn");
-    chimera_off_t   off_out = (chimera_off_t) tf_field(rv, "offOut");
-    ssize_t n;
-    int     e;
+    chimera_off_t off_in  = (chimera_off_t) tf_field(rv, "offIn");
+    chimera_off_t off_out = (chimera_off_t) tf_field(rv, "offOut");
+    ssize_t       n;
+    int           e;
 
     apply_cred(pid);
     n = chimera_posix_copy_file_range(rfd(pid, tf_field(rv, "fdIn")), &off_in,
@@ -2594,10 +2594,10 @@ op_fallocate(
     json_t *rv,
     json_t *res_v)
 {
-    int64_t mode = tf_field(rv, "mode");
-    chimera_off_t   off  = (chimera_off_t) tf_field(rv, "off");
-    chimera_off_t   len  = (chimera_off_t) tf_field(rv, "len");
-    int     rc, e;
+    int64_t       mode = tf_field(rv, "mode");
+    chimera_off_t off  = (chimera_off_t) tf_field(rv, "off");
+    chimera_off_t len  = (chimera_off_t) tf_field(rv, "len");
+    int           rc, e;
 
     apply_cred(pid);
     rc = mode == 0
@@ -3371,14 +3371,14 @@ final_audit(json_t *fs)
         }
 
         for (i = 0; pairs && i < json_array_size(pairs); i++) {
-            json_t     *pair  = json_array_get(pairs, i);
-            const char *name  = json_string_value(json_array_get(pair, 0));
-            int64_t     cino  = tf_i64(json_array_get(pair, 1));
-            json_t     *cnode = map_get_int(inodes, cino);
-            const char *ftag, *want_ft, *got_ft;
-            char        cpath[4160], full[4260];
+            json_t              *pair  = json_array_get(pairs, i);
+            const char          *name  = json_string_value(json_array_get(pair, 0));
+            int64_t              cino  = tf_i64(json_array_get(pair, 1));
+            json_t              *cnode = map_get_int(inodes, cino);
+            const char          *ftag, *want_ft, *got_ft;
+            char                 cpath[4160], full[4260];
             chimera_posix_stat_t st;
-            int         present = 0, rc;
+            int                  present = 0, rc;
 
             if (!name || !cnode) {
                 continue;
@@ -3651,9 +3651,9 @@ main(
      * here undiagnosable from its artifacts. */
 #ifdef _WIN32
     setvbuf(stdout, NULL, _IONBF, 0);
-#else
+#else  /* ifdef _WIN32 */
     setvbuf(stdout, NULL, _IOLBF, 0);
-#endif
+#endif /* ifdef _WIN32 */
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {

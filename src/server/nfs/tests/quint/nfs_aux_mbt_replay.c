@@ -1743,9 +1743,9 @@ main(
      * here undiagnosable from its artifacts. */
 #ifdef _WIN32
     setvbuf(stdout, NULL, _IONBF, 0);
-#else
+#else  /* ifdef _WIN32 */
     setvbuf(stdout, NULL, _IOLBF, 0);
-#endif
+#endif /* ifdef _WIN32 */
 
     traces = mbt_collect_traces(argc, argv, &ntraces);
 

@@ -39,9 +39,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include "common/rcu.h"
 #include "common/recycle_stack.h"
 
@@ -60,7 +60,7 @@ struct chimera_rcu_node {
     struct chimera_rcu_pool *pool;  /* pool this entry returns to */
     uint32_t                 home_stripe; /* depot stripe of the allocating thread */
     union {
-        chimera_stack_node      wfs;      /* linked on a depot stripe */
+        chimera_stack_node       wfs;     /* linked on a depot stripe */
         struct chimera_rcu_node *mag_next; /* linked on a thread magazine */
     };
 };
@@ -153,8 +153,8 @@ chimera_rcu_pool_alloc(
     if (!mag->head) {
         /* Refill up to the cap from this THREAD's stable stripe under one
          * pop-lock acquisition.  Bounded work -- we never walk the whole stack. */
-        chimera_stack *depot = &pool->depots[stripe].stack;
-        chimera_stack_node  *wn;
+        chimera_stack      *depot = &pool->depots[stripe].stack;
+        chimera_stack_node *wn;
 
         chimera_stack_pop_lock(depot);
         while (mag->count < CHIMERA_RCU_MAGAZINE_CAP) {
@@ -207,7 +207,7 @@ static inline void
 chimera_rcu_pool_destroy(struct chimera_rcu_pool *pool)
 {
     chimera_stack_batch     *batch;
-    chimera_stack_node     *wn, *wn_safe;
+    chimera_stack_node      *wn, *wn_safe;
     struct chimera_rcu_node *node;
     uint32_t                 i;
 

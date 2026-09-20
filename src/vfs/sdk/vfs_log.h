@@ -5,9 +5,9 @@
 #pragma once
 #ifdef _MSC_VER
 #define CHIMERA_VFS_NORETURN __declspec(noreturn)
-#else
+#else // ifdef _MSC_VER
 #define CHIMERA_VFS_NORETURN __attribute__((noreturn))
-#endif
+#endif // ifdef _MSC_VER
 
 /*
  * Logging entry points for VFS modules.
@@ -20,10 +20,10 @@
 
 extern int ChimeraLogLevel;
 
-#define CHIMERA_LOG_FATAL 1
-#define CHIMERA_LOG_ERROR 2
-#define CHIMERA_LOG_INFO  3
-#define CHIMERA_LOG_DEBUG 4
+#define CHIMERA_LOG_FATAL    1
+#define CHIMERA_LOG_ERROR    2
+#define CHIMERA_LOG_INFO     3
+#define CHIMERA_LOG_DEBUG    4
 
 void __chimera_debug(
     const char *mod,

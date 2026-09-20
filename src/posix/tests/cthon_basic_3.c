@@ -34,7 +34,7 @@ main(
     int                   rc;
     int                   count = 250;
     int                   ct;
-    chimera_posix_stat_t           statb;
+    chimera_posix_stat_t  statb;
     struct timeval        time;
     int                   opt;
     const char           *path;

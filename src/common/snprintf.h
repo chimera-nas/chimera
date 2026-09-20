@@ -243,7 +243,8 @@ STBSP__PUBLICDEC void STB_SPRINTF_DECORATE(
 #define stbsp__uint16  unsigned short
 
 #ifndef stbsp__uintptr
-#if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || \
+#if defined(__ppc64__) || defined(__powerpc64__) || defined(__aarch64__) || defined(_M_X64) || defined(_M_ARM64) || \
+    defined(__x86_64__) || \
     defined(__x86_64) || defined(__s390x__)
 #define stbsp__uintptr stbsp__uint64
 #else \
@@ -1567,7 +1568,7 @@ STB_SPRINTF_DECORATE(vsnprintf)(char * buf, int count, char const * fmt, va_list
 
 #ifndef _WIN32
 __attribute__((visibility("default")))
-#endif
+#endif // ifndef _WIN32
 STBSP__PUBLICDEF int
 STB_SPRINTF_DECORATE(snprintf)(char * buf, int count, char const * fmt, ...)
 {

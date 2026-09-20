@@ -500,7 +500,7 @@ diskfs_il_rec_alloc(
     rec = chimera_atomic_load_n(&il->rec_pool, CHIMERA_MEMORY_ACQUIRE);
     while (rec &&
            !chimera_atomic_compare_exchange_n(&il->rec_pool, &rec, rec->recycle_next,
-                                        0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
+                                              0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
     }
     if (!rec) {
         rec = malloc(sizeof(*rec));
@@ -542,7 +542,7 @@ diskfs_il_rec_recycle(
     do {
         rec->recycle_next = head;
     } while (!chimera_atomic_compare_exchange_n(&il->rec_pool, &head, rec,
-                                          0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE));
+                                                0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE));
 } /* diskfs_il_rec_recycle */
 
 
@@ -556,7 +556,7 @@ diskfs_il_ctx_alloc(
     ctx = chimera_atomic_load_n(&il->ctx_pool, CHIMERA_MEMORY_ACQUIRE);
     while (ctx &&
            !chimera_atomic_compare_exchange_n(&il->ctx_pool, &ctx, ctx->free_next,
-                                        0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
+                                              0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
     }
     if (!ctx) {
         ctx = malloc(sizeof(*ctx));
@@ -586,7 +586,7 @@ diskfs_il_ctx_recycle(
     do {
         ctx->free_next = head;
     } while (!chimera_atomic_compare_exchange_n(&il->ctx_pool, &head, ctx,
-                                          0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE));
+                                                0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE));
 } /* diskfs_il_ctx_recycle */
 
 
@@ -1753,7 +1753,7 @@ diskfs_iq_try_submit(
 
         if (diff == 0) {
             if (chimera_atomic_compare_exchange_n(&il->gsq_tail, &pos, pos + 1, 1,
-                                            CHIMERA_MEMORY_RELAXED, CHIMERA_MEMORY_RELAXED)) {
+                                                  CHIMERA_MEMORY_RELAXED, CHIMERA_MEMORY_RELAXED)) {
                 break;                    /* claimed slot `pos` */
             }
             /* CAS reloaded pos; retry */

@@ -12,20 +12,20 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <strings.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <jansson.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>

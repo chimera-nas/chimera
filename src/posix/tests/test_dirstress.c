@@ -543,11 +543,11 @@ remove_entries(
     struct posix_test_env *env,
     int                    nfiles)
 {
-    int         i;
-    char        buf[1024];
-    char        path[2048];
+    int                  i;
+    char                 buf[1024];
+    char                 path[2048];
     chimera_posix_stat_t statb;
-    int         error;
+    int                  error;
 
     for (i = 0; i < nfiles; i++) {
         snprintf(buf, sizeof(buf), "XXXXXXXXXXXX.%d", i);

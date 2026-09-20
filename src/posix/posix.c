@@ -10,7 +10,7 @@
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
 
-struct chimera_posix_client     *chimera_posix_global;
+struct chimera_posix_client                 *chimera_posix_global;
 
 CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_cred;
 CHIMERA_THREAD_LOCAL struct chimera_vfs_cred chimera_posix_tls_cred;

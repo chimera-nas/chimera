@@ -7,9 +7,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "nfs_nsm_state.h"
 #include "nfs_kv_keys.h"

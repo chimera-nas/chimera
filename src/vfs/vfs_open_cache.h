@@ -15,7 +15,7 @@
 #include "prometheus-c.h"
 
 struct vfs_open_cache_shard {
-    evpl_mutex_t                     lock;
+    evpl_mutex_t                        lock;
     struct chimera_vfs_open_handle     *handles;
     struct chimera_vfs_open_handle     *pending_close;
     struct chimera_vfs_open_handle     *free_handles;

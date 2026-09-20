@@ -16,7 +16,7 @@ struct s3_bucket {
 
 struct s3_bucket_map {
     struct s3_bucket *buckets;
-    evpl_rwlock_t  rwlock;
+    evpl_rwlock_t     rwlock;
 };
 
 struct s3_bucket_map *

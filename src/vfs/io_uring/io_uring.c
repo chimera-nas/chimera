@@ -10,29 +10,29 @@
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/sysmacros.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/types.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/statvfs.h>
 #include <sys/eventfd.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/dirent.h"
 #include <fcntl.h>
 #include <errno.h>
@@ -165,14 +165,14 @@ struct chimera_io_uring_shared {
     struct io_uring                     ring;
     int                                 readdir_verifier;
 
-    evpl_mutex_t                     range_lock;
+    evpl_mutex_t                        range_lock;
     struct chimera_io_uring_range_file *range_files;
     struct chimera_io_uring_range      *ranges;
     uint64_t                            range_next_token;
 
     /* Mount roots handed out as mount_private, so destroy can free the ones
      * no UMOUNT reclaimed.  See chimera_linux_mount_root. */
-    evpl_mutex_t                     mount_lock;
+    evpl_mutex_t                        mount_lock;
     struct chimera_linux_mount_root    *mount_roots;
 };
 

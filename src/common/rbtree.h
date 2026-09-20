@@ -294,7 +294,10 @@ rb_tree_destroy(
         } while (0)
 
 static inline void *
-rb_tree_next_element(struct rb_tree *tree, struct rb_node *node, size_t offset)
+rb_tree_next_element(
+    struct rb_tree *tree,
+    struct rb_node *node,
+    size_t          offset)
 {
     if (node->right != &tree->nil) {
         node = node->right;
@@ -304,16 +307,16 @@ rb_tree_next_element(struct rb_tree *tree, struct rb_node *node, size_t offset)
     } else {
         struct rb_node *parent = node->parent;
         while (parent != &tree->nil && node == parent->right) {
-            node = parent;
+            node   = parent;
             parent = parent->parent;
         }
         node = parent;
     }
     return node == &tree->nil ? NULL : (char *) node - offset;
-}
+} // rb_tree_next_element
 
 #define rb_tree_next(tree, element) \
-    ((typeof(element)) rb_tree_next_element((tree), &(element)->node, offsetof(typeof(*(element)), node)))
+        ((typeof(element))rb_tree_next_element((tree), &(element)->node, offsetof(typeof(*(element)), node)))
 
 static void
 rb_transplant(

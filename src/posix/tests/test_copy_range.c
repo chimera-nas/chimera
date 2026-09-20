@@ -116,12 +116,12 @@ test_basic_copy(void)
 static void
 test_copy_with_offsets(void)
 {
-    char    src_buf[PATTERN_LEN];
-    char    verify[PATTERN_LEN];
-    int     src_fd, dst_fd;
-    chimera_off_t   src_off = 1024;
-    chimera_off_t   dst_off = 2048;
-    ssize_t n;
+    char          src_buf[PATTERN_LEN];
+    char          verify[PATTERN_LEN];
+    int           src_fd, dst_fd;
+    chimera_off_t src_off = 1024;
+    chimera_off_t dst_off = 2048;
+    ssize_t       n;
 
     fprintf(stderr, "Testing copy_file_range with explicit offsets...\n");
 

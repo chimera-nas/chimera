@@ -31,7 +31,7 @@ main(
     EXPECT(0, pjd_create(n1, 0644));
     /* Owner can write then read back one byte. */
     {
-        int         fd = pjd_open(n1, O_WRONLY, 0);
+        int                  fd = pjd_open(n1, O_WRONLY, 0);
         PJD_CHECK(fd >= 0, "open n1 O_WRONLY");
         chimera_posix_write(fd, "x", 1);
         chimera_posix_stat_t stbuf;

@@ -35,12 +35,12 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/sysmacros.h>
-#endif
+#endif // ifdef _WIN32
 
 struct chimera_vfs_fsid_ent {
     uint64_t devkey;   /* (major << 32) | minor */
@@ -48,7 +48,7 @@ struct chimera_vfs_fsid_ent {
 };
 
 static struct {
-    evpl_mutex_t              lock;
+    evpl_mutex_t                 lock;
     struct chimera_vfs_fsid_ent *ents;
     int                          num;
     int                          cap;

@@ -376,7 +376,7 @@ chimera_vfs_umount_progress(struct chimera_vfs_request *request)
                 vfs->umount_timeout_us / 1000,
                 (unsigned long) (request->umount.close_fence -
                                  chimera_atomic_load_n(&vfs->close_thread.closes_completed,
-                                                 CHIMERA_MEMORY_ACQUIRE)));
+                                                       CHIMERA_MEMORY_ACQUIRE)));
         } else {
             chimera_vfs_info(
                 "umount %s: %lu handle(s) still open after purging the cache; "
@@ -399,7 +399,7 @@ chimera_vfs_umount_progress(struct chimera_vfs_request *request)
                 request->umount.mount->path, wait->waited_us / 1000,
                 (unsigned long) (request->umount.close_fence -
                                  chimera_atomic_load_n(&vfs->close_thread.closes_completed,
-                                                 CHIMERA_MEMORY_ACQUIRE)));
+                                                       CHIMERA_MEMORY_ACQUIRE)));
         } else {
             chimera_vfs_error(
                 "umount %s: giving up with %lu handle(s) still open after %lu ms "

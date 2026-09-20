@@ -7,32 +7,32 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/thread.h"
 #ifndef _WIN32
 #include <sys/resource.h>
-#endif
+#endif /* ifndef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/socket.h>
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <netdb.h>
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <arpa/inet.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <errno.h>
 
 #include "evpl/evpl.h"
@@ -211,8 +211,8 @@ struct chimera_server {
     struct chimera_rest_server         *rest;
     int                                 num_protocols;
     int                                 threads_online;
-    evpl_mutex_t                     lock;
-    evpl_cond_t                      all_threads_online;
+    evpl_mutex_t                        lock;
+    evpl_cond_t                         all_threads_online;
 };
 
 struct chimera_thread {
@@ -2801,9 +2801,10 @@ chimera_server_init(
 {
     struct chimera_server *server;
     int                    i;
+
 #ifndef _WIN32
     struct rlimit          rl;
-#endif
+#endif /* ifndef _WIN32 */
 
     if (!config) {
         config = chimera_server_config_init();
@@ -2832,7 +2833,7 @@ chimera_server_init(
         chimera_server_error("Failed to get file descriptor limit: %s", strerror(errno));
     }
 
-#endif
+#endif /* ifndef _WIN32 */
 
     server = calloc(1, sizeof(*server));
 

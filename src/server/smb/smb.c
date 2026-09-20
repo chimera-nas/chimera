@@ -10,16 +10,16 @@
 #include <fcntl.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/platform.h"
 #include "common/thread.h"
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <arpa/inet.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include <openssl/hmac.h>
 
@@ -230,7 +230,7 @@ chimera_smb_server_init(
     if (shared->config.auth.kerberos_enabled) {
 #ifndef CHIMERA_HAVE_GSSAPI
         chimera_smb_abort_if(1, "Kerberos requested but this build has no GSSAPI provider");
-#endif
+#endif /* ifndef CHIMERA_HAVE_GSSAPI */
         chimera_smb_info("SMB Auth: Kerberos enabled (realm: %s, keytab: %s)",
                          shared->config.auth.kerberos_realm[0] ? shared->config.auth.kerberos_realm : "(not set)",
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
@@ -315,8 +315,8 @@ chimera_smb_server_init(
 #ifdef _WIN32
         chimera_smb_abort_if(chimera_windows_machine_identity(hostid, sizeof(hostid)),
                              "Could not determine the Windows machine identity");
-#else
-        FILE *fp = fopen("/etc/machine-id", "r");
+#else  /* ifdef _WIN32 */
+        FILE         *fp = fopen("/etc/machine-id", "r");
 
         if (fp) {
             if (!fgets(hostid, sizeof(hostid), fp)) {
@@ -331,7 +331,7 @@ chimera_smb_server_init(
             snprintf(hostid, sizeof(hostid), "chimera-%lx", (unsigned long) gethostid());
         }
 
-#endif
+#endif /* ifdef _WIN32 */
         h                             = XXH3_128bits(hostid, strlen(hostid));
         shared->machine_domain_sub[0] = (uint32_t) h.low64 | 1;   /* never zero */
         shared->machine_domain_sub[1] = (uint32_t) (h.low64 >> 32);
@@ -350,7 +350,7 @@ chimera_smb_server_init(
 
     gss_import_name(&min, &name, GSS_C_NT_HOSTBASED_SERVICE, &shared->svc);
     //gss_acquire_cred(&min, shared->svc, 0, GSS_C_NO_OID_SET, GSS_C_ACCEPT, &shared->srv_cred, NULL, NULL);
-#endif
+#endif /* ifdef CHIMERA_HAVE_GSSAPI */
 
     shared->endpoint = chimera_tcp_flavor_endpoint_create(shared->tcp_flavor, "0.0.0.0",
                                                           shared->config.port);
@@ -427,7 +427,7 @@ chimera_smb_server_destroy(void *data)
     if (shared->srv_cred != GSS_C_NO_CREDENTIAL) {
         gss_release_cred(&min, &shared->srv_cred);
     }
-#endif
+#endif /* ifdef CHIMERA_HAVE_GSSAPI */
 
     evpl_mutex_destroy(&shared->threads_lock);
 
@@ -2778,10 +2778,10 @@ chimera_smb_server_accept(
 
     conn = chimera_smb_conn_alloc(thread);
 
-    conn->thread            = thread;
-    conn->bind              = bind;
-    conn->protocol          = evpl_bind_get_protocol(bind);
-    conn->smbvers           = conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? 2 : 0;
+    conn->thread   = thread;
+    conn->bind     = bind;
+    conn->protocol = evpl_bind_get_protocol(bind);
+    conn->smbvers  = conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? 2 : 0;
 #ifdef CHIMERA_HAVE_GSSAPI
     conn->gss_flags         = 0;
     conn->gss_major         = 0;
@@ -2789,9 +2789,9 @@ chimera_smb_server_accept(
     conn->gss_output.value  = NULL;
     conn->gss_output.length = 0;
     conn->nascent_ctx       = GSS_C_NO_CONTEXT;
-#endif
-    conn->ntlm_output       = NULL;
-    conn->ntlm_output_len   = 0;
+#endif /* ifdef CHIMERA_HAVE_GSSAPI */
+    conn->ntlm_output     = NULL;
+    conn->ntlm_output_len = 0;
     smb_ntlm_ctx_init(&conn->ntlm_ctx);
     memset(&conn->gssapi_ctx, 0, sizeof(conn->gssapi_ctx));
     /* SMB 3.1.1 preauth-integrity hash starts at zero for each connection. */

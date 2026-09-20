@@ -14,9 +14,9 @@
 #include <fcntl.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "common/rbtree.h"
 #include "common/logging.h"
@@ -140,12 +140,12 @@ sm_ag_mc_update(struct sm_ag *ag)
      * lookup re-verifies under ag->lock (sm_ag_can_alloc_locked). */
     if (newmax >= 0) {
         chimera_atomic_fetch_or(&dev->maxclass_bits[newmax][ag->ag_index >> 6],
-                          (1ULL << (ag->ag_index & 63u)), CHIMERA_MEMORY_RELAXED);
+                                (1ULL << (ag->ag_index & 63u)), CHIMERA_MEMORY_RELAXED);
         chimera_atomic_fetch_add(&dev->mc_class_count[newmax], 1, CHIMERA_MEMORY_RELAXED);
     }
     if (ag->maxclass >= 0) {
         chimera_atomic_fetch_and(&dev->maxclass_bits[ag->maxclass][ag->ag_index >> 6],
-                           ~(1ULL << (ag->ag_index & 63u)), CHIMERA_MEMORY_RELAXED);
+                                 ~(1ULL << (ag->ag_index & 63u)), CHIMERA_MEMORY_RELAXED);
         chimera_atomic_fetch_sub(&dev->mc_class_count[ag->maxclass], 1, CHIMERA_MEMORY_RELAXED);
     }
     ag->maxclass = (int16_t) newmax;
@@ -1352,7 +1352,7 @@ sm_ag_recall_claims_locked(struct sm_ag *ag)
             nw = SM_CLAIM_PACK(cur, cur);
 
             if (chimera_atomic_compare_exchange_n(&c->bump, &w, nw, 0,
-                                            CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
+                                                  CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
                 c->len     = cur;
                 reclaimed += lim - cur;
                 break;
@@ -1721,7 +1721,7 @@ space_map_bump_alloc(
         nw = SM_CLAIM_PACK((uint64_t) cur + need, lim);
 
         if (chimera_atomic_compare_exchange_n(&r->claim->bump, &w, nw, 0,
-                                        CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
+                                              CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
             break;      /* the region [cur, cur+need) is ours alone */
         }
         /* CAS reloaded w with the current value; retry against it. */
@@ -2364,7 +2364,7 @@ sm_persist_batch_submit(
             updates[i].ag->log_base_count  = updates[i].base_count;
             updates[i].ag->log_delta_count = 0;
             chimera_atomic_store_n(&updates[i].ag->ckpt_seq, updates[i].ckpt_seq,
-                             CHIMERA_MEMORY_RELEASE);
+                                   CHIMERA_MEMORY_RELEASE);
             updates[i].ag->ckpt_dirty = 0;
             evpl_mutex_unlock(&updates[i].ag->lock);
         }

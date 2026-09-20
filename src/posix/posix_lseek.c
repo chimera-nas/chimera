@@ -7,9 +7,9 @@
 #include <errno.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "posix_internal.h"
 #include "../client/client_seek.h"
@@ -55,7 +55,7 @@ static chimera_off_t
 chimera_posix_lseek_hole_data(
     struct chimera_posix_client *posix,
     int                          fd,
-    chimera_off_t                        offset,
+    chimera_off_t                offset,
     uint32_t                     what)
 {
     struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
@@ -130,12 +130,12 @@ chimera_posix_lseek_hole_data(
 
 SYMBOL_EXPORT chimera_off_t
 chimera_posix_lseek(
-    int   fd,
+    int           fd,
     chimera_off_t offset,
-    int   whence)
+    int           whence)
 {
     struct chimera_posix_client *posix     = chimera_posix_get_global();
-    chimera_off_t                        file_size = 0;
+    chimera_off_t                file_size = 0;
 
     if (whence == SEEK_DATA) {
         return chimera_posix_lseek_hole_data(posix, fd, offset, 0);

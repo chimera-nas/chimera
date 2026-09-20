@@ -34,7 +34,7 @@
 
 /* ---- process-global state (one shared chimera_client for all workers) ---- */
 
-static evpl_mutex_t            g_mutex        = EVPL_MUTEX_INITIALIZER;
+static evpl_mutex_t               g_mutex        = EVPL_MUTEX_INITIALIZER;
 static struct chimera_client     *g_client       = NULL;
 static struct prometheus_metrics *g_metrics      = NULL;
 static int                        g_refcount     = 0;

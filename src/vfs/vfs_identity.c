@@ -20,12 +20,12 @@
 #ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
-#endif
+#endif /* ifndef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "vfs.h"
 #include "vfs_internal.h"
@@ -57,12 +57,12 @@ struct chimera_vfs_identity_request {
 struct chimera_vfs_identity {
     struct chimera_vfs                        *vfs;
     int                                        num_workers;
-    evpl_native_thread_t                                 *workers;
-    evpl_mutex_t                            lock;
-    evpl_cond_t                             cond;
+    evpl_native_thread_t                      *workers;
+    evpl_mutex_t                               lock;
+    evpl_cond_t                                cond;
     struct chimera_vfs_identity_request       *queue;
     int                                        shutdown;
-    evpl_mutex_t                            handler_lock;
+    evpl_mutex_t                               handler_lock;
     struct chimera_vfs_identity_handler_entry *handlers;
 };
 
@@ -374,7 +374,7 @@ chimera_vfs_identity_nss_handler(
     /* NSS supplies no SID; left empty so the algorithmic idmap is used. */
     return 0;
 } /* chimera_vfs_identity_nss_handler */
-#endif
+#endif /* ifndef _WIN32 */
 
 
 static void
@@ -428,7 +428,7 @@ chimera_vfs_identity_create(
 #ifndef _WIN32
     chimera_vfs_identity_add_handler(identity, chimera_vfs_identity_nss_handler,
                                      NULL);
-#endif
+#endif /* ifndef _WIN32 */
 
     for (i = 0; i < num_workers; i++) {
         int rc = chimera_pthread_create(&identity->workers[i], NULL,

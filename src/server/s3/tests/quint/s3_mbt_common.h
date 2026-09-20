@@ -31,9 +31,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include <stdint.h>
 #include <inttypes.h>
 #include <fcntl.h>
@@ -41,7 +41,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>

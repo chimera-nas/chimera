@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 
 static inline int
 chimera_nfs4_write_stateid_is_special(const struct stateid4 *sid)

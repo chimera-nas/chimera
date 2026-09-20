@@ -261,7 +261,7 @@ void
 cthon_testdir(const char *dir)
 {
     chimera_posix_stat_t statb;
-    char        fullpath[MAXPATHLEN];
+    char                 fullpath[MAXPATHLEN];
 
     if (dir == NULL) {
         dir = "/test/nfstestdir";

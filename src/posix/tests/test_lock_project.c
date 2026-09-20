@@ -22,7 +22,7 @@
 
 static struct flock
 lock_desc(
-    short type,
+    short         type,
     chimera_off_t start,
     chimera_off_t len)
 {

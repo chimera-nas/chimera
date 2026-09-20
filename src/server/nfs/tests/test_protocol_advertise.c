@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "nfs_internal.h"
 #include "nfs4_xdr.h"

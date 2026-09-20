@@ -31,7 +31,7 @@ main(
     char                  str[STRCHARS];
     int                   count = 10;
     int                   fd, slen, lerr, slerr;
-    chimera_posix_stat_t           sb;
+    chimera_posix_stat_t  sb;
 
     cthon_Myname = "cthon_special_nfsidem";
 

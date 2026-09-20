@@ -16,12 +16,12 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include <fcntl.h>
 
 #include "common/dirent.h"
@@ -44,8 +44,8 @@ struct chimera_posix_dir {
 };
 
 struct chimera_posix_completion {
-    evpl_mutex_t                mutex;
-    evpl_cond_t                 cond;
+    evpl_mutex_t                   mutex;
+    evpl_cond_t                    cond;
     struct chimera_client_request *request;
     enum chimera_vfs_error status;
     int                            done;
@@ -109,8 +109,8 @@ struct chimera_posix_ofd_lock {
 };
 
 struct CHIMERA_ALIGNED(64) chimera_posix_fd_entry {
-    evpl_mutex_t                 lock;
-    evpl_cond_t                  cond;
+    evpl_mutex_t                    lock;
+    evpl_cond_t                     cond;
     struct chimera_vfs_open_handle *handle;
     struct chimera_posix_fd_entry  *next;
     struct chimera_posix_ofd       *ofd;
@@ -128,7 +128,7 @@ struct CHIMERA_ALIGNED(64) chimera_posix_fd_entry {
 typedef struct chimera_posix_fd_entry CHIMERA_FILE;
 
 struct CHIMERA_ALIGNED(64) chimera_posix_worker {
-    evpl_mutex_t                lock;
+    evpl_mutex_t                   lock;
     struct chimera_client_request *pending_requests;
     struct evpl_doorbell           doorbell;
     struct chimera_client_thread  *client_thread;
@@ -143,7 +143,7 @@ struct CHIMERA_ALIGNED(64) chimera_posix_client {
     struct chimera_posix_worker   *workers;
     int                            nworkers;
     atomic_uint                    next_worker;
-    evpl_mutex_t                fd_lock;
+    evpl_mutex_t                   fd_lock;
     struct chimera_posix_fd_entry *fds;
     struct chimera_posix_fd_entry *free_list;
     int                            max_fds;
@@ -169,12 +169,12 @@ extern struct chimera_posix_client *chimera_posix_global;
  * subsequent calls on the same thread; when unset, operations fall back to the
  * client-global credential and apply no umask (matching prior behavior).
  */
-extern CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_cred;
-extern CHIMERA_THREAD_LOCAL struct chimera_vfs_cred chimera_posix_tls_cred;
-extern CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_umask;
-extern CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_lock_owner;
-extern CHIMERA_THREAD_LOCAL uint64_t                chimera_posix_tls_lock_owner;
-extern CHIMERA_THREAD_LOCAL mode_t                  chimera_posix_tls_umask;
+extern CHIMERA_THREAD_LOCAL int      chimera_posix_tls_has_cred;
+extern                               CHIMERA_THREAD_LOCAL struct chimera_vfs_cred chimera_posix_tls_cred;
+extern CHIMERA_THREAD_LOCAL int      chimera_posix_tls_has_umask;
+extern CHIMERA_THREAD_LOCAL int      chimera_posix_tls_has_lock_owner;
+extern CHIMERA_THREAD_LOCAL uint64_t chimera_posix_tls_lock_owner;
+extern CHIMERA_THREAD_LOCAL mode_t   chimera_posix_tls_umask;
 
 static FORCE_INLINE const struct chimera_vfs_cred *
 chimera_posix_effective_cred(void)
@@ -567,7 +567,7 @@ chimera_posix_wait(struct chimera_posix_completion *comp)
 
 static FORCE_INLINE void
 chimera_posix_fill_stat(
-    chimera_posix_stat_t               *dst,
+    chimera_posix_stat_t      *dst,
     const struct chimera_stat *src)
 {
     dst->st_dev   = src->st_dev;
@@ -913,12 +913,12 @@ static FORCE_INLINE chimera_off_t
 chimera_posix_fd_lseek(
     struct chimera_posix_client *posix,
     int                          fd,
-    chimera_off_t                        offset,
+    chimera_off_t                offset,
     int                          whence,
-    chimera_off_t                        file_size)
+    chimera_off_t                file_size)
 {
     struct chimera_posix_fd_entry *entry;
-    chimera_off_t                          new_offset;
+    chimera_off_t                  new_offset;
 
     if (fd < 0 || fd >= posix->max_fds) {
         errno = EBADF;

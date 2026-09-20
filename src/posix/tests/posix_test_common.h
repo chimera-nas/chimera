@@ -11,26 +11,26 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <strings.h>
-#endif
+#endif // ifdef _WIN32
 #include <time.h>
 #include <fcntl.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #include <errno.h>
 #include <signal.h>
 #include "common/dirent.h"
 #ifndef _WIN32
 #include <execinfo.h>
-#endif
+#endif // ifndef _WIN32
 #include <jansson.h>
 #include "posix/posix.h"
 #include "server/server.h"
@@ -352,9 +352,10 @@ static inline const char *
 posix_test_session_root(void)
 {
     const char *root = getenv("CHIMERA_TEST_ROOT");
+
 #ifndef _WIN32
     struct stat st;
-#endif
+#endif // ifndef _WIN32
 
     if (root) {
         return root;
@@ -362,13 +363,13 @@ posix_test_session_root(void)
 
 #ifdef _WIN32
     return chimera_test_session_root();
-#else
+#else // ifdef _WIN32
     if (stat("/build", &st) == 0 && S_ISDIR(st.st_mode)) {
         return "/build/test";
     }
 
     return "/tmp/chimera_test";
-#endif
+#endif // ifdef _WIN32
 } // posix_test_session_root
 
 /* Emit the external-module client config into a posix.json "config" object:
@@ -432,13 +433,13 @@ posix_test_emit_ext_module_config(
  * posix_test_diskfs_reuse_devices reuses the existing device images without
  * re-initializing the filesystem (cold remount).  Set before posix_test_init
  * / posix_test_configure_diskfs. */
-static const char *posix_test_diskfs_extra_cfg = NULL;
-static int         posix_test_diskfs_reuse_devices CHIMERA_UNUSED = 0;
+static const char                         *posix_test_diskfs_extra_cfg = NULL;
+static int posix_test_diskfs_reuse_devices CHIMERA_UNUSED              = 0;
 /* Device geometry.  The default 10 x 1 GiB pool is effectively unbounded; a
  * test that needs ENOSPC to be reachable shrinks it (the kvm nfstest_alloc
  * wrapper does the same thing for the same reason). */
-static int         posix_test_diskfs_device_count = 10;
-static uint64_t    posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
+static int                                 posix_test_diskfs_device_count = 10;
+static uint64_t                            posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
  * mounts the SAME NFS backend a second time, read-only, under a subdirectory
@@ -491,7 +492,7 @@ static int posix_test_extra_exports CHIMERA_UNUSED = 0;
  * NFSv4 namespace root is then the share's real backend directory rather
  * than the synthetic pseudo-root, and the other exports remain reachable as
  * junctions grafted over it at LOOKUP (see nfs4_root_junction_check). */
-static int posix_test_root_export CHIMERA_UNUSED = 0;
+static int posix_test_root_export   CHIMERA_UNUSED = 0;
 
 /* Pinned id for the root export, clear of the other pinned ids here. */
 #define POSIX_TEST_ROOT_EXPORT_ID        (POSIX_TEST_EXPORT_ID + 3)
@@ -955,7 +956,7 @@ posix_test_init(
         }
     }
 
-#endif
+#endif // ifndef _WIN32
 
     if (is_nfs) {
         posix_test_start_nfs_server(env);

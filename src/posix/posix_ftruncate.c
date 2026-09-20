@@ -29,7 +29,7 @@ chimera_posix_ftruncate_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_ftruncate(
-    int   fd,
+    int           fd,
     chimera_off_t length)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();

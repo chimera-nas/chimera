@@ -12,7 +12,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    chimera_off_t                 pos;
+    chimera_off_t         pos;
     int64_t               pos64;
     char                  buf[64];
     ssize_t               nread;

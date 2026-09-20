@@ -32,23 +32,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-static SRWLOCK mbt_watchdog_lock = SRWLOCK_INIT;
+static SRWLOCK   mbt_watchdog_lock = SRWLOCK_INIT;
 static PTP_TIMER mbt_watchdog_timer;
-static char mbt_watchdog_trace_copy[2048];
-static char mbt_watchdog_tag_copy[256];
-static int mbt_watchdog_step_copy = -1;
+static char      mbt_watchdog_trace_copy[2048];
+static char      mbt_watchdog_tag_copy[256];
+static int       mbt_watchdog_step_copy = -1;
 
 static VOID CALLBACK
-mbt_watchdog_expired(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_TIMER timer)
+mbt_watchdog_expired(
+    PTP_CALLBACK_INSTANCE instance,
+    PVOID                 context,
+    PTP_TIMER             timer)
 {
-    char report[2560];
+    char  report[2560];
     DWORD written;
-    int length;
+    int   length;
+
     (void) instance; (void) context; (void) timer;
     AcquireSRWLockShared(&mbt_watchdog_lock);
     length = snprintf(report, sizeof(report),
-        "\n*** MBT WATCHDOG: timed out ***\n  trace: %s\n  step: %d (%s)\n",
-        mbt_watchdog_trace_copy, mbt_watchdog_step_copy, mbt_watchdog_tag_copy);
+                      "\n*** MBT WATCHDOG: timed out ***\n  trace: %s\n  step: %d (%s)\n",
+                      mbt_watchdog_trace_copy, mbt_watchdog_step_copy, mbt_watchdog_tag_copy);
     ReleaseSRWLockShared(&mbt_watchdog_lock);
     if (length > 0) {
         WriteFile(GetStdHandle(STD_ERROR_HANDLE), report,
@@ -56,10 +60,13 @@ mbt_watchdog_expired(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_TIMER ti
                   &written, NULL);
     }
     TerminateProcess(GetCurrentProcess(), 124);
-}
+} // mbt_watchdog_expired
 
 static inline void
-mbt_watchdog_at(const char *trace, int step, const char *tag)
+mbt_watchdog_at(
+    const char *trace,
+    int         step,
+    const char *tag)
 {
     /* Own the strings: the timer runs on a different native thread. */
     AcquireSRWLockExclusive(&mbt_watchdog_lock);
@@ -67,52 +74,58 @@ mbt_watchdog_at(const char *trace, int step, const char *tag)
     snprintf(mbt_watchdog_tag_copy, sizeof(mbt_watchdog_tag_copy), "%s", tag ? tag : "(none)");
     mbt_watchdog_step_copy = step;
     ReleaseSRWLockExclusive(&mbt_watchdog_lock);
-}
+} // mbt_watchdog_at
 
-static void mbt_watchdog_cleanup(void)
+static void
+mbt_watchdog_cleanup(void)
 {
     SetThreadpoolTimer(mbt_watchdog_timer, NULL, 0, 0);
     WaitForThreadpoolTimerCallbacks(mbt_watchdog_timer, TRUE);
     CloseThreadpoolTimer(mbt_watchdog_timer);
-}
+} // mbt_watchdog_cleanup
 
-static inline void mbt_watchdog_arm(unsigned int seconds)
+static inline void
+mbt_watchdog_arm(unsigned int seconds)
 {
     ULARGE_INTEGER relative;
-    FILETIME due;
+    FILETIME       due;
+
     if (!mbt_watchdog_timer) {
         /* The Windows CRT does not support line buffering. */
         setvbuf(stdout, NULL, _IONBF, 0);
         mbt_watchdog_timer = CreateThreadpoolTimer(mbt_watchdog_expired, NULL, NULL);
-        if (!mbt_watchdog_timer || atexit(mbt_watchdog_cleanup)) { abort(); }
+        if (!mbt_watchdog_timer || atexit(mbt_watchdog_cleanup)) {
+            abort();
+        }
     }
     SetThreadpoolTimer(mbt_watchdog_timer, NULL, 0, 0);
     WaitForThreadpoolTimerCallbacks(mbt_watchdog_timer, TRUE);
     if (seconds) {
-        relative.QuadPart = 0 - (uint64_t) seconds * 10000000ULL;
-        due.dwLowDateTime = relative.LowPart;
+        relative.QuadPart  = 0 - (uint64_t) seconds * 10000000ULL;
+        due.dwLowDateTime  = relative.LowPart;
         due.dwHighDateTime = relative.HighPart;
         SetThreadpoolTimer(mbt_watchdog_timer, &due, 0, 0);
     }
-}
+} // mbt_watchdog_arm
 
-static inline void mbt_watchdog_disarm(void)
+static inline void
+mbt_watchdog_disarm(void)
 {
     if (mbt_watchdog_timer) {
         SetThreadpoolTimer(mbt_watchdog_timer, NULL, 0, 0);
         WaitForThreadpoolTimerCallbacks(mbt_watchdog_timer, TRUE);
     }
     mbt_watchdog_at(NULL, -1, NULL);
-}
-#else
+} // mbt_watchdog_disarm
+#else // ifdef _WIN32
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 
 /* Position the alarm would report, published by the driver as it advances.
  * The trace and tag are string literals or long-lived buffers owned by the

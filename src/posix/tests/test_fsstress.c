@@ -18,9 +18,9 @@
 #include <sys/wait.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/dirent.h"
 #include "posix_test_common.h"
 
@@ -512,13 +512,13 @@ read_f(
     opnum_t opno,
     long    r)
 {
-    fent_t     *fent;
-    pathname_t  path;
-    int         fd;
-    char        buf[FILELEN_MAX];
+    fent_t              *fent;
+    pathname_t           path;
+    int                  fd;
+    char                 buf[FILELEN_MAX];
     chimera_posix_stat_t statb;
-    chimera_off_t       off;
-    ssize_t     len;
+    chimera_off_t        off;
+    ssize_t              len;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
         return;
@@ -639,10 +639,10 @@ stat_f(
     opnum_t opno,
     long    r)
 {
-    fent_t     *fent;
-    pathname_t  path;
+    fent_t              *fent;
+    pathname_t           path;
     chimera_posix_stat_t statb;
-    int         ft;
+    int                  ft;
 
     ft = random() % FT_NTYPE;
     if (get_random_fent(ft, &fent) < 0) {
@@ -690,9 +690,9 @@ truncate_f(
     opnum_t opno,
     long    r)
 {
-    fent_t     *fent;
-    pathname_t  path;
-    chimera_off_t       len;
+    fent_t              *fent;
+    pathname_t           path;
+    chimera_off_t        len;
     chimera_posix_stat_t statb;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
@@ -768,13 +768,13 @@ write_f(
     opnum_t opno,
     long    r)
 {
-    fent_t    *fent;
-    pathname_t path;
-    int        fd;
-    char       buf[FILELEN_MAX];
-    chimera_off_t      off;
-    size_t     len;
-    ssize_t    ret;
+    fent_t       *fent;
+    pathname_t    path;
+    int           fd;
+    char          buf[FILELEN_MAX];
+    chimera_off_t off;
+    size_t        len;
+    ssize_t       ret;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
         return;
@@ -857,10 +857,10 @@ do_stress(int noperations)
 static void
 do_cleanup(void)
 {
-    CHIMERA_DIR   *dir;
-    struct dirent *de;
-    char           path[PATH_MAX_LEN];
-    chimera_posix_stat_t    statb;
+    CHIMERA_DIR         *dir;
+    struct dirent       *de;
+    char                 path[PATH_MAX_LEN];
+    chimera_posix_stat_t statb;
 
     dir = chimera_posix_opendir(homedir);
     if (dir) {

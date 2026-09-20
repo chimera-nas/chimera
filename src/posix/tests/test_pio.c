@@ -6,9 +6,9 @@
 
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "posix_test_common.h"
 
 #define TEST_DATA     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

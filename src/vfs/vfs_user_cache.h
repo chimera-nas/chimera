@@ -88,10 +88,10 @@ struct chimera_vfs_user_cache {
     struct chimera_vfs_group_cache_bucket *group_gid_buckets;
     struct chimera_vfs_group_cache_bucket *group_sid_buckets;
     struct chimera_vfs_user               *builtin_users;
-    evpl_mutex_t                        write_lock;
-    evpl_native_thread_t                              expiry_thread;
-    evpl_mutex_t                        expiry_lock;
-    evpl_cond_t                         expiry_cond;
+    evpl_mutex_t                           write_lock;
+    evpl_native_thread_t                   expiry_thread;
+    evpl_mutex_t                           expiry_lock;
+    evpl_cond_t                            expiry_cond;
     int                                    shutdown;
 };
 
@@ -344,7 +344,7 @@ chimera_vfs_user_cache_create(
     evpl_cond_init(&cache->expiry_cond, NULL);
 
     evpl_native_thread_create(&cache->expiry_thread, NULL,
-                   chimera_vfs_user_cache_expiry_thread, cache);
+                              chimera_vfs_user_cache_expiry_thread, cache);
 
     return cache;
 } // chimera_vfs_user_cache_create

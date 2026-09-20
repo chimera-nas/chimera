@@ -35,9 +35,9 @@
 #include <jansson.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/time.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "nfs3_mbt_common.h"
 #include "common/mbt_trace_dir.h"

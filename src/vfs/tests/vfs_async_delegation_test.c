@@ -20,9 +20,9 @@
 #include <assert.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/thread.h"
 
 #include "evpl/evpl.h"
@@ -40,7 +40,7 @@ struct test_ctx {
     int                        done;
     enum chimera_vfs_error status;
     int                        search_hits;
-    evpl_thread_id_t                  dispatch_tid;
+    evpl_thread_id_t           dispatch_tid;
     struct chimera_vfs        *vfs;
     struct chimera_vfs_thread *vfs_thread;
     struct evpl               *evpl;
@@ -168,11 +168,11 @@ test_async_delegation_enabled(struct test_ctx *ctx)
 {
     evpl_thread_id_t main_tid = evpl_current_thread();
     evpl_thread_id_t tids[NUM_DISTINCT_KEYS];
-    char      keys[NUM_DISTINCT_KEYS][32];
-    char      values[NUM_DISTINCT_KEYS][32];
-    int       i, j;
-    int       distinct_threads = 0;
-    int       saw_main_thread  = 0;
+    char             keys[NUM_DISTINCT_KEYS][32];
+    char             values[NUM_DISTINCT_KEYS][32];
+    int              i, j;
+    int              distinct_threads = 0;
+    int              saw_main_thread  = 0;
 
     /* Insert NUM_DISTINCT_KEYS keys with prefixes that should hash differently. */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {

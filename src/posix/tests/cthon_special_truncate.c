@@ -20,7 +20,7 @@ main(
     int                   opt;
     char                  str[MAXPATHLEN];
     int                   fd;
-    chimera_posix_stat_t           statb;
+    chimera_posix_stat_t  statb;
 
     cthon_Myname = "cthon_special_truncate";
 

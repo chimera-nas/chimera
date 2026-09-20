@@ -7,24 +7,24 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <strings.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
 #include <crypt.h>
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
 #include "common/thread.h"
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
 #endif    /* crypt(3) */
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
@@ -265,8 +265,11 @@ chimera_rest_auth_init_secret(
  * etc.) never match.
  */
 #ifdef _WIN32
-char *chimera_crypt_sha512(const char *, const char *, char *);
-#endif
+char * chimera_crypt_sha512(
+    const char *,
+    const char *,
+    char *);
+#endif /* ifdef _WIN32 */
 
 static int
 chimera_rest_crypt_match(
@@ -274,13 +277,13 @@ chimera_rest_crypt_match(
     const char *hash)
 {
 #ifdef _WIN32
-    char output[128];
-    char *result = chimera_crypt_sha512(password, hash, output);
+    char                output[128];
+    char               *result = chimera_crypt_sha512(password, hash, output);
     return result == output && strlen(result) == strlen(hash) &&
            CRYPTO_memcmp(result, hash, strlen(hash)) == 0;
 #elif defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
-    struct crypt_data      cdata;
-    char                  *result;
+    struct crypt_data   cdata;
+    char               *result;
 
     memset(&cdata, 0, sizeof(cdata));
     result = crypt_r(password, hash, &cdata);
@@ -288,8 +291,8 @@ chimera_rest_crypt_match(
     return result && strcmp(result, hash) == 0;
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
     static evpl_mutex_t crypt_lock = EVPL_MUTEX_INITIALIZER;
-    char                  *result;
-    int                    match;
+    char               *result;
+    int                 match;
 
     evpl_mutex_lock(&crypt_lock);
     result = crypt(password, hash);

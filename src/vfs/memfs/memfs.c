@@ -11,19 +11,19 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <strings.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include <jansson.h>
 #include <utlist.h>
 #include "common/rcu.h"
@@ -243,7 +243,7 @@ struct memfs_inode {
      * inode is torn down belongs to an abandoned open and is freed there. */
     struct memfs_stream_open  *stream_opens;
 
-    evpl_mutex_t            lock;
+    evpl_mutex_t               lock;
 
     union {
         struct {
@@ -264,7 +264,7 @@ struct memfs_inode_list {
     uint32_t             max_blocks;
     struct memfs_inode **inode;
     struct memfs_inode  *free_inode;
-    evpl_mutex_t      lock;
+    evpl_mutex_t         lock;
 };
 
 struct memfs_shared;
@@ -387,13 +387,13 @@ struct memfs_shared {
      * gets fsid = seed ^ hash(name); when zero fsids are random. */
     uint64_t                 fsid_seed;
     /* CAP_LEASE arbiter registry + test knobs (guarded by lease_lock). */
-    evpl_mutex_t          lease_lock;
+    evpl_mutex_t             lease_lock;
     struct memfs_claim_file *lease_files;
     uint64_t                 lease_next_token;
     uint8_t                  lease_deny_mask;  /* env-masked grant bits */
     uint8_t                  lease_range_deny; /* env: refuse RANGE grants */
     uint64_t                 lease_recall_us;  /* env recall delay; 0 off */
-    evpl_mutex_t          lock;
+    evpl_mutex_t             lock;
 };
 
 struct memfs_thread {
@@ -649,10 +649,10 @@ memfs_block_alloc_charged(
 
     if (charge && fs->fs_size) {
         uint64_t used = chimera_atomic_add_fetch(&fs->fs_space_used,
-                                           shared->block_size, CHIMERA_MEMORY_RELAXED);
+                                                 shared->block_size, CHIMERA_MEMORY_RELAXED);
         if (used > fs->fs_size) {
             chimera_atomic_sub_fetch(&fs->fs_space_used, shared->block_size,
-                               CHIMERA_MEMORY_RELAXED);
+                                     CHIMERA_MEMORY_RELAXED);
             return NULL;
         }
     }
@@ -667,7 +667,7 @@ memfs_block_alloc_charged(
         if (!block) {
             if (charge && fs->fs_size) {
                 chimera_atomic_sub_fetch(&fs->fs_space_used, shared->block_size,
-                                   CHIMERA_MEMORY_RELAXED);
+                                         CHIMERA_MEMORY_RELAXED);
             }
             return NULL;
         }
@@ -704,7 +704,7 @@ memfs_block_free_charged(
 
     if (uncharge && fs->fs_size) {
         chimera_atomic_sub_fetch(&fs->fs_space_used,
-                           thread->shared->block_size, CHIMERA_MEMORY_RELAXED);
+                                 thread->shared->block_size, CHIMERA_MEMORY_RELAXED);
     }
 
     LL_PREPEND(thread->free_block, block);
@@ -1688,7 +1688,7 @@ memfs_map_attrs(
         static CHIMERA_THREAD_LOCAL uint8_t acl_scratch[
             sizeof(struct chimera_acl) +
             CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
-        struct chimera_acl     *dst = (struct chimera_acl *) acl_scratch;
+        struct chimera_acl                 *dst = (struct chimera_acl *) acl_scratch;
 
         if (inode->acl) {
             memcpy(dst, inode->acl, chimera_acl_size(inode->acl->num_aces));

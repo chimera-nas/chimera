@@ -23,7 +23,7 @@ main(
     int                   size = 8192;
     int                   fd;
     int                   i;
-    chimera_off_t                 off;
+    chimera_off_t         off;
 
     cthon_Myname = "cthon_special_rewind";
 

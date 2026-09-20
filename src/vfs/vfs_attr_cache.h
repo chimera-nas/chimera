@@ -20,7 +20,7 @@ struct chimera_vfs_attr_cache_entry {
 
 struct chimera_vfs_attr_cache_shard {
     struct chimera_vfs_attr_cache_entry **entries;
-    evpl_mutex_t                       entry_lock;
+    evpl_mutex_t                          entry_lock;
     struct prometheus_counter_instance   *insert;
     struct prometheus_counter_instance   *hit;
     struct prometheus_counter_instance   *miss;

@@ -41,10 +41,10 @@ evict_sweep(
     struct posix_test_env *env,
     int                    removed_stride)
 {
-    char        path[128];
+    char                 path[128];
     chimera_posix_stat_t st;
-    int         i, rc;
-    long        expect_files = 0, found_files = 0;
+    int                  i, rc;
+    long                 expect_files = 0, found_files = 0;
 
     for (i = 0; i < EVICT_NFILES; i++) {
         int removed = removed_stride && (i % removed_stride) == 0;

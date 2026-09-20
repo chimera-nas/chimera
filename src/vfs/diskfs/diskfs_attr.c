@@ -314,8 +314,8 @@ diskfs_acl_decode_into(
     uint32_t                  mode)
 {
     static CHIMERA_THREAD_LOCAL uint8_t scratch[sizeof(struct chimera_acl) +
-                                    CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
-    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+                                                CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
+    struct chimera_acl                 *dst = (struct chimera_acl *) scratch;
 
     if (len < 0 ||
         chimera_acl_deserialize((const char *) serial, len, dst,
@@ -449,17 +449,17 @@ diskfs_inherit_acl_async(
     diskfs_bt_cb_t            cb,
     void                     *private_data)
 {
-    int                       is_dir = S_ISDIR(child->mode);
-    uint16_t                  want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+    int                                 is_dir = S_ISDIR(child->mode);
+    uint16_t                            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
     /* Per-thread scratch: an ACE now carries an inline SID, so these are
      * too large to keep on the stack. */
-    static CHIMERA_THREAD_LOCAL uint8_t   abuf[sizeof(struct chimera_acl) +
-                                   DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-    static CHIMERA_THREAD_LOCAL uint8_t   pbuf[sizeof(struct chimera_acl) +
-                                   DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-    const struct chimera_acl *store       = NULL;
-    int                       derive_mode = 0;
+    static CHIMERA_THREAD_LOCAL uint8_t abuf[sizeof(struct chimera_acl) +
+                                             DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    static CHIMERA_THREAD_LOCAL uint8_t pbuf[sizeof(struct chimera_acl) +
+                                             DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    const struct chimera_acl           *store       = NULL;
+    int                                 derive_mode = 0;
 
     if (new_acl && new_acl->num_aces) {
         store       = new_acl;
@@ -1080,13 +1080,13 @@ diskfs_setattr_acl(struct chimera_vfs_request *request)
         return;
     } else if ((mask & CHIMERA_VFS_ATTR_MODE) && inode->acl_serial) {
         static CHIMERA_THREAD_LOCAL uint8_t obuf[sizeof(struct chimera_acl) +
-                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+                                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
         static CHIMERA_THREAD_LOCAL uint8_t nbuf[sizeof(struct chimera_acl) +
-                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        struct chimera_acl     *old_acl = (struct chimera_acl *) obuf;
-        struct chimera_acl     *new_acl = (struct chimera_acl *) nbuf;
-        uint8_t                 sbuf[DISKFS_ACL_REC_MAX];
-        int                     slen;
+                                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl                 *old_acl = (struct chimera_acl *) obuf;
+        struct chimera_acl                 *new_acl = (struct chimera_acl *) nbuf;
+        uint8_t                             sbuf[DISKFS_ACL_REC_MAX];
+        int                                 slen;
 
         if (chimera_acl_deserialize((const char *) inode->acl_serial,
                                     inode->acl_serial_len, old_acl,
@@ -1603,15 +1603,15 @@ diskfs_sb_write_complete(
     struct diskfs_sb_write *sw     = private_data;
     struct diskfs_shared   *shared = sw->thread->shared;
     uint64_t                floor  = chimera_atomic_load_n(&shared->gen_floor,
-                                                     CHIMERA_MEMORY_ACQUIRE);
+                                                           CHIMERA_MEMORY_ACQUIRE);
 
     chimera_diskfs_abort_if(status != 0,
                             "fs-table superblock write failed: %d", status);
 
     while (floor < sw->new_floor &&
            !chimera_atomic_compare_exchange_n(&shared->gen_floor, &floor,
-                                        sw->new_floor, 0,
-                                        CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
+                                              sw->new_floor, 0,
+                                              CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
         /* retry against the freshly-loaded floor */
     }
 

@@ -439,7 +439,7 @@ diskfs_block_cow_swap(
     y->device_id     = device_id;
     y->device_offset = device_offset;
     chimera_atomic_store_n(&y->seq, chimera_atomic_load_n(&x->seq, CHIMERA_MEMORY_RELAXED),
-                     CHIMERA_MEMORY_RELEASE);
+                           CHIMERA_MEMORY_RELEASE);
     y->wait_head           = NULL;
     y->wait_tail           = NULL;
     y->hash_next           = shard->buckets[bucket];
@@ -874,7 +874,7 @@ diskfs_block_buf_release(struct diskfs_block_buf *buf)
         head      = chimera_atomic_load_n(&shard->returned_buffers, CHIMERA_MEMORY_ACQUIRE);
         buf->next = head;
     } while (!chimera_atomic_compare_exchange_n(&shard->returned_buffers, &head, buf,
-                                          0, CHIMERA_MEMORY_RELEASE, CHIMERA_MEMORY_ACQUIRE));
+                                                0, CHIMERA_MEMORY_RELEASE, CHIMERA_MEMORY_ACQUIRE));
 
     /* The tail-pusher just freed a buffer cross-thread.  Wake any CoW fork
      * parked on this shard -- if every worker op on the shard is parked, nothing

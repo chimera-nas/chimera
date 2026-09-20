@@ -12,7 +12,7 @@ chimera_posix_fseek(
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
     int                          fd;
-    chimera_off_t                        result;
+    chimera_off_t                result;
 
     if (!stream) {
         errno = EBADF;
@@ -37,12 +37,12 @@ chimera_posix_fseek(
 SYMBOL_EXPORT int
 chimera_posix_fseeko(
     CHIMERA_FILE *stream,
-    chimera_off_t         offset,
+    chimera_off_t offset,
     int           whence)
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
     int                          fd;
-    chimera_off_t                        result;
+    chimera_off_t                result;
 
     if (!stream) {
         errno = EBADF;
@@ -69,7 +69,7 @@ chimera_posix_ftell(CHIMERA_FILE *stream)
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
     int                          fd;
-    chimera_off_t                        result;
+    chimera_off_t                result;
 
     if (!stream) {
         errno = EBADF;
@@ -96,7 +96,7 @@ chimera_posix_ftello(CHIMERA_FILE *stream)
 {
     struct chimera_posix_client *posix = chimera_posix_get_global();
     int                          fd;
-    chimera_off_t                        result;
+    chimera_off_t                result;
 
     if (!stream) {
         errno = EBADF;

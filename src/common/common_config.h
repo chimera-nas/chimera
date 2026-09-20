@@ -11,9 +11,9 @@
 #include <stdint.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <strings.h>
-#endif
+#endif // ifdef _WIN32
 #include <jansson.h>
 
 #include "evpl/evpl.h"

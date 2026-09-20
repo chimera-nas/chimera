@@ -29,8 +29,8 @@ chimera_posix_truncate_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_truncate(
-    const char *path,
-    chimera_off_t       length)
+    const char   *path,
+    chimera_off_t length)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);

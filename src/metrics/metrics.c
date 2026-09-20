@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "common/logging.h"

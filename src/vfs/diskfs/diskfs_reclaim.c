@@ -850,7 +850,7 @@ diskfs_condense_try(struct diskfs_condense *c)
      * undercount what the snapshot reflects -- conservative, never optimistic
      * (recovery replays seq > ckpt_seq idempotently). */
     c->ckpt_seq = chimera_atomic_load_n(&shared->intent_log.applied_seq,
-                                  CHIMERA_MEMORY_ACQUIRE);
+                                        CHIMERA_MEMORY_ACQUIRE);
 
     space_map_condense_prepare(shared->space_map, c->device_id,
                                c->ag_index, c->scratch,

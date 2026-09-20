@@ -5,15 +5,17 @@
 #include <string.h>
 #include "server/smb/smb_string.h"
 
-int main(void)
+int
+main(void)
 {
     struct chimera_smb_iconv_ctx ctx;
-    const char text[] = "file-\xc3\xa9-\xf0\x9f\x98\x80";
-    const uint16_t expected[] = {'f', 'i', 'l', 'e', '-', 0xe9, '-', 0xd83d, 0xde00};
-    const uint16_t invalid[] = {0xd800};
-    uint16_t wide[64];
-    char decoded[64];
-    int count;
+    const char                   text[]     = "file-\xc3\xa9-\xf0\x9f\x98\x80";
+    const uint16_t               expected[] = { 'f', 'i', 'l', 'e', '-', 0xe9, '-', 0xd83d, 0xde00 };
+    const uint16_t               invalid[]  = { 0xd800 };
+    uint16_t                     wide[64];
+    char                         decoded[64];
+    int                          count;
+
     chimera_smb_iconv_init(&ctx);
     count = chimera_smb_utf8_to_utf16le(&ctx, text, strlen(text), wide, sizeof(wide));
     assert(count == sizeof(expected));
@@ -31,4 +33,4 @@ int main(void)
     assert(wide[0] == 0xffff);
     chimera_smb_iconv_destroy(&ctx);
     return 0;
-}
+} /* main */

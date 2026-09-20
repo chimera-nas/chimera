@@ -30,7 +30,7 @@ main(
      * unlink.  Skip the nlink==0 assertion there but still exercise the path. */
     EXPECT(0, pjd_create(n0, 0644));
     {
-        int         fd = pjd_open(n0, O_RDONLY, 0644);
+        int                  fd = pjd_open(n0, O_RDONLY, 0644);
         PJD_CHECK(fd >= 0, "open n0");
         EXPECT(0, pjd_unlink(n0));
         chimera_posix_stat_t stbuf;

@@ -12,8 +12,8 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    chimera_posix_stat_t           st;
-    chimera_posix_stat_t           fst;
+    chimera_posix_stat_t  st;
+    chimera_posix_stat_t  fst;
     const char           *test_data = "Hello, World!";
     ssize_t               written;
 

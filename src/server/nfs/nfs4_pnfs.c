@@ -18,7 +18,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "nfs4_procs.h"
 #include "nfs4_state.h"
@@ -55,7 +55,7 @@ pnfs_put_u32(
     uint32_t value)
 {
     *(uint32_t *) *p = chimera_nfs_hton32(value);
-    *p = (char *) *p + sizeof(uint32_t);
+    *p               = (char *) *p + sizeof(uint32_t);
 } /* pnfs_put_u32 */
 
 static inline void
@@ -64,7 +64,7 @@ pnfs_put_u64(
     uint64_t value)
 {
     *(uint64_t *) *p = chimera_nfs_hton64(value);
-    *p = (char *) *p + sizeof(uint64_t);
+    *p               = (char *) *p + sizeof(uint64_t);
 } /* pnfs_put_u64 */
 
 /* XDR opaque<>/string<>: 4-byte length, bytes, then zero padding to 4. */

@@ -35,7 +35,7 @@ chimera_posix_fstat_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_fstat(
-    int          fd,
+    int                   fd,
     chimera_posix_stat_t *st)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();

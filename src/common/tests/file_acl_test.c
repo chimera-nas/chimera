@@ -4,21 +4,23 @@
 #include <assert.h>
 #include "common/host_file.h"
 
-int main(void)
+int
+main(void)
 {
     WCHAR directory[MAX_PATH], path[MAX_PATH];
-    int fd;
+    int   fd;
+
     assert(GetTempPathW(MAX_PATH, directory));
     assert(GetTempFileNameW(directory, L"acl", 0, path));
     fd = _wopen(path, _O_RDWR | _O_BINARY);
     assert(fd >= 0);
     for (int public_read = 0; public_read < 2; public_read++) {
-        PSECURITY_DESCRIPTOR descriptor = NULL;
-        PACL acl = NULL;
+        PSECURITY_DESCRIPTOR        descriptor = NULL;
+        PACL                        acl        = NULL;
         SECURITY_DESCRIPTOR_CONTROL control;
-        DWORD revision;
-        void *entry;
-        int found_world = 0;
+        DWORD                       revision;
+        void                       *entry;
+        int                         found_world = 0;
         assert(!chimera_host_fchmod(fd, public_read ? 0644 : 0600));
         assert(GetSecurityInfo((HANDLE) _get_osfhandle(fd), SE_FILE_OBJECT,
                                DACL_SECURITY_INFORMATION, NULL, NULL, &acl, NULL,
@@ -40,13 +42,13 @@ int main(void)
     _close(fd);
     assert(DeleteFileW(path));
     {
-        char utf8[MAX_PATH * 4];
-        PSECURITY_DESCRIPTOR descriptor = NULL;
-        PACL acl = NULL;
-        PSID owner;
-        void *entry;
+        char                        utf8[MAX_PATH * 4];
+        PSECURITY_DESCRIPTOR        descriptor = NULL;
+        PACL                        acl        = NULL;
+        PSID                        owner;
+        void                       *entry;
         SECURITY_DESCRIPTOR_CONTROL control;
-        DWORD revision;
+        DWORD                       revision;
         assert(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, -1,
                                    utf8, sizeof(utf8), NULL, NULL));
         fd = chimera_host_create_private(utf8);
@@ -67,4 +69,4 @@ int main(void)
         assert(DeleteFileW(path));
     }
     return 0;
-}
+} /* main */

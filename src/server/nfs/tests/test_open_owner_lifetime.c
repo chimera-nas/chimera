@@ -47,16 +47,16 @@
 #ifndef _WIN32
 #include <sched.h>
 #include <sys/wait.h>
-#endif
+#endif /* ifndef _WIN32 */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "nfs4_state.h"
 
@@ -437,13 +437,15 @@ test_adopt_prefers_published_owner(void)
 /* Run fn in a forked child and require it to die with SIGABRT (the
  * chimera_nfs_abort_if diagnostics in the get/put helpers). */
 static void
-expect_abort(void ( *fn )(void), unsigned test_id)
+expect_abort(
+    void (  *fn )(void),
+    unsigned test_id)
 {
 #ifdef _WIN32
-    WCHAR executable[32768], command[64];
-    STARTUPINFOW startup = { sizeof(startup) };
+    WCHAR               executable[32768], command[64];
+    STARTUPINFOW        startup = { sizeof(startup) };
     PROCESS_INFORMATION process;
-    DWORD length, status, waited;
+    DWORD               length, status, waited;
     (void) fn;
     length = GetModuleFileNameW(NULL, executable, 32768);
     CHECK(length && length < 32768);
@@ -459,7 +461,7 @@ expect_abort(void ( *fn )(void), unsigned test_id)
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     CHECK(status != 0);
-#else
+#else  /* ifdef _WIN32 */
     pid_t pid;
     int   status;
     (void) test_id;
@@ -488,7 +490,7 @@ expect_abort(void ( *fn )(void), unsigned test_id)
      * reaches raise(SIGABRT).  Either way the child must NOT have survived to
      * _exit(0) -- that (and only that) means the guard did not fire. */
     CHECK(!(WIFEXITED(status) && WEXITSTATUS(status) == 0));
-#endif
+#endif /* ifdef _WIN32 */
 } /* expect_abort */
 
 static void
@@ -613,9 +615,9 @@ stress_sweeper(void *arg)
         nfs_client_expire_state(ctx->client, ctx->table, NULL);
 #ifdef _WIN32
         SwitchToThread();
-#else
+#else  /* ifdef _WIN32 */
         sched_yield();
-#endif
+#endif /* ifdef _WIN32 */
     }
     return NULL;
 } /* stress_sweeper */
@@ -633,7 +635,7 @@ test_concurrent_install_vs_expire(void)
 {
     struct nfs_state_table table;
     struct stress_ctx      ctx;
-    evpl_native_thread_t              worker, sweeper;
+    evpl_native_thread_t   worker, sweeper;
 
     nfs_state_table_init(&table, 1);
     ctx.table  = &table;
@@ -662,7 +664,8 @@ main(
 {
 #ifdef _WIN32
     if (argc == 3 && strcmp(argv[1], "--death-test") == 0) {
-        void (*tests[])(void) = {
+        void     (*tests[])(
+            void) = {
             die_open_owner_get_after_free, die_open_owner_put_underflow,
             die_lock_owner_get_after_free, die_lock_owner_put_underflow
         };
@@ -673,10 +676,10 @@ main(
         tests[id]();
         return 0; /* Surviving the guard must fail the parent test. */
     }
-#else
+#else  /* ifdef _WIN32 */
     (void) argc;
     (void) argv;
-#endif
+#endif /* ifdef _WIN32 */
     test_open_owner_borrow_survives_sweep();
     test_lock_owner_borrow_survives_sweep();
     test_idle_expiry_frees_owners();

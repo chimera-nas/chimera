@@ -8,9 +8,9 @@
 #include <stdlib.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <errno.h>
 #include <assert.h>
 #include <jansson.h>
@@ -41,7 +41,7 @@
         chimera_abort_if(cond, "fio", __FILE__, __LINE__, __VA_ARGS__)
 
 
-evpl_mutex_t               ChimeraClientMutex  = EVPL_MUTEX_INITIALIZER;
+evpl_mutex_t                  ChimeraClientMutex  = EVPL_MUTEX_INITIALIZER;
 int                           ChimeraNumClients   = 0;
 struct prometheus_metrics    *ChimeraMetrics      = NULL;
 struct chimera_client_config *ChimeraClientConfig = NULL;

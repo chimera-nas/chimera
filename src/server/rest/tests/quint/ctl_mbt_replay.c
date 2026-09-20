@@ -41,9 +41,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/getopt.h"
 #include <jansson.h>
 
@@ -1213,9 +1213,9 @@ main(
      * here undiagnosable from its artifacts. */
 #ifdef _WIN32
     setvbuf(stdout, NULL, _IONBF, 0);
-#else
+#else  /* ifdef _WIN32 */
     setvbuf(stdout, NULL, _IOLBF, 0);
-#endif
+#endif /* ifdef _WIN32 */
 
     umask(0);
 

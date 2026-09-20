@@ -7,9 +7,9 @@
 
 #ifdef _WIN32
 #define SYMBOL_EXPORT
-#else
+#else // ifdef _WIN32
 #define SYMBOL_EXPORT __attribute__((visibility("default")))
-#endif
+#endif // ifdef _WIN32
 
 #ifndef offsetof
 #define offsetof(type, member) ((size_t) &((type *) 0)->member)
@@ -23,7 +23,7 @@
 #ifndef FORCE_INLINE
 #ifdef _MSC_VER
 #define FORCE_INLINE __forceinline
-#else
+#else // ifdef _MSC_VER
 #define FORCE_INLINE __attribute__((always_inline)) inline
-#endif
+#endif // ifdef _MSC_VER
 #endif /* ifndef FORCE_INLINE */

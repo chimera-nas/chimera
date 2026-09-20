@@ -50,7 +50,7 @@ struct nfs_layout_entry {
 };
 
 struct nfs_layout_shard {
-    evpl_mutex_t          lock;
+    evpl_mutex_t             lock;
     struct nfs_layout_entry *by_fh;
 };
 

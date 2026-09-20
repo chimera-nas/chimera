@@ -9,7 +9,7 @@
 #ifdef CHIMERA_HAVE_GSSAPI
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_krb5.h>
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 
 #define SMB_GSSAPI_SESSION_KEY_SIZE 16
 
@@ -20,7 +20,7 @@ struct smb_gssapi_ctx {
 #ifdef CHIMERA_HAVE_GSSAPI
     gss_ctx_id_t  gss_ctx;
     gss_cred_id_t server_cred;
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
     char          principal_name[256];
     uint8_t       session_key[SMB_GSSAPI_SESSION_KEY_SIZE];
     int           authenticated;

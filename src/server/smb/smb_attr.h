@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #include "vfs/vfs_internal.h"
 #include "common/evpl_iovec_cursor.h"
 

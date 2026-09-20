@@ -89,7 +89,7 @@ struct chimera_nfs4_layout {
      * out-of-order seqid (NFS4ERR_SEQ_MISORDERED).  They are replayed once
      * acquisition resolves.  acq_thread/shared/private are the dispatch context
      * captured when acquisition started, used to replay parked requests. */
-    evpl_mutex_t                   acq_lock;
+    evpl_mutex_t                      acq_lock;
     struct chimera_vfs_request       *acq_waiters;
     struct chimera_nfs_thread        *acq_thread;
     struct chimera_nfs_shared        *acq_shared;

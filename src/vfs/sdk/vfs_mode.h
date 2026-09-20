@@ -7,93 +7,93 @@
 /* Unix-shaped mode bits are part of the virtual filesystem protocol contract. */
 #ifdef _WIN32
 #ifndef S_IFMT
-#define S_IFMT 0170000
-#endif
+#define S_IFMT   0170000
+#endif // ifndef S_IFMT
 #ifndef S_IFSOCK
 #define S_IFSOCK 0140000
-#endif
+#endif // ifndef S_IFSOCK
 #ifndef S_IFLNK
-#define S_IFLNK 0120000
-#endif
+#define S_IFLNK  0120000
+#endif // ifndef S_IFLNK
 #ifndef S_IFREG
-#define S_IFREG 0100000
-#endif
+#define S_IFREG  0100000
+#endif // ifndef S_IFREG
 #ifndef S_IFBLK
-#define S_IFBLK 0060000
-#endif
+#define S_IFBLK  0060000
+#endif // ifndef S_IFBLK
 #ifndef S_IFDIR
-#define S_IFDIR 0040000
-#endif
+#define S_IFDIR  0040000
+#endif // ifndef S_IFDIR
 #ifndef S_IFCHR
-#define S_IFCHR 0020000
-#endif
+#define S_IFCHR  0020000
+#endif // ifndef S_IFCHR
 #ifndef S_IFIFO
-#define S_IFIFO 0010000
-#endif
+#define S_IFIFO  0010000
+#endif // ifndef S_IFIFO
 #ifndef S_ISUID
-#define S_ISUID 04000
-#endif
+#define S_ISUID  04000
+#endif // ifndef S_ISUID
 #ifndef S_ISGID
-#define S_ISGID 02000
-#endif
+#define S_ISGID  02000
+#endif // ifndef S_ISGID
 #ifndef S_ISVTX
-#define S_ISVTX 01000
-#endif
+#define S_ISVTX  01000
+#endif // ifndef S_ISVTX
 #ifndef S_IRWXU
-#define S_IRWXU 0700
-#endif
+#define S_IRWXU  0700
+#endif // ifndef S_IRWXU
 #ifndef S_IRUSR
-#define S_IRUSR 0400
-#endif
+#define S_IRUSR  0400
+#endif // ifndef S_IRUSR
 #ifndef S_IWUSR
-#define S_IWUSR 0200
-#endif
+#define S_IWUSR  0200
+#endif // ifndef S_IWUSR
 #ifndef S_IXUSR
-#define S_IXUSR 0100
-#endif
+#define S_IXUSR  0100
+#endif // ifndef S_IXUSR
 #ifndef S_IRWXG
-#define S_IRWXG 0070
-#endif
+#define S_IRWXG  0070
+#endif // ifndef S_IRWXG
 #ifndef S_IRGRP
-#define S_IRGRP 0040
-#endif
+#define S_IRGRP  0040
+#endif // ifndef S_IRGRP
 #ifndef S_IWGRP
-#define S_IWGRP 0020
-#endif
+#define S_IWGRP  0020
+#endif // ifndef S_IWGRP
 #ifndef S_IXGRP
-#define S_IXGRP 0010
-#endif
+#define S_IXGRP  0010
+#endif // ifndef S_IXGRP
 #ifndef S_IRWXO
-#define S_IRWXO 0007
-#endif
+#define S_IRWXO  0007
+#endif // ifndef S_IRWXO
 #ifndef S_IROTH
-#define S_IROTH 0004
-#endif
+#define S_IROTH  0004
+#endif // ifndef S_IROTH
 #ifndef S_IWOTH
-#define S_IWOTH 0002
-#endif
+#define S_IWOTH  0002
+#endif // ifndef S_IWOTH
 #ifndef S_IXOTH
-#define S_IXOTH 0001
-#endif
+#define S_IXOTH  0001
+#endif // ifndef S_IXOTH
 #ifndef S_ISREG
-#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
-#endif
+#define S_ISREG(m)  (((m)&S_IFMT) == S_IFREG)
+#endif // ifndef S_ISREG
 #ifndef S_ISDIR
-#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
-#endif
+#define S_ISDIR(m)  (((m)&S_IFMT) == S_IFDIR)
+#endif // ifndef S_ISDIR
 #ifndef S_ISLNK
-#define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
-#endif
+#define S_ISLNK(m)  (((m)&S_IFMT) == S_IFLNK)
+#endif // ifndef S_ISLNK
 #ifndef S_ISBLK
-#define S_ISBLK(m) (((m) & S_IFMT) == S_IFBLK)
-#endif
+#define S_ISBLK(m)  (((m)&S_IFMT) == S_IFBLK)
+#endif // ifndef S_ISBLK
 #ifndef S_ISCHR
-#define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)
-#endif
+#define S_ISCHR(m)  (((m)&S_IFMT) == S_IFCHR)
+#endif // ifndef S_ISCHR
 #ifndef S_ISFIFO
-#define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
-#endif
+#define S_ISFIFO(m) (((m)&S_IFMT) == S_IFIFO)
+#endif // ifndef S_ISFIFO
 #ifndef S_ISSOCK
-#define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
-#endif
-#endif
+#define S_ISSOCK(m) (((m)&S_IFMT) == S_IFSOCK)
+#endif // ifndef S_ISSOCK
+#endif // ifdef _WIN32

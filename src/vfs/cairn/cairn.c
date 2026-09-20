@@ -10,13 +10,13 @@
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/platform.h"
 #include <rocksdb/c.h>
 #include "rocksdb_compat.h"
@@ -311,7 +311,7 @@ struct cairn_shared {
      * lock).  Per-op resolution does not consult this: it comes in on the
      * request as mount_private. */
     struct cairn_fs                         *fs_list;
-    evpl_mutex_t                          lock;
+    evpl_mutex_t                             lock;
     /*
      * Striped per-inode mutexes (used by helpers below for fine-grained
      * locking on the metadata of a single inode).  Combined with
@@ -325,8 +325,8 @@ struct cairn_shared {
      * metadata-mutating op with the appropriate stripe locks is tracked
      * as Phase A.2.
      */
-    evpl_mutex_t                          multi_inode_lock;
-    evpl_mutex_t                          inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
+    evpl_mutex_t                             multi_inode_lock;
+    evpl_mutex_t                             inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
     int                                      noatime;
 };
 
@@ -474,11 +474,11 @@ cairn_lock_inodes(
     int                  n)
 {
     evpl_mutex_t *stripes[8];
-    int              ns = 0, i, j;
+    int           ns = 0, i, j;
 
     for (i = 0; i < n; i++) {
         evpl_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
-        int              dup = 0;
+        int           dup = 0;
         for (j = 0; j < ns; j++) {
             if (stripes[j] == s) {
                 dup = 1; break;
@@ -508,11 +508,11 @@ cairn_unlock_inodes(
     int                  n)
 {
     evpl_mutex_t *stripes[8];
-    int              ns = 0, i, j;
+    int           ns = 0, i, j;
 
     for (i = 0; i < n; i++) {
         evpl_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
-        int              dup = 0;
+        int           dup = 0;
         for (j = 0; j < ns; j++) {
             if (stripes[j] == s) {
                 dup = 1; break;
@@ -939,11 +939,11 @@ cairn_put_acl(
     uint64_t                  inum,
     const struct chimera_acl *acl)
 {
-    rocksdb_transaction_t  *txn = cairn_get_meta_txn(thread);
-    char                   *err = NULL;
-    struct cairn_acl_key    key;
+    rocksdb_transaction_t              *txn = cairn_get_meta_txn(thread);
+    char                               *err = NULL;
+    struct cairn_acl_key                key;
     static CHIMERA_THREAD_LOCAL uint8_t buf[CAIRN_ACL_SCRATCH];
-    int                     len;
+    int                                 len;
 
     len = chimera_acl_serialize(acl, buf, sizeof(buf));
     if (len < 0) {
@@ -1146,7 +1146,7 @@ cairn_map_acl(
     const struct cairn_inode *inode)
 {
     static CHIMERA_THREAD_LOCAL uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
-    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+    struct chimera_acl                 *dst = (struct chimera_acl *) scratch;
 
     /* The SID companions travel with the ACL everywhere it is mapped. */
     cairn_map_sids(thread, attr, inode);
@@ -1184,9 +1184,9 @@ cairn_inherit_acl(
     int                       windows_default)
 {
     static CHIMERA_THREAD_LOCAL uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
-    struct chimera_acl     *pacl   = (struct chimera_acl *) pbuf;
-    int                     is_dir = S_ISDIR(child->mode);
-    uint16_t                want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+    struct chimera_acl                 *pacl   = (struct chimera_acl *) pbuf;
+    int                                 is_dir = S_ISDIR(child->mode);
+    uint16_t                            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
 
     /* An explicit ACL supplied at create (e.g. an SMB SD via SecD) takes
@@ -2375,8 +2375,8 @@ cairn_setattr(
         } else if (orig_set_mask & CHIMERA_VFS_ATTR_MODE) {
             static CHIMERA_THREAD_LOCAL uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
             static CHIMERA_THREAD_LOCAL uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
-            struct chimera_acl     *old_acl = (struct chimera_acl *) old_buf;
-            struct chimera_acl     *new_acl = (struct chimera_acl *) new_buf;
+            struct chimera_acl                 *old_acl = (struct chimera_acl *) old_buf;
+            struct chimera_acl                 *new_acl = (struct chimera_acl *) new_buf;
 
             if (cairn_load_acl(thread, inode->inum, old_acl) &&
                 chimera_acl_chmod(old_acl, inode->mode, new_acl,
@@ -3835,9 +3835,9 @@ cairn_inode_access(
     const struct chimera_vfs_cred *cred,
     uint32_t                       requested)
 {
-    static CHIMERA_THREAD_LOCAL uint8_t  aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
-    struct chimera_acl      *acl = (struct chimera_acl *) aclbuf;
-    struct chimera_vfs_attrs attr;
+    static CHIMERA_THREAD_LOCAL uint8_t aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl                 *acl = (struct chimera_acl *) aclbuf;
+    struct chimera_vfs_attrs            attr;
 
     attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
         CHIMERA_VFS_ATTR_GID;

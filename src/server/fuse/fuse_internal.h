@@ -252,17 +252,17 @@ struct chimera_fuse_mount {
     struct chimera_fuse_node_table *node_table;
     /* Open files the kernel has not RELEASEd yet, so shutdown can release
     * their VFS handles.  Shared across threads (multi-queue delivery). */
-    evpl_mutex_t                 open_lock;
+    evpl_mutex_t                    open_lock;
     struct chimera_fuse_open_file  *open_files;
     /* POSIX byte-range lock table: (owner, file) buckets plus the parked
      * SETLKW requests INTERRUPT may cancel.  All under lock_lock. */
-    evpl_mutex_t                 lock_lock;
+    evpl_mutex_t                    lock_lock;
     struct chimera_fuse_lock_file  *lock_files;
     struct chimera_fuse_request    *parked_locks;
     /* Kernel-cache coherence: per-file caching grants and per-directory
      * change watches, both under grant_lock (a leaf: never held while
      * calling into vfs_state or vfs_notify). */
-    evpl_mutex_t                 grant_lock;
+    evpl_mutex_t                    grant_lock;
     struct chimera_fuse_grant      *grants;
     struct chimera_fuse_dirwatch   *dirwatches;
     /* Per-mount directory-event notifier: INVAL_ENTRY writes can block on
@@ -271,9 +271,9 @@ struct chimera_fuse_mount {
      * one mount's blocked entry invalidation must never sit ahead of
      * another mount's acks, or of the never-blocking grant lane on the
      * shared notifier (see chimera_fuse_dir_notifier). */
-    evpl_native_thread_t                       dir_notifier;
-    evpl_mutex_t                 dir_notifier_lock;
-    evpl_cond_t                  dir_notifier_cond;
+    evpl_native_thread_t            dir_notifier;
+    evpl_mutex_t                    dir_notifier_lock;
+    evpl_cond_t                     dir_notifier_cond;
     struct chimera_fuse_notice     *dir_notices;
     int                             dir_notifier_running;
     int                             dir_notifier_stop;
@@ -284,7 +284,7 @@ struct chimera_fuse_mount {
 struct chimera_fuse_shared {
     struct chimera_vfs         *vfs;
     struct prometheus_metrics  *metrics;
-    evpl_mutex_t             lock;
+    evpl_mutex_t                lock;
     int                         num_mounts;
     struct chimera_fuse_mount   mounts[CHIMERA_FUSE_MAX_MOUNTS];
     int                         num_threads;
@@ -292,9 +292,9 @@ struct chimera_fuse_shared {
     struct chimera_fuse_thread *threads[CHIMERA_FUSE_MAX_THREADS];
     int                         started;
     /* Dedicated invalidation-notifier thread (see chimera_fuse_notice). */
-    evpl_native_thread_t                   notifier;
-    evpl_mutex_t             notifier_lock;
-    evpl_cond_t              notifier_cond;
+    evpl_native_thread_t        notifier;
+    evpl_mutex_t                notifier_lock;
+    evpl_cond_t                 notifier_cond;
     struct chimera_fuse_notice *notices;
     int                         notifier_running;
     int                         notifier_stop;
@@ -333,7 +333,7 @@ struct chimera_fuse_thread {
     int                          active_requests;
     /* Requests completed off-thread (a blocked lock granted or cancelled)
      * marshalled home for their reply, the cb_doorbell pattern. */
-    evpl_mutex_t              resume_lock;
+    evpl_mutex_t                 resume_lock;
     struct chimera_fuse_request *resume_queue;
     struct evpl_doorbell         resume_doorbell;
 };

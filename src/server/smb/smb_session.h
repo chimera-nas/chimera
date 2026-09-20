@@ -315,7 +315,7 @@ struct chimera_smb_tree {
     struct chimera_smb_share     *share;
 
     struct chimera_smb_open_file *open_files[CHIMERA_SMB_OPEN_FILE_BUCKETS];
-    evpl_mutex_t               open_files_lock[CHIMERA_SMB_OPEN_FILE_BUCKETS];
+    evpl_mutex_t                  open_files_lock[CHIMERA_SMB_OPEN_FILE_BUCKETS];
 
     /* DH2Q creates that are deferred BEFORE their open_file is hashed into
      * open_files[]: a hard share conflict against a holder whose handle-caching
@@ -330,7 +330,7 @@ struct chimera_smb_tree {
      * request.  Guarded by pending_creates_lock; the list is short (one entry per
      * deferred create on this tree). */
     struct chimera_smb_request   *pending_creates;
-    evpl_mutex_t               pending_creates_lock;
+    evpl_mutex_t                  pending_creates_lock;
 
     struct chimera_smb_tree      *prev;
     struct chimera_smb_tree      *next;
@@ -399,7 +399,7 @@ struct chimera_smb_session {
     struct chimera_smb_session *prev;
     struct chimera_smb_session *next;
 
-    evpl_mutex_t             lock;
+    evpl_mutex_t                lock;
     struct chimera_smb_tree   **trees;
 
     int                         max_trees;

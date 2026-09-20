@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 
 /*
  * WRITE_SAME (RFC 7862 15.13) writes an Application Data Block pattern -- a

@@ -61,7 +61,7 @@ main(
 
         EXPECT(0, pjd_create_file(types[i], n0));
         EXPECT(0, pjd_chmod(n0, 0644));
-        long        inode = pjd_lstat_inode(n0);
+        long                 inode = pjd_lstat_inode(n0);
         check(n0, 0644, inode, 1);
 
         EXPECT(0, pjd_rename(n0, n1));
@@ -86,7 +86,7 @@ main(
         chimera_posix_stat_t junk;
         EXPECT(0, pjd_mkdir(n0, 0755));
         EXPECT_EQ(S_IFDIR, pjd_lstat_type(n0));
-        long        inode = pjd_lstat_inode(n0);
+        long                 inode = pjd_lstat_inode(n0);
         EXPECT(0, pjd_rename(n0, n1));
         EXPECT(ENOENT, pjd_lstat(n0, &junk));
         EXPECT_EQ(S_IFDIR, pjd_lstat_type(n1));

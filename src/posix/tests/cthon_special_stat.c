@@ -80,10 +80,10 @@ main(
 static void
 statit(const char *name)
 {
-    chimera_posix_stat_t    statb;
-    struct dirent *di;
-    CHIMERA_DIR   *dirp;
-    char           fullpath[MAXPATHLEN];
+    chimera_posix_stat_t statb;
+    struct dirent       *di;
+    CHIMERA_DIR         *dirp;
+    char                 fullpath[MAXPATHLEN];
 
     if (chimera_posix_lstat(name, &statb) < 0) {
         cthon_error("can't stat %s: %s", name, strerror(errno));

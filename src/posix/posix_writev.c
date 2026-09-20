@@ -7,9 +7,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #ifndef IOV_MAX
 #define IOV_MAX 1024
@@ -47,7 +47,7 @@ chimera_posix_writev_internal(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset,
+    chimera_off_t       offset,
     int                 use_fd_offset)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
@@ -143,7 +143,7 @@ chimera_posix_pwritev(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset)
+    chimera_off_t       offset)
 {
     return chimera_posix_writev_internal(fd, iov, iovcnt, offset, 0);
 } /* chimera_posix_pwritev */
@@ -163,7 +163,7 @@ chimera_posix_pwritev2(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
-    chimera_off_t               offset,
+    chimera_off_t       offset,
     int                 flags)
 {
     // Ignore RWF_HIPRI and RWF_NOWAIT for now - just behave as pwritev

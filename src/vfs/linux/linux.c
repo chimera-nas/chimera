@@ -11,28 +11,28 @@
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/types.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/sysmacros.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <sys/statvfs.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/dirent.h"
 #include <fcntl.h>
 #include <errno.h>
@@ -123,14 +123,14 @@ struct chimera_linux_range {
 struct chimera_linux_shared {
     int                              readdir_verifier;
 
-    evpl_mutex_t                  range_lock;
+    evpl_mutex_t                     range_lock;
     struct chimera_linux_range_file *range_files;
     struct chimera_linux_range      *ranges;
     uint64_t                         range_next_token;
 
     /* Mount roots handed out as mount_private, so destroy can free the ones
      * no UMOUNT reclaimed.  See chimera_linux_mount_root. */
-    evpl_mutex_t                  mount_lock;
+    evpl_mutex_t                     mount_lock;
     struct chimera_linux_mount_root *mount_roots;
 };
 
@@ -455,8 +455,8 @@ chimera_linux_getattr(
     if ((request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) &&
         (request->getattr.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
         static CHIMERA_THREAD_LOCAL uint8_t scratch[sizeof(struct chimera_acl) +
-                                        8 * sizeof(struct chimera_ace)];
-        struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+                                                    8 * sizeof(struct chimera_ace)];
+        struct chimera_acl                 *dst = (struct chimera_acl *) scratch;
 
         chimera_acl_from_mode(request->getattr.r_attr.va_mode, dst, 8);
         request->getattr.r_attr.va_acl       = dst;

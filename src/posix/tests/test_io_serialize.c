@@ -79,8 +79,8 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    chimera_posix_stat_t           st;
-    evpl_native_thread_t             threads[NUM_THREADS];
+    chimera_posix_stat_t  st;
+    evpl_native_thread_t  threads[NUM_THREADS];
     struct worker_args    args[NUM_THREADS];
     atomic_int            error_count;
     atomic_int            success_count;

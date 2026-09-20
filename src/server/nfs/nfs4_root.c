@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "nfs.h"
 #include "nfs4_procs.h"

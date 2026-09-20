@@ -26,16 +26,16 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <unistd.h>
-#endif
+#endif // ifdef _WIN32
 #include <inttypes.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 
 #include "server/server.h"
 #include "common/tcp_flavor.h"
@@ -1498,7 +1498,7 @@ static inline void
 mbt_env_stop(struct mbt_env *env)
 {
 
-    int  i;
+    int i;
 
     if (env->portmap_conn) {
         evpl_rpc2_client_disconnect(env->rpc2_thread, env->portmap_conn);

@@ -86,7 +86,7 @@ chimera_vfs_clock_refresh(uint64_t now_ticks)
     elapsed = chimera_vfs_ticks_to_ns(now_ticks);
 
     chimera_atomic_store_n(&chimera_vfs_clock.delta_ns, actual - chimera_vfs_clock.base_wall_ns - elapsed,
-                     CHIMERA_MEMORY_RELAXED);
+                           CHIMERA_MEMORY_RELAXED);
     chimera_atomic_store_n(&chimera_vfs_clock.last_refresh, now_ticks, CHIMERA_MEMORY_RELAXED);
 } /* chimera_vfs_clock_refresh */
 

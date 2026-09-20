@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif // ifdef _WIN32
 #include <string.h>
 
 #include "vfs/vfs.h"
@@ -341,7 +341,7 @@ chimera_nfs4_attr_append_uint32(
     uint32_t value)
 {
     *(uint32_t *) *attrs = chimera_nfs_hton32(value);
-    *attrs = (char *) *attrs + sizeof(uint32_t);
+    *attrs               = (char *) *attrs + sizeof(uint32_t);
 } /* chimera_nfs4_attr_append_uint32 */
 
 static void
@@ -350,7 +350,7 @@ chimera_nfs4_attr_append_uint64(
     uint64_t value)
 {
     *(uint64_t *) *attrs = chimera_nfs_hton64(value);
-    *attrs = (char *) *attrs + sizeof(uint64_t);
+    *attrs               = (char *) *attrs + sizeof(uint64_t);
 } /* chimera_nfs4_attr_append_uint64 */
 
 static void
@@ -1171,7 +1171,7 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-            attrs = (char *) attrs + sizeof(uint64_t);
+            attrs              = (char *) attrs + sizeof(uint64_t);
             attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         }
 
@@ -1182,7 +1182,7 @@ chimera_nfs4_unmarshall_attrs(
             if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
-            nace   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            nace  = chimera_nfs_ntoh32(*(uint32_t *) attrs);
             attrs = (char *) attrs + sizeof(uint32_t);
 
             if (unlikely(!acl_buf || nace > acl_buf_max_aces)) {
@@ -1197,13 +1197,13 @@ chimera_nfs4_unmarshall_attrs(
                     return NFS4ERR_BADXDR;
                 }
                 type   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
                 flag   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
                 mask   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
                 wholen = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
 
                 padded = (wholen + 3) & ~3u;
                 if (unlikely((char *) attrs + padded > attrsend || wholen == 0)) {
@@ -1269,7 +1269,7 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             attr->va_mode      = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs = (char *) attrs + sizeof(uint32_t);
+            attrs              = (char *) attrs + sizeof(uint32_t);
             attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         }
 
@@ -1282,7 +1282,7 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             owner_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs = (char *) attrs + sizeof(uint32_t);
+            attrs            = (char *) attrs + sizeof(uint32_t);
             owner_padded_len = (owner_len + 3) & ~3;
 
             if (unlikely((char *) attrs + owner_padded_len > attrsend)) {
@@ -1296,7 +1296,7 @@ chimera_nfs4_unmarshall_attrs(
 
             /* Convert string to numeric uid */
             attr->va_uid       = strtoul(attrs, NULL, 10);
-            attrs = (char *) attrs + owner_padded_len;
+            attrs              = (char *) attrs + owner_padded_len;
             attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         }
 
@@ -1309,7 +1309,7 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             group_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs = (char *) attrs + sizeof(uint32_t);
+            attrs            = (char *) attrs + sizeof(uint32_t);
             group_padded_len = (group_len + 3) & ~3;
 
             if (unlikely((char *) attrs + group_padded_len > attrsend)) {
@@ -1323,7 +1323,7 @@ chimera_nfs4_unmarshall_attrs(
 
             /* Convert string to numeric gid */
             attr->va_gid       = strtoul(attrs, NULL, 10);
-            attrs = (char *) attrs + group_padded_len;
+            attrs              = (char *) attrs + group_padded_len;
             attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         }
 
@@ -1334,7 +1334,7 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             set_it = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs = (char *) attrs + sizeof(uint32_t);
+            attrs  = (char *) attrs + sizeof(uint32_t);
 
             if (set_it) {
 
@@ -1343,9 +1343,9 @@ chimera_nfs4_unmarshall_attrs(
                 }
 
                 attr->va_atime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint64_t);
+                attrs                  = (char *) attrs + sizeof(uint64_t);
                 attr->va_atime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint32_t);
+                attrs                  = (char *) attrs + sizeof(uint32_t);
 
                 /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
                 if (unlikely(attr->va_atime.tv_nsec >= 1000000000)) {
@@ -1366,7 +1366,7 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             set_it = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs = (char *) attrs + sizeof(uint32_t);
+            attrs  = (char *) attrs + sizeof(uint32_t);
 
             if (set_it) {
 
@@ -1375,9 +1375,9 @@ chimera_nfs4_unmarshall_attrs(
                 }
 
                 attr->va_mtime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint64_t);
+                attrs                  = (char *) attrs + sizeof(uint64_t);
                 attr->va_mtime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs = (char *) attrs + sizeof(uint32_t);
+                attrs                  = (char *) attrs + sizeof(uint32_t);
 
                 /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
                 if (unlikely(attr->va_mtime.tv_nsec >= 1000000000)) {

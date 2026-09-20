@@ -18,18 +18,18 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/time.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 static int failures;
 

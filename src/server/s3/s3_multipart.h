@@ -40,7 +40,7 @@ struct chimera_s3_multipart_upload {
      * k=v&...), applied as object tag xattrs on CompleteMultipartUpload. */
     char                               *tagging;
     struct timespec                     created;
-    evpl_mutex_t                     lock;
+    evpl_mutex_t                        lock;
     int                                 refcount;
     int                                 removed;
     /* Set by the CompleteMultipartUpload that wins the race to assemble this
@@ -56,7 +56,7 @@ struct chimera_s3_multipart_upload {
 };
 
 struct chimera_s3_multipart_table {
-    evpl_rwlock_t                     lock;
+    evpl_rwlock_t                        lock;
     int                                  nbuckets;
     struct chimera_s3_multipart_upload **buckets;
 };

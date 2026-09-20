@@ -6,9 +6,9 @@
 
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <sys/sysmacros.h>
-#endif
+#endif // ifdef _WIN32
 #include <sys/xattr.h>
 #include <fcntl.h>
 

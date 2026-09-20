@@ -20,9 +20,9 @@
 #ifdef _WIN32
 #include "common/thread.h"
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "posix_internal.h"
 #include "vfs/sdk/vfs_module.h"
@@ -320,7 +320,7 @@ chimera_posix_ofd_lock_carve(
 struct chimera_posix_lock_waiter {
     evpl_mutex_t mutex;
     evpl_cond_t  cond;
-    int             done;
+    int          done;
     enum chimera_vfs_claim_result result;
 };
 
@@ -453,8 +453,8 @@ struct chimera_posix_lock_probe_ctx {
     uint8_t                             granted;
     uint64_t                            token;
     struct chimera_claim_range_conflict conflict;
-    evpl_mutex_t                     mutex;
-    evpl_cond_t                      cond;
+    evpl_mutex_t                        mutex;
+    evpl_cond_t                         cond;
     int                                 done;
 };
 
@@ -661,8 +661,8 @@ struct chimera_posix_unlock_ctx {
     const struct chimera_vfs_claim *except;
     uint64_t                        offset;
     uint64_t                        length;
-    evpl_mutex_t                 mutex;
-    evpl_cond_t                  cond;
+    evpl_mutex_t                    mutex;
+    evpl_cond_t                     cond;
     int                             done;
 };
 
@@ -774,8 +774,8 @@ struct chimera_posix_unlock_ranged_ctx {
     uint64_t                        length;
     struct chimera_claim_owner      owner;
     enum chimera_vfs_error status;
-    evpl_mutex_t                 mutex;
-    evpl_cond_t                  cond;
+    evpl_mutex_t                    mutex;
+    evpl_cond_t                     cond;
     int                             done;
 };
 

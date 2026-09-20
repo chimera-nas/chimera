@@ -12,7 +12,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    chimera_posix_stat_t           st1, st2;
+    chimera_posix_stat_t  st1, st2;
 
     posix_test_init(&env, argv, argc);
 

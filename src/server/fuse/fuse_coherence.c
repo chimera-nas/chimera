@@ -41,15 +41,15 @@
 #include <string.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include <errno.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
 #include "vfs/vfs_claim.h"
@@ -391,7 +391,7 @@ chimera_fuse_dir_notifier(void *arg)
     for (;;) {
         while (!mount->dir_notices && !mount->dir_notifier_stop) {
             evpl_cond_wait(&mount->dir_notifier_cond,
-                              &mount->dir_notifier_lock);
+                           &mount->dir_notifier_lock);
         }
 
         if (!mount->dir_notices) {
@@ -429,7 +429,7 @@ chimera_fuse_notifier_start(struct chimera_fuse_shared *shared)
 
         mount->dir_notifier_stop = 0;
         evpl_native_thread_create(&mount->dir_notifier, NULL,
-                       chimera_fuse_dir_notifier, mount);
+                                  chimera_fuse_dir_notifier, mount);
         mount->dir_notifier_running = 1;
     }
 } /* chimera_fuse_notifier_start */

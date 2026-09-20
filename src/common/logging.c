@@ -15,20 +15,20 @@
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/thread.h"
 #ifndef _WIN32
 #include <execinfo.h>
-#endif
+#endif /* ifndef _WIN32 */
 
 #include "evpl/evpl.h"
 
  #define UNW_LOCAL_ONLY
 #ifndef _WIN32
 #include <libunwind.h>
-#endif
+#endif /* ifndef _WIN32 */
 
 #include "common/macros.h"
 #include "common/logging.h"
@@ -130,7 +130,7 @@ chimera_timet2tmZ(
 } /* ot_timet2tmZ */
 
 
-static const char *level_string[] = {
+static const char   *level_string[] = {
     "none",
     "fatal",
     "error",
@@ -140,15 +140,15 @@ static const char *level_string[] = {
 
 #define CHIMERA_LOG_BUF_SIZE 1024 * 1024
 
-char              *ChimeraLogBuffers[2];
-int                ChimeraLogIndex    = 0;
-char              *ChimeraLogBuf      = NULL;
-char              *ChimeraLogBufPtr   = NULL;
-volatile int       ChimeraLogRun      = 1;
-SYMBOL_EXPORT int  ChimeraLogLevel    = CHIMERA_LOG_INFO;
-FILE              *ChimeraLogFile     = NULL; /* NULL => write to stdout */
-int                ChimeraLogDisabled = 0;
-evpl_mutex_t    ChimeraLogBufLock  = EVPL_MUTEX_INITIALIZER;
+char                *ChimeraLogBuffers[2];
+int                  ChimeraLogIndex    = 0;
+char                *ChimeraLogBuf      = NULL;
+char                *ChimeraLogBufPtr   = NULL;
+volatile int         ChimeraLogRun      = 1;
+SYMBOL_EXPORT int    ChimeraLogLevel    = CHIMERA_LOG_INFO;
+FILE                *ChimeraLogFile     = NULL; /* NULL => write to stdout */
+int                  ChimeraLogDisabled = 0;
+evpl_mutex_t         ChimeraLogBufLock  = EVPL_MUTEX_INITIALIZER;
 /* Held by the flusher across its stdio write and by the atfork prepare
  * handler: without it, fork() can land while the flusher is inside
  * fprintf/fflush holding the C library's stream lock, and the child inherits
@@ -156,9 +156,9 @@ evpl_mutex_t    ChimeraLogBufLock  = EVPL_MUTEX_INITIALIZER;
  * chimera_vlog's inline drain once the buffer fills with no flusher alive)
  * deadlocks.  ChimeraLogBufLock alone cannot prevent this because the flusher
  * deliberately prints outside it. */
-evpl_mutex_t    ChimeraLogFlushLock = EVPL_MUTEX_INITIALIZER;
-evpl_native_thread_t          ChimeraLogThread;
-evpl_once_t     ChimeraLogOnce = EVPL_ONCE_INIT;
+evpl_mutex_t         ChimeraLogFlushLock = EVPL_MUTEX_INITIALIZER;
+evpl_native_thread_t ChimeraLogThread;
+evpl_once_t          ChimeraLogOnce = EVPL_ONCE_INIT;
 
 static void *
 chimera_log_thread(void *arg)
@@ -272,7 +272,7 @@ chimera_log_atfork_child(void)
         ChimeraLogBuf[0] = '\0';
     }
 } /* chimera_log_atfork_child */
-#endif
+#endif /* ifndef _WIN32 */
 
 
 static void
@@ -299,7 +299,7 @@ chimera_log_thread_init(void)
 
 #ifdef _WIN32
     signal(SIGABRT, chimera_log_flush_signal);
-#else
+#else  /* ifdef _WIN32 */
     struct sigaction sa;
     sa.sa_handler = chimera_log_flush_signal;
     sigemptyset(&sa.sa_mask);
@@ -308,7 +308,7 @@ chimera_log_thread_init(void)
 
     pthread_atfork(chimera_log_atfork_prepare, chimera_log_atfork_parent,
                    chimera_log_atfork_child);
-#endif
+#endif /* ifdef _WIN32 */
 
 
     int rc = chimera_pthread_create(&ChimeraLogThread, NULL,
@@ -509,13 +509,13 @@ static void
 chimera_crash_handler(int signum)
 {
 #ifdef _WIN32
-    void *frames[BACKTRACE_SIZE];
-    USHORT count = CaptureStackBackTrace(0, BACKTRACE_SIZE, frames, NULL);
+    void         *frames[BACKTRACE_SIZE];
+    USHORT        count = CaptureStackBackTrace(0, BACKTRACE_SIZE, frames, NULL);
     chimera_error("core", __FILE__, __LINE__, "Received signal %d.", signum);
     for (USHORT i = 0; i < count; i++) {
         chimera_error("core", __FILE__, __LINE__, "frame %u: %p", i, frames[i]);
     }
-#else
+#else  /* ifdef _WIN32 */
     unw_cursor_t  cursor;
     unw_context_t context;
     unw_word_t    ip, sp, off;
@@ -539,7 +539,7 @@ chimera_crash_handler(int signum)
         }
     }
 
-#endif
+#endif /* ifdef _WIN32 */
 
     chimera_log_flush_signal(signum);
 
@@ -554,7 +554,7 @@ chimera_enable_crash_handler(void)
     signal(SIGSEGV, chimera_crash_handler);
     signal(SIGFPE, chimera_crash_handler);
     signal(SIGILL, chimera_crash_handler);
-#else
+#else  /* ifdef _WIN32 */
     struct sigaction sa;
 
     sa.sa_handler = chimera_crash_handler;
@@ -565,5 +565,5 @@ chimera_enable_crash_handler(void)
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
-#endif
+#endif /* ifdef _WIN32 */
 } /* chimera_enable_crash_handler */

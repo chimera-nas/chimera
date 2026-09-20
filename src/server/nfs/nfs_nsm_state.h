@@ -50,7 +50,7 @@ struct nsm_monitor {
  * first and drop it before taking nlm_state.mutex.
  */
 struct nsm_state {
-    evpl_mutex_t     mutex;
+    evpl_mutex_t        mutex;
     struct nsm_monitor *monitors;            /* uthash, keyed by host */
     uint32_t            state_number;        /* monotonic; odd == "we are up" */
     int                 persistence_disabled; /* 1 when kv_module is non-persistent */

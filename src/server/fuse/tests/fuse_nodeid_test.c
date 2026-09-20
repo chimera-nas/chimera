@@ -77,7 +77,7 @@ main(
     uint32_t                        fh_len;
     uint64_t                        id_a, id_a2, id_b, id_gone;
     struct worker_args              args[NUM_THREADS];
-    evpl_native_thread_t                       threads[NUM_THREADS];
+    evpl_native_thread_t            threads[NUM_THREADS];
     int                             i;
 
     table = chimera_fuse_node_table_create();
