@@ -171,6 +171,23 @@ nfs4_root_export_fh_resolve(
     nfs4_root_export_fh_callback_t    callback);
 
 /**
+ * Is `fh` (minted under `export_id`) the "/" export's root, answered from what
+ * is already known?  1 yes, 0 no, -1 not knowable without resolving the export
+ * path -- which this never does, because its caller is the VFS-sequence scan
+ * and a scan cannot wait.
+ *
+ * 0 is a definitive no: with no "/" export configured, or a handle minted
+ * under another export, nothing about this handle can be a junction.  -1 is
+ * only the cold cache, which PUTROOTFH warms on the first mount.
+ */
+int
+nfs4_root_export_fh_peek(
+    struct chimera_server_nfs_thread *thread,
+    uint16_t                          export_id,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len);
+
+/**
  * Decide whether the request's current filehandle is the root of the "/"
  * export, and continue the operation via resume(thread, req, at_root_export).
  * The decision is immediate (and resume runs synchronously) unless the root

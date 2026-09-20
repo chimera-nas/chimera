@@ -36,6 +36,14 @@
  * handle's export id and squash policy.  Refusing is always safe: the request
  * is untouched and the per-op path runs.
  *
+ * AND IT REFUSES THE CASE AND NOT THE FEATURE.  Junction shadowing is the
+ * shape of the rule: a sibling export shadows a name only AT the "/" export's
+ * own root, so only a LOOKUP or SECINFO whose directory could be that root is
+ * refused -- answered from the root-FH cache the first PUTROOTFH warms -- and
+ * every other name resolved on a server that has a "/" export is carried like
+ * any other.  A refusal written against the configuration rather than against
+ * the case costs every request on such a server, and none of them is the case.
+ *
  * INJECTED OPS.  Several NFSv4 operations do more VFS work than their
  * VFS-compound counterpart: PUTFH stats the handle it validates (the zero-link
  * staleness rule), READLINK stats the object before reading it (the symlink
@@ -2941,15 +2949,31 @@ chimera_nfs4_compound_try_vfs(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
-    struct chimera_vfs_compound    *compound;
-    struct nfs4_vfs_compound_ctx   *ctx;
-    struct nfs_argop4              *argop;
-    uint32_t                        first, num, nenc, i, k;
-    uint8_t                         cur_fh[NFS4_FHSIZE];
-    int                             cur_fhlen = 0;
-    int                             lead_putfh, have_lookup = 0;
-    int                             have_lookupp = 0, have_saved = 0;
-    int                             cur_moved = 0, stages_early = 0;
+    struct chimera_vfs_compound  *compound;
+    struct nfs4_vfs_compound_ctx *ctx;
+    struct nfs_argop4            *argop;
+    uint32_t                      first, num, nenc, i, k;
+    uint8_t                       cur_fh[NFS4_FHSIZE];
+    int                           cur_fhlen = 0;
+    int                           lead_putfh, have_lookupp = 0;
+    int                           have_saved = 0;
+    int                           cur_moved = 0, stages_early = 0;
+    /* A name resolved AT THE "/" EXPORT'S ROOT may be a junction: a sibling
+     * export shadows any real entry of the same name, and answering with that
+     * export means a different export id, a different sec= policy and a
+     * different squash -- so a different credential from the one the run was
+     * submitted under.  Nothing else about a "/" export is special, so only a
+     * LOOKUP or SECINFO whose directory COULD be that root is refused.
+     *
+     * cur_may_be_root is that "could": set while the cursor has not been
+     * proven to be somewhere else, cleared by every op that DESCENDS (a
+     * descendant is not the namespace root), and restored by anything that
+     * moves the cursor somewhere the scan cannot name -- a LOOKUPP, a
+     * RESTOREFH.  A later PUTFH names its handle, so it is peeked directly.
+     * The SEED cannot be peeked here, because it is decoded after this loop:
+     * a risk found against it is recorded and settled there. */
+    int                             cur_may_be_root  = 1;
+    int                             seed_junction_at = -1;
     /* Whether any op the run carries changes the filesystem -- see
      * nfs4_vfs_op_mutates and the headroom rule below. */
     int                             mutates = 0;
@@ -3183,6 +3207,19 @@ chimera_nfs4_compound_try_vfs(
                         stop = 1;
                         break;
                     }
+
+                    /* The PUTFH names its object, so whether it is the "/"
+                     * export's root is answerable here. */
+                    cur_may_be_root = (nfs4_root_export_fh_peek(
+                                           thread, later_export, later_fh,
+                                           (uint32_t) later_len) != 0);
+
+                    /* And it MOVED the current object.  Everything the scan
+                     * decides against the object the sequence starts from --
+                     * an anonymous I/O's deny check, a size-changing SETATTR's
+                     * authorize, LOCK's existing-stateid rule -- is decided
+                     * against cur_fh, which is the seed and not this. */
+                    cur_moved = 1;
                 }
                 break;
 
@@ -3195,8 +3232,20 @@ chimera_nfs4_compound_try_vfs(
                         break;
                     }
                 }
-                have_lookup = 1;
-                cur_moved   = 1;
+                if (cur_may_be_root) {
+                    if (!cur_moved) {
+                        /* The directory is the seed; settled after the loop. */
+                        seed_junction_at = (int) i;
+                    } else {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
+                }
+
+                /* The child of anything is not the namespace root. */
+                cur_may_be_root = 0;
+                cur_moved       = 1;
                 break;
 
             case OP_LOOKUPP:
@@ -3216,6 +3265,8 @@ chimera_nfs4_compound_try_vfs(
                 }
                 have_lookupp = 1;
                 cur_moved    = 1;
+                /* The parent of anything may be the namespace root. */
+                cur_may_be_root = 1;
                 break;
 
             case OP_SAVEFH:
@@ -3236,6 +3287,9 @@ chimera_nfs4_compound_try_vfs(
                     }
                 }
                 cur_moved = 1;
+                /* The slot holds whatever was current when SAVEFH ran, which
+                 * this scan no longer tracks by then. */
+                cur_may_be_root = 1;
                 break;
 
             case OP_READDIR:
@@ -3414,7 +3468,8 @@ chimera_nfs4_compound_try_vfs(
                 * itself is where an unsupported ACE is refused, and a refusal
                 * there sends the op back to the per-op path (see the build). */
 
-                cur_moved = 1;
+                cur_moved       = 1;
+                cur_may_be_root = 0;
                 break;
             }
 
@@ -3429,11 +3484,17 @@ chimera_nfs4_compound_try_vfs(
                 /* At a "/" export's root a name matching a sibling export is a
                  * junction, and SECINFO answers with THAT export's flavors --
                  * a name the VFS cannot resolve and a policy it does not hold.
-                 */
-                if (thread->shared->root_export_id != 0) {
-                    nenc = i;
-                    stop = 1;
-                    break;
+                 * Only AT that root: everywhere else a SECINFO is the lookup
+                 * the VFS can make plus the export's own policy, which the
+                 * request already names. */
+                if (cur_may_be_root) {
+                    if (!cur_moved) {
+                        seed_junction_at = (int) i;
+                    } else {
+                        nenc = i;
+                        stop = 1;
+                        break;
+                    }
                 }
 
                 /* Everything after a SECINFO is dispatched op by op, against
@@ -4037,8 +4098,15 @@ chimera_nfs4_compound_try_vfs(
                     nenc = i + 1;
                 }
 
-                /* The object the OPEN opened is the current one now. */
+                /* The object the OPEN opened is the current one now.  A
+                 * NAMED open resolved a child, which is not the namespace
+                 * root; an unnamed one re-opened whatever was already
+                 * current and changes nothing about that. */
                 cur_moved = 1;
+
+                if (oa->claim.claim == CLAIM_NULL) {
+                    cur_may_be_root = 0;
+                }
                 break;
             }
 
@@ -4104,19 +4172,6 @@ chimera_nfs4_compound_try_vfs(
         return 0;
     }
 
-    /* At a "/" export's root a sibling export shadows any real entry of the
-     * same name (nfs4_root_junction_check); the VFS resolves names in the
-     * backend and cannot see that graft. */
-    if (have_lookup && thread->shared->root_export_id != 0) {
-        return 0;
-    }
-
-    /* With a "/" export configured, LOOKUPP has to recognize the namespace root
-     * and hand back export roots' parents from it (nfs4_root_export_fh_get);
-     * neither is visible to the VFS. */
-    if (have_lookupp && thread->shared->root_export_id != 0) {
-        return 0;
-    }
 
     /* Establish the object the sequence starts from. */
     lead_putfh = (req->args_compound->argarray[first].argop == OP_PUTFH);
@@ -4158,11 +4213,34 @@ chimera_nfs4_compound_try_vfs(
     /* An export root's parent is the NFSv4 namespace root, not the backend's
      * physical parent -- a graft the VFS knows nothing about, so its ".." is
      * the wrong answer.  Only reachable for a LOOKUPP from the object the
-     * sequence starts from, which is the only one a LOOKUPP is encoded for. */
+     * sequence starts from, which is the only one a LOOKUPP is encoded for.
+     *
+     * The namespace root itself is the other half: with a "/" export
+     * configured, a LOOKUPP from ITS root answers NFS4ERR_NOENT rather than
+     * climbing into the backend.  Both are properties of the seed, which is
+     * decoded by now, so neither costs a LOOKUPP anywhere else. */
     if (have_lookupp &&
-        chimera_nfs4_fh_is_vfs_mount_root(thread->vfs, cur_fh,
-                                          (uint32_t) cur_fhlen)) {
+        (chimera_nfs4_fh_is_vfs_mount_root(thread->vfs, cur_fh,
+                                           (uint32_t) cur_fhlen) ||
+         nfs4_root_export_fh_peek(thread, seq_export, cur_fh,
+                                  (uint32_t) cur_fhlen) != 0)) {
         return 0;
+    }
+
+    /* A LOOKUP or SECINFO that resolves a name in the SEED object, on a server
+     * with a "/" export: only if the seed IS that export's root can the name
+     * be a junction.  A cold root-FH cache answers "not knowable" and is
+     * refused with it -- PUTROOTFH warms it on the first mount. */
+    if (seed_junction_at >= 0 &&
+        nfs4_root_export_fh_peek(thread, seq_export, cur_fh,
+                                 (uint32_t) cur_fhlen) != 0) {
+        if (seed_junction_at <= (int) first) {
+            return 0;
+        }
+
+        if ((uint32_t) seed_junction_at < nenc) {
+            nenc = (uint32_t) seed_junction_at;
+        }
     }
 
     /* ---- ops [first, nenc) are expressible: build the sequence ---- */
