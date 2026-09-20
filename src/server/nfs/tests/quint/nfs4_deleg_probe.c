@@ -28,7 +28,11 @@
  *   C2  read delegation held by A; B's WRITE open: recall + DELAY, same
  *       cycle.
  *   C3  non-OPEN triggers against A's write delegation: REMOVE and
- *       SETATTR(size) from B -- recall + DELAY (or completion), probed.
+ *       SETATTR(size) from B -- recall + completion.  Both discharge RFC 7530
+ *       §10.4.4 by recalling before the change; the client is answered when
+ *       the change is done rather than told NFS4ERR_DELAY and asked to come
+ *       back, which is also what the same server gives an NFSv3 client doing
+ *       the same thing.
  */
 
 #include "nfs3_mbt_common.h"
@@ -706,8 +710,8 @@ main(
     }
     snprintf(buf, sizeof(buf), "REMOVE st=%u recall=%d",
              p.st[2], recall_seen(&a, &a_f4_deleg));
-    expect("B REMOVE vs A write deleg: DELAY + recall",
-           p.st[2] == P_DELAY && recall_seen(&a, &a_f4_deleg), buf);
+    expect("B REMOVE vs A write deleg: completes AND recalls",
+           p.st[2] == NFS4_OK && recall_seen(&a, &a_f4_deleg), buf);
 
     p          = do_open(&a, &root, "a-oo1", "f6", 3, 1);
     a_f6_deleg = p.deleg_sid;
@@ -785,37 +789,32 @@ main(
         }
         snprintf(buf, sizeof(buf), "self REMOVE st=%u self-recall=%d",
                  p.st[2], recall_seen(&g4c, &f8_deleg));
-        expect("A REMOVE of its own write-delegated file: DELAY + "
-               "self-recall (D4-13; RFC intent: no self-conflict)",
-               p.st[2] == P_DELAY && recall_seen(&g4c, &f8_deleg), buf);
+        /* D4-13 was the DELAY, not the recall.  The removal completes now:
+         * the VFS drives the recall inside the unlink and the client is
+         * answered once the name is gone, so a client no longer has to retry
+         * a removal of its own file.  The self-recall is still observed --
+         * the delegation's holder identity and the remover's are different
+         * owners to the claim core -- and is what the RFC intent (no
+         * self-conflict) would still remove. */
+        expect("A REMOVE of its own write-delegated file: completes AND "
+               "self-recalls (D4-13 residue: the recall, not the DELAY)",
+               p.st[2] == NFS4_OK && recall_seen(&g4c, &f8_deleg), buf);
         {
-            struct nfs_argop4 lops[3], rops[2];
+            struct nfs_argop4 rops[2];
 
-            memset(lops, 0, sizeof(lops));
-            lops[0]                       = op_putfh(&root);
-            lops[1].argop                 = OP_LOOKUP;
-            lops[1].oplookup.objname.data = "f8";
-            lops[1].oplookup.objname.len  = 2;
-            lops[2].argop                 = OP_GETFH;
-            p                             = pc_compound(&g4c, lops, 3, 1);
-            rops[0]                       = op_putfh(&p.fh);
-            rops[1]                       = op_delegreturn(&f8_deleg);
-            p                             = pc_compound(&g4c, rops, 2, 1);
-            expect("A returns the self-recalled delegation",
-                   p.st[2] == NFS4_OK, "delegreturn");
+            /* The name is gone, so there is no filehandle to put but the
+             * root's, and what the server makes of a DELEGRETURN for a
+             * removed file is recorded rather than pinned: the RFC does not
+             * say, the recall already broke the delegation, and the client
+             * has nothing left to hold.  Recorded so a CHANGE here is
+             * visible. */
+            rops[0] = op_putfh(&root);
+            rops[1] = op_delegreturn(&f8_deleg);
+            p       = pc_compound(&g4c, rops, 2, 1);
+            snprintf(buf, sizeof(buf), "delegreturn st=%u", p.st[2]);
+            expect("A's DELEGRETURN for the file it removed (observed)",
+                   1, buf);
         }
-        for (i = 0; i < 200; i++) {
-            ops[0] = op_putfh(&root);
-            ops[1] = op_remove("f8");
-            p      = pc_compound(&g4c, ops, 2, 1);
-            if (p.st[2] != P_DELAY) {
-                break;
-            }
-            usleep(10000);
-        }
-        snprintf(buf, sizeof(buf), "st=%u", p.st[2]);
-        expect("self REMOVE succeeds after the return",
-               p.st[2] == NFS4_OK, buf);
     }
 
     printf("C4 anonymous-stateid I/O vs A's write delegation:\n");
