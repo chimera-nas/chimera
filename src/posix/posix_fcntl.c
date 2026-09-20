@@ -281,11 +281,13 @@ chimera_posix_fcntl(
     }
 
     /*
-     * Local claim-core arbitration first: the client's embedded VFS core
-     * arbitrates this process's share of the cluster (protocol claims and
-     * other posix threads), then a CHIMERA_VFS_CAP_CLAIM_RANGE backend
-     * confirms the range so cross-PROCESS conflicts keep working (each
-     * process has its own core instance; the backend is the shared arbiter).
+     * Every resolved-range command is one VFS sequence -- PUTHANDLE of this
+     * descriptor's open file, then a CLAIM or CLAIM_TEST against it.  The
+     * client's embedded VFS core arbitrates this process's share of the
+     * cluster (protocol claims and other posix threads), and beneath it a
+     * CHIMERA_VFS_CAP_CLAIM_RANGE backend confirms the range so cross-PROCESS
+     * conflicts keep working (each process has its own core instance; the
+     * backend is the shared arbiter).
      *
      * SEEK_END ranges stay backend-only: the backend resolves the offset
      * relative to EOF atomically (the TOCTOU note above), so the local core
@@ -303,50 +305,32 @@ chimera_posix_fcntl(
     }
 
     if (local_arbiter && cmd == F_GETLK) {
-        struct chimera_vfs_state         *vstate = posix->client->vfs->vfs_state;
-        struct chimera_vfs_file_state    *file;
-        struct chimera_vfs_claim          probe;
         struct chimera_vfs_claim_conflict conf;
-        struct chimera_claim_owner        owner;
-        enum chimera_vfs_claim_result     result;
+        int                               found;
 
-        chimera_posix_lock_owner_init(&owner);
-        chimera_vfs_claim_init_range(&probe,
-                                     lock_type == CHIMERA_VFS_LOCK_WRITE,
-                                     /* smb */ false,
-                                     offset, core_length, &owner);
+        /* One CLAIM_TEST answers both halves: the local core first, and --
+         * when that comes back clear and something arbitrates ranges -- the
+         * backend, so holders outside this process are seen too. */
+        found = chimera_posix_lock_claim_getlk(
+            posix, handle, chimera_posix_fd_open_flags(entry),
+            lock_type == CHIMERA_VFS_LOCK_WRITE, offset, core_length, &conf);
 
-        file = chimera_vfs_state_get(vstate, handle->fh,
-                                     (uint8_t) handle->fh_len,
-                                     handle->fh_hash, true);
+        if (found < 0) {
+            int saved = errno;
 
-        result = chimera_vfs_claim_test(file, &probe, &conf);
+            chimera_posix_fd_release(entry, 0);
+            errno = saved;
+            return -1;
+        }
 
-        chimera_vfs_state_put(vstate, file);
-
-        if (result != CHIMERA_CLAIM_GRANTED) {
-            /* Local conflict: report it without asking the backend.
-             * WRITE_LT iff the holder's used mode carries a write-flavored
-             * bit (a write delegation reports WRITE_LT though it holds no
-             * LW). */
+        if (found) {
+            /* WRITE_LT iff the holder's used mode carries a write-flavored
+             * bit -- a write delegation reports WRITE_LT though it holds no
+             * LW, and a backend holder is reported as LR or LR|LW. */
             fl->l_type = (conf.used & (CHIMERA_CLAIM_W |
                                        CHIMERA_CLAIM_CW |
                                        CHIMERA_CLAIM_LW))
                 ? F_WRLCK : F_RDLCK;
-            fl->l_whence = SEEK_SET;
-            fl->l_start  = (chimera_off_t) conf.offset;
-            fl->l_len    = (conf.length == UINT64_MAX)
-                ? 0 : (chimera_off_t) conf.length;
-            fl->l_pid = (pid_t) conf.owner.owner_lo;
-
-            chimera_posix_fd_release(entry, 0);
-            return 0;
-        }
-        /* No local conflict.  Ask the backend, if it arbitrates ranges, so
-         * holders outside this process are seen; otherwise the local core
-         * is the whole answer and the range is free. */
-        if (chimera_posix_lock_claim_test(posix, handle, &probe, &conf)) {
-            fl->l_type   = (conf.used & CHIMERA_CLAIM_LW) ? F_WRLCK : F_RDLCK;
             fl->l_whence = SEEK_SET;
             fl->l_start  = (chimera_off_t) conf.offset;
             fl->l_len    = (conf.length == UINT64_MAX)
@@ -384,8 +368,6 @@ chimera_posix_fcntl(
 
     if (local_arbiter && cmd != F_GETLK &&
         lock_type != CHIMERA_VFS_LOCK_UNLOCK) {
-        enum chimera_vfs_claim_result result;
-
         node = chimera_posix_ofd_lock_alloc(posix, handle,
                                             lock_type == CHIMERA_VFS_LOCK_WRITE,
                                             offset, core_length);
@@ -396,21 +378,26 @@ chimera_posix_fcntl(
             return -1;
         }
 
-        /* F_SETLKW waits on BREAKING and on a hard DENIED lock conflict;
-         * F_SETLK is a try, where BREAKING (recalls kicked, claim not
-         * inserted) maps to EAGAIN just as DENIED does.  Both arbitrate
-         * locally first and, on a CAP_LEASE backend, confirm the granted
-         * range with it before returning -- so a lock this process is told
-         * it holds is one the backend has agreed to.  A backend refusal
-         * arrives as DENIED with the optimistic local insert already rolled
-         * back. */
-        result = chimera_posix_lock_claim_acquire(posix, node,
-                                                  /* wait */ cmd == F_SETLKW);
+        /* One sequence: the descriptor's own handle, then the CLAIM.
+         * F_SETLKW waits on a breaking holder and on a hard lock conflict;
+         * F_SETLK waits for neither, and a BREAKING answer (recalls kicked,
+         * claim not inserted) is the same EAGAIN a DENIED is.  Both
+         * arbitrate locally first and, on a CAP_LEASE backend, confirm the
+         * granted range with it before returning -- so a lock this process
+         * is told it holds is one the backend has agreed to.  A backend
+         * refusal arrives as DENIED with the optimistic local insert
+         * already rolled back. */
+        if (chimera_posix_lock_claim_acquire(posix, handle,
+                                             chimera_posix_fd_open_flags(entry),
+                                             node,
+                                             /* wait */ cmd == F_SETLKW) < 0) {
+            /* The refusal's errno is the answer; the teardown below it is
+             * free to have one of its own. */
+            int saved = errno;
 
-        if (result != CHIMERA_CLAIM_GRANTED) {
             chimera_posix_ofd_lock_free(posix, node);
             chimera_posix_fd_release(entry, 0);
-            errno = EAGAIN;
+            errno = saved;
             return -1;
         }
 
