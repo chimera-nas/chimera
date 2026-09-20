@@ -892,17 +892,37 @@ struct chimera_smb_request {
                 uint32_t flags;
             }                              elements[CHIMERA_SMB_LOCK_MAX_ELEMENTS];
             bool                           lock_too_many;
-            struct chimera_smb_lock_entry *entry;  /* live for the in-flight acquire */
+            /* The VFS sequence this request's acquires run as: one PUTHANDLE
+             * lending the open's handle, then one CLAIM per lock element.  Live
+             * from submit until the sequence's completion frees it; the cancel
+             * triggers post against it.  NULL outside that window. */
+            struct chimera_vfs_compound   *run;
+            /* One entry per lock element, built before the run and BORROWED by
+             * it -- the claim core keeps pointers into each entry's claim, so
+             * the entries outlive the sequence and, once granted, the lock. */
+            struct chimera_smb_lock_entry *entries[CHIMERA_SMB_LOCK_MAX_ELEMENTS];
+            uint16_t                       nentries;
+            /* Non-zero once a cancel has been posted against the run: the status
+             * the client is to be told (STATUS_CANCELLED for an SMB2 CANCEL,
+             * RANGE_NOT_LOCKED for a close / tree-disconnect / logoff / teardown).
+             * Set under the park lock BEFORE the post, so it decides the reply
+             * whether the cancel takes the park back or loses to a grant already
+             * in flight. */
+            uint32_t                       cancel_status;
             /* Blocking-lock (MS-SMB2 3.3.5.14) park state.  Set once a contended
              * LOCK without FAIL_IMMEDIATELY emits its STATUS_PENDING interim and
-             * parks on the VFS pending-acquire queue.  The grant callback may fire
-             * on ANOTHER thread (whoever released the conflicting range); it stashes
-             * resume_status and enqueues the request on its owning thread's
-             * lock_resume_head via lock_resume_next, then rings the resume doorbell.
-             * The owning thread drains the queue, retires the interim, and completes
-             * with resume_status.  parked stays set from interim until completion so
-             * the close / teardown abort path can find and cancel it. */
+             * the run parks on the VFS pending-acquire queue.  It stays set from
+             * the interim until the sequence completes, so the SMB2 CANCEL and
+             * the close / teardown abort paths can find the run and post against
+             * it. */
             uint8_t                        parked;
+            /* Retired with the hand-rolled park: the sequence executor marshals
+             * a deferred grant home through the VFS's own resume doorbell and
+             * calls the completion on the submitting thread, so nothing is
+             * stashed here and nothing is chained on the thread's
+             * lock_resume_head any more.  The two fields remain because the
+             * teardown and close abort sites still name them while those files
+             * are converted separately; both are inert. */
             uint32_t                       resume_status;
             struct chimera_smb_request    *lock_resume_next;
             /* MS-SMB2 3.3.5.14 LockSequence replay bucket for this single-element
@@ -1821,8 +1841,16 @@ chimera_smb_open_file_drain_locks(
     struct chimera_smb_open_file     *open_file);
 
 /* Forward decls (defined in smb_proc_lock.c; also in smb_procs.h, which this
- * header cannot include) so the inline tree-teardown path can abort and complete
- * a blocking byte-range LOCK parked on an open being torn down. */
+ * header cannot include) so the inline tree-teardown path can take back a
+ * blocking byte-range LOCK parked on an open being torn down.  The cancel is
+ * POSTED, so it is safe under the bucket lock the teardown holds and completes
+ * nothing inside the call; the LOCK replies from its own sequence's completion
+ * on the submitting thread. */
+void
+chimera_smb_lock_cancel_parked(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file,
+    uint32_t                          status);
 struct chimera_smb_request *
 chimera_smb_lock_abort_parked(
     struct chimera_server_smb_thread *thread,

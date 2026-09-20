@@ -373,23 +373,38 @@ void chimera_smb_lock_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
-/* Complete a parked blocking byte-range LOCK on its owning thread with `status`
- * (the stashed grant result, SMB2_STATUS_CANCELLED, or
- * SMB2_STATUS_RANGE_NOT_LOCKED).  Cancels the VFS ticket bookkeeping, installs or
- * tears down the entry, drops the open_file reference the park held, and replies. */
-void chimera_smb_lock_park_finish(
-    struct chimera_smb_request *request,
-    uint32_t                    status);
+/* Ask the VFS to take back the sequence a blocking byte-range LOCK parked on
+ * `open_file` is waiting in, and to report `status` to the client.  Safe from
+ * ANY thread and with the caller's own state lock held -- the cancel is posted,
+ * never arbitrated here, so nothing of the LOCK's completes inside the call.
+ *
+ * `status` decides the reply whichever way the race goes: if the cancel takes
+ * the park back the run completes cancelled, and if a grant was already in
+ * flight the claim it inserted is released and the client is still told
+ * `status` -- which is what the hand-rolled abort did with a ticket that would
+ * not dequeue.  No-op when no lock is parked on the open. */
+void chimera_smb_lock_cancel_parked(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file,
+    uint32_t                          status);
 
-/* Abort a blocking LOCK parked on `open_file` (handle close, tree disconnect,
- * logoff, or connection teardown): cancel its VFS acquire and complete it with
- * SMB2_STATUS_RANGE_NOT_LOCKED.  No-op when no lock is parked.  Must run on the
- * open's owning thread.  Returns the aborted request (whose open_file reference
- * the caller's completion drops), or NULL. */
+/* chimera_smb_lock_cancel_parked with the close / tree-disconnect / logoff /
+ * teardown status (SMB2_STATUS_RANGE_NOT_LOCKED, MS-SMB2 smb2.lock.cancel
+ * "cancel by close").  Always returns NULL: the parked LOCK's completion belongs
+ * to its own VFS sequence and fires on the submitting thread, so there is no
+ * request for the caller to finish -- a caller that still holds the old
+ * `if (parked) park_finish(...)` shape simply does nothing. */
 struct chimera_smb_request *
 chimera_smb_lock_abort_parked(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
+
+/* Retired with the hand-rolled park; kept while the close and teardown sites
+ * that name it are converted separately.  Posts a cancel carrying `status` for
+ * a request still parked, and does nothing at all for one that is not. */
+void chimera_smb_lock_park_finish(
+    struct chimera_smb_request *request,
+    uint32_t                    status);
 
 /* Drain (release + free) every byte-range lock entry held by `open_file`.
  * Called at close before the underlying VFS handle is released. */
