@@ -7,6 +7,7 @@
 #include "smb_common/smb2.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 /* FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA and FSCTL_QUERY_ALLOCATED_RANGES are
  * implemented entirely on top of existing VFS primitives:
@@ -132,18 +133,23 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
 /* FSCTL_SET_ZERO_DATA                                                 */
 /* ------------------------------------------------------------------ */
 
+/* PUTHANDLE, ALLOCATE(DEALLOCATE). */
 static void
-chimera_smb_set_zero_data_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_set_zero_data_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
-    chimera_smb_complete_request(request, chimera_smb_sparse_status(error_code));
-} /* chimera_smb_set_zero_data_cb */
+    chimera_smb_complete_request(request, chimera_smb_sparse_status(status));
+} /* chimera_smb_set_zero_data_sequence_complete */
 
 void
 chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
@@ -185,22 +191,61 @@ chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
 
     /* Punch a hole over the range; on memfs/linux/io_uring the bytes read
      * back as zeros and EOF is preserved (FALLOC_FL_PUNCH_HOLE|KEEP_SIZE). */
-    chimera_vfs_allocate(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        open_file->handle,
-        request->ioctl.sp_zero_offset,
-        length,
-        CHIMERA_VFS_ALLOCATE_DEALLOCATE,
-        0,
-        0,
-        chimera_smb_set_zero_data_cb,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       open_file->handle,
+                                       open_file->open_flags);
+
+    chimera_vfs_compound_add_allocate(request->vfs_compound,
+                                      NULL,
+                                      request->ioctl.sp_zero_offset,
+                                      length,
+                                      CHIMERA_VFS_ALLOCATE_DEALLOCATE,
+                                      0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_zero_data_sequence_complete,
+                                request);
 } /* chimera_smb_ioctl_set_zero_data */
 
 /* ------------------------------------------------------------------ */
 /* FSCTL_QUERY_ALLOCATED_RANGES                                        */
 /* ------------------------------------------------------------------ */
+
+/*
+ * PUTHANDLE, SEEK -- one sequence per seek, walking the file's extent map.
+ *
+ * The scan alternates SEEK_DATA and SEEK_HOLE, and the hole seek's offset IS
+ * the data seek's answer.  An op cannot take an argument from an earlier op's
+ * result -- the gate may refuse an op, not supply it with an offset -- so the
+ * pair cannot be batched into one sequence, and the number of pairs is the
+ * file's extent count, which nothing knows before the scan starts.  So this is
+ * the honest shape: consecutive sequences within the one request, as the
+ * compound header's corollary describes for a fan-out whose size the first
+ * answer decides.
+ */
+static void
+chimera_smb_qar_submit_seek(
+    struct chimera_smb_request     *request,
+    uint64_t                        offset,
+    uint32_t                        what,
+    chimera_vfs_compound_callback_t callback)
+{
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->ioctl.sp_handle,
+                                       request->ioctl.sp_open_file->open_flags);
+
+    chimera_vfs_compound_add_seek(request->vfs_compound, NULL, offset, what);
+
+    chimera_vfs_compound_submit(request->vfs_compound, callback, request);
+} /* chimera_smb_qar_submit_seek */
 
 static void chimera_smb_qar_seek_data(
     struct chimera_smb_request *request);
@@ -245,21 +290,32 @@ chimera_smb_qar_finalize(struct chimera_smb_request *request)
 } /* chimera_smb_qar_finalize */
 
 static void
-chimera_smb_qar_seek_hole_cb(
-    enum chimera_vfs_error error_code,
-    int                    sr_eof,
-    uint64_t               sr_offset,
-    void                  *private_data)
+chimera_smb_qar_seek_hole_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
-    uint64_t                    hole, extent_end;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              hole = 0, extent_end;
+    uint32_t                              sr_eof = 0;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_qar_done(request, chimera_smb_sparse_status(error_code));
-        return;
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        hole   = op->seek_offset;
+        sr_eof = op->seek_eof;
     }
 
-    hole = sr_offset;
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_smb_qar_done(request, chimera_smb_sparse_status(status));
+        return;
+    }
 
     /* The hole offset bounds the data extent.  On EOF it is the file's data
      * end (memfs/the backend clamps SEEK_HOLE to the logical size), so the
@@ -292,30 +348,43 @@ chimera_smb_qar_seek_hole_cb(
     }
 
     chimera_smb_qar_seek_data(request);
-} /* chimera_smb_qar_seek_hole_cb */
+} /* chimera_smb_qar_seek_hole_complete */
 
 static void
-chimera_smb_qar_seek_data_cb(
-    enum chimera_vfs_error error_code,
-    int                    sr_eof,
-    uint64_t               sr_offset,
-    void                  *private_data)
+chimera_smb_qar_seek_data_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint64_t                              sr_offset = 0;
+    uint32_t                              sr_eof    = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        sr_offset = op->seek_offset;
+        sr_eof    = op->seek_eof;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     /* SEEK_DATA reports ENXIO when there is no data at or beyond the cursor
      * (POSIX lseek): the remainder of the file is an implicit hole, so the
      * allocated-range scan is complete with whatever ranges were collected so
      * far.  This is the common case for a zero-length or fully-sparse file
      * (smb2.ioctl.sparse_qar). */
-    if (error_code == CHIMERA_VFS_ENXIO) {
+    if (status == CHIMERA_VFS_ENXIO) {
         chimera_smb_qar_finalize(request);
         return;
     }
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_qar_done(request, chimera_smb_sparse_status(error_code));
+    if (status != CHIMERA_VFS_OK) {
+        chimera_smb_qar_done(request, chimera_smb_sparse_status(status));
         return;
     }
 
@@ -327,29 +396,16 @@ chimera_smb_qar_seek_data_cb(
 
     request->ioctl.sp_qar_data_start = sr_offset;
 
-    chimera_vfs_seek(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.sp_open_file->handle,
-        sr_offset,
-        CHIMERA_SMB_SEEK_HOLE,
-        chimera_smb_qar_seek_hole_cb,
-        request);
-} /* chimera_smb_qar_seek_data_cb */
+    chimera_smb_qar_submit_seek(request, sr_offset, CHIMERA_SMB_SEEK_HOLE,
+                                chimera_smb_qar_seek_hole_complete);
+} /* chimera_smb_qar_seek_data_complete */
 
 static void
 chimera_smb_qar_seek_data(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
-
-    chimera_vfs_seek(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.sp_open_file->handle,
-        request->ioctl.sp_qar_cursor,
-        CHIMERA_SMB_SEEK_DATA,
-        chimera_smb_qar_seek_data_cb,
-        request);
+    chimera_smb_qar_submit_seek(request, request->ioctl.sp_qar_cursor,
+                                CHIMERA_SMB_SEEK_DATA,
+                                chimera_smb_qar_seek_data_complete);
 } /* chimera_smb_qar_seek_data */
 
 void
@@ -376,6 +432,11 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
 
     request->ioctl.sp_open_file = open_file;
     request->ioctl.sp_qar_count = 0;
+
+    /* The scan is a run of sequences built one after another; a pipelined
+     * CLOSE on this FileId NULLs open_file->handle between them, so the handle
+     * every one of them borrows is the one captured here. */
+    request->ioctl.sp_handle = open_file->handle;
 
     /* FileOffset + Length must not overflow (MS-FSCC 2.3.20.1): a wrapping
      * range is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_qar_overflow). */

@@ -975,6 +975,11 @@ struct chimera_smb_request {
             int                             rp_response_len;
             /* SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES fields */
             struct chimera_smb_open_file   *sp_open_file;
+            /* The open's VFS handle, captured once before the first of the
+             * QUERY_ALLOCATED_RANGES scan's sequences.  Each SEEK is its own
+             * sequence, so re-reading open_file->handle between them would pick
+             * up the NULL a pipelined CLOSE leaves there. */
+            struct chimera_vfs_open_handle *sp_handle;
             uint8_t                         sp_set_sparse;
             uint64_t                        sp_zero_offset;
             uint64_t                        sp_zero_beyond;
