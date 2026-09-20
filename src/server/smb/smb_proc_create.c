@@ -22,6 +22,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_release.h"
@@ -731,6 +732,34 @@ chimera_smb_create_purge_parked_writers(
  * a pure stat-open (no data/delete/truncate access) and when the only holder is
  * the opener's own.
  */
+/* Does this open BREAK a conflicting caching holder, or is it transparent to
+ * one?
+ *
+ * Access rights that make an open a "real" open rather than a pure stat open.
+ * Per MS-FSA / smb2.lease.statopen4: data read/write/append/execute, EA
+ * read/write, DELETE, and WRITE_DAC / WRITE_OWNER all break; READ_ATTRIBUTES,
+ * WRITE_ATTRIBUTES, READ_CONTROL and SYNCHRONIZE do NOT (they are compatible
+ * with a cached handle).  Delete-on-close and a truncating disposition make an
+ * open real whatever it asked for.
+ *
+ * A pure function of the request, so the sequenced create can decide at build
+ * time whether its share CLAIM carries a break trigger at all. */
+static inline bool
+chimera_smb_create_break_trigger(struct chimera_smb_request *request)
+{
+    return (request->create.desired_access &
+            (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
+             SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
+             SMB2_FILE_READ_EA | SMB2_FILE_WRITE_EA |
+             SMB2_WRITE_DACL | SMB2_WRITE_OWNER |
+             SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
+             SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
+             SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) != 0 ||
+           (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) != 0 ||
+           chimera_smb_disposition_overwrites(
+               request->create.create_disposition);
+} /* chimera_smb_create_break_trigger */
+
 static inline void
 chimera_smb_create_break_for_open(
     struct chimera_server_smb_thread *thread,
@@ -739,27 +768,9 @@ chimera_smb_create_break_for_open(
     struct chimera_vfs_open_handle   *oh,
     int                               phase)
 {
-    uint32_t da        = open_file->desired_access;
-    uint32_t disp      = request->create.create_disposition;
-    bool     truncates =
-        disp == SMB2_FILE_OVERWRITE ||
-        disp == SMB2_FILE_OVERWRITE_IF ||
-        disp == SMB2_FILE_SUPERSEDE;
-    /* Access rights that make an open a "real" open (vs a pure stat open) and so
-     * break a conflicting caching holder.  Per MS-FSA / smb2.lease.statopen4:
-     * data read/write/append/execute, EA read/write, DELETE, and WRITE_DAC /
-     * WRITE_OWNER all break; READ_ATTRIBUTES, WRITE_ATTRIBUTES, READ_CONTROL and
-     * SYNCHRONIZE do NOT (they are compatible with a cached handle). */
-    bool break_trigger =
-        (da & (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-               SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
-               SMB2_FILE_READ_EA | SMB2_FILE_WRITE_EA |
-               SMB2_WRITE_DACL | SMB2_WRITE_OWNER |
-               SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
-               SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
-               SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
-        (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
-        truncates;
+    bool truncates =
+        chimera_smb_disposition_overwrites(request->create.create_disposition);
+    bool break_trigger        = chimera_smb_create_break_trigger(request);
     struct chimera_vfs_state  *vfs_state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_claim_actor actor     = {
         .owner          = {
@@ -813,8 +824,166 @@ chimera_smb_create_break_for_open(
     }
 } /* chimera_smb_create_break_for_open */
 
-static inline struct chimera_smb_open_file *
-chimera_smb_create_gen_open_file(
+/*
+ * The share reservation this open asserts, in both directions, and what it
+ * RETAINS once the transient write a truncating disposition borrows for the
+ * arbitration has been shrunk away.
+ *
+ * A pure function of the request's DesiredAccess, ShareAccess and disposition,
+ * which is why it can be answered before the object is open: the sequenced
+ * create needs all four bits at BUILD time, where no handle exists yet, and the
+ * op-at-a-time path needs them at the same point it always did.
+ */
+static void
+chimera_smb_create_share_bits(
+    struct chimera_smb_request         *request,
+    const struct chimera_smb_open_file *open_file,
+    uint8_t                            *r_granted,
+    uint8_t                            *r_denied,
+    uint8_t                            *r_held_granted,
+    uint8_t                            *r_held_denied)
+{
+    uint32_t da = open_file->desired_access;
+    uint32_t sa = open_file->share_access;
+    uint8_t  granted = 0, denied = 0;
+    bool     truncating;
+
+    /* Map desired_access -> R/W/D access.  Only data-access rights
+     * participate in share-mode conflicts (matching Windows and the
+     * legacy smb_sharemode_check_conflict): READ_DATA/EXECUTE are
+     * "read", WRITE_DATA/APPEND_DATA are "write", DELETE is "delete".
+     * EA and attribute rights (READ_EA, WRITE_EA, *_ATTRIBUTES) do NOT
+     * count.  Generic + MAXIMUM_ALLOWED expand to the data rights they
+     * imply, as smb_sharemode_expand_access used to do. */
+    if (da & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
+              SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
+              SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        granted |= CHIMERA_CLAIM_R;
+    }
+    if (da & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+              SMB2_GENERIC_WRITE |
+              SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        granted |= CHIMERA_CLAIM_W;
+    }
+    if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        granted |= CHIMERA_CLAIM_D;
+    }
+
+    /* Map share_access -> R/W/D deny.  Each access bit NOT shared
+     * becomes a deny on the corresponding bit (D is 0x04 in the claim
+     * vocabulary, not the old lease core's 0x08). */
+    if (!(sa & SMB2_FILE_SHARE_READ)) {
+        denied |= CHIMERA_CLAIM_R;
+    }
+    if (!(sa & SMB2_FILE_SHARE_WRITE)) {
+        denied |= CHIMERA_CLAIM_W;
+    }
+    if (!(sa & SMB2_FILE_SHARE_DELETE)) {
+        denied |= CHIMERA_CLAIM_D;
+    }
+
+    /* A truncating disposition must obtain write access at open time to
+     * overwrite the data, so it conflicts with an existing opener that
+     * denies write -- but it does not *hold* write for the handle's
+     * lifetime (the granted access is what was requested).  Request write
+     * transiently for the conflict check, then shrink the held grant
+     * once the claim is inserted (chimera_vfs_claim_shrink). */
+    *r_held_granted = granted;
+    *r_held_denied  = denied;
+
+    truncating =
+        chimera_smb_disposition_overwrites(request->create.create_disposition);
+
+    if (truncating) {
+        granted |= CHIMERA_CLAIM_W;
+    }
+
+    /* Attribute-only opens (no data/delete access bits, e.g. a
+     * READ_ATTRIBUTES stat-open) hold no share-mode rights and impose no
+     * deny.  Register them anyway as an inert (granted=0, denied=0) SHARE
+     * entry so the layer can answer "is there another opener?" (sole-access
+     * oplock grant), delete-pending, and stat-open classification -- without
+     * changing any conflict outcome (chimera_vfs_share_conflict and the
+     * CACHING sole-access loop both treat a (0,0) entry as absent). */
+    if (!(da & SMB2_SHAREMODE_ACCESS_MASK)) {
+        /* Whatever it asserted while opening, an attribute-only handle
+         * RETAINS nothing: the truncate's write was transient, so the
+         * handle blocks nobody afterwards. */
+        *r_held_granted = 0;
+        *r_held_denied  = 0;
+
+        /* But only a true STAT open -- attribute-only AND non-truncating
+         * -- is exempt from arbitration in the first place.  A truncating
+         * open is going to modify the file, so it asserts the write it
+         * just took AND its ShareAccess, in both directions, exactly like
+         * an ordinary writer.  Zeroing them here discarded the very write
+         * bit added just above, which is the one case where the truncate
+         * is the ONLY source of it (MS-FSA 2.1.5.1.2; found by replaying
+         * the spec corpus against Samba, which refuses these). */
+        if (!truncating) {
+            granted = 0;
+            denied  = 0;
+        }
+    }
+
+    *r_granted = granted;
+    *r_denied  = denied;
+} /* chimera_smb_create_share_bits */
+
+/* Build the open's share claim.  Everything here is a function of the request
+ * and of the open_file's own identity, so it too can be done before the object
+ * is open; op_handle is the one field that cannot, and the caller stamps it
+ * from the handle as soon as it has one. */
+static void
+chimera_smb_create_share_claim_init(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    uint8_t                       granted,
+    uint8_t                       denied)
+{
+    struct chimera_claim_owner share_owner;
+
+    /* The open itself is the owner — different opens, even by the
+     * same client, must satisfy share-mode constraints between
+     * themselves.  A RqLs open additionally carries its 16-byte LeaseKey
+     * in owner.key: the KEY circle replaces the old break-skip logic (a
+     * handle-caching lease already held under the same key is its own —
+     * a second open under one lease key — and must coalesce, not be
+     * broken by this share acquire). */
+    memset(&share_owner, 0, sizeof(share_owner));
+    share_owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    share_owner.client_key = request->session_handle->session->client_key;
+    share_owner.owner_lo   = open_file->file_id.pid;
+    share_owner.owner_hi   = open_file->file_id.vid;
+    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
+        memcpy(share_owner.key, request->create.rqls.key, 16);
+    }
+
+    /* The constructor zeroes the claim (including a stale parked=1 a
+     * recycled open_file slot could otherwise carry from a previously-
+     * disconnected durable handle). */
+    chimera_vfs_claim_init_smb_open(&open_file->share_lease,
+                                    granted, denied, &share_owner);
+    /* Back-reference to the owning open so a conflicting CREATE carrying a
+     * matching AppInstanceId can locate it for the force-close rule;
+     * policy_tag carries the open's pid by value in conflict reports (the
+     * durable purge loop).  The batch-escape link to this open's own cache
+     * grant (own_cache) is stamped once the grant exists, in
+     * chimera_smb_create_after_share. */
+    open_file->share_lease.cb_private = open_file;
+    open_file->share_lease.policy_tag = open_file->file_id.pid;
+} /* chimera_smb_create_share_claim_init */
+
+/* Allocate the open_file and fill in everything that is a function of the
+ * REQUEST rather than of the open: identity, access, flags, names, the
+ * AppInstance fields.  Split out of chimera_smb_create_gen_open_file because a
+ * sequenced create must have all of it -- above all the share claim embedded in
+ * it, whose address is its identity to the claim core -- before it submits,
+ * where no handle exists yet.  `oh` may therefore be NULL, and the two things
+ * that can only be read off a handle (the handle itself and the real open flags
+ * a PUTHANDLE needs) are stamped by the caller once the run produces it. */
+static struct chimera_smb_open_file *
+chimera_smb_create_open_file_init(
     struct chimera_smb_request     *request,
     enum chimera_smb_open_file_type type,
     chimera_smb_pipe_transceive_t   transceive,
@@ -827,9 +996,8 @@ chimera_smb_create_gen_open_file(
     int                             is_directory,
     struct chimera_vfs_open_handle *oh)
 {
-    struct chimera_smb_compound      *compound = request->compound;
-    struct chimera_server_smb_thread *thread   = compound->thread;
-    struct chimera_smb_tree          *tree     = request->tree;
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct chimera_smb_tree          *tree   = request->tree;
     struct chimera_smb_open_file     *open_file;
 
     open_file = chimera_smb_open_file_alloc(thread);
@@ -966,6 +1134,34 @@ chimera_smb_create_gen_open_file(
     open_file->stream_name_len = 0;
     open_file->base_fh_len     = 0;
 
+    return open_file;
+} /* chimera_smb_create_open_file_init */
+
+static inline struct chimera_smb_open_file *
+chimera_smb_create_gen_open_file(
+    struct chimera_smb_request     *request,
+    enum chimera_smb_open_file_type type,
+    chimera_smb_pipe_transceive_t   transceive,
+    uint64_t                        pid,
+    const void                     *parent_fh,
+    int                             parent_fh_len,
+    const char                     *name,
+    int                             name_len,
+    int                             delete_on_close,
+    int                             is_directory,
+    struct chimera_vfs_open_handle *oh)
+{
+    struct chimera_smb_compound      *compound = request->compound;
+    struct chimera_server_smb_thread *thread   = compound->thread;
+    struct chimera_smb_tree          *tree     = request->tree;
+    struct chimera_smb_open_file     *open_file;
+
+    open_file = chimera_smb_create_open_file_init(request, type, transceive,
+                                                  pid, parent_fh, parent_fh_len,
+                                                  name, name_len,
+                                                  delete_on_close, is_directory,
+                                                  oh);
+
     /* MS-SMB2 3.3.5.9.16: an AppInstanceId failover replaces a prior open held
      * under the same AppInstanceId on another connection.  It must run BEFORE the
      * phase-1 batch break below, because the failover force-closes that prior
@@ -1094,93 +1290,14 @@ chimera_smb_create_gen_open_file(
     if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share && oh) {
         struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
         struct chimera_vfs_file_state    *file_state;
-        uint32_t                          da = open_file->desired_access;
-        uint32_t                          sa = open_file->share_access;
         uint8_t                           granted = 0, denied = 0;
         uint8_t                           held_granted = 0, held_denied = 0;
-        struct chimera_claim_owner        share_owner;
         struct chimera_vfs_claim_conflict conflict;
         enum chimera_vfs_claim_result     result;
 
-        /* Map desired_access -> R/W/D access.  Only data-access rights
-         * participate in share-mode conflicts (matching Windows and the
-         * legacy smb_sharemode_check_conflict): READ_DATA/EXECUTE are
-         * "read", WRITE_DATA/APPEND_DATA are "write", DELETE is "delete".
-         * EA and attribute rights (READ_EA, WRITE_EA, *_ATTRIBUTES) do NOT
-         * count.  Generic + MAXIMUM_ALLOWED expand to the data rights they
-         * imply, as smb_sharemode_expand_access used to do. */
-        if (da & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
-                  SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
-                  SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-            granted |= CHIMERA_CLAIM_R;
-        }
-        if (da & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
-                  SMB2_GENERIC_WRITE |
-                  SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-            granted |= CHIMERA_CLAIM_W;
-        }
-        if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-            granted |= CHIMERA_CLAIM_D;
-        }
-
-        /* Map share_access -> R/W/D deny.  Each access bit NOT shared
-         * becomes a deny on the corresponding bit (D is 0x04 in the claim
-         * vocabulary, not the old lease core's 0x08). */
-        if (!(sa & SMB2_FILE_SHARE_READ)) {
-            denied |= CHIMERA_CLAIM_R;
-        }
-        if (!(sa & SMB2_FILE_SHARE_WRITE)) {
-            denied |= CHIMERA_CLAIM_W;
-        }
-        if (!(sa & SMB2_FILE_SHARE_DELETE)) {
-            denied |= CHIMERA_CLAIM_D;
-        }
-
-        /* A truncating disposition must obtain write access at open time to
-         * overwrite the data, so it conflicts with an existing opener that
-         * denies write -- but it does not *hold* write for the handle's
-         * lifetime (the granted access is what was requested).  Request write
-         * transiently for the conflict check, then shrink the held grant
-         * once the claim is inserted (chimera_vfs_claim_shrink). */
-        held_granted = granted;
-        held_denied  = denied;
-
-        bool truncating =
-            request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF;
-
-        if (truncating) {
-            granted |= CHIMERA_CLAIM_W;
-        }
-
-        /* Attribute-only opens (no data/delete access bits, e.g. a
-         * READ_ATTRIBUTES stat-open) hold no share-mode rights and impose no
-         * deny.  Register them anyway as an inert (granted=0, denied=0) SHARE
-         * entry so the layer can answer "is there another opener?" (sole-access
-         * oplock grant), delete-pending, and stat-open classification -- without
-         * changing any conflict outcome (chimera_vfs_share_conflict and the
-         * CACHING sole-access loop both treat a (0,0) entry as absent). */
-        if (!(da & SMB2_SHAREMODE_ACCESS_MASK)) {
-            /* Whatever it asserted while opening, an attribute-only handle
-             * RETAINS nothing: the truncate's write was transient, so the
-             * handle blocks nobody afterwards. */
-            held_granted = 0;
-            held_denied  = 0;
-
-            /* But only a true STAT open -- attribute-only AND non-truncating
-             * -- is exempt from arbitration in the first place.  A truncating
-             * open is going to modify the file, so it asserts the write it
-             * just took AND its ShareAccess, in both directions, exactly like
-             * an ordinary writer.  Zeroing them here discarded the very write
-             * bit added just above, which is the one case where the truncate
-             * is the ONLY source of it (MS-FSA 2.1.5.1.2; found by replaying
-             * the spec corpus against Samba, which refuses these). */
-            if (!truncating) {
-                granted = 0;
-                denied  = 0;
-            }
-        }
+        chimera_smb_create_share_bits(request, open_file,
+                                      &granted, &denied,
+                                      &held_granted, &held_denied);
 
         file_state = chimera_vfs_state_get(vfs_state,
                                            oh->fh, oh->fh_len,
@@ -1191,36 +1308,8 @@ chimera_smb_create_gen_open_file(
             return NULL;
         }
 
-        /* The open itself is the owner — different opens, even by the
-         * same client, must satisfy share-mode constraints between
-         * themselves.  A RqLs open additionally carries its 16-byte LeaseKey
-         * in owner.key: the KEY circle replaces the old break-skip logic (a
-         * handle-caching lease already held under the same key is its own —
-         * a second open under one lease key — and must coalesce, not be
-         * broken by this share acquire). */
-        memset(&share_owner, 0, sizeof(share_owner));
-        share_owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
-        share_owner.client_key = request->session_handle->session->client_key;
-        share_owner.owner_lo   = open_file->file_id.pid;
-        share_owner.owner_hi   = open_file->file_id.vid;
-        if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
-            memcpy(share_owner.key, request->create.rqls.key, 16);
-        }
-
-        /* The constructor zeroes the claim (including a stale parked=1 a
-         * recycled open_file slot could otherwise carry from a previously-
-         * disconnected durable handle). */
-        chimera_vfs_claim_init_smb_open(&open_file->share_lease,
-                                        granted, denied, &share_owner);
+        chimera_smb_create_share_claim_init(request, open_file, granted, denied);
         open_file->share_lease.op_handle = oh;
-        /* Back-reference to the owning open so a conflicting CREATE carrying a
-         * matching AppInstanceId can locate it for the force-close rule below;
-         * policy_tag carries the open's pid by value in conflict reports (the
-         * durable purge loop).  The batch-escape link to this open's own cache
-         * grant (own_cache) is stamped once the grant exists, in
-         * chimera_smb_create_after_share. */
-        open_file->share_lease.cb_private = open_file;
-        open_file->share_lease.policy_tag = open_file->file_id.pid;
 
         /* AppInstanceId failover (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16) was already
          * resolved before the phase-1 break above (so the displaced open is
@@ -1535,25 +1624,10 @@ chimera_smb_create_after_share(
          * RqLs lease path uses; for a stat-open we apply it to legacy oplocks too
          * (a *data* legacy oplock keeps the break-the-peer arbitration). */
         /* "stat-open" == an open that does NOT break a conflicting holder: the
-         * exact inverse of break_for_open's break_trigger (MS-FSA / smb2.oplock.
-         * statopen1).  DELETE, WRITE_DAC, WRITE_OWNER, EA and any data/generic
-         * access -- plus delete-on-close or a truncating disposition -- make it a
-         * "real" open that breaks; only READ_ATTRIBUTES / WRITE_ATTRIBUTES /
-         * READ_CONTROL / SYNCHRONIZE leave it transparent.  Keep this mask in
-         * sync with chimera_smb_create_break_for_open. */
-        bool stat_open =
-            !((request->create.desired_access &
-               (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-                SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
-                SMB2_FILE_READ_EA | SMB2_FILE_WRITE_EA |
-                SMB2_WRITE_DACL | SMB2_WRITE_OWNER |
-                SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
-                SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
-                SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
-              (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
-              request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-              request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
-              request->create.create_disposition == SMB2_FILE_SUPERSEDE);
+         * exact inverse of the break trigger (MS-FSA / smb2.oplock.statopen1),
+         * and spelled as that inverse rather than as a second copy of the mask,
+         * which is what let the two drift. */
+        bool stat_open = !chimera_smb_create_break_trigger(request);
 
         if (via_rqls || want_fresh_caching) {
             file_state = chimera_vfs_state_get(vfs_state,
@@ -1998,6 +2072,30 @@ chimera_smb_create_release_parent(struct chimera_smb_request *request)
         request->create.parent_handle = NULL;
     }
 } /* chimera_smb_create_release_parent */
+
+/* The parent directory's file handle, for the CHANGE_NOTIFY emit.
+ *
+ * The op-at-a-time path holds the parent OPEN across the whole create and reads
+ * the fh off it.  A sequenced create does not: the parent open belongs to the
+ * run and is released with it, which is the point -- nothing of the VFS's is
+ * held across the MS-SMB2 3.3.5.9 reply hold any more.  So the fh is COPIED out
+ * of the run at build time and the emit reads it from there.  A handle, when one
+ * is held, still wins: it is the same object, and keeping the two in one
+ * accessor is what stops a caller reading a stale copy on the legacy path. */
+static inline const uint8_t *
+chimera_smb_create_parent_fh(
+    struct chimera_smb_request *request,
+    uint32_t                   *r_len)
+{
+    if (request->create.parent_handle) {
+        *r_len = request->create.parent_handle->fh_len;
+        return request->create.parent_handle->fh;
+    }
+
+    *r_len = request->create.seq_parent_fh_len;
+    return request->create.seq_parent_fh_len ?
+           request->create.seq_parent_fh : NULL;
+} /* chimera_smb_create_parent_fh */
 
 static inline void
 chimera_smb_create_finish_share_grant(
@@ -3547,6 +3645,8 @@ static void
 chimera_smb_create_finish_deferred_dir_break(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
+    const uint8_t                    *parent_fh;
+    uint32_t                          parent_fh_len;
 
     if (!request->create.dir_break_pending) {
         return;
@@ -3554,10 +3654,12 @@ chimera_smb_create_finish_deferred_dir_break(struct chimera_smb_request *request
 
     request->create.dir_break_pending = 0;
 
-    if (request->create.parent_handle) {
+    parent_fh = chimera_smb_create_parent_fh(request, &parent_fh_len);
+
+    if (parent_fh) {
         chimera_vfs_notify_emit_lease(thread->shared->vfs->vfs_notify,
-                                      request->create.parent_handle->fh,
-                                      request->create.parent_handle->fh_len,
+                                      parent_fh,
+                                      parent_fh_len,
                                       request->create.dir_break_action,
                                       request->create.name,
                                       request->create.name_len,
@@ -3681,9 +3783,13 @@ chimera_smb_create_open_finish(
             * supplied: the client creating the file holds (or is updating) that
             * directory's cached view and must not have its own lease broken
             * (MS-SMB2 dirlease ParentLeaseKey; dirlease.v2_request_parent). */
-            uint64_t skip_lo, skip_hi;
-            bool     has_skip = chimera_smb_parent_lease_skip(
+            uint64_t       skip_lo, skip_hi;
+            bool           has_skip = chimera_smb_parent_lease_skip(
                 open_file->parent_lease_key, &skip_lo, &skip_hi);
+            const uint8_t *parent_fh;
+            uint32_t       parent_fh_len;
+
+            parent_fh = chimera_smb_create_parent_fh(request, &parent_fh_len);
 
             if (will_park) {
                 /* This open is about to park on a FILE caching break; defer the
@@ -3695,10 +3801,10 @@ chimera_smb_create_open_finish(
                 request->create.dir_break_skip_lo  = skip_lo;
                 request->create.dir_break_skip_hi  = skip_hi;
                 request->create.dir_break_has_skip = has_skip;
-            } else {
+            } else if (parent_fh) {
                 chimera_vfs_notify_emit_lease(thread->shared->vfs->vfs_notify,
-                                              request->create.parent_handle->fh,
-                                              request->create.parent_handle->fh_len,
+                                              parent_fh,
+                                              parent_fh_len,
                                               action,
                                               request->create.name,
                                               request->create.name_len,
@@ -4480,13 +4586,13 @@ chimera_smb_seed_creator_sids(struct chimera_smb_request *request)
     }
 } /* chimera_smb_seed_creator_sids */
 
-/* Issue the open_at against the (already opened) parent handle in
- * request->create.parent_handle.  Shared by the plain path and the
- * post-overwrite-check path. */
-static void
-chimera_smb_create_issue_open(struct chimera_smb_request *request)
+/* The CHIMERA_VFS_OPEN_* word the leaf open is issued with.  Factored out of
+ * chimera_smb_create_issue_open so the sequence builder, which must record the
+ * REAL flags for any later PUTHANDLE that lends the handle, computes them from
+ * the same place rather than from a second copy that could drift. */
+static unsigned int
+chimera_smb_create_open_flags(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
     /* NO_NOTIFY: the SMB create path emits its own CHANGE_NOTIFY event
      * (disposition policy, DIR/STREAM_NAME classes, directory-lease key
      * sparing), so the VFS core's generic created-file emission must stay
@@ -4569,6 +4675,17 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
          * alone). */
     }
 
+    return flags;
+} /* chimera_smb_create_open_flags */
+
+/* The attributes a create-capable open stamps on the object it creates.  Split
+ * from the flags above because it MUTATES request->create.set_attr, which the
+ * open then carries: a caller computing flags twice must not stamp twice. */
+static void
+chimera_smb_create_stamp_create_attrs(
+    struct chimera_smb_request *request,
+    unsigned int                flags)
+{
     /* A file is stamped FILE_ATTRIBUTE_ARCHIVE when it is created, and again
      * when an overwrite/supersede replaces its contents (MS-FSCC).  Both reduce
      * to "request ARCHIVE on any create-capable open": the backend applies
@@ -4597,6 +4714,18 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
             request->create.set_attr.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
         }
     }
+} /* chimera_smb_create_stamp_create_attrs */
+
+/* Issue the open_at against the (already opened) parent handle in
+ * request->create.parent_handle.  Shared by the plain path and the
+ * post-overwrite-check path. */
+static void
+chimera_smb_create_issue_open(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+    unsigned int               flags      = chimera_smb_create_open_flags(request);
+
+    chimera_smb_create_stamp_create_attrs(request, flags);
 
     /* Seed the owner and group SID companions from the creator's identity.
      *
@@ -4881,11 +5010,989 @@ chimera_smb_create_lookup_parent_callback(
         request);
 } /* chimera_smb_create_lookup_parent_callback */
 
+/* ---------------------------------------------------------------------------
+ * The CREATE as one VFS sequence.
+ *
+ * Everything an ordinary open does -- resolve the parent, open the leaf, take
+ * the share reservation, and replace the contents a truncating disposition owes
+ * -- is ONE submission:
+ *
+ *   PUTFH(tree root) -> LOOKUP_PATH(parent) -> OPEN_CURRENT(parent as a dir)
+ *     -> OPEN(name) -> CLAIM(share) -> [SETATTR(size 0)]
+ *
+ * and one completion.  What that buys is not the round trips (the VFS runs the
+ * same ops it always did) but that the server is no longer BETWEEN them: the
+ * four callbacks this replaces each had to re-establish where they were and
+ * release, by hand and on every error path, a parent handle and a leaf handle
+ * the sequence now owns.
+ *
+ * Three pieces of the old shape move, and each moves because the sequence
+ * expresses it better:
+ *
+ *   The OVERWRITE fence -- READONLY, or HIDDEN/SYSTEM the request does not also
+ *   carry -- was a LOOKUP of its own in front of the open.  It is now a gate
+ *   verdict on the open's own attributes, which is the same question asked of
+ *   the same bytes one round trip earlier.  It is still asked BEFORE anything
+ *   is mutated: the open carries no TRUNCATE (the replacement is deferred, see
+ *   trunc_deferred) and a backend applies set_attr only when it actually
+ *   creates the inode, so a vetoed open leaves the file exactly as it found it.
+ *
+ *   The DEFERRED TRUNCATE is an op in the run rather than a setattr the share
+ *   grant's callback issued.  It addresses the OPEN's own handle, which the
+ *   executor dispatches with descriptor rights (fsetattr): the replacement is
+ *   authorized by the open the client was just granted, not re-checked against
+ *   the file's mode -- the ftruncate(2) rule, and the whole reason it may empty
+ *   a file whose mode forbids writing.
+ *
+ *   The PARENT HANDLE is the sequence's, not the request's.  It is released
+ *   with the run, so no VFS reference is held across the MS-SMB2 3.3.5.9 reply
+ *   hold; the parent fh the CHANGE_NOTIFY emit needs is copied out instead
+ *   (chimera_smb_create_parent_fh).
+ *
+ * What is NOT in the run is what THE RULE keeps out of it: the open-table
+ * install, the durable registry, the delete-on-close arming, the notify emit
+ * and the reply hold all address nothing through the cursors and mutate nothing
+ * the run holds, so they follow the completion exactly as they followed the
+ * open callback before.
+ * --------------------------------------------------------------------------- */
+
+static void
+chimera_smb_create_submit_open_run(struct chimera_smb_request *request);
+
+/* Reset the per-submission sequence state.  A gate must not remember it was
+ * asked, and a resubmission is a first run: everything the last execution
+ * derived is cleared here rather than at the end of the one before, so a
+ * rebuild cannot inherit a verdict from a run it did not describe. */
+static void
+chimera_smb_create_seq_reset(struct chimera_smb_request *request)
+{
+    request->create.seq_parent_idx     = -1;
+    request->create.seq_open_idx       = -1;
+    request->create.seq_share_idx      = -1;
+    request->create.seq_trunc_idx      = -1;
+    request->create.seq_grant_idx      = -1;
+    request->create.seq_verdict        = 0;
+    request->create.seq_retry_access   = 0;
+    request->create.seq_symlink_parent = 0;
+    request->create.seq_symlink_leaf   = 0;
+    request->create.seq_parked         = 0;
+} /* chimera_smb_create_seq_reset */
+
+/* The index of the op that stopped the run, or -1 if none did.  Read off the
+ * ops' own statuses rather than from the completed count, because an op a gate
+ * skipped did not run and is not a failure. */
+static int
+chimera_smb_create_seq_failed_index(struct chimera_vfs_compound *compound)
+{
+    uint32_t i, n = chimera_vfs_compound_num_ops(compound);
+
+    for (i = 0; i < n; i++) {
+        const struct chimera_vfs_compound_op *op =
+            chimera_vfs_compound_op(compound, i);
+
+        if (op->status != CHIMERA_VFS_OK &&
+            op->status != CHIMERA_VFS_UNSET) {
+            return (int) i;
+        }
+    }
+    return -1;
+} /* chimera_smb_create_seq_failed_index */
+
+/* Tear down the half-built open a failed run leaves behind.  It was never
+ * hashed, so nothing can have found it; `handle` is cleared first because the
+ * run owns the handle until the completion takes it, and a take that did not
+ * happen must not be released twice. */
+static void
+chimera_smb_create_seq_discard_open_file(struct chimera_smb_request *request)
+{
+    struct chimera_smb_open_file *open_file = request->create.seq_open_file;
+
+    if (!open_file) {
+        return;
+    }
+
+    request->create.seq_open_file = NULL;
+    open_file->handle             = NULL;
+    chimera_smb_open_file_free(request->compound->thread, open_file);
+} /* chimera_smb_create_seq_discard_open_file */
+
+/* Finish a run: free the compound and answer the client.  Every failure exit
+ * from the sequenced create funnels through here so the compound is returned
+ * exactly once and the half-built open with it. */
+static void
+chimera_smb_create_seq_fail(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    if (request->vfs_compound) {
+        chimera_vfs_compound_free(request->vfs_compound);
+        request->vfs_compound = NULL;
+    }
+
+    chimera_smb_create_seq_discard_open_file(request);
+    chimera_smb_create_pending_unregister(request);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_create_seq_fail */
+
+/* ---- the symbolic-link error bodies ----
+ *
+ * STATUS_STOPPED_ON_SYMLINK must carry a SymbolicLinkErrorResponse (MS-SMB2
+ * 2.2.2.2.1) so the client can splice the link and retry; without the body it
+ * sees only ELOOP, and every operation through a symlinked directory fails
+ * where POSIX would follow.  Reading the target is a SECOND sequence, issued
+ * from the completion of the one that stopped -- a failure-path fan-out, which
+ * is exactly what consecutive runs are for.  A failure of the body run degrades
+ * to the bare error, as it always did: a missing body costs the client one
+ * extra resolve round trip, never correctness. */
+static void
+chimera_smb_create_seq_symlink_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    int                                   i;
+
+    if (chimera_vfs_compound_status(compound) == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
+        if (op->target && op->target_len > 0 &&
+            op->target_len < CHIMERA_VFS_PATH_MAX) {
+            /* The target is the compound's, valid until it is freed: copy it
+             * out before that, and convert to the backslash separators an SMB
+             * substitute name uses.  A leading separator (or its absence) is
+             * what sets the response's relative/absolute Flags. */
+            memcpy(request->create.r_symlink_target, op->target,
+                   op->target_len);
+            request->create.r_symlink_target[op->target_len] = '\0';
+            request->create.r_symlink_relative =
+                (request->create.r_symlink_target[0] != '/');
+            for (i = 0; i < (int) op->target_len; i++) {
+                if (request->create.r_symlink_target[i] == '/') {
+                    request->create.r_symlink_target[i] = '\\';
+                }
+            }
+            request->create.r_symlink_target_len = op->target_len;
+            request->create.r_symlink_error      = 1;
+        }
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_create_pending_unregister(request);
+    chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+} /* chimera_smb_create_seq_symlink_complete */
+
+/* Read the target of the link the create stopped on.  `link_fh` names the link
+ * itself when the PARENT path stopped on one (the lookup resolved it without
+ * following, so its own fh is in hand); otherwise the link is the leaf, reached
+ * by name from the parent -- NOFOLLOW|PATH either way, because the link and not
+ * its target is the object to read.
+ *
+ * UnparsedPathLength is the difference between the two: a leaf link has no
+ * suffix left to parse, while an intermediate one leaves "/" + the create name
+ * for the client to re-apply after it has resolved the link. */
+static void
+chimera_smb_create_seq_symlink_body(
+    struct chimera_smb_request *request,
+    const uint8_t              *link_fh,
+    uint32_t                    link_fh_len,
+    const uint8_t              *parent_fh,
+    uint32_t                    parent_fh_len)
+{
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+
+    request->create.r_symlink_error = 0;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
+
+    if (link_fh_len) {
+        request->create.r_symlink_unparsed =
+            (uint16_t) ((request->create.name_len + 1) * 2);
+        chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                       link_fh, (int) link_fh_len);
+        chimera_vfs_compound_add_open(request->vfs_compound, NULL, 0,
+                                      CHIMERA_VFS_OPEN_NOFOLLOW |
+                                      CHIMERA_VFS_OPEN_PATH,
+                                      0, NULL, 0, 0, 0);
+    } else {
+        request->create.r_symlink_unparsed = 0;
+        chimera_vfs_compound_add_putfh(request->vfs_compound,
+                                       parent_fh, (int) parent_fh_len);
+        chimera_vfs_compound_add_open(request->vfs_compound,
+                                      request->create.name,
+                                      request->create.name_len,
+                                      CHIMERA_VFS_OPEN_NOFOLLOW |
+                                      CHIMERA_VFS_OPEN_PATH,
+                                      0, NULL, CHIMERA_VFS_ATTR_FH, 0, 0);
+    }
+
+    chimera_vfs_compound_add_readlink(request->vfs_compound);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_create_seq_symlink_complete,
+                                request);
+} /* chimera_smb_create_seq_symlink_body */
+
+/* ---- the gate ----
+ *
+ * Everything MS-SMB2 requires of a CREATE that the VFS cannot be asked -- the
+ * DACL evaluation, the READONLY fence, the lease-key binding, the fork-syntax
+ * type rules -- is answered HERE, as each op finishes, rather than after the
+ * whole run.  That is not a stylistic choice: the ops behind the open MUTATE
+ * (the share claim inserts, the truncate empties the file), and a rule applied
+ * after them has already let them happen.
+ *
+ * It answers from what it already has -- the op's own results, the request, the
+ * session's lease-key table, the config -- and it may be asked twice for the
+ * same op if the run is resubmitted, so every verdict is a question asked
+ * again rather than a step taken twice. */
+static uint32_t
+chimera_smb_create_gate_open(
+    struct chimera_smb_request           *request,
+    struct chimera_vfs_compound          *compound,
+    uint32_t                              index,
+    const struct chimera_vfs_compound_op *op)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_smb_open_file     *open_file = request->create.seq_open_file;
+    const struct chimera_vfs_attrs   *attr      = &op->attr;
+    struct chimera_vfs_compound_op   *edit;
+    int                               is_directory;
+
+    /* 1. The opened leaf is itself a symbolic link.  Unless the caller asked to
+     * open the reparse point directly, SMB does not follow it on the server:
+     * the client resolves the link and retries (MS-SMB2 2.2.2.2.1).  memfs
+     * reports the link inode's attributes for a non-NOFOLLOW open of a
+     * final-component symlink, which is what makes this visible here rather
+     * than as the open's own ELOOP. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode) &&
+        !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+        request->create.seq_symlink_leaf = 1;
+        return SMB2_STATUS_STOPPED_ON_SYMLINK;
+    }
+
+    /* 2. Enforce the requested access against the object's ACL for every
+     * disposition that can open an existing object.  Pure FILE_CREATE always
+     * makes a new object (and fails with a collision otherwise), so the creator
+     * implicitly holds it and we do not gate it here.  A newly-created object
+     * reached via OPEN_IF/OVERWRITE_IF/SUPERSEDE carries the owner-full-control
+     * default (or inherited) ACL, so the creator passes this check naturally. */
+    if (request->create.create_disposition != SMB2_FILE_CREATE) {
+        uint32_t access_status = chimera_smb_create_check_access(request, attr);
+
+        /* A CREATE that loses a same-name race can observe a half-constructed
+         * object: the passthrough backends execute an SMB create as the server
+         * identity and apply the client's ownership with a separate fchown, so
+         * the loser's open can see the object still owned by the server -- the
+         * owner fast-path misses and a mode-only evaluation denies rights the
+         * final owner holds.  When a denial carries that exact signature, the
+         * whole sequence is resubmitted, a bounded number of times, until the
+         * racing creator's chown lands.  The budget lives on the REQUEST, never
+         * in the gate, which must not remember it was asked; the attr_mask
+         * keeps ATTR_ACL, which is never attr-cache-served, so each attempt
+         * reaches the backend. */
+        if (access_status == SMB2_STATUS_ACCESS_DENIED &&
+            request->create.access_retries < CHIMERA_SMB_CREATE_ACCESS_RETRIES &&
+            chimera_smb_create_access_deny_transient(request, attr)) {
+            request->create.seq_retry_access = 1;
+            return SMB2_STATUS_ACCESS_DENIED;
+        }
+
+        if (access_status != SMB2_STATUS_SUCCESS) {
+            return access_status;
+        }
+
+        /* 3. MS-FSA 2.1.5.1.2 "Check Access to an Existing File": the
+         * FILE_ATTRIBUTE_READONLY DOS bit is a write/delete fence separate from
+         * the DACL evaluated above.  Skipped when THIS open just created the
+         * file -- the readonly attribute a create sets does not fence that same
+         * creating handle from writing -- and for a truncating disposition,
+         * whose READONLY bit is the NEW state being applied rather than a
+         * pre-existing constraint (those are fenced at row 4 instead). */
+        if (!request->create.reconnect &&
+            !op->created &&
+            !chimera_smb_disposition_overwrites(request->create.create_disposition) &&
+            !S_ISDIR(attr->va_mode) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+            (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)) {
+
+            if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
+                return SMB2_STATUS_CANNOT_DELETE;
+            }
+
+            if (request->create.desired_access &
+                (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) {
+                return SMB2_STATUS_ACCESS_DENIED;
+            }
+        }
+    }
+
+    /* 4. MS-FSA create with an overwriting disposition: an existing file is not
+     * replaced when it is READONLY, or when it is HIDDEN/SYSTEM and the request
+     * does not also carry that bit (which would silently clear it).  This is
+     * the fence the op-at-a-time path asked with a LOOKUP in front of the open;
+     * asked here it reads the open's own attributes, one round trip earlier and
+     * still before anything has been mutated. */
+    if (!op->created &&
+        !request->create.has_stream &&
+        chimera_smb_disposition_overwrites(request->create.create_disposition)) {
+        uint32_t existing = (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES)
+            ? attr->va_dos_attributes : 0;
+        uint32_t requested = request->create.file_attributes;
+
+        if ((existing & SMB2_FILE_ATTRIBUTE_READONLY) ||
+            ((existing & SMB2_FILE_ATTRIBUTE_HIDDEN) &&
+             !(requested & SMB2_FILE_ATTRIBUTE_HIDDEN)) ||
+            ((existing & SMB2_FILE_ATTRIBUTE_SYSTEM) &&
+             !(requested & SMB2_FILE_ATTRIBUTE_SYSTEM))) {
+            return SMB2_STATUS_ACCESS_DENIED;
+        }
+    }
+
+    /* 5. A lease key may be bound to only one file per client (MS-SMB2
+     * 3.3.5.9.8).  Gated on leasing actually being advertised: with smb_leases
+     * off the context is answered with a bare, cacheless RqLs reply and binds
+     * nothing, so enforcing the binding would refuse an open no lease was ever
+     * granted for. */
+    if (thread->shared->config.leases &&
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+        chimera_smb_session_lease_key_conflict(request->session_handle->session,
+                                               request->create.rqls.key,
+                                               op->fh, op->fh_len)) {
+        return SMB2_STATUS_INVALID_PARAMETER;
+    }
+
+    /* 6. The resolved file is delete-pending: its deletion was deferred because
+     * a named stream still holds it open, so a name open of the base file or
+     * any of its streams is answered STATUS_DELETE_PENDING.  A fresh create
+     * cannot be delete-pending.  This is a mutex-protected read of state the
+     * claim layer already holds in memory, not I/O: the gate may ask it. */
+    if (!op->created) {
+        struct chimera_vfs_state      *vfs_state = vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_file_state *fs        =
+            chimera_vfs_state_get(vfs_state, op->fh, op->fh_len,
+                                  op->out_handle->fh_hash, false);
+
+        if (fs) {
+            bool pending = chimera_vfs_state_is_delete_pending(fs);
+
+            chimera_vfs_state_put(vfs_state, fs);
+            if (pending) {
+                return SMB2_STATUS_DELETE_PENDING;
+            }
+        }
+    }
+
+    /* 7. The explicit fork forms name something the target may not have.
+     * "DNAME::$DATA" names a default data fork, which a directory has none of;
+     * "DNAME::$INDEX_ALLOCATION" names a directory's index stream -- the
+     * directory itself -- so it is valid only on one.  And
+     * FILE_NON_DIRECTORY_FILE on a target that resolved to a directory is
+     * STATUS_FILE_IS_A_DIRECTORY, applied only when the base object itself is
+     * the target (a stream open addresses a data fork, so the option is about
+     * the stream and not the directory carrying it). */
+    if (request->create.explicit_data_fork && S_ISDIR(attr->va_mode)) {
+        return (request->create.create_options & SMB2_FILE_DIRECTORY_FILE)
+               ? SMB2_STATUS_NOT_A_DIRECTORY
+               : SMB2_STATUS_FILE_IS_A_DIRECTORY;
+    }
+
+    if (request->create.explicit_index_fork && !S_ISDIR(attr->va_mode)) {
+        return SMB2_STATUS_NOT_A_DIRECTORY;
+    }
+
+    if ((request->create.create_options & SMB2_FILE_NON_DIRECTORY_FILE) &&
+        !request->create.has_stream && S_ISDIR(attr->va_mode)) {
+        return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+    }
+
+    /* 8. The open stands.  What follows is not a verdict: it is the state the
+     * rest of the run and the tail after it need, derived from the one op that
+     * has the answers.  All of it is ASSIGNED from the op's results, never
+     * accumulated onto what a previous execution left, so a resubmitted run
+     * derives the same thing again. */
+    is_directory                   = S_ISDIR(attr->va_mode) ? 1 : 0;
+    request->create.r_created      = op->created;
+    request->create.r_is_directory = is_directory;
+
+    /* A truncating disposition owes a content replacement, but only where there
+     * is content to replace: a file this open just created already starts
+     * empty, and a directory is never truncated. */
+    request->create.trunc_deferred =
+        (chimera_smb_disposition_overwrites(request->create.create_disposition) &&
+         !op->created && !is_directory) ? 1 : 0;
+
+    if (open_file) {
+        if (is_directory) {
+            open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
+        } else {
+            open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
+        }
+
+        /* The real flags the handle was opened with, for every PUTHANDLE that
+         * lends it, and the share claim's HOLDER anchor.  Both are read off a
+         * handle, so neither could be had at build time; the executor stamps
+         * op_handle for a CACHE-class claim only -- an open handle is cached
+         * per (fh, access mode, cred) and SHARED, so folding every open-owner
+         * that uses it into one holder is exactly what must not happen to a
+         * share claim -- and SMB stamps its own, knowing its handles. */
+        open_file->open_flags =
+            chimera_smb_open_handle_flags(op->out_handle, is_directory);
+        open_file->share_lease.op_handle = op->out_handle;
+    }
+
+    /* The deferred truncate runs only where there was content to replace. */
+    if (request->create.seq_trunc_idx > (int) index) {
+        edit = chimera_vfs_compound_op_edit(compound,
+                                            (uint32_t) request->create.seq_trunc_idx);
+        if (edit) {
+            edit->skip = !request->create.trunc_deferred;
+        }
+    }
+
+    return SMB2_STATUS_SUCCESS;
+} /* chimera_smb_create_gate_open */
+
+static void
+chimera_smb_create_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op      =
+        chimera_vfs_compound_op(compound, index);
+    uint32_t                              verdict;
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    if ((int) index == request->create.seq_parent_idx) {
+        /* The create path traverses a symbolic link.  The parent-path lookup is
+         * issued without LOOKUP_FOLLOW, so a symlink as the final component of
+         * the parent path resolves to the link itself here; SMB never silently
+         * follows a reparse point on the server. */
+        if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            S_ISLNK(op->attr.va_mode)) {
+            request->create.seq_symlink_parent = 1;
+            request->create.seq_verdict        = SMB2_STATUS_STOPPED_ON_SYMLINK;
+            *status                            = CHIMERA_VFS_ELOOP;
+        }
+        return;
+    }
+
+    if ((int) index == request->create.seq_open_idx) {
+        verdict = chimera_smb_create_gate_open(request, compound, index, op);
+
+        if (verdict != SMB2_STATUS_SUCCESS) {
+            request->create.seq_verdict = verdict;
+            /* The status only has to be a failure; WHICH failure the client is
+             * told is the verdict's, which the completion applies.  EACCES is
+             * the honest stand-in for "the server refused this open". */
+            *status = (verdict == SMB2_STATUS_STOPPED_ON_SYMLINK) ?
+                CHIMERA_VFS_ELOOP : CHIMERA_VFS_EACCES;
+        }
+        return;
+    }
+} /* chimera_smb_create_gate */
+
+/* ---- the completion ---- */
+static void
+chimera_smb_create_run_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request    = private_data;
+    struct chimera_server_smb_thread     *thread     = request->compound->thread;
+    struct chimera_vfs_thread            *vfs_thread = thread->vfs_thread;
+    struct chimera_smb_open_file         *open_file  = request->create.seq_open_file;
+    const struct chimera_vfs_compound_op *open_op, *op;
+    struct chimera_vfs_file_state        *file_state;
+    struct chimera_vfs_open_handle       *oh;
+    enum chimera_vfs_error                status;
+    int                                   failed;
+    uint32_t                              smb_status;
+    request->create.seq_parked = 0;
+
+    status = chimera_vfs_compound_status(compound);
+    failed = chimera_smb_create_seq_failed_index(compound);
+
+    /* The connection went away while this run was parked.  The teardown already
+     * asked for the cancel; whichever side won, exactly one completion runs and
+     * it is this one.  Tear the half-built open down and say nothing: there is
+     * nobody left to say it to. */
+    if (request->create.seq_abandoned) {
+        oh = request->create.seq_open_idx >= 0 ?
+            chimera_vfs_compound_take_handle(
+                compound, (uint32_t) request->create.seq_open_idx) : NULL;
+
+        if (oh) {
+            chimera_vfs_release(vfs_thread, oh);
+        }
+
+        chimera_vfs_compound_free(compound);
+        request->vfs_compound = NULL;
+        chimera_smb_create_seq_discard_open_file(request);
+        chimera_smb_create_pending_unregister(request);
+        return;
+    }
+
+    if (status != CHIMERA_VFS_OK) {
+        /* A transient denial on a racing create: resubmit the whole sequence.
+         * Each attempt costs a parent resolve and an open rather than a
+         * getattr, which is the honest price of re-asking a question whose
+         * answer the open itself carries -- and this is an already-failing
+         * path, taken only while a racing creator's chown window is open. */
+        if (request->create.seq_retry_access) {
+            request->create.access_retries++;
+            chimera_vfs_compound_free(compound);
+            request->vfs_compound = NULL;
+            chimera_smb_create_submit_open_run(request);
+            return;
+        }
+
+        /* A symbolic link the create stopped on owes the client the target, in
+         * a second run.  The link is the parent path's final component (whose
+         * own fh the lookup resolved) or the leaf (reached by name). */
+        if (request->create.seq_symlink_parent &&
+            request->create.seq_parent_idx >= 0) {
+            const struct chimera_vfs_compound_op *pop =
+                chimera_vfs_compound_op(
+                    compound, (uint32_t) request->create.seq_parent_idx);
+            uint8_t  link_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t link_fh_len = pop->attr.va_fh_len;
+
+            memcpy(link_fh, pop->attr.va_fh, link_fh_len);
+            chimera_vfs_compound_free(compound);
+            request->vfs_compound = NULL;
+            chimera_smb_create_seq_discard_open_file(request);
+            chimera_smb_create_seq_symlink_body(request, link_fh, link_fh_len,
+                                                NULL, 0);
+            return;
+        }
+
+        if (request->create.seq_symlink_leaf ||
+            (failed == request->create.seq_open_idx &&
+             status == CHIMERA_VFS_ELOOP)) {
+            uint8_t  parent_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t parent_fh_len = request->create.seq_parent_fh_len;
+
+            memcpy(parent_fh, request->create.seq_parent_fh, parent_fh_len);
+            chimera_vfs_compound_free(compound);
+            request->vfs_compound = NULL;
+            chimera_smb_create_seq_discard_open_file(request);
+            chimera_smb_create_seq_symlink_body(request, NULL, 0,
+                                                parent_fh, parent_fh_len);
+            return;
+        }
+
+        if (request->create.seq_verdict) {
+            smb_status = request->create.seq_verdict;
+        } else if (failed >= 0 && failed < request->create.seq_open_idx) {
+            /* A failure resolving or opening the PARENT: a missing component is
+             * an OBJECT_PATH_NOT_FOUND (an intermediate path element), not
+             * OBJECT_NAME_NOT_FOUND (the final name). */
+            smb_status = chimera_smb_create_parent_error_status(status);
+        } else if (failed == request->create.seq_share_idx) {
+            /* A genuine share conflict.  A handle-caching lease holder must
+             * still be told to relinquish its handle cache even though this
+             * open is refused -- the holder may close its deferred handle so a
+             * later retry succeeds (smb2.lease.break_twice).  It is fired here
+             * rather than as the op's `deny` trigger because it must follow the
+             * purge attempts above, and because it belongs only to a
+             * SYNCHRONOUS refusal: a ticket that queued and came back DENIED
+             * means the holder was asked and kept its handle, and asking twice
+             * would recall a lease the holder has already defended. */
+            oh = chimera_vfs_compound_take_handle(
+                compound, (uint32_t) request->create.seq_open_idx);
+
+            if (oh) {
+                {
+                    struct chimera_claim_actor brk_actor = {
+                        .owner     = open_file->share_lease.owner,
+                        .op_handle = oh,
+                    };
+
+                    if (request->create.ctx_present_mask &
+                        CHIMERA_SMB_CREATE_CTX_RQLS) {
+                        memcpy(&brk_actor.owner.owner_lo,
+                               request->create.rqls.key, 8);
+                        memcpy(&brk_actor.owner.owner_hi,
+                               request->create.rqls.key + 8, 8);
+                    }
+
+                    chimera_vfs_claim_invalidate(
+                        vfs_thread->vfs->vfs_state,
+                        oh->fh, oh->fh_len, oh->fh_hash,
+                        CHIMERA_TRIGGER_OPEN_H_FORCE, &brk_actor,
+                        CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW
+                        /* retain read+write caching; only H is stripped on a
+                         * real share conflict (break_twice) */);
+                }
+
+                /* Taken, so this side owns it however the refusal was
+                 * classified: a handle the completion takes and does not
+                 * release is one the compound will no longer release either,
+                 * and it wedges the close-thread drain at shutdown. */
+                chimera_vfs_release(vfs_thread, oh);
+            }
+
+            chimera_smb_create_seq_fail(request,
+                                        request->create.force_close_status);
+            return;
+        } else {
+            smb_status = chimera_smb_create_error_status(status);
+        }
+
+        chimera_smb_create_seq_fail(request, smb_status);
+        return;
+    }
+
+    /* ---- the run succeeded ----
+     *
+     * Everything derived from the leaf's attributes is computed HERE, before
+     * the compound is freed: the ACL among them lives in storage the compound
+     * owns, so the access masks it feeds must be resolved while it still
+     * stands. */
+    open_op = chimera_vfs_compound_op(compound,
+                                      (uint32_t) request->create.seq_open_idx);
+
+    request->create.r_granted_access =
+        chimera_smb_create_granted_access(request, &open_op->attr);
+    request->create.r_maximal_access =
+        chimera_vfs_access_check(&open_op->attr,
+                                 &request->session_handle->session->cred,
+                                 CHIMERA_ACE_MASK_ALL);
+
+    /* The reply describes the file as the client will find it: after the
+     * replacement, when one ran, and otherwise as the open reported it. */
+    op = (request->create.seq_trunc_idx >= 0 &&
+          chimera_vfs_compound_op(
+              compound,
+              (uint32_t) request->create.seq_trunc_idx)->status ==
+          CHIMERA_VFS_OK) ?
+        chimera_vfs_compound_op(compound,
+                                (uint32_t) request->create.seq_trunc_idx) :
+        open_op;
+
+    chimera_smb_marshal_attrs(&op->attr, &request->create.r_attrs);
+
+    /* MS-SMB2 2.2.13.2 AlSi: for creates, overwrites and supersedes (not plain
+     * opens of existing files), report max(backend_alloc, requested_AlSi).
+     * Directories never report an AlSi reservation. */
+    if (request->create.alsi_alloc_size > 0 &&
+        !request->create.r_is_directory &&
+        (request->create.r_created ||
+         chimera_smb_disposition_overwrites(request->create.create_disposition)) &&
+        request->create.r_attrs.smb_alloc_size <
+        request->create.alsi_alloc_size) {
+        request->create.r_attrs.smb_alloc_size = request->create.alsi_alloc_size;
+    }
+
+    /* The handle and the share reservation become the caller's here and not
+     * before: the run owned both until it finished OK, which is what makes the
+     * failure paths above leak nothing. */
+    oh         = chimera_vfs_compound_take_handle(
+        compound, (uint32_t) request->create.seq_open_idx);
+    file_state = chimera_vfs_compound_take_file_state(
+        compound, (uint32_t) request->create.seq_share_idx);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    open_file->handle = oh;
+
+    request->create.seq_open_file = NULL;
+    request->create.gen_finish_cb = chimera_smb_create_open_finish;
+
+    /* The tail is the one the op-at-a-time path runs: shrink the transient
+     * truncate write out of the share grant, take the caching grant, arm
+     * delete-on-close, hash the open and answer.  None of it addresses an
+     * object through the cursors, so none of it belongs in the run. */
+    chimera_smb_create_share_granted_tail(request, open_file, file_state);
+} /* chimera_smb_create_run_complete */
+
+/* ---- building and submitting ---- */
+
+/* Is this create a shape the sequence covers?
+ *
+ * Step by step: the regular-file open by name.  A directory CREATE, a named
+ * stream, the share root and a pipe each have their own shape, and the two
+ * blocks that need the leaf's fh before the share claim -- the AppInstanceId
+ * failover and the disconnected-persistent refusal -- make an honest TWO-run
+ * create, so a request that can reach either keeps the op-at-a-time path until
+ * that shape lands.  Neither can arise with persistent handles off: nothing is
+ * ever parked, and an AppInstanceId establishes no failover identity. */
+static bool
+chimera_smb_create_seq_eligible(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+
+    if (request->tree->type != CHIMERA_SMB_TREE_TYPE_SHARE ||
+        !request->tree->share) {
+        return false;
+    }
+
+    if (request->create.name_len == 0 || request->create.has_stream) {
+        return false;
+    }
+
+    if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
+        (request->create.create_disposition == SMB2_FILE_CREATE ||
+         request->create.create_disposition == SMB2_FILE_OPEN_IF)) {
+        return false;
+    }
+
+    if (thread->shared->config.persistent_handles ||
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP)) {
+        return false;
+    }
+
+    if (request->create.parent_path_len > CHIMERA_VFS_PATH_MAX - 1) {
+        return false;
+    }
+
+    return true;
+} /* chimera_smb_create_seq_eligible */
+
+static void
+chimera_smb_create_submit_open_run(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread     = request->compound->thread;
+    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_smb_tree          *tree       = request->tree;
+    struct chimera_smb_open_file     *open_file;
+    struct chimera_vfs_compound      *compound;
+    unsigned int                      flags;
+    uint8_t                           granted, denied;
+    uint64_t                          pid;
+    int                               idx;
+
+    chimera_smb_create_seq_reset(request);
+
+    flags = chimera_smb_create_open_flags(request);
+    chimera_smb_create_stamp_create_attrs(request, flags);
+    request->create.seq_open_flags = flags;
+
+    /* What a truncating open would have had the backend apply as it replaced
+     * the file (the request's FileAttributes, ARCHIVE, an AllocationSize
+     * reservation) travels with the replacement instead, so the stamping stays
+     * attached to the act it belongs to.  The security descriptor does NOT: a
+     * SecD create context describes the file being CREATED, and this only runs
+     * when the file already existed -- carrying it here would rewrite an
+     * existing object's DACL on an overwrite, which Windows does not do. */
+    request->create.trunc_attr              = request->create.set_attr;
+    request->create.trunc_attr.va_acl       = NULL;
+    request->create.trunc_attr.va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_ACL;
+    request->create.trunc_attr.va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_ACL;
+    request->create.trunc_attr.va_size      = 0;
+    request->create.trunc_attr.va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
+    request->create.trunc_attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+
+    /* The open_file, and with it the share claim the run takes, must exist
+     * before the submission: a claim's ADDRESS is its identity to the claim
+     * core, so no copy would do.  A resubmission reuses the one it built. */
+    open_file = request->create.seq_open_file;
+
+    if (!open_file) {
+        /* Persistent ids come from a process-global monotonic counter rather
+         * than a per-tree one so they stay unique across tree teardowns --
+         * durable reconnect looks an open up by persistent id alone. */
+        pid = request->create.persist_pid ?
+            request->create.persist_pid :
+            atomic_fetch_add(&thread->shared->next_persistent_id, 1);
+
+        /* The parent's fh, resolved before the run: delete-on-close records it
+         * with the name so the unlink at last close can find the entry, and it
+         * is what the CHANGE_NOTIFY emit addresses. */
+        open_file = chimera_smb_create_open_file_init(
+            request, CHIMERA_SMB_OPEN_FILE_TYPE_FILE, NULL, pid,
+            request->create.seq_parent_fh,
+            (int) request->create.seq_parent_fh_len,
+            request->create.name, request->create.name_len,
+            request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
+            0 /* the open decides; the gate corrects it */,
+            NULL);
+
+        request->create.seq_open_file = open_file;
+
+        chimera_smb_create_share_bits(request, open_file,
+                                      &granted, &denied,
+                                      &request->create.gen_held_granted,
+                                      &request->create.gen_held_denied);
+
+        chimera_smb_create_share_claim_init(request, open_file,
+                                            granted, denied);
+
+        /* A batch (handle-caching) oplock holder breaks BEFORE the share-mode
+         * check: it may close its deferred handle, after which the conflict
+         * disappears -- so the break fires even when this open is ultimately
+         * refused (MS-FSA drives it off the access attempt).  It is a trigger
+         * on the acquire rather than a call of its own, which is what keeps it
+         * ordered with the admission it belongs to.  A pure attribute open
+         * (no data / delete / truncate intent) breaks nothing. */
+        request->create.seq_pre_trigger =
+            chimera_smb_create_break_trigger(request) ?
+            CHIMERA_TRIGGER_OPEN_H : 0;
+        request->create.seq_pre_retain =
+            chimera_smb_disposition_overwrites(request->create.create_disposition) ?
+            0 : CHIMERA_CLAIM_CR;
+    }
+
+    compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
+    request->vfs_compound = compound;
+
+    chimera_vfs_compound_add_putfh(compound, tree->fh, tree->fh_len);
+
+    if (request->create.parent_path_len) {
+        idx = chimera_vfs_compound_add_lookup_path(
+            compound,
+            request->create.parent_path,
+            request->create.parent_path_len,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+            0);
+        request->create.seq_parent_idx = (int8_t) idx;
+    }
+
+    chimera_vfs_compound_add_open_current(
+        compound,
+        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+        CHIMERA_VFS_OPEN_DIRECTORY,
+        CHIMERA_VFS_ATTR_FH);
+
+    idx = chimera_vfs_compound_add_open(
+        compound,
+        request->create.name, request->create.name_len,
+        flags, 0,
+        &request->create.set_attr,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+        CHIMERA_VFS_ATTR_BTIME | CHIMERA_VFS_ATTR_ACL,
+        0, 0);
+
+    if (idx < 0) {
+        /* The leaf name does not fit the sequence's own bound.  A sequence that
+         * cannot express the operation is not submitted half-built. */
+        chimera_vfs_compound_free(compound);
+        request->vfs_compound = NULL;
+        chimera_smb_create_seq_fail(request, SMB2_STATUS_NAME_TOO_LONG);
+        return;
+    }
+
+    request->create.seq_open_idx = (int8_t) idx;
+
+    idx = chimera_vfs_compound_add_claim(
+        compound, &open_file->share_lease, &request->create.gen_ticket,
+        CHIMERA_VFS_COMPOUND_CLAIM_TRY,
+        request->create.seq_pre_trigger, request->create.seq_pre_retain,
+        0, 0);
+    chimera_vfs_compound_op_use_handle(compound, (uint32_t) idx,
+                                       (uint32_t) request->create.seq_open_idx);
+    request->create.seq_share_idx = (int8_t) idx;
+
+    /* The replacement a truncating disposition owes, addressed through the
+     * handle the OPEN just produced so the executor applies it with descriptor
+     * rights.  Whether it runs at all is the gate's to say, once the open has
+     * reported whether there was anything there to replace. */
+    idx = chimera_vfs_compound_add_setattr(
+        compound, NULL, &request->create.trunc_attr,
+        0, CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME);
+    chimera_vfs_compound_op_use_handle(compound, (uint32_t) idx,
+                                       (uint32_t) request->create.seq_open_idx);
+    request->create.seq_trunc_idx = (int8_t) idx;
+
+    chimera_vfs_compound_set_gate(compound, chimera_smb_create_gate, request);
+
+    chimera_vfs_compound_submit(compound, chimera_smb_create_run_complete,
+                                request);
+} /* chimera_smb_create_submit_open_run */
+
+/* The parent's file handle, resolved before the run that uses it.
+ *
+ * The run's own PUTFH/LOOKUP_PATH resolves the parent for the open; this copy
+ * exists for what happens AFTER the run -- the CHANGE_NOTIFY emit, and the
+ * symbolic-link body run that reaches the leaf by name.  The share root needs
+ * no resolve at all. */
+static void
+chimera_smb_create_seq_lookup_parent_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_complete_request(
+            request, chimera_smb_create_parent_error_status(error_code));
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode)) {
+        /* The parent path stopped on a link before the run even started; the
+         * body run reads its target from the fh the lookup resolved. */
+        request->create.seq_parent_fh_len = 0;
+        chimera_smb_create_seq_symlink_body(request, attr->va_fh,
+                                            attr->va_fh_len, NULL, 0);
+        return;
+    }
+
+    request->create.seq_parent_fh_len = attr->va_fh_len;
+    memcpy(request->create.seq_parent_fh, attr->va_fh, attr->va_fh_len);
+
+    chimera_smb_create_submit_open_run(request);
+} /* chimera_smb_create_seq_lookup_parent_cb */
+
+static void
+chimera_smb_create_seq_start(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_tree   *tree       = request->tree;
+
+    request->create.seq_open_file  = NULL;
+    request->create.seq_abandoned  = 0;
+    request->create.seq_parent_fh_len = 0;
+
+    if (request->create.parent_path_len) {
+        chimera_vfs_lookup(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            tree->fh, tree->fh_len,
+            request->create.parent_path,
+            request->create.parent_path_len,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+            0,
+            chimera_smb_create_seq_lookup_parent_cb,
+            request);
+        return;
+    }
+
+    request->create.seq_parent_fh_len = tree->fh_len;
+    memcpy(request->create.seq_parent_fh, tree->fh, tree->fh_len);
+
+    chimera_smb_create_submit_open_run(request);
+} /* chimera_smb_create_seq_start */
+
 static inline void
 chimera_smb_create_process(struct chimera_smb_request *request)
 {
     struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
     struct chimera_smb_tree   *tree       = request->tree;
+
+    /* The ordinary open by name is one sequence.  The shapes that are not --
+     * a directory CREATE, a named stream, the share root, and the two-run
+     * creates persistent handles and AppInstanceId make -- still drive the VFS
+     * an op at a time; chimera_smb_create_seq_eligible says which is which. */
+    if (chimera_smb_create_seq_eligible(request)) {
+        chimera_smb_create_seq_start(request);
+        return;
+    }
 
     if (request->create.parent_path_len) {
         chimera_vfs_lookup(
@@ -5591,6 +6698,17 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.pending_linked         = 0;
     request->create.r_symlink_error        = 0;
     request->create.r_symlink_handle       = NULL;
+    /* The op-at-a-time path holds the parent open across the create and every
+     * one of its callbacks assigns this before reading it; a SEQUENCED create
+     * never holds one at all, and the parent-fh accessor has to be able to tell
+     * "no handle" from whatever the request pool last left here. */
+    request->create.parent_handle          = NULL;
+    /* Sequence state.  seq_open_file is the half-built open a run carries, and
+     * a request arriving from the pool must not inherit one. */
+    request->create.seq_open_file          = NULL;
+    request->create.seq_abandoned          = 0;
+    request->create.seq_parent_fh_len      = 0;
+    chimera_smb_create_seq_reset(request);
 
     /* A TWRP ("@GMT-..." timewarp) create context opens a file as of a VSS
      * snapshot.  chimera exposes no snapshots, so any non-zero timewarp names a

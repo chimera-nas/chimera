@@ -809,6 +809,64 @@ struct chimera_smb_request {
             uint16_t                           r_symlink_unparsed;
             char                               r_symlink_target[CHIMERA_VFS_PATH_MAX];
             struct chimera_vfs_open_handle    *r_symlink_handle;
+
+            /* ---- the CREATE as one VFS sequence ----
+             *
+             * The open run's op indices, so the completion callback can ask
+             * each op what it did without re-deriving the shape it built.  -1
+             * for an op this shape did not append (there is no LOOKUP_PATH
+             * when the create names a leaf in the share root, and no grant
+             * CLAIM on a shape that can hold no cache).  Rebuilt by
+             * chimera_smb_create_build_open_run on every submission, including
+             * a resubmission, so nothing here survives a run it did not
+             * describe. */
+            int8_t                             seq_parent_idx;
+            int8_t                             seq_open_idx;
+            int8_t                             seq_share_idx;
+            int8_t                             seq_trunc_idx;
+            int8_t                             seq_grant_idx;
+            /* The open_file the run is building, allocated BEFORE the
+             * submission because the share claim embedded in it is what the
+             * CLAIM op takes and a claim's ADDRESS is its identity.  Every
+             * failure path frees it with handle == NULL. */
+            struct chimera_smb_open_file      *seq_open_file;
+            /* The SMB status the gate derived from an op's results, which
+             * overrides the VFS-error mapping in the completion (a veto says
+             * only "this op failed", and ELOOP-for-a-symlink and
+             * EACCES-for-a-readonly-file are not the same answer).  0 = none;
+             * cleared before every submission, because a gate must not
+             * remember it was asked. */
+            uint32_t                           seq_verdict;
+            /* The gate's verdict wants something other than a plain reply:
+             * a whole-sequence resubmission (the transient-ACCESS_DENIED
+             * retry), or one of the two symbolic-link error-body runs. */
+            uint8_t                            seq_retry_access;
+            uint8_t                            seq_symlink_parent;
+            uint8_t                            seq_symlink_leaf;
+            /* The run parked on its share CLAIM: the interim is out, and a
+             * teardown may take the park back with
+             * chimera_vfs_compound_cancel.  Cleared when the run completes. */
+            uint8_t                            seq_parked;
+            /* The connection went away while the run was parked: the
+             * completion tears the half-built open down and sends no reply. */
+            uint8_t                            seq_abandoned;
+            /* The flags the leaf OPEN was issued with, for a PUTHANDLE that
+             * lends its handle to a later run -- the real flags, which
+             * PUTHANDLE requires and which cannot be read off a handle the
+             * run has not produced yet. */
+            unsigned int                       seq_open_flags;
+            /* The share claim's arguments, hoisted out of the run: what the
+             * handle RETAINS once the transient truncate write is shrunk
+             * away, and the trigger words fired around the acquire. */
+            uint8_t                            seq_pre_trigger;
+            uint8_t                            seq_pre_retain;
+            uint8_t                            seq_post_trigger;
+            uint8_t                            seq_post_retain;
+            /* The parent directory's file handle, copied out of the run for
+             * the notify emit: no parent handle is held across the reply hold
+             * any more -- the sequence owned it and released it with the run. */
+            uint8_t                            seq_parent_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                           seq_parent_fh_len;
         } create;
 
         struct  {
