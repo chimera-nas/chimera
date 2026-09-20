@@ -172,6 +172,24 @@ struct chimera_vfs_compound {
     _Atomic uint8_t                 claim_phase;
     struct chimera_vfs_request     *claim_resume;
 
+    /* THE CROSS-THREAD CANCEL -- chimera_vfs_compound_cancel_post.
+     *
+     * The vehicle that carries a post home to the submitting thread, and the
+     * latch that makes any number of posts exactly one ride.  Both are read
+     * and written from threads that are not the submitting one, which is what
+     * shapes them: the poster cannot take a request off this thread's free
+     * list (it is per-thread and unlocked), so the vehicle is allocated WITH
+     * the compound and lives exactly as long as it does -- surviving the
+     * recycle, so a warm thread allocates none -- and the pointer is never
+     * NULL for a compound a caller is holding.
+     *
+     * cancel_post_state says who owns the vehicle: IDLE, the compound's;
+     * POSTED, the doorbell's; ORPHAN, the doorbell's and the compound has
+     * been freed underneath it, so the drain does the recycling the free
+     * deferred.  See chimera_vfs_compound_cancel_post. */
+    struct chimera_vfs_request     *cancel_post;
+    _Atomic uint8_t                 cancel_post_state;
+
     chimera_vfs_compound_callback_t callback;
     void                           *private_data;
 
@@ -207,10 +225,67 @@ struct chimera_vfs_compound {
  * state is a handful in flight at once, and a burst past the cap simply frees
  * the excess instead of holding it for a peak that has passed.
  */
-#define CHIMERA_VFS_COMPOUND_FREE_MAX 64
+#define CHIMERA_VFS_COMPOUND_FREE_MAX      64
 
 static void chimera_vfs_compound_step(
     struct chimera_vfs_compound *compound);
+
+/* Who owns the cross-thread cancel's vehicle -- see cancel_post_state on the
+ * compound, and chimera_vfs_compound_cancel_post. */
+#define CHIMERA_VFS_COMPOUND_CANCEL_IDLE   0
+#define CHIMERA_VFS_COMPOUND_CANCEL_POSTED 1
+#define CHIMERA_VFS_COMPOUND_CANCEL_ORPHAN 2
+
+static void chimera_vfs_compound_cancel_resume(
+    struct chimera_vfs_request *request);
+
+/*
+ * Give the compound its cancel vehicle.  On the owning thread, once, when the
+ * compound is first allocated: a recycled compound still has the one it was
+ * born with, and a poster on another thread must never find this NULL.
+ *
+ * `complete` and `proto_private_data` are set here and never change -- the
+ * vehicle serves one compound for life.  notify_gate_resume is the flag the
+ * drain routes on and the drain CLEARS it, so the post sets it each time.
+ */
+static void
+chimera_vfs_compound_cancel_alloc(struct chimera_vfs_compound *compound)
+{
+    struct chimera_vfs_request *request;
+    void                       *scratch;
+
+    scratch = chimera_vfs_gate_scratch_alloc(compound->thread);
+    request = container_of(scratch, struct chimera_vfs_request, gate.data);
+
+    request->complete           = chimera_vfs_compound_cancel_resume;
+    request->proto_private_data = compound;
+    request->notify_gate_resume = 0;
+
+    compound->cancel_post = request;
+
+    atomic_store(&compound->cancel_post_state,
+                 CHIMERA_VFS_COMPOUND_CANCEL_IDLE);
+} /* chimera_vfs_compound_cancel_alloc */
+
+/* Return the vehicle to the thread's request pool.  Only for a compound that
+ * is going back to the allocator rather than onto the free list, and only
+ * with the vehicle IDLE -- a posted one is the doorbell's. */
+static void
+chimera_vfs_compound_cancel_free(struct chimera_vfs_compound *compound)
+{
+    struct chimera_vfs_request *request = compound->cancel_post;
+
+    if (!request) {
+        return;
+    }
+
+    request->proto_private_data = NULL;
+    request->notify_gate_resume = 0;
+
+    chimera_vfs_gate_scratch_free(compound->thread, request->gate.data);
+
+    compound->cancel_post = NULL;
+} /* chimera_vfs_compound_cancel_free */
 
 /*
  * Release the by-value ACL and SIDs an attribute RESULT slot carries.
@@ -253,6 +328,11 @@ chimera_vfs_compound_alloc(
     compound->thread = thread;
     compound->cred   = cred;
     compound->status = CHIMERA_VFS_OK;
+
+    /* A recycled compound kept the one it was born with. */
+    if (!compound->cancel_post) {
+        chimera_vfs_compound_cancel_alloc(compound);
+    }
 
     return compound;
 } /* chimera_vfs_compound_alloc */
@@ -366,8 +446,14 @@ chimera_vfs_compound_release_saved(struct chimera_vfs_compound *compound)
 static void
 chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
 {
-    struct chimera_vfs_thread *thread = compound->thread;
-    uint32_t                   i;
+    struct chimera_vfs_thread  *thread = compound->thread;
+    /* The cancel vehicle and its latch outlive the reset: the vehicle is the
+     * compound's for life, and the latch may say a post is still riding the
+     * doorbell towards it, which is precisely what the free below reads. */
+    struct chimera_vfs_request *cancel_post  = compound->cancel_post;
+    uint8_t                     cancel_state =
+        atomic_load(&compound->cancel_post_state);
+    uint32_t                    i;
 
     chimera_vfs_compound_release_cursor(compound);
     chimera_vfs_compound_release_saved(compound);
@@ -429,23 +515,57 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
      * later is reset whether or not anyone remembers to name it here. */
     memset(compound, 0, offsetof(struct chimera_vfs_compound, ops));
 
-    compound->thread = thread;
+    compound->thread      = thread;
+    compound->cancel_post = cancel_post;
+    atomic_store(&compound->cancel_post_state, cancel_state);
 } /* chimera_vfs_compound_reset */
 
-SYMBOL_EXPORT void
-chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
+/* The tail of the free: the compound holds nothing any more and goes back to
+ * the thread's pool, or to the allocator when the pool is full -- in which
+ * case its cancel vehicle goes back to the request pool with it. */
+static void
+chimera_vfs_compound_recycle(struct chimera_vfs_compound *compound)
 {
     struct chimera_vfs_thread *thread = compound->thread;
 
-    chimera_vfs_compound_reset(compound);
-
     if (thread->num_free_compounds >= CHIMERA_VFS_COMPOUND_FREE_MAX) {
+        chimera_vfs_compound_cancel_free(compound);
         free(compound);
         return;
     }
 
     LL_PREPEND(thread->free_compounds, compound);
     thread->num_free_compounds++;
+} /* chimera_vfs_compound_recycle */
+
+SYMBOL_EXPORT void
+chimera_vfs_compound_free(struct chimera_vfs_compound *compound)
+{
+    chimera_vfs_compound_reset(compound);
+
+    /*
+     * A cross-thread cancel is still on the doorbell holding this pointer.
+     * That is not the caller's mistake -- it posted while the run was alive
+     * and the run then finished -- so the recycle waits rather than hand the
+     * drain a compound that has been handed out again.  Everything the
+     * compound held has been released above; only the memory is held back,
+     * and only until the drain, which runs on this thread and is already
+     * carrying the vehicle.
+     *
+     * The one thing that does not collect it is a thread torn down without
+     * draining its doorbell first, which leaks this compound -- as it already
+     * leaks every request still posted to that thread.  A server drains on
+     * its event loop and a test drains before it destroys anything, so the
+     * case is the same pathology, not a new one.
+     */
+    if (atomic_load(&compound->cancel_post_state) ==
+        CHIMERA_VFS_COMPOUND_CANCEL_POSTED) {
+        atomic_store(&compound->cancel_post_state,
+                     CHIMERA_VFS_COMPOUND_CANCEL_ORPHAN);
+        return;
+    }
+
+    chimera_vfs_compound_recycle(compound);
 } /* chimera_vfs_compound_free */
 
 void
@@ -456,6 +576,15 @@ chimera_vfs_compound_thread_destroy(struct chimera_vfs_thread *thread)
     while (thread->free_compounds) {
         compound = thread->free_compounds;
         LL_DELETE(thread->free_compounds, compound);
+        /* Straight to the allocator, not back to the request pool: this runs
+         * from chimera_vfs_thread_destroy, which has already emptied
+         * thread->free_requests, and a request prepended to it now would
+         * never be freed at all. */
+        if (compound->cancel_post) {
+            free(compound->cancel_post->plugin_data);
+            free(compound->cancel_post);
+            compound->cancel_post = NULL;
+        }
         free(compound);
     }
 
@@ -6100,6 +6229,73 @@ chimera_vfs_compound_cancel(struct chimera_vfs_compound *compound)
 
     return 1;
 } /* chimera_vfs_compound_cancel */
+
+/*
+ * The cross-thread cancel, arriving home -- see the contract on the
+ * declaration.
+ *
+ * Two things happen here and their order is the whole of the safety.  The
+ * latch goes back to IDLE FIRST, because the cancel below may complete the
+ * run inside this call and the caller may free the compound inside its
+ * completion: a free that still saw POSTED would defer a recycle that nobody
+ * is left to perform.  Then the cancel runs, and from that call on the
+ * compound is not ours to touch -- it may already be back on the thread's
+ * free list.
+ *
+ * The ORPHAN arm is the other side of that: the run finished and the caller
+ * freed the compound while this was riding the doorbell, so there is nothing
+ * to cancel and the recycle the free deferred is ours to finish.
+ */
+static void
+chimera_vfs_compound_cancel_resume(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_compound *compound = request->proto_private_data;
+    uint8_t                      state    =
+        atomic_load(&compound->cancel_post_state);
+
+    atomic_store(&compound->cancel_post_state,
+                 CHIMERA_VFS_COMPOUND_CANCEL_IDLE);
+
+    if (state == CHIMERA_VFS_COMPOUND_CANCEL_ORPHAN) {
+        chimera_vfs_compound_recycle(compound);
+        return;
+    }
+
+    chimera_vfs_compound_cancel(compound);
+} /* chimera_vfs_compound_cancel_resume */
+
+/*
+ * Ask for a run to be cancelled from any thread -- see the contract on the
+ * declaration.
+ *
+ * Nothing is decided here.  The CAS is the whole of the idempotence: exactly
+ * one post per ride, and a second one while the first is still in flight is
+ * dropped because the ride it would ask for is already booked.  Everything
+ * that could answer -- whether the run is parked, whether the claim core
+ * gives the park back, whether the grant got there first -- is answered on
+ * the submitting thread by the ordinary chimera_vfs_compound_cancel the drain
+ * calls, which is what keeps one arbitration rather than two.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_compound_cancel_post(struct chimera_vfs_compound *compound)
+{
+    uint8_t expected = CHIMERA_VFS_COMPOUND_CANCEL_IDLE;
+
+    if (!atomic_compare_exchange_strong(&compound->cancel_post_state,
+                                        &expected,
+                                        CHIMERA_VFS_COMPOUND_CANCEL_POSTED)) {
+        /* Already riding, or riding towards a compound the caller has freed.
+         * Either way one cancel is on its way and a second changes nothing. */
+        return;
+    }
+
+    /* Ours exclusively from the CAS until the drain takes it: the submitting
+     * thread reads the vehicle only to recycle it, which it cannot do while
+     * the latch says POSTED. */
+    compound->cancel_post->notify_gate_resume = 1;
+
+    chimera_vfs_io_resume_post(compound->cancel_post);
+} /* chimera_vfs_compound_cancel_post */
 
 /* ---------------------------------------------------------------------- */
 /* Results                                                                */
