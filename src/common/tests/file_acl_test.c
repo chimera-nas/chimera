@@ -39,5 +39,32 @@ int main(void)
     }
     _close(fd);
     assert(DeleteFileW(path));
+    {
+        char utf8[MAX_PATH * 4];
+        PSECURITY_DESCRIPTOR descriptor = NULL;
+        PACL acl = NULL;
+        PSID owner;
+        void *entry;
+        SECURITY_DESCRIPTOR_CONTROL control;
+        DWORD revision;
+        assert(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, -1,
+                                   utf8, sizeof(utf8), NULL, NULL));
+        fd = chimera_host_create_private(utf8);
+        assert(fd >= 0);
+        assert(GetSecurityInfo((HANDLE) _get_osfhandle(fd), SE_FILE_OBJECT,
+                               OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                               &owner, NULL, &acl, NULL, &descriptor) == ERROR_SUCCESS);
+        assert(GetSecurityDescriptorControl(descriptor, &control, &revision));
+        assert(control & SE_DACL_PROTECTED);
+        assert(acl && acl->AceCount == 1);
+        assert(GetAce(acl, 0, &entry));
+        assert(EqualSid(owner, &((ACCESS_ALLOWED_ACE *) entry)->SidStart));
+        LocalFree(descriptor);
+        assert(_write(fd, "key", 3) == 3);
+        assert(chimera_host_create_private(utf8) == -1 && errno == EEXIST);
+        assert(!chimera_host_fchmod(fd, 0600));
+        _close(fd);
+        assert(DeleteFileW(path));
+    }
     return 0;
 }

@@ -154,7 +154,7 @@ generate_self_signed_cert(
      * /tmp path is rejected rather than overwritten (CWE-377).
      */
     {
-        int key_fd = open(key_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        int key_fd = chimera_host_create_private(key_path);
 
         if (key_fd < 0) {
             chimera_server_error("Failed to open key file: %s (%s)",
