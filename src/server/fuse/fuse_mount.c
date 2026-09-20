@@ -25,7 +25,6 @@
 #endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/sdk/vfs_attrs.h"
 
 /*
@@ -44,25 +43,28 @@ struct chimera_fuse_resolve_ctx {
 };
 
 static void
-chimera_fuse_resolve_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_fuse_resolve_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_resolve_ctx *ctx = private_data;
+    struct chimera_fuse_resolve_ctx      *ctx = private_data;
+    const struct chimera_vfs_compound_op *op;
 
-    ctx->status = error_code;
+    ctx->status = chimera_vfs_compound_status(compound);
 
-    if (error_code == CHIMERA_VFS_OK &&
-        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    } else if (error_code == CHIMERA_VFS_OK) {
-        ctx->status = CHIMERA_VFS_ENOENT;
+    if (ctx->status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound, 1);
+
+        if (op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+            memcpy(ctx->fh, op->attr.va_fh, op->attr.va_fh_len);
+            ctx->fh_len = op->attr.va_fh_len;
+        } else {
+            ctx->status = CHIMERA_VFS_ENOENT;
+        }
     }
 
     ctx->done = 1;
-} /* chimera_fuse_resolve_callback */
+} /* chimera_fuse_resolve_complete */
 
 static int
 chimera_fuse_resolve_root(
@@ -71,10 +73,9 @@ chimera_fuse_resolve_root(
 {
     struct evpl                    *evpl;
     struct chimera_vfs_thread      *vfs_thread;
+    struct chimera_vfs_compound    *compound;
     struct chimera_fuse_resolve_ctx ctx = { .done = 0 };
     struct chimera_vfs_cred         cred;
-    uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                        root_fh_len;
 
     chimera_vfs_cred_init_unix(&cred, 0, 0, 0, NULL);
 
@@ -82,18 +83,27 @@ chimera_fuse_resolve_root(
 
     vfs_thread = chimera_vfs_thread_init(evpl, shared->vfs);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    /* One sequence on this private loop: the export root, then the whole
+     * share path walked through it.  A path op resolves against the current
+     * file handle and needs nothing opened, which is what a share root on a
+     * path-only mount has. */
+    compound = chimera_vfs_compound_alloc(vfs_thread, &cred);
 
-    chimera_vfs_lookup(vfs_thread, &cred,
-                       root_fh, root_fh_len,
-                       mount->share_path, strlen(mount->share_path),
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_fuse_resolve_callback, &ctx);
+    chimera_vfs_compound_add_putroot(compound);
+
+    chimera_vfs_compound_add_lookup_path(compound,
+                                         mount->share_path,
+                                         (int) strlen(mount->share_path),
+                                         CHIMERA_VFS_ATTR_FH,
+                                         CHIMERA_VFS_LOOKUP_FOLLOW);
+
+    chimera_vfs_compound_submit(compound, chimera_fuse_resolve_complete, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);
     }
+
+    chimera_vfs_compound_free(compound);
 
     chimera_vfs_thread_destroy(vfs_thread);
 
