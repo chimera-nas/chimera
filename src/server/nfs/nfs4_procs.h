@@ -222,6 +222,17 @@ chimera_nfs4_getattr_fill(
     const uint8_t                  *fh,
     int                             fhlen);
 
+/* Everything a GETATTR owes once the object has been stat'd: the §10.4.3
+ * CB_GETATTR combine when another client holds a write delegation, and the
+ * marshalling either way.  It completes the COMPOUND itself, possibly after
+ * parking on the query -- which is why a sequence that carries such a GETATTR
+ * ends its run at it and hands the request over here rather than filling in
+ * place.  `attr` is read, never kept. */
+void
+chimera_nfs4_getattr_settle(
+    struct nfs_request       *req,
+    struct chimera_vfs_attrs *attr);
+
 uint32_t
 chimera_nfs4_access_requested(
     struct nfs_request             *req,
