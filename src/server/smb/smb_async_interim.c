@@ -181,21 +181,12 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
         evpl_remove_timer(thread->evpl, &request->async.timer);
         chimera_smb_create_break_waiter_retire(request);
 
-        /* A CREATE parked on a share-acquire ticket (rather than on a break ack)
-         * is resumed by the VFS pump, which would dereference this request after
-         * the connection is gone.  Cancel the ticket and release the half-built
-         * open the way the DENIED resume would; there is nobody left to reply
-         * to. */
-        if (request->smb2_hdr.command == SMB2_CREATE &&
-            request->create.gen_parked) {
-            chimera_smb_create_abandon_share_park(request);
-            continue;
-        }
-
-        /* The same wait, taken by a SEQUENCED create: the run is parked on its
-         * share CLAIM and the executor, not this server, owns the ticket.  Ask
-         * it to abandon the run; its completion tears the half-built open down
-         * and replies to nobody. */
+        /* A CREATE parked on its share-acquire ticket: the run is parked on its
+         * share CLAIM and the executor, not this server, owns the ticket.  It
+         * would otherwise be resumed by the VFS pump, which would dereference
+         * this request after the connection is gone -- so ask the executor to
+         * abandon the run; its completion tears the half-built open down and
+         * replies to nobody. */
         if (request->smb2_hdr.command == SMB2_CREATE &&
             request->create.seq_parked) {
             chimera_smb_create_seq_abandon(request);
