@@ -2662,6 +2662,29 @@ nfs4_vfs_add_open_op(
  * a delegation stateid, which authorizes the I/O but carries no handle and
  * changes which lease the I/O is attributed to.
  */
+/*
+ * Does this stateid leave the I/O addressing the CURRENT object rather than a
+ * handle the server's state carries?
+ *
+ * Two do.  A special (anonymous) stateid names no state at all, and a
+ * delegation stateid names state that authorizes the I/O without holding a
+ * handle for it.  Both are therefore settled against the object the sequence
+ * starts from, and neither may sit behind an op that moved the cursor.
+ */
+static int
+nfs4_vfs_io_addresses_current(const struct stateid4 *sid)
+{
+    struct nfs4_stateid_view view;
+
+    if (nfs4_stateid_is_special(sid)) {
+        return 1;
+    }
+
+    nfs4_stateid_decode(&view, sid);
+
+    return view.type == NFS4_STATEID_TYPE_DELEG;
+} /* nfs4_vfs_io_addresses_current */
+
 static nfsstat4
 nfs4_vfs_io_authorize(
     struct chimera_server_nfs_thread *thread,
@@ -2708,12 +2731,37 @@ nfs4_vfs_io_authorize(
     }
 
     if (state_type == NFS4_SLOT_TYPE_DELEG) {
-        /* Authorizes the I/O but carries no handle, and the per-op path
-         * attributes the on-the-fly I/O to the delegation holder so it does not
-         * recall the client's own delegation.  Leave it there. */
+        /* A delegation stateid AUTHORIZES the I/O and carries no handle: the
+         * object is the current one and the sequence opens it, exactly as it
+         * does for an anonymous stateid.  What is different is whose I/O it
+         * is -- without saying so, the claim layer arbitrates this client's
+         * read against this client's own delegation, denies it, and recalls
+         * the delegation the read is being done under.
+         *
+         * The per-op path names that owner as (client, the on-the-fly
+         * handle's fh_hash).  fh_hash is chimera_vfs_hash of the file handle
+         * and nothing else, so the same value is computable HERE, before
+         * anything is open -- which is what lets the io_owner the executor
+         * takes by value be filled for an op whose handle does not exist yet.
+         * The fh is the seed's, and the scan admits a delegation-stateid I/O
+         * only while the cursor has not moved off it. */
         nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
-        return NFS4ERR_NOTSUPP;
+
+        if (!req->session || !req->session->client_unified) {
+            /* No client to attribute it to; the per-op path falls back to the
+             * implicit claim, and so does this by declining. */
+            return NFS4ERR_NOTSUPP;
+        }
+
+        memset(out_owner, 0, sizeof(*out_owner));
+        out_owner->owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        out_owner->owner.client_key = req->session->client_unified->client_id;
+        out_owner->owner.owner_lo   = chimera_vfs_hash(fh, fhlen);
+        out_owner->owner.owner_hi   = 0;
+        *have_owner                 = 1;
+
+        return NFS4_OK;
     }
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
@@ -3707,15 +3755,15 @@ chimera_nfs4_compound_try_vfs(
                 /* The same two stateid rules READ and WRITE have, and for the
                  * same reasons: a current stateid needs an io_owner the
                  * sequence cannot derive (see the SETATTR case), and a special
-                 * stateid is authorized against the object the sequence starts
-                 * from. */
+                 * or delegation stateid is authorized against the object the
+                 * sequence starts from. */
                 if (chimera_nfs4_stateid_is_current(sid)) {
                     nenc = i;
                     stop = 1;
                     break;
                 }
 
-                if (nfs4_stateid_is_special(sid) && cur_moved) {
+                if (nfs4_vfs_io_addresses_current(sid) && cur_moved) {
                     nenc = i;
                     stop = 1;
                     break;
@@ -3747,8 +3795,11 @@ chimera_nfs4_compound_try_vfs(
                 /* An anonymous I/O is authorized against the object it
                  * addresses, and that authorization is settled before the
                  * sequence is submitted -- so the object has to be the one the
-                 * sequence starts from. */
-                if (nfs4_stateid_is_special(sid) && cur_moved) {
+                 * sequence starts from.  A DELEGATION stateid carries no
+                 * handle either: the object is the current one and the
+                 * io_owner is derived from ITS file handle, so the same rule
+                 * applies for the same reason. */
+                if (nfs4_vfs_io_addresses_current(sid) && cur_moved) {
                     nenc = i;
                     stop = 1;
                     break;
