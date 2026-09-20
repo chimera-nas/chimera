@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 #pragma once
 
-#if !defined(_WIN32) && !defined(CHIMERA_NATIVE_RCU)
 #include "common/atomic.h"
+
+#if !defined(_WIN32) && !defined(CHIMERA_NATIVE_RCU)
 #include <urcu/urcu-qsbr.h>
 #else
 #include <stddef.h>

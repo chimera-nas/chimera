@@ -4,6 +4,7 @@
 #include "common/thread.h"
 #include <assert.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 
 static evpl_mutex_t lock = EVPL_MUTEX_INITIALIZER;
 static evpl_cond_t changed;
@@ -43,9 +44,14 @@ static void *reader(void *arg)
     urcu_qsbr_unregister_thread();
     return NULL;
 }
+static void verify_shutdown(void)
+{
+    assert(atomic_load(&callbacks) == 2);
+}
 int main(void)
 {
     evpl_native_thread_t thread;
+    assert(atexit(verify_shutdown) == 0);
     evpl_cond_init(&changed, NULL);
     for (int i = 0; i < 100; i++) {
         ready = release_reader = 0;
@@ -76,5 +82,9 @@ int main(void)
     urcu_qsbr_unregister_thread();
     assert(atomic_load(&callbacks) == 3);
     evpl_cond_destroy(&changed);
+    atomic_store(&callbacks, 0);
+    urcu_qsbr_register_thread();
+    call_rcu(&first, after_first);
+    /* Exercise shutdown with an online caller and a nested callback. */
     return 0;
 }

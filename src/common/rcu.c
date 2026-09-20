@@ -84,6 +84,11 @@ reclaim(void *arg)
 static void
 shutdown_worker(void)
 {
+    /* A callback may enqueue another callback after the barrier snapshot.
+     * The exiting caller must stay offline while the worker drains that tail. */
+    if (self) {
+        chimera_rcu_unregister_thread();
+    }
     chimera_rcu_barrier();
     evpl_mutex_lock(&lock);
     stopping = 1;
