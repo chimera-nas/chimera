@@ -254,30 +254,33 @@ chimera_nfs4_getattr_cb_resume(
     free(park);
 } /* chimera_nfs4_getattr_cb_resume */
 
-static void
-chimera_nfs4_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+/*
+ * Answer a GETATTR whose local attributes are already in hand.
+ *
+ * Everything a GETATTR still owes once the object has been stat'd, which is
+ * one thing: the RFC 7530 / RFC 8881 §10.4.3 combine.  If another client holds
+ * a write delegation on this file it may have uncommitted size/change locally,
+ * so the holder is queried via CB_GETATTR and the answer merged.  CB_GETATTR is
+ * an NFSv4.0 mechanism (RFC 7530 §18.1) that 4.1 inherited, and the send path
+ * serves both (nfs4_callback.c prepends CB_SEQUENCE only for 4.1+), so the
+ * query runs for any minor version -- gating it on 4.1+ left 4.0 peers reading
+ * pre-modification size/change.
+ *
+ * Shared with the VFS-compound path, which stats the object inside its run and
+ * hands the attributes over here rather than marshalling them itself: the query
+ * PARKS, and a sequence's fill loop cannot.  Such a GETATTR ends its run, so by
+ * the time this is called the COMPOUND's req->index names it and req->fh is the
+ * object it addressed -- exactly what the per-op path has in hand.  `attr` is
+ * the caller's and is read, never kept: the park takes its own copy.
+ */
+void
+chimera_nfs4_getattr_settle(
+    struct nfs_request       *req,
+    struct chimera_vfs_attrs *attr)
 {
-    struct nfs_request    *req = private_data;
-    struct GETATTR4res    *res = &req->res_compound.resarray[req->index].opgetattr;
     struct nfs_client     *client;
     struct nfs_delegation *wdeleg;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    /* RFC 7530 §10.4.3 / RFC 8881 §10.4.3: if another client holds a write
-     * delegation on this file it may have uncommitted size/change locally, so
-     * query it via CB_GETATTR and merge the result.  CB_GETATTR is an NFSv4.0
-     * mechanism (RFC 7530 §18.1) that 4.1 inherited, and the send path serves
-     * both (nfs4_callback.c prepends CB_SEQUENCE only for 4.1+), so the query
-     * runs for any minor version -- gating it on 4.1+ left 4.0 peers reading
-     * pre-modification size/change. */
     client = req->session ? req->session->client_unified : NULL;
 
     if (client &&
@@ -296,6 +299,24 @@ chimera_nfs4_getattr_complete(
     }
 
     chimera_nfs4_getattr_finish(req, attr);
+} /* chimera_nfs4_getattr_settle */
+
+static void
+chimera_nfs4_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct GETATTR4res *res = &req->res_compound.resarray[req->index].opgetattr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_nfs4_getattr_settle(req, attr);
 } /* chimera_nfs4_getattr_complete */
 
 static void

@@ -14,11 +14,12 @@
  * exactly as before.
  *
  * WHERE THE SEQUENCE ENDS.  Usually at the end of the COMPOUND.  A few ops end
- * it early (nfs4_vfs_op_ends_run): a SECINFO, a LOCK, and an OPEN that could
- * still earn a delegation -- the one part of an OPEN that can suspend the
- * request is the CB_NULL probe its grant attempt may park on, so an OPEN that
- * cannot reach that probe is carried like any other op and the run goes on
- * past it.  Whatever follows a run-ending op is dispatched op by op
+ * it early (nfs4_vfs_op_ends_run): a SECINFO, a LOCK, an OPEN that could still
+ * earn a delegation -- the one part of an OPEN that can suspend the request is
+ * the CB_NULL probe its grant attempt may park on, so an OPEN that cannot
+ * reach that probe is carried like any other op and the run goes on past it --
+ * and a GETATTR that could owe the §10.4.3 combine, whose CB_GETATTR parks the
+ * same way.  Whatever follows a run-ending op is dispatched op by op
  * afterwards.  Handing the dispatcher back a req->index short of the end is
  * not a special case -- that is what every per-op handler does when it
  * completes.
@@ -360,6 +361,21 @@ struct nfs4_vfs_compound_ctx {
     int                      open_filled;
     int                      open_has_attr;
     struct chimera_vfs_attrs open_attr;
+
+    /* A GETATTR that may owe the RFC 7530/8881 §10.4.3 combine: another
+     * client's write delegation makes the answer a CB_GETATTR away, and that
+     * query parks.  Such a GETATTR ends the run and does not marshal in its
+     * own fill; the completion asks whether the combine is really needed --
+     * against the object the GETATTR actually addressed, which the run has
+     * resolved by then -- and hands the request over to nfs4_proc_getattr.c
+     * either way.  -1 when the run carries no such GETATTR.
+     *
+     * The attributes are copied out for the same reason the OPEN's are: the
+     * tail runs after the sequence has been freed.  No ACL travels in them --
+     * the scan refuses a GETATTR that asks for one. */
+    int                      getattr_defer_res;
+    int                      getattr_filled;
+    struct chimera_vfs_attrs getattr_attr;
 };
 
 static int
@@ -1602,6 +1618,18 @@ nfs4_vfs_op_fill(
             return NFS4_OK;
 
         case OP_GETATTR:
+            /* The one GETATTR that does not marshal here.  Its answer may owe
+            * the §10.4.3 combine, whose CB_GETATTR parks, and a fill cannot
+            * park; so the attributes are copied out and the completion --
+            * which is past every fill and may free the sequence -- settles
+            * it.  Nothing of the compound is referenced afterwards: the scan
+            * refuses a GETATTR that asks for an ACL, so the copy is whole. */
+            if ((int) map->res_index == ctx->getattr_defer_res) {
+                ctx->getattr_attr   = vop->attr;
+                ctx->getattr_filled = 1;
+                return NFS4_OK;
+            }
+
             status = chimera_nfs4_getattr_fill(req, &argop->opgetattr,
                                                &resop->opgetattr, &vop->attr,
                                                vop->fh, (int) vop->fh_len);
@@ -2292,6 +2320,30 @@ nfs4_vfs_compound_complete(
         return;
     }
 
+    if (!failed && ctx->getattr_filled) {
+        /* The GETATTR's own tail: ask whether another client's write
+         * delegation really stands on the object this GETATTR addressed, and
+         * if it does, query the holder and combine.  That query parks, so the
+         * sequence is freed first and the attributes travel by value -- the
+         * same hand-over a delegating OPEN makes.  req->index and req->fh have
+         * already been set to this op and its object above, which is what the
+         * settle marshals against, and what the resume completes the COMPOUND
+         * from. */
+        struct chimera_vfs_attrs gattr = ctx->getattr_attr;
+
+        chimera_vfs_compound_free(compound);
+        free(ctx);
+
+        /* The settle releases req->handle, which a per-op GETATTR owns and a
+         * sequenced one does not: this path opens nothing on the request, and
+         * what the slot still holds is the last per-op handler's, already
+         * released by it.  Say so rather than release it twice. */
+        req->handle = NULL;
+
+        chimera_nfs4_getattr_settle(req, &gattr);
+        return;
+    }
+
     chimera_vfs_compound_free(compound);
     free(ctx);
 
@@ -2824,7 +2876,7 @@ chimera_nfs4_compound_try_vfs(
     uint32_t                        first, num, nenc, i, k;
     uint8_t                         cur_fh[NFS4_FHSIZE];
     int                             cur_fhlen = 0;
-    int                             lead_putfh, have_lookup = 0, have_getattr = 0;
+    int                             lead_putfh, have_lookup = 0;
     int                             have_lookupp = 0, have_saved = 0;
     int                             cur_moved = 0, stages_early = 0;
     /* Whether any op the run carries changes the filesystem -- see
@@ -2850,6 +2902,16 @@ chimera_nfs4_compound_try_vfs(
     /* Index of a SETATTR whose size change has to be authorized before the
      * sequence runs, or -1. */
     int                             setattr_at = -1;
+    /* Index of a GETATTR that could owe the §10.4.3 CB_GETATTR combine, or -1.
+     * Like the OPEN and the LOCK it is the last op of its run, because the
+     * combine parks. */
+    int                             getattr_at = -1;
+    /* Whether the combine is reachable at all in this configuration: the query
+     * runs only for a client reached through a session, and only with
+     * delegations configured. */
+    const int                       getattr_may_combine =
+        chimera_server_config_get_nfs4_delegations(thread->shared->config) &&
+        req->session && req->session->client_unified;
     /* The export the sequence runs under, established by the op that seeds the
      * current object.  A later PUTFH is admitted only back into this one -- see
      * the PUTFH case.  Read during the scan, which is before the seed handle is
@@ -3203,7 +3265,25 @@ chimera_nfs4_compound_try_vfs(
                         break;
                     }
                 }
-                have_getattr = 1;
+                /* RFC 7530/8881 §10.4.3: while another client holds a write
+                 * delegation on the object, the answer is not the server's
+                 * alone -- it is combined with what CB_GETATTR asks the
+                 * holder, and that query PARKS.  A fill with results still to
+                 * fill behind it cannot park, so a GETATTR that could reach
+                 * the query ends the run and owns the request's tail from the
+                 * completion, exactly as a delegating OPEN does.
+                 *
+                 * What is decided here is only that it MIGHT: whether a
+                 * conflicting delegation really stands is read when the run
+                 * has finished, against the object the GETATTR addressed
+                 * rather than against a guess made before anything ran.  The
+                 * query only ever runs for a client reached through a session,
+                 * so with no session -- or with delegations off -- the GETATTR
+                 * is carried like any other op and the run goes on past it. */
+                if (getattr_may_combine) {
+                    getattr_at = (int) i;
+                    nenc       = i + 1;
+                }
                 break;
 
             case OP_CREATE:
@@ -3928,7 +4008,8 @@ chimera_nfs4_compound_try_vfs(
         mutates      |= nfs4_vfs_op_mutates(argop);
 
         if (nfs4_vfs_op_ends_run(argop->argop) ||
-            (argop->argop == OP_OPEN && open_ends_run)) {
+            (argop->argop == OP_OPEN && open_ends_run) ||
+            (argop->argop == OP_GETATTR && getattr_at == (int) i)) {
             break;
         }
     }
@@ -3984,18 +4065,6 @@ chimera_nfs4_compound_try_vfs(
      * and hand back export roots' parents from it (nfs4_root_export_fh_get);
      * neither is visible to the VFS. */
     if (have_lookupp && thread->shared->root_export_id != 0) {
-        return 0;
-    }
-
-    /* RFC 7530/8881 §10.4.3: when another client holds a write delegation the
-     * GETATTR must query it via CB_GETATTR and combine the answer.  That query
-     * only ever runs for a client reached through a session.  Expressible as
-     * an ends-run GETATTR whose fill parks on the CB_GETATTR, the way an OPEN
-     * that could earn a delegation ends its run -- but the combine itself
-     * lives in nfs4_proc_getattr.c and the split belongs with it. */
-    if (have_getattr &&
-        chimera_server_config_get_nfs4_delegations(thread->shared->config) &&
-        req->session && req->session->client_unified) {
         return 0;
     }
 
@@ -4139,6 +4208,10 @@ chimera_nfs4_compound_try_vfs(
     ctx->open_claim_op   = -1;
     ctx->open_setattr_op = -1;
     ctx->open_ends_run   = open_ends_run;
+    /* An op index of 0 is a real one, and a GETATTR can never be at `first`
+     * without being at 0 either, so "no deferred GETATTR" is said with -1. */
+    ctx->getattr_defer_res = (getattr_at >= (int) first &&
+                              getattr_at < (int) nenc) ? getattr_at : -1;
 
     /* Seed the current object.  When the remainder opens with a PUTFH this is
      * that PUTFH; otherwise it re-states the COMPOUND's current filehandle and
