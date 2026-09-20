@@ -2561,8 +2561,12 @@ main(
 
         chimera_vfs_compound_free(cp);
 
-        /* ...but not a LOOKUP, which needs a directory: EINVAL, and the
-         * sequence stops rather than opening a directory of its own. */
+        /* ...but not a LOOKUP, which needs a directory.  The handle does not
+         * carry the DIRECTORY bit, so the executor asks the object what it is
+         * rather than refusing on the flag -- and the object is a regular
+         * file, so the answer is ENOTDIR: the thing that is actually wrong.
+         * The sequence stops there rather than opening a directory of its
+         * own. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
@@ -2575,9 +2579,9 @@ main(
         wait_done(&ctx);
 
         assert(ctx.callbacks == 1);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
         assert(chimera_vfs_compound_num_completed(cp) == 2);
-        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOTDIR);
         assert(chimera_vfs_compound_op(cp, i_ga)->status == CHIMERA_VFS_UNSET);
 
         chimera_vfs_compound_free(cp);
@@ -3054,8 +3058,8 @@ main(
         owner_b.proto    = CHIMERA_CLAIM_PROTO_NFSV4;
         owner_b.owner_lo = 12;
 
-        /* GRANTED, then the LOOKUP behind it fails (a data handle cannot
-         * serve one). */
+        /* GRANTED, then the LOOKUP behind it fails (the lent handle's object
+         * is a regular file, so it cannot serve one: ENOTDIR). */
         chimera_vfs_claim_init_range(&claim_a, true, false, 0, 16, &owner_a);
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
@@ -3070,8 +3074,8 @@ main(
         wait_done(&ctx);
 
         assert(ctx.callbacks == 1);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
-        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOTDIR);
         op = chimera_vfs_compound_op(cp, i_lock);
         assert(op->status == CHIMERA_VFS_OK);
         assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
@@ -5211,8 +5215,9 @@ main(
         chimera_vfs_state_put(ctx.vfs->vfs_state, fs);
 
         /* The abort release for a share: A GRANTED, then the LOOKUP behind it
-         * fails (a data handle cannot serve one), and the share goes with the
-         * failure -- so B's write open, refused a moment ago, is GRANTED. */
+         * fails (the lent handle's object is a regular file: ENOTDIR), and the
+         * share goes with the failure -- so B's write open, refused a moment
+         * ago, is GRANTED. */
         chimera_vfs_claim_init_nfs4_open(&share_a,
                                          CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
                                          CHIMERA_CLAIM_W, &owner_a);
@@ -5228,8 +5233,8 @@ main(
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
-        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOTDIR);
         op = chimera_vfs_compound_op(cp, i_cl);
         assert(op->status == CHIMERA_VFS_OK);
         assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
@@ -5380,8 +5385,8 @@ main(
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
-        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
+        assert(chimera_vfs_compound_op(cp, i_lk)->status == CHIMERA_VFS_ENOTDIR);
         op = chimera_vfs_compound_op(cp, i_cl);
         assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
         assert(deleg.op_handle == oh);
@@ -5675,7 +5680,7 @@ main(
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
         op = chimera_vfs_compound_op(cp, i_cl);
         assert(op->claim_result == CHIMERA_CLAIM_GRANTED);
         assert(op->claim_grant == NULL);
@@ -6574,6 +6579,82 @@ main(
     }
     TEST_PASS("a SETATTR through the handle an earlier op produced takes the "
               "descriptor-rights path, unless that open was a PATH open");
+
+    /* ---- a lent handle is judged by what it ADDRESSES, not by its flags ----
+     * A dirfd from open(dir, O_RDONLY) is an open directory that cannot report
+     * CHIMERA_VFS_OPEN_DIRECTORY.  It serves a READDIR because the object is a
+     * directory; a regular file's handle does not, and the answer is the
+     * ENOTDIR that says what is actually wrong. */
+    {
+        struct chimera_vfs_attrs        sattr;
+        struct chimera_vfs_open_handle *dh, *fh_handle;
+        int                             i_gh, i_open, i_rd;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, a_fh, (int) a_fh_len);
+        chimera_vfs_compound_add_open_current(cp,
+                                              CHIMERA_VFS_OPEN_READ_ONLY, 0);
+        i_gh          = chimera_vfs_compound_add_gethandle(cp);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        dh = chimera_vfs_compound_take_handle(cp, (uint32_t) i_gh);
+        assert(dh != NULL);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, dh, CHIMERA_VFS_OPEN_READ_ONLY);
+        i_rd = chimera_vfs_compound_add_readdir(cp, 0, 0, 0, 0, 16,
+                                                CHIMERA_VFS_ATTR_MASK_STAT, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, i_rd);
+        assert(op->status == CHIMERA_VFS_OK);
+        /* /mem/a holds b, and the enumeration reached it. */
+        assert(op->num_entries >= 1);
+        chimera_vfs_compound_free(cp);
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = S_IFREG | 0600;
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_open = chimera_vfs_compound_add_open(cp, "notdir", 6,
+                                               CHIMERA_VFS_OPEN_CREATE |
+                                               CHIMERA_VFS_OPEN_READ_ONLY,
+                                               0, &sattr, 0, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        fh_handle = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
+        assert(fh_handle != NULL);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, fh_handle,
+                                           CHIMERA_VFS_OPEN_READ_ONLY);
+        i_rd          = chimera_vfs_compound_add_readdir(cp, 0, 0, 0, 0, 16, 0, 0);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_op(cp, i_rd)->status == CHIMERA_VFS_ENOTDIR);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ENOTDIR);
+        chimera_vfs_compound_free(cp);
+
+        chimera_vfs_release(ctx.vfs_thread, dh);
+        chimera_vfs_release(ctx.vfs_thread, fh_handle);
+    }
+    TEST_PASS("a lent dirfd without the DIRECTORY bit serves a READDIR; a "
+              "regular file's handle is ENOTDIR");
 
     /* ---- an empty sequence completes ---- */
     cp            = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);

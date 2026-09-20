@@ -1964,7 +1964,7 @@ chimera_vfs_compound_add_restorehandle(
  * open bound rights to this handle (an SMB2 FileId's granted access, an NFSv4
  * stateid's), and acting through a different one would discard them.
  *
- * Two rules decide "serves":
+ * Three rules decide "serves":
  *
  *   1. CHIMERA_VFS_OPEN_INFERRED is never required.  It is provenance -- the
  *      VFS opened this for an op -- not a capability, and a handle the caller
@@ -1979,6 +1979,23 @@ chimera_vfs_compound_add_restorehandle(
  *      served by whatever handle is lent, path or data, because fsyncdir(2)
  *      IS a commit through an O_PATH directory handle and every backend
  *      accepts one.
+ *
+ *   3. CHIMERA_VFS_OPEN_DIRECTORY is provenance too, and what settles a
+ *      directory-wanting op -- READDIR, FIND, and the ops that resolve a name
+ *      -- is what the handle ADDRESSES.  A dirfd from open(dir, O_RDONLY) is
+ *      an open directory that cannot report the bit; refusing it would leave
+ *      the caller nothing legal to do (it may not substitute another handle),
+ *      and a caller that ORs the bit in on faith is asserting something it has
+ *      not checked.  So a lent handle without the bit is accepted for such an
+ *      op when the object IS a directory and refused ENOTDIR -- the errno for
+ *      the thing that is actually wrong -- when it is not.
+ *
+ *      That costs one GETATTR of the mode, and it is paid ONLY by a lent
+ *      handle that does not carry the bit and is asked to serve a
+ *      directory-wanting op: a handle lent as PATH|DIRECTORY (an opendir, an
+ *      SMB2 enumeration handle) is taken at its word and costs nothing, as it
+ *      always did.  A handle the sequence opened for itself is not affected at
+ *      all -- it is re-opened as a directory, and the open is the check.
  */
 int
 chimera_vfs_compound_add_puthandle(

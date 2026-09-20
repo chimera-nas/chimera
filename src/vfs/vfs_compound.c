@@ -125,6 +125,12 @@ struct chimera_vfs_compound {
      * the sequence advances. */
     uint8_t                         io_typechecked;
 
+    /* A LENT handle that does not carry CHIMERA_VFS_OPEN_DIRECTORY has been
+     * asked whether it addresses one, and does -- see the lent-handle rules in
+     * the header.  Asked once per op, like the I/O type check, and cleared
+     * whenever the sequence advances. */
+    uint8_t                         lent_dirchecked;
+
     /* A parking RECALL's inert request answered -- inside the recall call,
      * or later off the owning thread's resume drain.  Read once the call
      * returns to tell an inline answer from a park; see the RECALL arm of
@@ -2597,6 +2603,7 @@ chimera_vfs_compound_op_done(
     compound->open_resolved   = 0;
     compound->open_retried    = 0;
     compound->io_typechecked  = 0;
+    compound->lent_dirchecked = 0;
     compound->recall_answered = 0;
     chimera_vfs_compound_step(compound);
 } /* chimera_vfs_compound_op_done */
@@ -4358,6 +4365,58 @@ chimera_vfs_compound_lent_serves(
 } /* chimera_vfs_compound_lent_serves */
 
 /*
+ * ...and whether the ONLY thing standing between them is the DIRECTORY bit.
+ *
+ * That bit is provenance, not a capability: a caller whose dirfd came from
+ * open(dir, O_RDONLY) holds an open directory it cannot describe as one, and
+ * what a READDIR or a name op actually needs is that the handle ADDRESS a
+ * directory.  So a lent handle failing on that bit alone is not refused -- the
+ * object is asked, and it is the object's type that answers (see the lent-
+ * handle rules in the header).  Everything else about `serves` still stands:
+ * a PATH handle lent to a WRITE is still the EBADF it was.
+ */
+static int
+chimera_vfs_compound_lent_wants_dir(
+    const struct chimera_vfs_compound_op *op,
+    unsigned int                          have,
+    unsigned int                          want)
+{
+    if (!(want & CHIMERA_VFS_OPEN_DIRECTORY) ||
+        (have & CHIMERA_VFS_OPEN_DIRECTORY)) {
+        return 0;
+    }
+
+    return chimera_vfs_compound_lent_serves(op, have,
+                                            want & ~CHIMERA_VFS_OPEN_DIRECTORY);
+} /* chimera_vfs_compound_lent_wants_dir */
+
+/* The answer: the lent handle addresses a directory, or it does not and the
+ * op's real complaint is ENOTDIR rather than a flag mismatch. */
+static void
+chimera_vfs_compound_lent_dir_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_compound *compound = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_op_done(compound, error_code);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode)) {
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    compound->lent_dirchecked = 1;
+
+    chimera_vfs_compound_step(compound);
+} /* chimera_vfs_compound_lent_dir_callback */
+
+/*
  * A CLAIM's answer, and which thread it arrives on.
  *
  * chimera_vfs_claim_acquire answers inside the call when it can (GRANTED or
@@ -4724,8 +4783,25 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
               !(open_flags & CHIMERA_VFS_OPEN_DIRECTORY)))) {
             if (!chimera_vfs_compound_lent_serves(op, compound->handle_flags,
                                                   open_flags)) {
-                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
-                return;
+                /* Unless all it lacks is the DIRECTORY bit, which is
+                 * provenance: ask the object what it is, once, and let its
+                 * type answer.  A caller that DID lend the bit is taken at its
+                 * word and pays nothing. */
+                if (!chimera_vfs_compound_lent_wants_dir(op,
+                                                         compound->handle_flags,
+                                                         open_flags)) {
+                    chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                    return;
+                }
+
+                if (!compound->lent_dirchecked) {
+                    chimera_vfs_getattr(compound->thread, compound->cred,
+                                        compound->handle,
+                                        CHIMERA_VFS_ATTR_MODE,
+                                        chimera_vfs_compound_lent_dir_callback,
+                                        compound);
+                    return;
+                }
             }
         } else if (!compound->handle ||
                    !chimera_vfs_compound_handle_serves(compound->handle_flags,
