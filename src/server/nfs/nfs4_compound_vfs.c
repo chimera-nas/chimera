@@ -1619,13 +1619,35 @@ nfs4_vfs_op_fill(
 
         case OP_GETATTR:
             /* The one GETATTR that does not marshal here.  Its answer may owe
-            * the §10.4.3 combine, whose CB_GETATTR parks, and a fill cannot
-            * park; so the attributes are copied out and the completion --
-            * which is past every fill and may free the sequence -- settles
-            * it.  Nothing of the compound is referenced afterwards: the scan
-            * refuses a GETATTR that asks for an ACL, so the copy is whole. */
+             * the §10.4.3 combine, whose CB_GETATTR parks, and a fill cannot
+             * park; so the attributes are copied out and the completion --
+             * which is past every fill and may free the sequence -- settles
+             * it.
+             *
+             * The struct copy is whole for everything except the ACL, which is
+             * a POINTER into storage the compound owns and frees.  So the ACL
+             * is copied once more, into the request's own bump allocator, which
+             * outlives the reply; the SIDs that share its lifetime need no such
+             * copy because no NFSv4 attribute reads them. */
             if ((int) map->res_index == ctx->getattr_defer_res) {
-                ctx->getattr_attr   = vop->attr;
+                ctx->getattr_attr = vop->attr;
+
+                if ((vop->attr.va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+                    vop->attr.va_acl) {
+                    size_t              sz = chimera_acl_size(
+                        vop->attr.va_acl->num_aces);
+                    struct chimera_acl *copy = xdr_dbuf_alloc_space(
+                        sz, req->encoding->dbuf);
+
+                    if (!copy) {
+                        resop->opgetattr.status = NFS4ERR_RESOURCE;
+                        return NFS4ERR_RESOURCE;
+                    }
+
+                    memcpy(copy, vop->attr.va_acl, sz);
+                    ctx->getattr_attr.va_acl = copy;
+                }
+
                 ctx->getattr_filled = 1;
                 return NFS4_OK;
             }
@@ -2411,6 +2433,45 @@ nfs4_vfs_add_xattr_op(
 } /* nfs4_vfs_add_xattr_op */
 
 /*
+ * Decode a set-side attribute list, ACL included.
+ *
+ * The one settable attribute that is not a value in chimera_vfs_attrs is the
+ * ACL: the struct carries a POINTER, and the executor hands it to the backend
+ * in place rather than copying what it points at (the set_attr contract in
+ * vfs_compound.h).  So the storage has to outlive the run, and a retried run
+ * has to find the same bytes there -- which the request's own bump allocator
+ * gives for free, since it outlives the reply and is written once.  This is
+ * where the per-op SETATTR already puts it.
+ *
+ * Returns the decode's status.  Anything but NFS4_OK -- an AUDIT/ALARM ACE, an
+ * unmappable principal, a truncated list -- is a status the per-op path is what
+ * says, so the caller refuses the op and lets it say so.
+ */
+static nfsstat4
+nfs4_vfs_decode_set_attrs(
+    struct nfs_request       *req,
+    struct chimera_vfs_attrs *attr,
+    uint32_t                  num_attrmask,
+    const uint32_t           *attrmask,
+    void                     *attr_vals,
+    uint32_t                  attr_vals_len)
+{
+    struct chimera_acl *acl_buf      = NULL;
+    unsigned            acl_buf_aces = 0;
+
+    if (num_attrmask >= 1 && (attrmask[0] & (1U << FATTR4_ACL))) {
+        acl_buf = xdr_dbuf_alloc_space(
+            chimera_acl_size(CHIMERA_ACL_MAX_ACES), req->encoding->dbuf);
+        acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
+    }
+
+    return chimera_nfs4_unmarshall_attrs(attr, num_attrmask,
+                                         (uint32_t *) attrmask,
+                                         attr_vals, attr_vals_len,
+                                         acl_buf, acl_buf_aces);
+} /* nfs4_vfs_decode_set_attrs */
+
+/*
  * The create attributes an exclusive OPEN carries.
  *
  * EXCLUSIVE4 carries none at all -- the verifier occupies the attribute slot --
@@ -2423,8 +2484,9 @@ nfs4_vfs_add_xattr_op(
  * the client asked for there -- which is why an EXCLUSIVE4_1 that sets
  * time_access_set or time_modify_set is refused rather than silently clobbered.
  */
-static void
+static nfsstat4
 nfs4_vfs_open_exclusive_attrs(
+    struct nfs_request       *req,
     const struct OPEN4args   *args,
     struct chimera_vfs_attrs *attr)
 {
@@ -2432,13 +2494,16 @@ nfs4_vfs_open_exclusive_attrs(
     uint32_t       part;
 
     if (args->openhow.how.mode == EXCLUSIVE4_1) {
-        chimera_nfs4_unmarshall_attrs(
-            attr,
+        nfsstat4 rc = nfs4_vfs_decode_set_attrs(
+            req, attr,
             args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
             args->openhow.how.ch_createboth.cva_attrs.attrmask,
             args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
-            args->openhow.how.ch_createboth.cva_attrs.attr_vals.len,
-            NULL, 0);
+            args->openhow.how.ch_createboth.cva_attrs.attr_vals.len);
+
+        if (rc != NFS4_OK) {
+            return rc;
+        }
         verf = args->openhow.how.ch_createboth.cva_verf;
     } else {
         verf = args->openhow.how.createverf;
@@ -2457,6 +2522,8 @@ nfs4_vfs_open_exclusive_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         attr->va_mode      = 0600;
     }
+
+    return NFS4_OK;
 } /* nfs4_vfs_open_exclusive_attrs */
 
 /*
@@ -2510,12 +2577,14 @@ nfs4_vfs_add_open_op(
              * per-op path draws the line in the same place.) */
             flags |= CHIMERA_VFS_OPEN_CREATE_REGULAR;
 
-            chimera_nfs4_unmarshall_attrs(&attr,
-                                          args->openhow.how.createattrs.num_attrmask,
-                                          args->openhow.how.createattrs.attrmask,
-                                          args->openhow.how.createattrs.attr_vals.data,
-                                          args->openhow.how.createattrs.attr_vals.len,
-                                          NULL, 0);
+            if (nfs4_vfs_decode_set_attrs(
+                    req, &attr,
+                    args->openhow.how.createattrs.num_attrmask,
+                    args->openhow.how.createattrs.attrmask,
+                    args->openhow.how.createattrs.attr_vals.data,
+                    args->openhow.how.createattrs.attr_vals.len) != NFS4_OK) {
+                return -1;
+            }
         } else {
             /* EXCLUSIVE4 and EXCLUSIVE4_1 stamp the client's verifier into the
              * object's atime and mtime, which is how a repeat of the same
@@ -2525,7 +2594,9 @@ nfs4_vfs_add_open_op(
              * than refused, which is what EXCLUSIVE_RETRY is for. */
             opts |= CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY;
 
-            nfs4_vfs_open_exclusive_attrs(args, &attr);
+            if (nfs4_vfs_open_exclusive_attrs(req, args, &attr) != NFS4_OK) {
+                return -1;
+            }
         }
 
         if (args->openhow.how.mode == UNCHECKED4) {
@@ -2554,8 +2625,6 @@ nfs4_vfs_add_open_op(
     if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
         flags |= CHIMERA_VFS_OPEN_WRITE_ONLY;
     }
-
-    (void) req;
 
     /* The same attributes the per-op path's open asks for -- no more, so an
      * object is not stat'd more thoroughly on one path than the other.  An
@@ -2800,6 +2869,7 @@ nfs4_vfs_setattr_authorize(
  */
 static int
 nfs4_vfs_add_create_op(
+    struct nfs_request          *req,
     struct chimera_vfs_compound *compound,
     const struct nfs_argop4     *argop)
 {
@@ -2811,12 +2881,13 @@ nfs4_vfs_add_create_op(
 
     memset(&attr, 0, sizeof(attr));
 
-    chimera_nfs4_unmarshall_attrs(&attr,
+    if (nfs4_vfs_decode_set_attrs(req, &attr,
                                   args->createattrs.num_attrmask,
                                   args->createattrs.attrmask,
                                   args->createattrs.attr_vals.data,
-                                  args->createattrs.attr_vals.len,
-                                  NULL, 0);
+                                  args->createattrs.attr_vals.len) != NFS4_OK) {
+        return -1;
+    }
 
     switch (args->objtype.type) {
         case NF4DIR:
@@ -3252,19 +3323,15 @@ chimera_nfs4_compound_try_vfs(
                     }
                 }
 
-                /* A backend owns the ACL it reports only for the duration of
-                 * its own completion, so the copy the sequence keeps has a
-                 * dangling va_acl by the time results are filled.  An ACL
-                 * request must be answered by the per-op path, which marshals
-                 * it while it is still live. */
-                if (argop->opgetattr.num_attr_request >= 1 &&
-                    (argop->opgetattr.attr_request[0] & (1U << FATTR4_ACL))) {
-                    {
-                        nenc = i;
-                        stop = 1;
-                        break;
-                    }
-                }
+                /* An ACL request needs no exception any more.  A backend owns
+                 * the ACL it reports only while its own completion runs, which
+                 * is why a result that merely copied the attribute struct used
+                 * to carry a dangling va_acl -- but the executor now copies the
+                 * ACL itself into storage the op owns and re-points va_acl at
+                 * it (the ACLs BY VALUE rule on the op's results), so it is
+                 * live for exactly as long as the compound is.  The fill
+                 * marshals inside that window. */
+
                 /* RFC 7530/8881 §10.4.3: while another client holds a write
                  * delegation on the object, the answer is not the server's
                  * alone -- it is combined with what CB_GETATTR asks the
@@ -3339,14 +3406,13 @@ chimera_nfs4_compound_try_vfs(
                     break;
                 }
 
-                /* The sequence carries no ACL: a backend owns the one it
-                 * reports only while its own completion runs. */
-                if (ca->createattrs.num_attrmask >= 1 &&
-                    (ca->createattrs.attrmask[0] & (1U << FATTR4_ACL))) {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                /* A set-side ACL needs no exception either.  It is BORROWED for
+                * the life of the run rather than copied into the op, so what
+                * it has to outlive the run is the storage it points at -- and
+                * the ACL is decoded into the request's own bump allocator,
+                * which outlives the reply, let alone the sequence.  The decode
+                * itself is where an unsupported ACE is refused, and a refusal
+                * there sends the op back to the per-op path (see the build). */
 
                 cur_moved = 1;
                 break;
@@ -3659,13 +3725,7 @@ chimera_nfs4_compound_try_vfs(
                     break;
                 }
 
-                /* The sequence carries no ACL. */
-                if (sa->obj_attributes.num_attrmask >= 1 &&
-                    (sa->obj_attributes.attrmask[0] & (1U << FATTR4_ACL))) {
-                    nenc = i;
-                    stop = 1;
-                    break;
-                }
+                /* A set-side ACL is carried -- see the CREATE arm. */
 
                 /* The "current stateid" (RFC 8881 §16.2.3.1.2) means whatever
                  * the op before this one left.
@@ -3880,7 +3940,8 @@ chimera_nfs4_compound_try_vfs(
                  * suppattr_exclcreat is NFS4ERR_INVAL, and the per-op path is
                  * what says so.  Without this the verifier would silently
                  * clobber a time_access_set or time_modify_set the client
-                 * asked for. */
+                 * asked for.  (An ACL is outside suppattr_exclcreat too, so
+                 * the exclcreat check is what refuses one here.) */
                 if (oa->openhow.opentype == OPEN4_CREATE &&
                     oa->openhow.how.mode == EXCLUSIVE4_1 &&
                     (chimera_nfs4_validate_createattrs(
@@ -3890,10 +3951,7 @@ chimera_nfs4_compound_try_vfs(
                      chimera_nfs4_validate_exclcreat_attrs(
                          oa->openhow.how.ch_createboth.cva_attrs.num_attrmask,
                          oa->openhow.how.ch_createboth.cva_attrs.attrmask) !=
-                     NFS4_OK ||
-                     (oa->openhow.how.ch_createboth.cva_attrs.num_attrmask >= 1 &&
-                      (oa->openhow.how.ch_createboth.cva_attrs.attrmask[0] &
-                       (1U << FATTR4_ACL))))) {
+                     NFS4_OK)) {
                     nenc = i;
                     stop = 1;
                     break;
@@ -3931,18 +3989,10 @@ chimera_nfs4_compound_try_vfs(
                         }
                     }
 
-                    /* An ACL in the create attributes would have to survive
-                    * from the moment the sequence is built to the moment it
-                    * runs, and the sequence deliberately carries no ACL. */
-                    if (oa->openhow.how.createattrs.num_attrmask >= 1 &&
-                        (oa->openhow.how.createattrs.attrmask[0] &
-                         (1U << FATTR4_ACL))) {
-                        {
-                            nenc = i;
-                            stop = 1;
-                            break;
-                        }
-                    }
+                    /* An ACL in the create attributes IS carried, on the same
+                     * terms as CREATE's and SETATTR's: it is decoded into the
+                     * request's bump allocator and borrowed from there for the
+                     * life of the run. */
                 }
 
                 /* The grace-window and per-client reclaim gates, which the
@@ -4380,7 +4430,7 @@ chimera_nfs4_compound_try_vfs(
                     goto refuse;
                 }
 
-                idx          = nfs4_vfs_add_create_op(compound, argop);
+                idx          = nfs4_vfs_add_create_op(req, compound, argop);
                 map->vfs_res = idx;
 
                 /* The created object is the current one now. */
@@ -4575,13 +4625,16 @@ chimera_nfs4_compound_try_vfs(
                 struct chimera_vfs_attrs sattr;
 
                 memset(&sattr, 0, sizeof(sattr));
-                chimera_nfs4_unmarshall_attrs(
-                    &sattr,
-                    argop->opsetattr.obj_attributes.num_attrmask,
-                    argop->opsetattr.obj_attributes.attrmask,
-                    argop->opsetattr.obj_attributes.attr_vals.data,
-                    argop->opsetattr.obj_attributes.attr_vals.len,
-                    NULL, 0);
+
+                if (nfs4_vfs_decode_set_attrs(
+                        req, &sattr,
+                        argop->opsetattr.obj_attributes.num_attrmask,
+                        argop->opsetattr.obj_attributes.attrmask,
+                        argop->opsetattr.obj_attributes.attr_vals.data,
+                        argop->opsetattr.obj_attributes.attr_vals.len) !=
+                    NFS4_OK) {
+                    goto refuse;
+                }
 
                 if ((int) i == setattr_at) {
                     map->io_handle = setattr_handle;
