@@ -2108,8 +2108,19 @@ chimera_vfs_compound_add_link_path(
     uint64_t                     attr_mask);
 
 /* Make op `index` address the handle op `from` produced, instead of the
-* current object.  For the operation after a path OPEN: on a path-only mount
-* that handle is the only usable reference to what the open resolved. */
+ * current object.  For the operation after a path OPEN: on a path-only mount
+ * that handle is the only usable reference to what the open resolved.
+ *
+ * `from` must be an op that LEAVES a handle -- OPEN, OPEN_PATH, OPEN_STREAM,
+ * CREATE_UNLINKED, GETHANDLE.  Every other op resolves to no handle at all, and
+ * the op addressing it would dereference NULL inside a backend; naming one
+ * fails the BUILD, so submit answers EINVAL and the run never starts.
+ *
+ * Two near misses are worth naming, because both read as if they belonged.
+ * OPEN_CURRENT opens the current object, but the handle it opens belongs to the
+ * cursor and is published by a GETHANDLE after it -- name the GETHANDLE.  And a
+ * PUTHANDLE's handle is the caller's own and is already the current object,
+ * which is what a PUTHANDLE is for: address it by not calling this at all. */
 void
 chimera_vfs_compound_op_use_handle(
     struct chimera_vfs_compound *compound,

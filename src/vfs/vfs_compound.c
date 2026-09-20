@@ -1472,6 +1472,32 @@ chimera_vfs_compound_add_link_path(
     return index;
 } /* chimera_vfs_compound_add_link_path */
 
+/*
+ * Which op types leave a handle in out_handle for a later op to address.
+ *
+ * The list is short and it is exactly the set of completions that assign
+ * out_handle.  OPEN_CURRENT is the one that reads as if it belongs here and
+ * does not: the handle it opens is owned by the CURSOR, and publishing it in
+ * out_handle as well would release it twice -- GETHANDLE is what hands it over,
+ * and that is the op to name.  A PUTHANDLE is the other near miss: the handle
+ * is the caller's own, and the sequence addresses it as the current object,
+ * which is what a PUTHANDLE is FOR.
+ */
+static int
+chimera_vfs_compound_op_produces_handle(uint8_t type)
+{
+    switch (type) {
+        case CHIMERA_VFS_COMPOUND_OP_OPEN:
+        case CHIMERA_VFS_COMPOUND_OP_OPEN_PATH:
+        case CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM:
+        case CHIMERA_VFS_COMPOUND_OP_CREATE_UNLINKED:
+        case CHIMERA_VFS_COMPOUND_OP_GETHANDLE:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_compound_op_produces_handle */
+
 SYMBOL_EXPORT void
 chimera_vfs_compound_op_use_handle(
     struct chimera_vfs_compound *compound,
@@ -1481,6 +1507,16 @@ chimera_vfs_compound_op_use_handle(
     /* `from` must be EARLIER: a later op has not run, so its out_handle is
      * NULL and the addressing would silently resolve to nothing. */
     if (index >= compound->num_ops || from >= index) {
+        return;
+    }
+
+    /* ...and it must be an op that LEAVES one.  Naming one that does not is
+     * the same NULL, arrived at a different way, and the addressing op would
+     * dereference it three frames down in a backend.  The type is known right
+     * here, so the sequence is refused at build and answered EINVAL at submit
+     * rather than crashing mid-run. */
+    if (!chimera_vfs_compound_op_produces_handle(compound->ops[from].type)) {
+        compound->build_failed = 1;
         return;
     }
 
@@ -4910,6 +4946,17 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                          compound->ops[op->handle_from].skip,
                          "compound op %u addresses the handle of op %d, which "
                          "a gate skipped", compound->index, op->handle_from);
+
+    /* The other way that handle can be missing, and the one that is not a
+     * caller bug: the op ran, and produced nothing.  A path OPEN on a backend
+     * that resolved the name without handing back a reference is the case --
+     * the adder has already refused every op type that CANNOT produce one, so
+     * what is left here is an op that could have and did not.  That is an
+     * answer, so it is reported rather than aborted. */
+    if (op->handle_from >= 0 && !compound->ops[op->handle_from].out_handle) {
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+        return;
+    }
 
     /* The object this op acts on: the one the caller handed in, or else the
      * sequence's current object.  Ops that resolve a NAME use compound->handle
