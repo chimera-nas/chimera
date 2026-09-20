@@ -958,6 +958,31 @@ chimera_nfs_nlm4_test(
     chimera_nfs_nlm4_do_test(evpl, conn, cred, args, encoding, private_data, 1);
 } /* chimera_nfs_nlm4_test */
 
+/*
+ * LOCK IS DELIBERATELY NOT A SEQUENCE, and the reason is not a hop that could
+ * be shortened.
+ *
+ * `entry->pending` means "not held yet" to every other NLM RPC on the file --
+ * nlm_client_find_lock_in_range (nfs_nlm_state.h) SKIPS a pending entry, so an
+ * UNLOCK covering the range would answer NLM4_GRANTED for a lock that is in
+ * fact held.  The acquire callback therefore clears it where the claim core
+ * answers, on whatever thread that is, before anything else can run.
+ *
+ * A sequence gives the caller no such moment.  Its whole contract is that the
+ * caller is not between the operations: a CLAIM's answer reaches the caller in
+ * the completion, marshalled home to the submitting thread, and there is no
+ * hook in between by design.  So the clear could only happen a doorbell hop
+ * later, widening the window rather than closing it -- and closing it from the
+ * other side means changing what `pending` means to UNLOCK, which is an NLM
+ * semantics change and not a conversion.  (The reaper's exactly-once hand-off
+ * in nlm_client_release_all_locks would have to move with it: it arbitrates on
+ * chimera_vfs_claim_cancel's return, and a sequenced LOCK would arbitrate on
+ * chimera_vfs_compound_cancel_post's, which promises nothing synchronously.)
+ *
+ * TEST does not have the problem and IS a sequence -- see
+ * chimera_nfs_nlm4_do_test: a probe inserts nothing, so there is no state to
+ * settle at the moment of the answer.
+ */
 static void
 chimera_nfs_nlm4_do_lock(
     struct evpl               *evpl,
