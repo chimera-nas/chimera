@@ -49,6 +49,7 @@ chimera_writev(
     request->writev.callback     = callback;
     request->writev.private_data = private_data;
     request->writev.handle       = handle;
+    request->writev.open_flags   = chimera_client_handle_open_flags(handle);
     request->writev.offset       = offset;
     request->writev.length       = length;
     request->writev.src_iov      = iov;
@@ -76,6 +77,7 @@ chimera_writerv(
     request->writerv.callback     = callback;
     request->writerv.private_data = private_data;
     request->writerv.handle       = handle;
+    request->writerv.open_flags   = chimera_client_handle_open_flags(handle);
     request->writerv.offset       = offset;
     request->writerv.length       = length;
     request->writerv.niov         = niov;
