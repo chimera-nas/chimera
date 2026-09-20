@@ -71,7 +71,7 @@ chimera_vfs_attr_cache_create(
                           sizeof(struct chimera_vfs_attr_cache_entry));
 
     cache->num_shards  = 1 << num_shards_bits;
-    cache->num_slots   = 1 << num_slots_bits;
+    cache->num_slots   = UINT64_C(1) << num_slots_bits;
     cache->num_entries = 1 << entries_per_slot_bits;
 
     cache->num_slots_mask   = cache->num_slots - 1;

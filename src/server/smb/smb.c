@@ -311,8 +311,12 @@ chimera_smb_server_init(
      * replaces the former fixed S-1-5-21-1111-2222-3333. */
     {
         char          hostid[256] = { 0 };
-        FILE         *fp          = fopen("/etc/machine-id", "r");
         XXH128_hash_t h;
+#ifdef _WIN32
+        chimera_smb_abort_if(chimera_windows_machine_identity(hostid, sizeof(hostid)),
+                             "Could not determine the Windows machine identity");
+#else
+        FILE *fp = fopen("/etc/machine-id", "r");
 
         if (fp) {
             if (!fgets(hostid, sizeof(hostid), fp)) {
@@ -327,6 +331,7 @@ chimera_smb_server_init(
             snprintf(hostid, sizeof(hostid), "chimera-%lx", (unsigned long) gethostid());
         }
 
+#endif
         h                             = XXH3_128bits(hostid, strlen(hostid));
         shared->machine_domain_sub[0] = (uint32_t) h.low64 | 1;   /* never zero */
         shared->machine_domain_sub[1] = (uint32_t) (h.low64 >> 32);

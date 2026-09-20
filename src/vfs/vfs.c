@@ -384,6 +384,14 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
 {
     char  hostname[64];
     char  machine_id[64];
+#ifdef _WIN32
+    DWORD hostname_size = sizeof(hostname);
+    if (!GetComputerNameA(hostname, &hostname_size)) {
+        snprintf(hostname, sizeof(hostname), "unknown");
+    }
+    chimera_vfs_abort_if(chimera_windows_machine_identity(machine_id, sizeof(machine_id)),
+                         "Could not determine the Windows machine identity");
+#else
     int   len;
     FILE *fp;
 
@@ -438,6 +446,8 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
     if (machine_id[0] == '\0') {
         snprintf(machine_id, sizeof(machine_id), "%08lx", gethostid());
     }
+
+#endif
 
     /* Synthesize machine name: hostname chimera version machine-id */
     vfs->machine_name_len = snprintf(vfs->machine_name,

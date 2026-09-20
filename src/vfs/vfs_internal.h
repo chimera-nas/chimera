@@ -93,9 +93,9 @@ chimera_vfs_handle_stamp_access(
 
 /* ERR_PTR style error handling for request allocation */
 #define CHIMERA_VFS_MAX_ERRNO 4095
-#define CHIMERA_VFS_ERR_PTR(err) ((void *) (long) (-(err)))
-#define CHIMERA_VFS_PTR_ERR(ptr) ((int) (-(long) (ptr)))
-#define CHIMERA_VFS_IS_ERR(ptr)  ((unsigned long) (ptr) > (unsigned long) -CHIMERA_VFS_MAX_ERRNO)
+#define CHIMERA_VFS_ERR_PTR(err) ((void *) (-(intptr_t) (err)))
+#define CHIMERA_VFS_PTR_ERR(ptr) ((int) (-(intptr_t) (ptr)))
+#define CHIMERA_VFS_IS_ERR(ptr)  ((uintptr_t) (ptr) > (uintptr_t) -(intptr_t) CHIMERA_VFS_MAX_ERRNO)
 
 /* Parse a comma-separated key[=value] options string into mount_options,
  * copying keys/values into the caller's buffer.  Shared by the mount and

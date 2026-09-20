@@ -123,3 +123,19 @@ static inline int ftruncate(int fd, int64_t length)
     }
     return 0;
 }
+
+/* Stable per-host identity for protocol metadata. The computer name is a
+ * fallback when access to the installation GUID is restricted. */
+static inline int chimera_windows_machine_identity(char *buffer, size_t capacity)
+{
+    DWORD bytes = (DWORD) capacity;
+    if (!RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography",
+                      "MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                      NULL, buffer, &bytes) && buffer[0]) {
+        return 0;
+    }
+    bytes = (DWORD) capacity;
+    if (GetComputerNameA(buffer, &bytes) && buffer[0]) { return 0; }
+    errno = EIO;
+    return -1;
+}
