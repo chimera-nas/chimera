@@ -81,7 +81,8 @@ static inline void mbt_watchdog_arm(unsigned int seconds)
     ULARGE_INTEGER relative;
     FILETIME due;
     if (!mbt_watchdog_timer) {
-        setvbuf(stdout, NULL, _IOLBF, 0);
+        /* The Windows CRT does not support line buffering. */
+        setvbuf(stdout, NULL, _IONBF, 0);
         mbt_watchdog_timer = CreateThreadpoolTimer(mbt_watchdog_expired, NULL, NULL);
         if (!mbt_watchdog_timer || atexit(mbt_watchdog_cleanup)) { abort(); }
     }

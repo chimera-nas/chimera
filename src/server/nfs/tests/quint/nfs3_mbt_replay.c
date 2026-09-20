@@ -1814,7 +1814,11 @@ main(
      * boundary, including the line naming the trace that was executing and
      * the fatal log message itself.  That is exactly what made a CI abort
      * here undiagnosable from its artifacts. */
+#ifdef _WIN32
+    setvbuf(stdout, NULL, _IONBF, 0);
+#else
     setvbuf(stdout, NULL, _IOLBF, 0);
+#endif
 
     umask(0);
 
