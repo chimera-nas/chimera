@@ -371,6 +371,16 @@ chimera_vfs_state_io_resume(struct chimera_vfs_request *request)
     struct chimera_vfs_file_state *file = request->io_lease_file;
 
     if (!file) {
+        /* A recall cancelled after a pump had posted it (chimera_vfs_claim_
+         * recall_cancel): the ticket is gone and so is its continuation, and
+         * the one posted resume -- this one -- is the last reference to the
+         * request.  Finish it as its continuation would have, minus the
+         * continuation. */
+        if ((request->io_recall_single || request->io_recall_all) &&
+            !request->io_next) {
+            chimera_vfs_complete(request);
+            chimera_vfs_request_free(request->thread, request);
+        }
         return;
     }
 
@@ -752,6 +762,62 @@ chimera_vfs_io_recall_single(
 
     chimera_vfs_io_try(state, file, request);
 } /* chimera_vfs_io_recall_single */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_recall_cancel(
+    struct chimera_vfs_state   *state,
+    struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_file_state      *file   = request->io_lease_file;
+    struct chimera_vfs_pending_acquire *ticket = &request->io_lease_ticket;
+    bool                                posted;
+    bool                                queued;
+
+    /* Never parked, or the drain already ran io_try for it (which clears
+     * io_lease_file only on the way into `next`). */
+    if (!file) {
+        return false;
+    }
+
+    /* `wait` is the pump's "resume posted" mark (chimera_vfs_claim_pump_io):
+     * read under the lock the pump sets it under, before the unpark clears
+     * it.  A posted request is on the owning thread's pending_io_resume list
+     * -- or in the drain's own batch, if this cancel is running from inside
+     * that drain -- and only the drain can take it off, so it is not freed
+     * here; io_lease_file NULL and io_next NULL are what tell the drain
+     * (chimera_vfs_state_io_resume) that the request it has reached was
+     * cancelled and is its to finish. */
+    pthread_mutex_lock(&file->lock);
+    posted = ticket->queued && ticket->wait;
+    queued = chimera_vfs_io_unpark_locked(file, request);
+    pthread_mutex_unlock(&file->lock);
+
+    if (!queued) {
+        return false;
+    }
+
+    /* The barrier position the ticket held is free: re-post whoever was
+     * behind it, as io_try does when a request proceeds. */
+    chimera_vfs_claim_pump_io(state, file);
+
+    /* io_lease_file NULL with io_next NULL is the mark the drain reads: a
+     * recall request in that shape was cancelled and is the drain's to
+     * finish.  io_recall_single / io_recall_all stay set -- they are what
+     * tells the drain this is a recall at all. */
+    request->io_lease_file = NULL;
+    request->io_next       = NULL;
+
+    /* The reference the recall took for its wait. */
+    request->io_owns_lease_ref = 0;
+    chimera_vfs_state_put(state, file);
+
+    if (!posted) {
+        chimera_vfs_complete(request);
+        chimera_vfs_request_free(request->thread, request);
+    }
+
+    return true;
+} /* chimera_vfs_claim_recall_cancel */
 
 SYMBOL_EXPORT void
 chimera_vfs_io_claim_release(struct chimera_vfs_request *request)

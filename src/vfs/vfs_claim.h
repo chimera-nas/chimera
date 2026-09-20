@@ -804,6 +804,31 @@ chimera_vfs_io_recall_single(
     void (                     *next )(
         struct chimera_vfs_request *request));
 
+/* Cancel a recall parked on its drain (chimera_vfs_io_recall_single /
+ * chimera_vfs_io_recall): unlink the request's io-wait ticket so `next` is
+ * never invoked.  The breaks the recall kicked stay kicked -- a recall hands
+ * nobody anything, so abandoning the wait is safe the way abandoning a queued
+ * acquire is.  Called on the request's OWNING thread only, and never blocks.
+ *
+ *   true  -- the ticket was still parked and is now unlinked.  The request
+ *            is the core's from here: it is finished and freed inside this
+ *            call, or -- if a pump had already posted its resume to the
+ *            owning thread's drain -- when that drain reaches it, which is
+ *            why the caller must be the owning thread (the drain cannot be
+ *            running concurrently) and must drop its pointer now.
+ *   false -- the recall has drained and `next` is running or has run; the
+ *            request is `next`'s.  Only reachable while the request is
+ *            alive, which the caller knows because `next` frees it: a
+ *            caller that keeps its pointer until `next` runs, and calls this
+ *            only before then, never passes a dead request.
+ *
+ * Symmetric with chimera_vfs_claim_cancel for a queued acquire: the return
+ * value is the whole arbitration.  The compound executor is the caller. */
+bool
+chimera_vfs_claim_recall_cancel(
+    struct chimera_vfs_state   *state,
+    struct chimera_vfs_request *request);
+
 /* Mandatory-lock I/O predicate (SMB data path only; inline local bool).
  * Zero-length reads are exempt before the walk.  MAND rows are stamped on
  * every range lock regardless of protocol: shared denies W globally (its
