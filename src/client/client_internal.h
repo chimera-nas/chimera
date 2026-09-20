@@ -382,6 +382,13 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
+            /* Apply to a final-component symlink itself rather than to its
+             * target -- the *at() forms under AT_SYMLINK_NOFOLLOW.  Read by
+             * chimera_dispatch_setattr_at only, so only the callers that set
+             * parent_handle need set it; the path-based forms choose between
+             * chimera_dispatch_setattr and chimera_dispatch_lsetattr instead. */
+            int                             nofollow;
             chimera_setattr_callback_t      callback;
             void                           *private_data;
             int                             path_len;

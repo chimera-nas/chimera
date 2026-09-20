@@ -2,11 +2,102 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <fcntl.h>
 #include "posix_test_common.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
+#define AT_FDCWD            -100
 #endif /* ifndef AT_FDCWD */
+
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif /* ifndef AT_SYMLINK_NOFOLLOW */
+
+/* fchmodat relative to a real directory descriptor, through an interior
+ * component, and with AT_SYMLINK_NOFOLLOW leaving a symlink's target alone. */
+static void
+test_real_dirfd(struct posix_test_env *env)
+{
+    struct stat st;
+    int         dfd, fd, rc;
+
+    rc = chimera_posix_mkdir("/test/fchmodat_dir", 0755);
+    if (rc != 0) {
+        fprintf(stderr, "mkdir fchmodat_dir failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_mkdir("/test/fchmodat_dir/sub", 0755);
+    if (rc != 0) {
+        fprintf(stderr, "mkdir fchmodat_dir/sub failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    fd = chimera_posix_open("/test/fchmodat_dir/sub/file", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "create fchmodat_dir/sub/file failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+
+    rc = chimera_posix_symlink("sub/file", "/test/fchmodat_dir/link");
+    if (rc != 0) {
+        fprintf(stderr, "symlink failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    dfd = chimera_posix_open("/test/fchmodat_dir", O_RDONLY);
+    if (dfd < 0) {
+        fprintf(stderr, "open fchmodat_dir failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_fchmodat(dfd, "sub/file", 0600, 0);
+    if (rc != 0) {
+        fprintf(stderr, "fchmodat(dfd, sub/file) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_stat("/test/fchmodat_dir/sub/file", &st);
+    if (rc != 0 || (st.st_mode & 0777) != 0600) {
+        fprintf(stderr, "fchmodat(dfd, sub/file): expected 0600, got %03o (%s)\n",
+                st.st_mode & 0777, strerror(errno));
+        posix_test_fail(env);
+    }
+
+    /* Through the link: the target changes. */
+    rc = chimera_posix_fchmodat(dfd, "link", 0640, 0);
+    if (rc != 0) {
+        fprintf(stderr, "fchmodat(dfd, link) failed: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+
+    rc = chimera_posix_stat("/test/fchmodat_dir/sub/file", &st);
+    if (rc != 0 || (st.st_mode & 0777) != 0640) {
+        fprintf(stderr, "fchmodat(dfd, link): expected 0640 on the target, got %03o\n",
+                st.st_mode & 0777);
+        posix_test_fail(env);
+    }
+
+    /* NOFOLLOW: whatever the backend does with a symlink's own mode, the
+     * target must be left alone. */
+    rc = chimera_posix_fchmodat(dfd, "link", 0600, AT_SYMLINK_NOFOLLOW);
+    (void) rc;
+
+    rc = chimera_posix_stat("/test/fchmodat_dir/sub/file", &st);
+    if (rc != 0 || (st.st_mode & 0777) != 0640) {
+        fprintf(stderr, "fchmodat(dfd, link, NOFOLLOW) changed the target: got %03o\n",
+                st.st_mode & 0777);
+        posix_test_fail(env);
+    }
+
+    chimera_posix_close(dfd);
+
+    chimera_posix_unlink("/test/fchmodat_dir/link");
+    chimera_posix_unlink("/test/fchmodat_dir/sub/file");
+    chimera_posix_rmdir("/test/fchmodat_dir/sub");
+    chimera_posix_rmdir("/test/fchmodat_dir");
+} /* test_real_dirfd */
 
 int
 main(
@@ -59,6 +150,8 @@ main(
         fprintf(stderr, "fchmodat: expected mode 0700, got %03o\n", st.st_mode & 0777);
         posix_test_fail(&env);
     }
+
+    test_real_dirfd(&env);
 
     fprintf(stderr, "fchmodat test passed\n");
 
