@@ -145,6 +145,23 @@ nfs4_vfs_open_for(
     return chimera_vfs_compound_add_open_current(compound, want, 0);
 } /* nfs4_vfs_open_for */
 
+/*
+ * What a handle the server already holds was really opened with, which is what
+ * PUTHANDLE requires so the sequence can tell whether it serves the ops behind
+ * it.
+ *
+ * The open cache keeps the access MODE rather than the flag word (it is what
+ * the cache is keyed on), and that is the whole of it for the handles this
+ * lends: an NFSv4 open state's handle is a data handle, opened for read and/or
+ * write by chimera_nfs4_open, and a lock state's is a dup of one.
+ */
+static unsigned int
+nfs4_vfs_handle_open_flags(const struct chimera_vfs_open_handle *handle)
+{
+    return (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RO) ?
+           CHIMERA_VFS_OPEN_READ_ONLY : 0;
+} /* nfs4_vfs_handle_open_flags */
+
 /* A CLAIM_NULL OPEN names a file in the current directory; every other claim
  * re-opens an object the client already has, and needs no directory. */
 static int
@@ -279,6 +296,22 @@ struct nfs4_vfs_compound_ctx {
     int                      open_present;
     uint32_t                 open_res_index;
 
+    /* The LOCK this sequence carries, if any.  Like the OPEN, every way out
+     * of it goes through its own completion -- the RFC 7530 §9.1.7 seqid
+     * wrapper -- including the ways where the CLAIM never ran.
+     *
+     * lock_fh_op is the VFS op immediately in front of the LOCK's own, whose
+     * recorded current object is what the COMPOUND is left holding: the LOCK
+     * addresses the handle its stateid names, which chimera lends the run with
+     * a PUTHANDLE, and that is not where the COMPOUND's current filehandle
+     * goes.  0 when the sequence carries no LOCK: index 0 is the seed PUTFH's
+     * and can never be a LOCK's. */
+    int                      lock_present;
+    int                      lock_filled;
+    uint32_t                 lock_res_index;
+    int                      lock_fh_op;
+    int                      lock_claim_op;
+
     /* An OPEN that filled successfully still owes the part of itself that can
      * suspend -- the delegation grant, the deferred truncate -- and that part
      * runs after the sequence has been freed, so what it needs is copied out
@@ -316,6 +349,7 @@ nfs4_vfs_op_encodable(uint32_t argop)
         case OP_READ:
         case OP_WRITE:
         case OP_LOCKT:
+        case OP_LOCK:
         case OP_SECINFO:
         case OP_ALLOCATE:
         case OP_DEALLOCATE:
@@ -390,6 +424,7 @@ nfs4_vfs_op_reads_state(uint32_t argop)
         case OP_SEEK:
         case OP_WRITE_SAME:
         case OP_LOCKT:
+        case OP_LOCK:
             return 1;
         default:
             return 0;
@@ -460,6 +495,15 @@ nfs4_vfs_op_mutates(const struct nfs_argop4 *argop)
             return 1;
         case OP_OPEN:
             return argop->opopen.openhow.opentype == OPEN4_CREATE;
+        /* A LOCK changes nothing in the filesystem, but its CLAIM inserts a
+         * claim that is the caller's from the completion callback on, and a
+         * headroom refusal at the fill would leave it inserted with nobody
+         * owning it -- the executor does not release a claim behind a
+         * sequence that finished OK.  So it takes the mutating op's rule:
+         * carried only when the whole run's worst-case reply fits, which is
+         * what makes the late test unable to fire. */
+        case OP_LOCK:
+            return 1;
         default:
             return 0;
     } /* switch */
@@ -488,7 +532,24 @@ nfs4_vfs_op_ends_run(uint32_t argop)
      * (RFC 7530 §16.31.3), so ending the run there is merely conservative:
      * what follows is dispatched op by op against a filehandle that is still
      * good. */
-    return argop == OP_OPEN || argop == OP_SECINFO;
+    /* LOCK joins them, for the abort release.  A run that finishes with any
+     * non-OK status releases every claim a CLAIM in it inserted, before the
+     * completion callback -- which is right for a claim nobody has been told
+     * about, and wrong for one the reply has already committed.  A LOCK's
+     * result IS that commitment: "LOCK: OK, here is your stateid" followed by
+     * a GETATTR that failed EIO would leave the client believing it holds a
+     * byte range the abort released.  The OPEN's share claim takes the other
+     * way out and re-acquires, because an OPEN is routinely followed by a
+     * GETFH and a re-arbitration that fails maps onto the OPEN's own result,
+     * which is the one still being written; a byte-range re-acquire could be
+     * DENIED by a holder that arrived in the window, and the LOCK's result is
+     * already written by then.  Under one rule: a claim taken for an op whose
+     * result is already committed cannot be re-arbitrated, and a claim taken
+     * for the op currently being filled can.
+     *
+     * It costs nothing.  Linux and pynfs send [SEQUENCE;] PUTFH; LOCK with
+     * nothing behind it, and the model's LOCK steps are single-op. */
+    return argop == OP_OPEN || argop == OP_SECINFO || argop == OP_LOCK;
 } /* nfs4_vfs_op_ends_run */
 
 /*
@@ -540,6 +601,7 @@ nfs4_vfs_op_reply_bound(const struct nfs_argop4 *argop)
              * the same array, at op time. */
             return sizeof(struct evpl_iovec) * NFS4_VFS_READ_MAX_IOV + slack;
         case OP_LOCKT:
+        case OP_LOCK:
             /* A denied answer copies the holder's owner string into the reply
              * (nfs4_fill_denied_owner), up to the protocol's opaque limit. */
             return NFS4_OPAQUE_LIMIT + slack;
@@ -1086,6 +1148,24 @@ nfs4_vfs_op_fill(
              * COMPOUND and nothing behind it may run. */
             resop->oplockt.status = NFS4_OK;
             return NFS4_OK;
+
+        case OP_LOCK:
+        {
+            struct nfs4_range_lease *rl = req->nfs_inflight_range;
+
+            /* The CLAIM was granted, and the claim it inserted is the
+             * caller's from here -- which means the file state is too, and
+             * the coalesce surgery in the apply needs it. */
+            rl->file_state = chimera_vfs_compound_take_file_state(
+                compound, (uint32_t) map->vfs_res);
+
+            chimera_nfs_abort_if(rl->file_state == NULL,
+                                 "NFSv4 LOCK: granted claim without a file state");
+
+            ctx->lock_filled = 1;
+
+            return chimera_nfs4_lock_apply(req, CHIMERA_CLAIM_GRANTED, NULL);
+        }
 
         case OP_SETATTR:
         {
@@ -1648,6 +1728,21 @@ nfs4_vfs_compound_complete(
                 /* VERIFY and NVERIFY answer with NFS4ERR_NOT_SAME or
                  * NFS4ERR_SAME, which no errno encodes; the gate recorded the
                  * real answer when it failed the op. */
+                if (argop->argop == OP_LOCK && j == ctx->lock_claim_op) {
+                    /* A refused CLAIM: the arbiter answered, and what it
+                     * answered is the operation's result, not a failure of
+                     * the sequence.  The apply writes the denied body from
+                     * the holder the op reported and hands back the status
+                     * the seqid wrapper is owed. */
+                    status = chimera_nfs4_lock_apply(req, vop->claim_result,
+                                                     &vop->conflict);
+                    resop->oplock.status = status;
+                    ctx->lock_filled     = 1;
+                    fail_res             = map->res_index;
+                    failed               = 1;
+                    break;
+                }
+
                 status = map->gate_status ? map->gate_status :
                     nfs4_vfs_op_errno(argop, vop, req);
                 resop->opillegal.status = status;
@@ -1700,6 +1795,18 @@ nfs4_vfs_compound_complete(
      * -- the name it looked up -- is not what the COMPOUND is left holding. */
     if (ctx->fh_consumed) {
         req->fhlen = 0;
+    } else if (ctx->lock_fh_op >= 0) {
+        /* A LOCK lent the run the handle its stateid names, and a lent handle
+         * becomes the current object like any other -- but that object is not
+         * where the COMPOUND ends up: LOCK does not change the current
+         * filehandle (RFC 7530 §16.10).  Put back what the op in front of the
+         * lent handle recorded, which is what was current when the LOCK ran. */
+        vop = chimera_vfs_compound_op(compound, (uint32_t) ctx->lock_fh_op);
+
+        if (vop && vop->fh_len) {
+            memcpy(req->fh, vop->fh, vop->fh_len);
+            req->fhlen = (int) vop->fh_len;
+        }
     } else if (ctx->secinfo_lookup > 0) {
         /* A 4.0 SECINFO whose name resolved: the name is not what the
          * COMPOUND holds afterwards -- the directory it resolved the name IN
@@ -1746,6 +1853,29 @@ nfs4_vfs_compound_complete(
      * for a request that was perfectly good.
      */
     nfs4_vfs_compound_give_back(thread, ctx);
+
+    /*
+     * A LOCK gets the same treatment, and for the same reason: its own
+     * completion is the RFC 7530 §9.1.7 seqid wrapper, which has to run for
+     * the outcomes that fail too.  When the CLAIM never ran -- the sequence
+     * stopped in front of it -- nothing was consumed, so the request's
+     * references are given back without any advance and the generic
+     * completion truncates the reply at whatever did fail.
+     */
+    if (ctx->lock_present) {
+        struct nfs_argop4 *largop =
+            &req->args_compound->argarray[ctx->lock_res_index];
+
+        if (ctx->lock_filled) {
+            chimera_vfs_compound_free(compound);
+            free(ctx);
+
+            chimera_nfs4_lock_finish(req, status);
+            return;
+        }
+
+        chimera_nfs4_lock_abandon(thread, req, largop);
+    }
 
     if (failed && ctx->open_present && fail_res == ctx->open_res_index) {
         req->index = (int) fail_res;
@@ -2334,6 +2464,10 @@ chimera_nfs4_compound_try_vfs(
     /* Index of the OPEN this sequence carries, or -1.  At most one: an OPEN is
      * always the last op of its run. */
     int                             open_at = -1;
+    /* Index of the LOCK this sequence carries, or -1.  At most one: a LOCK is
+     * always the last op of its run. */
+    int                             lock_at       = -1;
+    int                             lock_prepared = 0;
     /* Index of a SETATTR whose size change has to be authorized before the
      * sequence runs, or -1. */
     int                             setattr_at = -1;
@@ -2451,6 +2585,11 @@ chimera_nfs4_compound_try_vfs(
             case OP_LOCKT:
                 /* open + getattr (the type gate) + the claim probe */
                 vfs_ops += 3;
+                break;
+            case OP_LOCK:
+                /* the lent handle + the claim; no open, the handle is the
+                 * client's and the sequence borrows it */
+                vfs_ops += 2;
                 break;
             case OP_PUTFH:
                 /* The seed PUTFH below is the leading one's own op. */
@@ -2827,6 +2966,54 @@ chimera_nfs4_compound_try_vfs(
                  * behind a LOCKT has to be refused any more. */
                 break;
             }
+
+            case OP_LOCK:
+
+                /* A run cannot BEGIN with a LOCK, for the reason a run cannot
+                 * begin with a slot: the seed PUTFH's own failure has to land
+                 * on the op at the front, and what a LOCK contributes is a
+                 * lent handle and a claim, neither of which is where the seed
+                 * was resolved.  It buys nothing either -- a LOCK is the last
+                 * op of its run, so a run led by one carries only it. */
+                if (i == first) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The existing-lock-stateid rule (RFC 7530 §16.10.5) asks
+                 * whether this lock-owner already has a stateid ON THIS FILE,
+                 * and reads the COMPOUND's current filehandle to say which
+                 * file that is.  The prepare below runs before the sequence
+                 * does, so the only current object it can be told about is the
+                 * one the sequence starts from. */
+                if (cur_moved) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* The grace window is the one answer LOCK owes before it has
+                 * looked anything up, and nfs_recovery_open_check is where the
+                 * reclaim half of reboot recovery lives -- statuses that
+                 * belong to the operation and not to any claim result. */
+                if (nfs_recovery_open_check(
+                        &thread->shared->nfs4_recovery,
+                        req->session ? req->session->client_unified : NULL,
+                        argop->oplock.reclaim != 0) != NFS4_OK) {
+                    nenc = i;
+                    stop = 1;
+                    break;
+                }
+
+                /* Everything else the operation settles is state the server
+                 * already holds, and it is settled when the sequence is built
+                 * -- see the nfs4_vfs_lock_prepare call below, which is what
+                 * decides whether the LOCK is really carried.  The run ends
+                 * here whatever it decides (nfs4_vfs_op_ends_run). */
+                lock_at = (int) i;
+                nenc    = i + 1;
+                break;
 
             case OP_CLOSE:
             case OP_LOCKU:
@@ -3451,6 +3638,43 @@ chimera_nfs4_compound_try_vfs(
         }
     }
 
+    /* Everything a LOCK settles before it asks the arbiter anything.  A LOCK
+     * is always the last op of its run, so a prepare that answers instead of
+     * preparing simply drops the LOCK from the run: nothing it did mutates,
+     * and the per-op path reaches the same answer -- and produces the seqid
+     * advance that goes with it, which this path deliberately does not.
+     *
+     * Ahead of the 4.0 OPEN entry below and behind the SETATTR authorize
+     * above, in the same window and for the same reason: it takes references,
+     * so it must not run before a decision that could still send the whole
+     * COMPOUND back to the per-op path. */
+    if (lock_at >= 0) {
+        nfsstat4 lock_status;
+
+        /* The object the sequence starts from is what the LOCK's
+         * existing-stateid rule reads as the current filehandle, and the scan
+         * admitted the LOCK only while nothing had moved it.  Stating it on
+         * the request is what the per-op path would have had in hand; a
+         * leading PUTFH re-states the same handle if the build gives up. */
+        memcpy(req->fh, cur_fh, (size_t) cur_fhlen);
+        req->fhlen = cur_fhlen;
+
+        if (chimera_nfs4_lock_prepare(
+                thread, req,
+                &req->args_compound->argarray[lock_at],
+                &req->res_compound.resarray[lock_at],
+                &lock_status) == NFS4_LOCK_PREPARE_READY) {
+            lock_prepared = 1;
+        } else {
+            nenc    = (uint32_t) lock_at;
+            lock_at = -1;
+
+            if (nenc <= first) {
+                return 0;
+            }
+        }
+    }
+
     /* The 4.0 OPEN's entry-time seqid classification.  Deliberately the last
      * thing before the sequence is built: it pins the open_owner on the request
      * for chimera_nfs4_open_finish to advance, so it must not run ahead of a
@@ -3476,6 +3700,10 @@ chimera_nfs4_compound_try_vfs(
     ctx = calloc(1, sizeof(*ctx));
     chimera_nfs_abort_if(ctx == NULL, "Failed to allocate NFSv4 compound context");
     ctx->req = req;
+    /* 0 is a real VFS op index -- the seed PUTFH's -- so "no LOCK" has to be
+     * said with something else. */
+    ctx->lock_claim_op = -1;
+    ctx->lock_fh_op    = -1;
 
     /* Seed the current object.  When the remainder opens with a PUTFH this is
      * that PUTFH; otherwise it re-states the COMPOUND's current filehandle and
@@ -3705,6 +3933,44 @@ chimera_nfs4_compound_try_vfs(
                 }
                 map->vfs_res = idx;
                 break;
+
+            case OP_LOCK:
+            {
+                struct nfs_lock_state   *ls = req->nfs_state_ref;
+                struct nfs4_range_lease *rl = req->nfs_inflight_range;
+
+                /* The lock is arbitrated on the object the STATEID names, not
+                 * on whatever the sequence's cursor holds -- the per-op path
+                 * acts on lock_state->handle and the two can differ.  So the
+                 * handle is lent to the run; it is the client's, pinned for
+                 * the sequence by the acquire-ref prepare took, and the
+                 * sequence never releases it.  A CLAIM reads only the fh, so
+                 * whatever the handle was opened for serves. */
+                ctx->lock_fh_op = next - 1;
+
+                idx = chimera_vfs_compound_add_puthandle(
+                    compound, ls->handle,
+                    nfs4_vfs_handle_open_flags(ls->handle));
+
+                if (idx >= 0) {
+                    /* TRY: NFSv4 answers DENIED on conflict rather than
+                     * blocking, and a breakable cross-protocol holder still
+                     * has its break kicked inside the acquire. */
+                    idx = chimera_vfs_compound_add_claim(
+                        compound, &rl->claim, &rl->ticket,
+                        CHIMERA_VFS_COMPOUND_CLAIM_TRY, 0, 0, 0, 0);
+                }
+
+                map->vfs_res        = idx;
+                ctx->lock_present   = 1;
+                ctx->lock_res_index = i;
+                ctx->lock_claim_op  = idx;
+
+                /* The lent handle is the current object now, and it is not
+                 * where the COMPOUND ends up -- see lock_fh_op. */
+                cur_open_flags = 0;
+                break;
+            }
 
             case OP_READ:
             case OP_WRITE:
@@ -4141,6 +4407,14 @@ chimera_nfs4_compound_try_vfs(
 
     if (setattr_handle) {
         chimera_vfs_release(thread->vfs_thread, setattr_handle);
+    }
+
+    /* The build gave up after the LOCK was prepared.  Nothing was consumed, so
+     * the references go back without a seqid advance and the per-op path
+     * settles the operation from the beginning. */
+    if (lock_prepared && lock_at >= 0) {
+        chimera_nfs4_lock_abandon(thread, req,
+                                  &req->args_compound->argarray[lock_at]);
     }
 
     /* The build gave up partway; anything it resolved goes back.  The WRITE

@@ -12,6 +12,9 @@
 #endif // ifdef _WIN32
 #include "nfs_common.h"
 #include "nfs_internal.h"
+/* For the LOCK split below: the arbiter's answer and the holder that refused
+ * it are what chimera_nfs4_lock_apply takes. */
+#include "vfs/vfs_claim_types.h"
 
 /* Static root file handle for the nfs4_root pseudo-filesystem */
 static const uint8_t *nfs4_root_fh     = (const uint8_t *) "CHIMERA NFS4 ROOT FH";
@@ -682,6 +685,54 @@ chimera_nfs4_delegreturn_apply(
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
+
+/*
+ * LOCK, in the three pieces the VFS-sequence driver needs it in.
+ *
+ * Everything the operation settles before it asks the claim layer anything is
+ * state the server already holds, so it runs when a sequence is BUILT and the
+ * arbitration becomes a CLAIM op of the run.  prepare does that part; apply is
+ * everything the arbiter's answer decides; finish is the RFC 7530 §9.1.7 seqid
+ * wrapper both entrances owe.  abandon gives back what a prepared LOCK holds
+ * when the arbiter is never asked -- no seqid advances there, because the
+ * request was not consumed.
+ */
+enum nfs4_lock_prepare_result {
+    /* The range claim is built; req->nfs_state_ref and req->nfs_inflight_range
+     * carry the lock_state and the lease, and the caller takes the claim. */
+    NFS4_LOCK_PREPARE_READY,
+    /* *status is the whole answer and nothing is left pinned; the seqid
+     * wrapper runs for it. */
+    NFS4_LOCK_PREPARE_ANSWERED,
+    /* As ANSWERED, but the wrapper must NOT run: a replay and a bad seqid
+     * consume nothing. */
+    NFS4_LOCK_PREPARE_REPLAY,
+};
+
+enum nfs4_lock_prepare_result
+chimera_nfs4_lock_prepare(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop,
+    nfsstat4                         *status_out);
+
+nfsstat4
+chimera_nfs4_lock_apply(
+    struct nfs_request                      *req,
+    enum chimera_vfs_claim_result            result,
+    const struct chimera_vfs_claim_conflict *conflict);
+
+void
+chimera_nfs4_lock_finish(
+    struct nfs_request *req,
+    nfsstat4            status);
+
+void
+chimera_nfs4_lock_abandon(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop);
 
 void
 chimera_nfs4_setclientid(
