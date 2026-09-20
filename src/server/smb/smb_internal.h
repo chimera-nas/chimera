@@ -821,6 +821,7 @@ struct chimera_smb_request {
              * a resubmission, so nothing here survives a run it did not
              * describe. */
             int8_t                             seq_parent_idx;
+            int8_t                             seq_parentopen_idx;
             int8_t                             seq_open_idx;
             int8_t                             seq_share_idx;
             int8_t                             seq_trunc_idx;

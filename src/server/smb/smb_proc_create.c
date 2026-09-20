@@ -5093,6 +5093,7 @@ static void
 chimera_smb_create_seq_reset(struct chimera_smb_request *request)
 {
     request->create.seq_parent_idx     = -1;
+    request->create.seq_parentopen_idx = -1;
     request->create.seq_open_idx       = -1;
     request->create.seq_share_idx      = -1;
     request->create.seq_trunc_idx      = -1;
@@ -5575,6 +5576,23 @@ chimera_smb_create_gate(
         return;
     }
 
+    if ((int) index == request->create.seq_parentopen_idx) {
+        /* The parent is open and has reported its file handle.  Copy it out
+         * for what happens after the run: the sequence owns this open and
+         * releases it with the run, so nothing of the VFS's is held across the
+         * reply hold, and an fh is a value rather than a reference. */
+        request->create.seq_parent_fh_len = op->fh_len;
+        memcpy(request->create.seq_parent_fh, op->fh, op->fh_len);
+
+        if (request->create.seq_open_file) {
+            struct chimera_smb_open_file *of = request->create.seq_open_file;
+
+            of->parent_fh_len = op->fh_len;
+            memcpy(of->parent_fh, op->fh, op->fh_len);
+        }
+        return;
+    }
+
     if ((int) index == request->create.seq_open_idx) {
         verdict = chimera_smb_create_gate_open(request, compound, index, op);
 
@@ -5991,8 +6009,13 @@ chimera_smb_create_run_complete(
      * the durable registry, delete-on-close arming, the notify emit and the
      * reply hold. */
     if (!chimera_smb_create_after_grant(request, open_file)) {
-        /* Refused and freed the open (FILE_OPEN_REQUIRING_OPLOCK that ended at
-         * no cache); the status is in force_close_status. */
+        /* Refused and freed the open -- a FILE_OPEN_REQUIRING_OPLOCK that ended
+         * at no cache is an atomic "open only if I am granted it", so the open
+         * is closed and the CREATE fails.  It drains the open's claims and
+         * clears its handle without releasing it, on the rule that whoever
+         * opened the object releases it: here that is this completion, which
+         * took the handle off the run. */
+        chimera_vfs_release(vfs_thread, oh);
         chimera_smb_create_pending_unregister(request);
         chimera_smb_complete_request(request,
                                      request->create.force_close_status);
@@ -6097,13 +6120,12 @@ chimera_smb_create_submit_open_run(struct chimera_smb_request *request)
             request->create.persist_pid :
             atomic_fetch_add(&thread->shared->next_persistent_id, 1);
 
-        /* The parent's fh, resolved before the run: delete-on-close records it
-         * with the name so the unlink at last close can find the entry, and it
-         * is what the CHANGE_NOTIFY emit addresses. */
+        /* No parent fh yet: the run has not resolved one.  The gate stamps it
+         * on the open the moment the parent's own op reports it, which is
+         * before anything reads it -- delete-on-close is armed after the run. */
         open_file = chimera_smb_create_open_file_init(
             request, CHIMERA_SMB_OPEN_FILE_TYPE_FILE, NULL, pid,
-            request->create.seq_parent_fh,
-            (int) request->create.seq_parent_fh_len,
+            NULL, 0,
             request->create.name, request->create.name_len,
             request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE,
             0 /* the open decides; the gate corrects it */,
@@ -6213,11 +6235,19 @@ chimera_smb_create_submit_open_run(struct chimera_smb_request *request)
         request->create.seq_parent_idx = (int8_t) idx;
     }
 
-    chimera_vfs_compound_add_open_current(
+    /* The parent, opened as a directory so the leaf's name resolves in it.
+     * Its own fh comes back on the op, which is where the two things that
+     * outlive the run get it from -- the CHANGE_NOTIFY emit's target, and the
+     * parent a delete-on-close records so the unlink at last close can find the
+     * name again.  Asking the run for it is what keeps the parent resolved
+     * ONCE: reading it from a lookup of the caller's own would be a second
+     * resolve of the very path the sequence is already walking. */
+    idx = chimera_vfs_compound_add_open_current(
         compound,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
         CHIMERA_VFS_OPEN_DIRECTORY,
         CHIMERA_VFS_ATTR_FH);
+    request->create.seq_parentopen_idx = (int8_t) idx;
 
     idx = chimera_vfs_compound_add_open(
         compound,
@@ -6330,67 +6360,12 @@ chimera_smb_create_seq_share_retry_cb(
     chimera_smb_create_submit_open_run(request);
 } /* chimera_smb_create_seq_share_retry_cb */
 
-/* The parent's file handle, resolved before the run that uses it.
- *
- * The run's own PUTFH/LOOKUP_PATH resolves the parent for the open; this copy
- * exists for what happens AFTER the run -- the CHANGE_NOTIFY emit, and the
- * symbolic-link body run that reaches the leaf by name.  The share root needs
- * no resolve at all. */
-static void
-chimera_smb_create_seq_lookup_parent_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_complete_request(
-            request, chimera_smb_create_parent_error_status(error_code));
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode)) {
-        /* The parent path stopped on a link before the run even started; the
-         * body run reads its target from the fh the lookup resolved. */
-        request->create.seq_parent_fh_len = 0;
-        chimera_smb_create_seq_symlink_body(request, attr->va_fh,
-                                            attr->va_fh_len, NULL, 0);
-        return;
-    }
-
-    request->create.seq_parent_fh_len = attr->va_fh_len;
-    memcpy(request->create.seq_parent_fh, attr->va_fh, attr->va_fh_len);
-
-    chimera_smb_create_submit_open_run(request);
-} /* chimera_smb_create_seq_lookup_parent_cb */
-
 static void
 chimera_smb_create_seq_start(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
-    struct chimera_smb_tree   *tree       = request->tree;
-
     request->create.seq_open_file     = NULL;
     request->create.seq_abandoned     = 0;
     request->create.seq_parent_fh_len = 0;
-
-    if (request->create.parent_path_len) {
-        chimera_vfs_lookup(
-            vfs_thread,
-            &request->session_handle->session->cred,
-            tree->fh, tree->fh_len,
-            request->create.parent_path,
-            request->create.parent_path_len,
-            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
-            0,
-            chimera_smb_create_seq_lookup_parent_cb,
-            request);
-        return;
-    }
-
-    request->create.seq_parent_fh_len = tree->fh_len;
-    memcpy(request->create.seq_parent_fh, tree->fh, tree->fh_len);
 
     chimera_smb_create_submit_open_run(request);
 } /* chimera_smb_create_seq_start */
