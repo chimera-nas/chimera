@@ -1108,11 +1108,11 @@ struct chimera_smb_request {
             uint32_t                        ii_flags;
         } ioctl;
         struct {
-            uint8_t                         info_type;
-            uint8_t                         info_class;
-            uint32_t                        addl_info;
-            uint32_t                        flags;
-            uint32_t                        output_length;
+            uint8_t                       info_type;
+            uint8_t                       info_class;
+            uint32_t                      addl_info;
+            uint32_t                      flags;
+            uint32_t                      output_length;
             /* Client-supplied OutputBufferLength (max bytes the client will
              * accept) and the info level's fixed minimum size, used to answer
              * INFO_LENGTH_MISMATCH / BUFFER_OVERFLOW before marshalling. */

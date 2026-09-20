@@ -8,8 +8,40 @@
 #include "smb_ea.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
+
+/*
+ * Every VFS-touching QUERY_INFO level runs as a sequence that starts on the
+ * object the FileId names: PUTHANDLE of the open's own handle, lent on the
+ * flags it was really opened with, so the attributes come back through the
+ * handle whose granted_access this query was already checked against.
+ *
+ * A STREAM open is the exception.  Its handle refers to the fork, and the
+ * levels that enumerate (FileStreamInformation, FileFullEaInformation) are
+ * about the BASE file, so those start with PUTFH of the base's file handle and
+ * let the sequence open it -- which is exactly the PATH open those two used to
+ * take by hand.
+ */
+static struct chimera_vfs_compound *
+chimera_smb_query_base_sequence(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_smb_open_file     *open_file = request->query_info.open_file;
+    struct chimera_vfs_compound      *compound;
+
+    compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, &request->session_handle->session->cred);
+
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
+        chimera_vfs_compound_add_putfh(compound, open_file->base_fh,
+                                       open_file->base_fh_len);
+    } else {
+        chimera_vfs_compound_add_puthandle(compound, open_file->handle,
+                                           open_file->open_flags);
+    }
+
+    return compound;
+} /* chimera_smb_query_base_sequence */
 
 /* FileAttributeTagInformation of a reparse point chimera keeps verbatim: the
  * tag is the first field of the stored buffer. */
@@ -113,6 +145,41 @@ chimera_smb_query_info_getattr_callback(
         chimera_smb_complete_request(request, chimera_smb_query_info_ok(request));
     }
 } /* chimera_smb_query_info_getattr_callback */
+
+/*
+ * PUTHANDLE, GETATTR.
+ *
+ * The attributes are copied out of the op before the sequence is freed -- a
+ * freed sequence is recycled and reset.  A struct copy is enough here because
+ * none of these levels asks for the ACL, the one attribute that is not a value
+ * in the struct; SMB2_INFO_SECURITY, which does, is in smb_proc_security.c and
+ * marshals inside the completion for that reason.
+ */
+static void
+chimera_smb_query_info_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    memset(&attr, 0, sizeof(attr));
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        attr = op->attr;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_query_info_getattr_callback(status, &attr, request);
+} /* chimera_smb_query_info_sequence_complete */
 
 /*
  * MS-SMB2 3.3.5.20 OutputBufferLength validation, shared by the synthetic
@@ -265,9 +332,9 @@ chimera_smb_query_stream_info_complete(
  * A directory has no data fork and yields an empty list, as on both. */
 static void
 chimera_smb_query_stream_info_default_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data)
 {
     struct chimera_smb_request     *request = private_data;
     struct chimera_vfs_stream_entry entry;
@@ -296,107 +363,121 @@ chimera_smb_query_stream_info_default_callback(
     chimera_smb_query_stream_info_complete(request, records_len, count);
 } /* chimera_smb_query_stream_info_default_callback */
 
+/* PUTHANDLE / PUTFH(base), GETATTR -- the synthesized-fork arm above. */
 static void
-chimera_smb_query_stream_info_list_callback(
-    enum chimera_vfs_error error_code,
-    const void            *records,
-    uint32_t               records_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
+chimera_smb_query_stream_info_default_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                status;
 
-    chimera_vfs_release(vfs_thread, request->query_info.stream_base_handle);
-    request->query_info.stream_base_handle = NULL;
+    status = chimera_vfs_compound_status(compound);
 
-    if (error_code != CHIMERA_VFS_OK) {
+    memset(&attr, 0, sizeof(attr));
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        attr = op->attr;
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_query_stream_info_default_callback(status, &attr, request);
+} /* chimera_smb_query_stream_info_default_complete */
+
+/*
+ * PUTHANDLE / PUTFH(base), LIST_STREAMS.
+ *
+ * The page the op reports lives in the compound's buffer, so it is copied into
+ * the request's own record store before the free: the reply builder emits it
+ * long after this callback has returned.
+ */
+static void
+chimera_smb_query_stream_info_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint32_t                              records_len = 0, count = 0;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
+        records_len = op->buffer_len;
+        count       = op->buffer_count;
+
+        if (records_len) {
+            memcpy(request->query_info.stream_records, op->buffer, records_len);
+        }
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
         chimera_smb_complete_request(request,
-                                     error_code == CHIMERA_VFS_ERANGE ?
+                                     status == CHIMERA_VFS_ERANGE ?
                                      SMB2_STATUS_INFO_LENGTH_MISMATCH :
                                      SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
-    memcpy(request->query_info.stream_records, records, records_len);
-
     chimera_smb_query_stream_info_complete(request, records_len, count);
-} /* chimera_smb_query_stream_info_list_callback */
-
-static void
-chimera_smb_query_stream_info_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_request       *request = private_data;
-    struct chimera_server_smb_thread *thread  = request->compound->thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->query_info.open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    request->query_info.stream_base_handle = oh;
-
-    chimera_vfs_list_streams(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        oh,
-        0,
-        request->query_info.stream_records,
-        sizeof(request->query_info.stream_records),
-        0, /* SMB FILE_STREAM_INFORMATION does not need per-stream handles */
-        chimera_smb_query_stream_info_list_callback,
-        request);
-} /* chimera_smb_query_stream_info_open_callback */
+} /* chimera_smb_query_stream_info_sequence_complete */
 
 static void
 chimera_smb_query_stream_info(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread    = request->compound->thread;
     struct chimera_smb_open_file     *open_file = request->query_info.open_file;
-    const uint8_t                    *base_fh;
-    uint32_t                          base_fh_len;
 
     /* Gate: named streams must be enabled and the backend must support them.
      * Without them the object still has its default data fork, so report that
-     * one synthesized "::$DATA" stream instead of failing the level. */
+     * one synthesized "::$DATA" stream instead of failing the level.  The
+     * synthesis describes the OPEN's own object, not the base, so this arm
+     * always addresses the open's handle. */
     if (!chimera_smb_named_streams_enabled(open_file->handle->vfs_module->capabilities,
                                            thread->shared->config.named_streams)) {
-        chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            open_file->handle,
-                            CHIMERA_VFS_ATTR_MASK_STAT,
-                            chimera_smb_query_stream_info_default_callback,
-                            request);
+        request->vfs_compound = chimera_vfs_compound_alloc(
+            thread->vfs_thread, &request->session_handle->session->cred);
+
+        chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                           open_file->handle,
+                                           open_file->open_flags);
+
+        chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                         CHIMERA_VFS_ATTR_MASK_STAT);
+
+        chimera_vfs_compound_submit(
+            request->vfs_compound,
+            chimera_smb_query_stream_info_default_complete, request);
         return;
     }
 
-    /* Enumerate the streams of the BASE file.  For a stream open the base fh is
-     * stored on the open_file; otherwise the open's own handle is the base. */
-    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
-        base_fh     = open_file->base_fh;
-        base_fh_len = open_file->base_fh_len;
-    } else {
-        base_fh     = open_file->handle->fh;
-        base_fh_len = open_file->handle->fh_len;
-    }
+    /* Enumerate the streams of the BASE file -- which is what the sequence
+     * starts on, handle or file handle (chimera_smb_query_base_sequence). */
+    request->vfs_compound = chimera_smb_query_base_sequence(request);
 
-    request->query_info.stream_base_handle = NULL;
+    chimera_vfs_compound_add_list_streams(
+        request->vfs_compound,
+        0,
+        sizeof(request->query_info.stream_records),
+        0 /* SMB FILE_STREAM_INFORMATION does not need per-stream handles */);
 
-    chimera_vfs_open_fh(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        base_fh,
-        base_fh_len,
-        CHIMERA_VFS_OPEN_PATH,
-        chimera_smb_query_stream_info_open_callback,
-        request);
+    chimera_vfs_compound_submit(
+        request->vfs_compound,
+        chimera_smb_query_stream_info_sequence_complete, request);
 } /* chimera_smb_query_stream_info */
 
 /* ---- FILE_FULL_EA_INFORMATION query: enumerate the object's user.* xattrs and
@@ -1141,13 +1222,21 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     }
 
     if (getattr_mask) {
-        /* Get the file attributes */
-        chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->query_info.open_file->handle,
-                            getattr_mask,
-                            chimera_smb_query_info_getattr_callback,
-                            request);
+        /* PUTHANDLE, GETATTR: the attributes come through the FileId's own
+         * handle, which is the one this query's access check ran against. */
+        request->vfs_compound = chimera_vfs_compound_alloc(
+            thread->vfs_thread, &request->session_handle->session->cred);
+
+        chimera_vfs_compound_add_puthandle(
+            request->vfs_compound,
+            request->query_info.open_file->handle,
+            request->query_info.open_file->open_flags);
+
+        chimera_vfs_compound_add_getattr(request->vfs_compound, getattr_mask);
+
+        chimera_vfs_compound_submit(request->vfs_compound,
+                                    chimera_smb_query_info_sequence_complete,
+                                    request);
     } else {
         chimera_smb_open_file_release(request, request->query_info.open_file);
         chimera_smb_complete_request(request, chimera_smb_query_info_ok(request));
