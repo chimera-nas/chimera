@@ -373,6 +373,39 @@ nfs4_root_export_fh_get(
     nfs4_root_export_fh_resolve(thread, req, callback);
 } /* nfs4_root_export_fh_get */
 
+SYMBOL_EXPORT int
+nfs4_root_export_fh_peek(
+    struct chimera_server_nfs_thread *thread,
+    uint16_t                          export_id,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    uint16_t                          root_id;
+    int                               answer;
+
+    /* The same lockless gate nfs4_root_junction_check opens with, and for the
+     * same reason: a handle can only BE the namespace root if it was minted
+     * under the "/" export. */
+    root_id = shared->root_export_id;
+
+    if (root_id == 0 || export_id != root_id) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&shared->exports_lock);
+
+    if (shared->root_export_fh_id == root_id && shared->root_export_fh_len) {
+        answer = (shared->root_export_fh_len == fh_len &&
+                  memcmp(shared->root_export_fh, fh, fh_len) == 0);
+    } else {
+        answer = -1;
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return answer;
+} /* nfs4_root_export_fh_peek */
+
 static void
 nfs4_root_junction_check_fh_ready(
     enum chimera_vfs_error            error_code,
