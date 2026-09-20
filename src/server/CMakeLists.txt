@@ -27,8 +27,10 @@ endif()
 
 find_package(PkgConfig QUIET)
 
-if(PkgConfig_FOUND)
+if(CHIMERA_GSSAPI AND PkgConfig_FOUND)
     pkg_check_modules(KRB5_GSSAPI QUIET krb5-gssapi krb5)
+else()
+    set(KRB5_GSSAPI_FOUND FALSE)
 endif()
 
 set(MBT_KRB5_DIR ${CMAKE_SOURCE_DIR}/ext/libevpl/src/rpc2/tests)

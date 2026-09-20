@@ -8,12 +8,13 @@ add_subdirectory(quint)
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
-target_link_libraries(smb_auth_test chimera_server chimera_smb chimera_vfs urcu-cds)
+target_link_libraries(smb_auth_test chimera_server chimera_smb chimera_vfs ${CHIMERA_RCU_CDS_LIB})
 target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_test(NAME chimera/server/smb/auth_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_auth_test --mode=local)
 
+if(NOT WIN32)
 # SMB smbclient authentication test
 add_executable(smbclient_auth_test smbclient_auth_test.c)
 target_link_libraries(smbclient_auth_test chimera_server chimera_metrics)
@@ -22,6 +23,8 @@ target_include_directories(smbclient_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 chimera_add_netns_test(chimera/server/smb/smbclient_ntlm ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
 set_tests_properties(chimera/server/smb/smbclient_ntlm PROPERTIES
     SKIP_RETURN_CODE 77)
+
+endif()
 
 # kerberos_test_wrapper.sh and ad_test_wrapper.sh both set up an isolated
 # netns internally, so they need the same privilege as the netns wrapper.
@@ -95,6 +98,7 @@ add_test(NAME chimera/server/smb/ea_test
 # the COMPRESSION_TRANSFORM path over a real connection, in the quick tier where
 # the rest of the SMB ground-truth probes live.
 
+if(NOT WIN32)
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)
 target_link_libraries(rest_user_manip_test chimera_server chimera_metrics)
@@ -103,6 +107,8 @@ target_include_directories(rest_user_manip_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 chimera_add_netns_test(chimera/server/smb/rest_user_manip ${CMAKE_CURRENT_BINARY_DIR}/rest_user_manip_test)
 set_tests_properties(chimera/server/smb/rest_user_manip PROPERTIES
     SKIP_RETURN_CODE 77)
+
+endif()
 
 # ---------------------------------------------------------------------------
 # Microsoft Windows Protocol Test Suites (WPTS) -- MS-SMB2 server conformance
@@ -512,10 +518,13 @@ else()
             "(need CHIMERA_NETNS_TESTING + pike at ${PIKE_DIR})")
 endif()
 
+if(NOT WIN32)
 # SMB smbtorture integration tests
 add_executable(smbtorture_test smbtorture_test.c)
 target_link_libraries(smbtorture_test chimera_server chimera_metrics)
 target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+endif()
 
 # Subtests needing named-stream (ADS) support.  Single source of truth, read by
 # both the driver (at run time, to set the config knob) and this file (at
