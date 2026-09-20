@@ -31,9 +31,9 @@
  * WHAT IT REFUSES.  Every refusal below exists because the operation carries
  * NFSv4-specific handling the VFS knows nothing about -- the pseudo-root, the
  * synthetic named-attribute directory, junction shadowing at a "/" export's
- * root, the CB_GETATTR delegation combine, the wire handle's export id and
- * squash policy.  Refusing is always safe: the request is untouched and the
- * per-op path runs.
+ * root, a pNFS data-server backing file deleted on another mount, the wire
+ * handle's export id and squash policy.  Refusing is always safe: the request
+ * is untouched and the per-op path runs.
  *
  * INJECTED OPS.  Several NFSv4 operations do more VFS work than their
  * VFS-compound counterpart: PUTFH stats the handle it validates (the zero-link
@@ -3663,28 +3663,30 @@ chimera_nfs4_compound_try_vfs(
                     break;
                 }
 
-                /* With either in play the per-op path looks the victim up
-                 * before unlinking it -- to recall a delegation on it (RFC 7530
-                 * §10.4.4), or to learn the data-server backing it has to
-                 * delete afterwards.  Both are decisions about the object being
-                 * removed that the sequence has no way to reach.
+                /* THE DELEGATION HALF IS EXPRESSED, AND IT IS EXPRESSED BY THE
+                 * REMOVE ITSELF.  What kept it out was the belief that the
+                 * victim had to be resolved on this side: a LOOKUP to reach
+                 * it, which makes it current, against a REMOVE that resolves
+                 * its name in whatever IS current -- a cursor the sequence
+                 * cannot have both ways.  The resolve does not belong here.
+                 * CHIMERA_VFS_REMOVE_RECALL asks remove_at to resolve the name
+                 * itself and recall the caching holders on what it finds
+                 * before the unlink (vfs_proc_remove_at.c, the by-name recall
+                 * pre-step), which is the lookup this side was trying to make
+                 * and the one NFSv3's REMOVE has always asked for.  So the op
+                 * is carried and the flag travels with it.
                  *
-                 * The delegation half is now ALMOST expressible: a RECALL op
-                 * with CHIMERA_VFS_COMPOUND_RECALL_NOWAIT is exactly the
-                 * chimera_vfs_claim_break_caching the per-op path calls, and
-                 * reports the same boolean.  What is missing is a way to reach
-                 * the victim without moving the cursor off the directory the
-                 * REMOVE then needs: resolving it takes a LOOKUP, a LOOKUP
-                 * makes the victim current, and a REMOVE resolves its name in
-                 * whatever is current.  The clean shape is for the recall to
-                 * happen inside remove_at, driven by the lease-recall bit
-                 * remove_flags already documents (vfs_compound.h, the REMOVE
-                 * op and its adder) and which vfs_proc_remove.c does not
-                 * implement -- a VFS-core change, not one this file can make.
-                 * Until then both halves keep the whole REMOVE out. */
-                if (chimera_server_config_get_nfs4_delegations(
-                        thread->shared->config) ||
-                    chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+                 * The client is answered when the removal is done rather than
+                 * with NFS4ERR_DELAY and a retry.  Both discharge SS10.4.4 --
+                 * the delegation is recalled before the name goes -- and this
+                 * is the one the same server already gives an NFSv3 client
+                 * removing the same file.
+                 *
+                 * pNFS still keeps it out, for the half that is genuinely not
+                 * a decision about the unlink: the data-server backing file
+                 * deleted AFTERWARDS is a second call chain on another mount,
+                 * addressed through a handle this sequence never holds. */
+                if (chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
                     nenc = i;
                     stop = 1;
                     break;
@@ -3711,21 +3713,23 @@ chimera_nfs4_compound_try_vfs(
                     break;
                 }
 
-                /* A rename onto an existing name unlinks what was there, so it
-                 * has REMOVE's problem too: a delegation on the displaced
-                 * object to recall, or a data server backing it to delete.
-                 * Both are decisions about an object the sequence never names.
+                /* The three things that kept a delegated RENAME out were all
+                 * the same thing: a lookup made on the WRONG SIDE.  The source
+                 * to recall, the destination that is about to be clobbered,
+                 * and the destination's ENOENT -- which is the ordinary
+                 * no-overwrite case and must not fail the run, and which a
+                 * gate cannot un-fail (it may fail an op that succeeded, never
+                 * pass one that failed).  All three are rename_at's, under
+                 * CHIMERA_VFS_REMOVE_RECALL: it recalls the source, resolves
+                 * the destination for itself, recalls a holder on it when
+                 * there is one, and goes on when there is not.  Its comment
+                 * says it exists so that "every by-name caller (NFSv3 RENAME)"
+                 * need not make that lookup; this is now one of them.
                  *
-                 * RENAME has it twice -- the source is recalled as well as the
-                 * target -- and once more besides: the target LOOKUP finding
-                 * NOTHING is the ordinary case and must not fail the run,
-                 * which a gate cannot express.  It may fail an op that
-                 * succeeded; it may not pass one that failed
-                 * (chimera_vfs_compound_gate_t).  See the REMOVE case for the
-                 * recall the VFS core would have to own. */
-                if (chimera_server_config_get_nfs4_delegations(
-                        thread->shared->config) ||
-                    chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
+                 * pNFS keeps it out for the same reason it keeps REMOVE out:
+                 * a displaced object's data-server backing is deleted after
+                 * the fact, on another mount. */
+                if (chimera_vfs_pnfs_enabled(thread->shared->vfs)) {
                     nenc = i;
                     stop = 1;
                     break;
@@ -4525,9 +4529,13 @@ chimera_nfs4_compound_try_vfs(
             }
 
             case OP_REMOVE:
-                /* No type assertion and no recall request: NFS4's REMOVE is
-                 * type-agnostic, and the recall decision is made on the
-                 * protocol side before the sequence is built. */
+                /* No type assertion: NFS4's REMOVE is type-agnostic.  The
+                 * recall request is the one flag it does carry -- with
+                 * delegations configured the VFS resolves the victim itself
+                 * and recalls the caching holders on it before the unlink,
+                 * which is what RFC 7530 SS10.4.4 asks for and what NFSv3's
+                 * REMOVE already passes.  See the scan's REMOVE arm for why
+                 * the flag is what lets this op be carried at all. */
                 if (nfs4_vfs_open_for(compound, &cur_open_flags,
                                       NFS4_VFS_OPEN_DIR) < 0) {
                     goto refuse;
@@ -4537,7 +4545,10 @@ chimera_nfs4_compound_try_vfs(
                     compound,
                     (const char *) argop->opremove.target.data,
                     (int) argop->opremove.target.len,
-                    0, 0, 0);
+                    chimera_server_config_get_nfs4_delegations(
+                        thread->shared->config) ?
+                    CHIMERA_VFS_REMOVE_RECALL : 0,
+                    0, 0);
                 map->vfs_res = idx;
                 break;
 
@@ -4545,13 +4556,24 @@ chimera_nfs4_compound_try_vfs(
              * which is what the VFS op takes, so neither needs anything said
              * about where the other directory is. */
             case OP_RENAME:
+                /* The recall request rides here too, and buys more than it
+                 * does on REMOVE: rename_at resolves BOTH ends for itself --
+                 * the source it is moving and whatever it is about to clobber
+                 * at the destination -- and treats the destination's ENOENT as
+                 * the ordinary no-overwrite case rather than a failure.  That
+                 * is the lookup every by-name caller would otherwise make,
+                 * and the one a gate could not make: a gate may fail an op
+                 * that succeeded, never pass one that failed. */
                 idx = chimera_vfs_compound_add_rename(
                     compound,
                     (const char *) argop->oprename.oldname.data,
                     (int) argop->oprename.oldname.len,
                     (const char *) argop->oprename.newname.data,
                     (int) argop->oprename.newname.len,
-                    0, 0, 0);
+                    chimera_server_config_get_nfs4_delegations(
+                        thread->shared->config) ?
+                    CHIMERA_VFS_REMOVE_RECALL : 0,
+                    0, 0);
                 map->vfs_res = idx;
                 break;
 
