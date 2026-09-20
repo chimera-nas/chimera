@@ -26,18 +26,18 @@
 #include "vfs/sdk/vfs_acl.h"
 
 /* Security information flags (addl_info) */
-#define OWNER_SECURITY_INFORMATION 0x00000001
-#define GROUP_SECURITY_INFORMATION 0x00000002
-#define DACL_SECURITY_INFORMATION  0x00000004
-#define SACL_SECURITY_INFORMATION  0x00000008
-#define LABEL_SECURITY_INFORMATION 0x00000010
+#define SMB_OWNER_SECURITY_INFORMATION 0x00000001
+#define SMB_GROUP_SECURITY_INFORMATION 0x00000002
+#define SMB_DACL_SECURITY_INFORMATION  0x00000004
+#define SMB_SACL_SECURITY_INFORMATION  0x00000008
+#define SMB_LABEL_SECURITY_INFORMATION 0x00000010
 
 /* Security descriptor control flags */
-#define SE_SELF_RELATIVE           0x8000
-#define SE_DACL_PRESENT            0x0004
-#define SE_DACL_AUTO_INHERIT_REQ   0x0100
-#define SE_DACL_AUTO_INHERITED     0x0400
-#define SE_DACL_PROTECTED          0x1000
+#define SMB_SE_SELF_RELATIVE           0x8000
+#define SMB_SE_DACL_PRESENT            0x0004
+#define SMB_SE_DACL_AUTO_INHERIT_REQ   0x0100
+#define SMB_SE_DACL_AUTO_INHERITED     0x0400
+#define SMB_SE_DACL_PROTECTED          0x1000
 
 /* Size of a SID with 3 sub-authorities: S-1-5-88-X-Y */
 #define SID_UNIX_SIZE              20 /* 1+1+6+3*4 */
@@ -503,14 +503,14 @@ chimera_smb_sd_to_acl(
          * suite exercises) preserves AUTO_INHERITED verbatim regardless of
          * REQ.  PROTECTED is stored as-is in both modes. */
         if (canonicalize_inherited) {
-            if ((sd_control & SE_DACL_AUTO_INHERIT_REQ) &&
-                (sd_control & SE_DACL_AUTO_INHERITED)) {
+            if ((sd_control & SMB_SE_DACL_AUTO_INHERIT_REQ) &&
+                (sd_control & SMB_SE_DACL_AUTO_INHERITED)) {
                 acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
             }
-        } else if (sd_control & SE_DACL_AUTO_INHERITED) {
+        } else if (sd_control & SMB_SE_DACL_AUTO_INHERITED) {
             acl->ctrl_flags |= CHIMERA_ACL_CTRL_AUTO_INHERITED;
         }
-        if (sd_control & SE_DACL_PROTECTED) {
+        if (sd_control & SMB_SE_DACL_PROTECTED) {
             acl->ctrl_flags |= CHIMERA_ACL_CTRL_PROTECTED;
         }
         if (n > 0) {
@@ -600,7 +600,7 @@ chimera_smb_acl_to_sd(
 {
     uint32_t offset = SD_HEADER_SIZE;
     uint32_t dacl_off = 0, owner_off = 0, group_off = 0;
-    uint16_t control = SE_SELF_RELATIVE;
+    uint16_t control = SMB_SE_SELF_RELATIVE;
 
     if (cap < SD_HEADER_SIZE) {
         return -1;
@@ -638,16 +638,16 @@ chimera_smb_acl_to_sd(
         uint16_t ace_count = 0;
         uint32_t ace_pos;
 
-        control |= SE_DACL_PRESENT;
+        control |= SMB_SE_DACL_PRESENT;
 
         /* Reflect the canonical ACL control bits.  AUTO_INHERITED is set only
          * for a DACL produced by inheritance (so an explicitly-set SD round
          * trips without it); PROTECTED blocks inheritance from the parent. */
         if (acl && (acl->ctrl_flags & CHIMERA_ACL_CTRL_AUTO_INHERITED)) {
-            control |= SE_DACL_AUTO_INHERITED;
+            control |= SMB_SE_DACL_AUTO_INHERITED;
         }
         if (acl && (acl->ctrl_flags & CHIMERA_ACL_CTRL_PROTECTED)) {
-            control |= SE_DACL_PROTECTED;
+            control |= SMB_SE_DACL_PROTECTED;
         }
 
         if (offset + 8 > cap) {
@@ -999,14 +999,14 @@ chimera_smb_set_security(struct chimera_smb_request *request)
      * changes are unaffected.  chimera never grants ACCESS_SYSTEM_SECURITY, so
      * a SACL set is always denied -- matching the model (no case expects a SACL
      * set to succeed). */
-    if (addl_info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-                     LABEL_SECURITY_INFORMATION)) {
+    if (addl_info & (SMB_OWNER_SECURITY_INFORMATION | SMB_GROUP_SECURITY_INFORMATION |
+                     SMB_LABEL_SECURITY_INFORMATION)) {
         required |= SMB2_WRITE_OWNER;
     }
-    if (addl_info & DACL_SECURITY_INFORMATION) {
+    if (addl_info & SMB_DACL_SECURITY_INFORMATION) {
         required |= SMB2_WRITE_DACL;
     }
-    if (addl_info & SACL_SECURITY_INFORMATION) {
+    if (addl_info & SMB_SACL_SECURITY_INFORMATION) {
         /* The SACL is normally gated by ACCESS_SYSTEM_SECURITY (SeSecurityPrivilege).
          * chimera does not model that privilege separately and never grants the
          * bit, so use WRITE_DAC as the proxy: a handle privileged enough to
@@ -1065,9 +1065,9 @@ chimera_smb_query_emit_sd(
 
     sd_len = chimera_smb_acl_to_sd(
         uid, gid, mode & (S_IFMT | 07777), acl,
-        !!(addl_info & OWNER_SECURITY_INFORMATION),
-        !!(addl_info & GROUP_SECURITY_INFORMATION),
-        !!(addl_info & DACL_SECURITY_INFORMATION),
+        !!(addl_info & SMB_OWNER_SECURITY_INFORMATION),
+        !!(addl_info & SMB_GROUP_SECURITY_INFORMATION),
+        !!(addl_info & SMB_DACL_SECURITY_INFORMATION),
         request->query_info.sec_buf,
         sizeof(request->query_info.sec_buf),
         request->compound->thread->shared->vfs);

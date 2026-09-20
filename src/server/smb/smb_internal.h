@@ -1443,7 +1443,7 @@ struct chimera_smb_conn {
         uint16_t preauth_hash_alg;          /* 0 or SMB2_PREAUTH_HASH_SHA_512 */
         uint16_t cipher_id;                 /* 0 or SMB2_ENCRYPTION_* */
         uint16_t signing_alg;               /* SMB2_SIGNING_* */
-        uint16_t compression_flags;         /* SMB2_COMPRESSION_FLAG_* */
+        uint32_t compression_flags;         /* SMB2_COMPRESSION_FLAG_* */
         uint8_t  preauth_salt[32];          /* server-generated; Phase 2 will hash */
         uint8_t  compression_alg_count;
         uint8_t  rdma_transform_count;
