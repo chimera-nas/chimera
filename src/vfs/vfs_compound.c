@@ -5160,6 +5160,14 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         }
 
         case CHIMERA_VFS_COMPOUND_OP_SETATTR:
+            if (op->setattr_after_write) {
+                chimera_vfs_setattr_after_write(compound->thread, compound->cred,
+                                                target, &op->set_attr,
+                                                op->pre_attr_mask, op->attr_mask,
+                                                chimera_vfs_compound_setattr_callback,
+                                                compound);
+                break;
+            }
             /* Through a handle the caller NAMED -- one it lent, or the one an
              * earlier op produced and use_handle points at -- the change is
              * authorized by that open's grant rather than re-checked against

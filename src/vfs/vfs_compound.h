@@ -817,6 +817,9 @@ struct chimera_vfs_compound_op {
      * ACL is the one settable attribute that is not a value in this struct,
      * so it takes the WRITE payload's terms rather than the struct copy's.) */
     struct chimera_vfs_attrs              set_attr;
+    /* Only metadata publication for a data write already authorized by the
+     * protocol (for example pNFS LAYOUTCOMMIT), never a fresh mutation. */
+    uint8_t                               setattr_after_write;
 
     /* ---- the name-op knobs: exempt handle, lease skip, match fh ----
      * Set by chimera_vfs_compound_op_set_remove_match / _set_rename_opts /
