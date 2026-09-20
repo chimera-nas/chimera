@@ -931,15 +931,16 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
             /* The VFS handle the write sequence borrowed, captured before it
-             * was submitted.  The sticky-mtime restore that follows the
-             * sequence acts on this rather than re-reading open_file->handle,
-             * which a pipelined CLOSE on the same FileId NULLs out from under
-             * an in-flight request (chimera_smb_close_release). */
+             * was submitted.  The sticky-mtime restore inside the sequence
+             * addresses this rather than re-reading open_file->handle, which a
+             * pipelined CLOSE on the same FileId NULLs out from under an
+             * in-flight request (chimera_smb_close_release). */
             struct chimera_vfs_open_handle *handle;
-            /* Holds the pre-write mtime restored after a write through a
-             * write-time-sticky handle (chimera_vfs_setattr keeps this pointer
-             * across the async call, so it must live in the request). */
-            struct chimera_vfs_attrs        restore_attrs;
+            /* The WRITE and, for a write-time-sticky handle, the SETATTR that
+             * puts its pre-write mtime back -- the op the gate fills in from
+             * the WRITE's own reading.  -1 when the sequence has no restore. */
+            int8_t                          seq_write_idx;
+            int8_t                          seq_restore_idx;
             struct chimera_smb_rdma_element rdma_elements[8];
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];

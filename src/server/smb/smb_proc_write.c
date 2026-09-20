@@ -41,35 +41,17 @@ chimera_smb_write_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_write_error_status */
 
-/* Completion for the mtime-restore setattr issued after a write through a
- * write-time-sticky handle.  The write itself already succeeded; a failed
- * restore leaves a slightly-advanced write time but is not worth failing the
- * write over, so we always report success. */
-static void
-chimera_smb_write_sticky_restore_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    chimera_smb_open_file_release(request, request->write.open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_write_sticky_restore_callback */
-
+/* The write is over: give its payload back, tell the directory's watchers, and
+ * answer the client.  Nothing here reads the write's results -- what the reply
+ * carries is a count the marshaller already has, and the one attribute a write
+ * owes anybody (the pre-write mtime a sticky handle restores) is consumed
+ * inside the run, by the gate. */
 static void
 chimera_smb_write_callback(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_smb_request *request,
+    enum chimera_vfs_error      error_code)
 {
-    struct chimera_smb_request       *request = private_data;
-    struct chimera_server_smb_thread *thread  = request->compound->thread;
+    struct chimera_server_smb_thread *thread = request->compound->thread;
 
     /* Release write iovecs here on the server thread, not in VFS backend.
      * The iovecs were allocated on this thread and must be released here
@@ -103,40 +85,63 @@ chimera_smb_write_callback(
         request->write.open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
     }
 
-    /* A handle that explicitly set its write time has "taken control" of it:
-     * the backend bumped mtime as a side effect of this write, so restore it to
-     * the pre-write value (reported in pre_attr) to keep it frozen.
-     *
-     * This stays a separate setattr after the sequence rather than a SETATTR
-     * op in it: the value restored is the mtime the WRITE itself sampled, which
-     * exists only once the WRITE has run, and nothing lets a later op in the
-     * same sequence be filled in from an earlier op's result yet.
-     *
-     * It acts on the handle the sequence borrowed, captured before submission;
-     * open_file->handle is not re-read here because a pipelined CLOSE on the
-     * same FileId NULLs it whether or not a write is in flight. */
-    if (!error_code &&
-        (request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
-        (pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+    chimera_smb_open_file_release(request, request->write.open_file);
+    chimera_smb_complete_request(request,
+                                 chimera_smb_write_error_status(error_code));
+} /* chimera_smb_write_callback */
 
-        request->write.restore_attrs.va_req_mask = 0;
-        request->write.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
-        request->write.restore_attrs.va_mtime    = pre_attr->va_mtime;
+/* A handle that explicitly set its write time has "taken control" of it: the
+ * backend bumps mtime as a side effect of the write, so the pre-write reading
+ * is put back to keep it frozen.
+ *
+ * The value restored is the WRITE's OWN pre-attr mtime, which does not exist
+ * until the WRITE has run -- so the restore is a SETATTR whose argument the
+ * gate fills in the moment the WRITE reports, from that op's result.  That is
+ * what the gate's edit rule is for: it writes an argument of an op STRICTLY
+ * AHEAD of the one it is consulted on, and it ASSIGNS the value rather than
+ * folding it into what a previous execution left, so a re-run of the sequence
+ * restores the same mtime the write it re-ran actually displaced.
+ *
+ * A backend that reports no pre-write mtime leaves nothing to restore, and the
+ * op is skipped rather than applying a zero timestamp.
+ *
+ * The restore is not allowed to fail the WRITE: a slightly-advanced write time
+ * is not worth failing a write that succeeded over, which is why the
+ * completion reads the WRITE's own status rather than the sequence's. */
+static void
+chimera_smb_write_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_compound_op       *edit;
 
-        chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->write.handle,
-                            &request->write.restore_attrs,
-                            0,
-                            0,
-                            chimera_smb_write_sticky_restore_callback,
-                            request);
+    if (*status != CHIMERA_VFS_OK ||
+        (int) index != request->write.seq_write_idx ||
+        request->write.seq_restore_idx <= (int) index) {
         return;
     }
 
-    chimera_smb_open_file_release(private_data, request->write.open_file);
-    chimera_smb_complete_request(private_data, chimera_smb_write_error_status(error_code));
-} /* chimera_smb_write_callback */
+    op   = chimera_vfs_compound_op(compound, index);
+    edit = chimera_vfs_compound_op_edit(
+        compound, (uint32_t) request->write.seq_restore_idx);
+
+    if (!edit) {
+        return;
+    }
+
+    if (op->pre_attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME) {
+        edit->set_attr.va_req_mask = 0;
+        edit->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
+        edit->set_attr.va_mtime    = op->pre_attr.va_mtime;
+        edit->skip                 = 0;
+    } else {
+        edit->skip = 1;
+    }
+} /* chimera_smb_write_gate */
 
 static void
 chimera_smb_write_sequence_complete(
@@ -146,41 +151,43 @@ chimera_smb_write_sequence_complete(
     struct chimera_smb_request           *request = private_data;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                status;
-    struct chimera_vfs_attrs              pre_attr, post_attr;
-    uint32_t                              written, committed;
 
-    /* Everything the callback needs has to come out of the sequence before it
-     * is freed, pre_attr included -- it is read after the free returns. */
-    status = chimera_vfs_compound_status(compound);
-
+    /* The WRITE's own status, not the sequence's: a failed sticky-mtime restore
+     * behind a successful write is not a failed write, exactly as it was not
+     * when the restore was a call of its own. */
     op = chimera_vfs_compound_op(compound,
-                                 chimera_vfs_compound_num_ops(compound) - 1);
+                                 (uint32_t) request->write.seq_write_idx);
 
-    pre_attr  = op->pre_attr;
-    post_attr = op->attr;
-    written   = op->written;
-    committed = op->committed;
+    status = op->status;
 
     chimera_vfs_compound_free(compound);
     request->vfs_compound = NULL;
 
-    chimera_smb_write_callback(status, written, committed,
-                               &pre_attr, &post_attr, request);
+    chimera_smb_write_callback(request, status);
 } /* chimera_smb_write_sequence_complete */
 
-/* PUTHANDLE(the open SMB2 already holds) -> WRITE.  The pre-write mtime that a
- * write-time-sticky handle restores has to be sampled by the write itself, so
- * it is asked for here rather than by a GETATTR the sequence would run after
- * the write had already advanced it. */
+/* PUTHANDLE(the open SMB2 already holds) -> WRITE -> [SETATTR(mtime)].  The
+ * pre-write mtime that a write-time-sticky handle restores has to be sampled by
+ * the write itself, so it is asked for here rather than by a GETATTR the
+ * sequence would run after the write had already advanced it -- and the restore
+ * that consumes it is an op in the same run, its timestamp filled in by the
+ * gate the moment the WRITE reports (chimera_smb_write_gate).
+ *
+ * The restore addresses the LENT handle, which is what keeps it on the
+ * descriptor-rights path: putting the write time back is authorized by the open
+ * the client is writing through, not re-checked against the file's mode. */
 static void
 chimera_smb_write_submit(
     struct chimera_smb_request       *request,
     struct chimera_server_smb_thread *thread,
     const struct chimera_claim_actor *io_owner)
 {
-    /* The handle this write runs on, captured once so everything after the
-     * sequence -- the sticky-mtime restore -- acts on the same one the
-     * sequence borrowed. */
+    struct chimera_vfs_attrs restore;
+
+    /* The handle this write runs on, captured once so the restore behind it
+     * acts on the same one the sequence borrowed: open_file->handle is not
+     * re-read, because a pipelined CLOSE on the same FileId NULLs it whether or
+     * not a write is in flight. */
     request->write.handle = request->write.open_file->handle;
 
     request->vfs_compound = chimera_vfs_compound_alloc(
@@ -191,7 +198,7 @@ chimera_smb_write_submit(
                                        request->write.handle,
                                        request->write.open_file->open_flags);
 
-    chimera_vfs_compound_add_write(
+    request->write.seq_write_idx = (int8_t) chimera_vfs_compound_add_write(
         request->vfs_compound,
         NULL,
         request->write.offset,
@@ -202,6 +209,25 @@ chimera_smb_write_submit(
         chimera_smb_write_pre_attr_mask(request->write.open_file),
         0,
         io_owner);
+
+    request->write.seq_restore_idx = -1;
+
+    /* Only a sticky handle owes a restore, and only it asked the write for the
+     * pre-attr the restore is made of.  The timestamp is left empty here: it is
+     * the gate's to assign, from the reading the WRITE takes. */
+    if (request->write.open_file->flags &
+        CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) {
+
+        memset(&restore, 0, sizeof(restore));
+
+        request->write.seq_restore_idx = (int8_t)
+            chimera_vfs_compound_add_setattr(request->vfs_compound,
+                                             request->write.handle,
+                                             &restore, 0, 0);
+
+        chimera_vfs_compound_set_gate(request->vfs_compound,
+                                      chimera_smb_write_gate, request);
+    }
 
     chimera_vfs_compound_submit(request->vfs_compound,
                                 chimera_smb_write_sequence_complete, request);
