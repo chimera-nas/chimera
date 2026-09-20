@@ -1073,20 +1073,20 @@ struct chimera_smb_request {
             uint32_t                        ii_flags;
         } ioctl;
         struct {
-            uint8_t                         info_type;
-            uint8_t                         info_class;
-            uint32_t                        addl_info;
-            uint32_t                        flags;
-            uint32_t                        output_length;
+            uint8_t                       info_type;
+            uint8_t                       info_class;
+            uint32_t                      addl_info;
+            uint32_t                      flags;
+            uint32_t                      output_length;
             /* Client-supplied OutputBufferLength (max bytes the client will
              * accept) and the info level's fixed minimum size, used to answer
              * INFO_LENGTH_MISMATCH / BUFFER_OVERFLOW before marshalling. */
-            uint32_t                        max_response_size;
-            uint32_t                        min_length;
-            struct chimera_smb_file_id      file_id;
-            struct chimera_smb_attrs        r_attrs;
-            struct chimera_smb_fs_attrs     r_fs_attrs;
-            struct chimera_smb_open_file   *open_file;
+            uint32_t                      max_response_size;
+            uint32_t                      min_length;
+            struct chimera_smb_file_id    file_id;
+            struct chimera_smb_attrs      r_attrs;
+            struct chimera_smb_fs_attrs   r_fs_attrs;
+            struct chimera_smb_open_file *open_file;
             /* Security descriptor built in the getattr callback and emitted by
              * the reply builder (SMB2_INFO_SECURITY). */
             uint8_t                         sec_buf[4096];
@@ -1107,23 +1107,22 @@ struct chimera_smb_request {
             struct chimera_sid              sd_owner_sid;
             struct chimera_sid              sd_group_sid;
             /* FileStreamInformation: the packed VFS list_streams records are
-             * held here from the list_streams callback until the reply builder
-             * emits them as MS-FSCC FILE_STREAM_INFORMATION entries.
-             * stream_base_handle is a temporary handle on the base file. */
-            struct chimera_vfs_open_handle *stream_base_handle;
-            uint32_t                        stream_record_len;
-            uint32_t                        stream_record_count;
-            uint8_t                         stream_records[4096];
-            /* FILE_FULL_EA_INFORMATION query: stream_base_handle is reused as the
-             * EA enumeration handle and stream_records holds the listed user.*
-             * names.  Values are fetched one at a time and the wire FULL_EA list
-             * is built into ea_out (malloc'd, freed by the reply emitter on
-             * success or by the finish path on error). */
-            uint8_t                        *ea_out;
-            uint32_t                        ea_out_len;
-            uint32_t                        ea_out_cap;
-            uint32_t                        ea_last_off;
-            const char                     *ea_cursor;
+             * copied here out of the LIST_STREAMS op's buffer, and held until
+             * the reply builder emits them as MS-FSCC FILE_STREAM_INFORMATION
+             * entries. */
+            uint32_t                      stream_record_len;
+            uint32_t                      stream_record_count;
+            uint8_t                       stream_records[4096];
+            /* FILE_FULL_EA_INFORMATION query: stream_records is reused for the
+             * listed user.* names, which the GETXATTR fan-out sequences walk
+             * with ea_cursor.  The wire FULL_EA list is built into ea_out
+             * (malloc'd, freed by the reply emitter on success or by the finish
+             * path on error). */
+            uint8_t                      *ea_out;
+            uint32_t                      ea_out_len;
+            uint32_t                      ea_out_cap;
+            uint32_t                      ea_last_off;
+            const char                   *ea_cursor;
         } query_info;
 
         struct {

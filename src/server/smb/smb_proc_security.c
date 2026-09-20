@@ -22,6 +22,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_identity.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_sid.h"
@@ -1041,10 +1042,16 @@ chimera_smb_set_security(struct chimera_smb_request *request)
 /* QUERY_INFO handler for SMB2_INFO_SECURITY                          */
 /* ------------------------------------------------------------------ */
 
-/* Marshal the security descriptor from the given owner/group/mode + ACL and
- * complete the QUERY_INFO request. */
-static void
-chimera_smb_query_emit_sd(
+/* Marshal the security descriptor from the given owner/group/mode + ACL into
+ * the request's reply buffer and answer the status the level owes.
+ *
+ * Split from the completion below because the ACL it reads may be the
+ * SEQUENCE'S: the executor copies an ACL result into storage the compound owns
+ * and frees, so the descriptor has to be built before chimera_vfs_compound_free
+ * -- which is also before the request can be completed, since the completion
+ * recycles the request the sequence is hung off. */
+static uint32_t
+chimera_smb_query_build_sd(
     struct chimera_smb_request *request,
     uint32_t                    uid,
     uint32_t                    gid,
@@ -1065,11 +1072,8 @@ chimera_smb_query_emit_sd(
         sizeof(request->query_info.sec_buf),
         request->compound->thread->shared->vfs);
 
-    chimera_smb_open_file_release(request, request->query_info.open_file);
-
     if (sd_len < 0) {
-        chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_OVERFLOW);
-        return;
+        return SMB2_STATUS_BUFFER_OVERFLOW;
     }
 
     /* MS-SMB2 3.3.5.20.3: if the security descriptor does not fit in the
@@ -1079,12 +1083,29 @@ chimera_smb_query_emit_sd(
      * 3.3.4.4); stash it in output_length, which the error-reply path emits. */
     if (request->query_info.max_response_size < (uint32_t) sd_len) {
         request->query_info.output_length = (uint32_t) sd_len;
-        chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
-        return;
+        return SMB2_STATUS_BUFFER_TOO_SMALL;
     }
 
     request->query_info.sec_buf_len = (uint32_t) sd_len;
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+
+    return SMB2_STATUS_SUCCESS;
+} /* chimera_smb_query_build_sd */
+
+/* Build the descriptor and complete the QUERY_INFO request. */
+static void
+chimera_smb_query_emit_sd(
+    struct chimera_smb_request *request,
+    uint32_t                    uid,
+    uint32_t                    gid,
+    uint32_t                    mode,
+    const struct chimera_acl   *acl,
+    const struct chimera_sid   *owner_sid,
+    const struct chimera_sid   *group_sid)
+{
+    uint32_t status = chimera_smb_query_build_sd(request, uid, gid, mode, acl, owner_sid, group_sid);
+
+    chimera_smb_open_file_release(request, request->query_info.open_file);
+    chimera_smb_complete_request(request, status);
 } /* chimera_smb_query_emit_sd */
 
 /* Fan-out join: once every parked identity resolve has completed, the SD's
@@ -1119,127 +1140,146 @@ chimera_smb_query_resolve_cb(
     chimera_smb_query_resolve_decr(private_data);
 } /* chimera_smb_query_resolve_cb */
 
+/*
+ * PUTHANDLE, GETATTR(STAT | ACL).
+ *
+ * Everything the descriptor is built from is read here, before the sequence is
+ * freed: the ACL is the compound's own copy and dies with it, and the identity
+ * resolve that may follow is out of band -- it is name resolution, not a file
+ * operation, and it answers long after this callback has returned.  So either
+ * the descriptor is marshalled now, or the attributes it needs are copied into
+ * the request and marshalled on the resolve join.
+ */
 static void
-chimera_smb_query_security_getattr_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_smb_query_security_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
-    struct chimera_vfs_thread  *thread  = request->compound->thread->vfs_thread;
-    struct chimera_vfs         *vfs     = request->compound->thread->shared->vfs;
-    const struct chimera_acl   *acl;
-    const struct chimera_sid   *owner_sid;
-    const struct chimera_sid   *group_sid;
-    unsigned                    i;
-    int                         nmiss = 0;
-    int                         acl_fits;
+    struct chimera_smb_request           *request = private_data;
+    struct chimera_vfs_thread            *thread  = request->compound->thread->vfs_thread;
+    struct chimera_vfs                   *vfs     = request->compound->thread->shared->vfs;
+    const struct chimera_vfs_compound_op *op;
+    const struct chimera_vfs_attrs       *attr;
+    const struct chimera_acl             *acl = NULL;
+    enum chimera_vfs_error                status;
+    const struct chimera_sid *owner_sid, *group_sid;
+    uint32_t                              sd_status = SMB2_STATUS_SUCCESS;
+    unsigned                              i;
+    int                                   nmiss = 0;
+    int                                   acl_fits, resolve = 0;
 
-    if (error_code) {
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        attr = &op->attr;
+        owner_sid = (attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) ? attr->va_owner_sid : NULL;
+        group_sid = (attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) ? attr->va_group_sid : NULL;
+
+        acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
+
+        /* modefromsid mount: report the mode as an S-1-5-88-3 ACE (the emit's
+         * no-ACL path) rather than the Windows ACL memfs synthesizes from it, so
+         * a POSIX/CIFS-style client reads back the exact mode -- including the
+         * setuid/setgid/sticky bits a translated ACL cannot express. */
+        if (request->compound->thread->shared->config.mode_from_sid) {
+            acl = NULL;
+        }
+
+        /* The owner and group SIDs and any USER/GROUP ACE need a real SID;
+         * count the principals not yet in the cache (those would block) so we
+         * know whether to resolve. */
+        if (!chimera_sid_present(&request->query_info.sd_owner_sid) &&
+        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+                                         attr->va_uid, NULL)) {
+            nmiss++;
+        }
+        if (!chimera_sid_present(&request->query_info.sd_group_sid) &&
+        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
+                                         attr->va_gid, NULL)) {
+            nmiss++;
+        }
+        if (acl) {
+            for (i = 0; i < acl->num_aces; i++) {
+                if (acl->aces[i].who.sid.len) continue;
+                if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_USER &&
+                    !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+                                                 acl->aces[i].who.id, NULL)) {
+                    nmiss++;
+                } else if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_GROUP &&
+                           !chimera_vfs_identity_cached(vfs,
+                                                        CHIMERA_VFS_IDENTITY_BY_GID,
+                                                        acl->aces[i].who.id, NULL)) {
+                    nmiss++;
+                }
+            }
+        }
+
+        acl_fits = !acl || acl->num_aces <= 64;
+
+        if (nmiss == 0 || !acl_fits) {
+            /* Everything is cached (or the ACL is too large to copy): build the
+             * descriptor now, from the sequence's own ACL. */
+            sd_status = chimera_smb_query_build_sd(request, attr->va_uid,
+                                                   attr->va_gid, attr->va_mode,
+                                                   acl, owner_sid, group_sid);
+        } else {
+            /* Some principal is uncached: copy the attrs out, resolve the
+             * missing identities off the event loop, and build the SD on the
+             * join. */
+            request->query_info.sd_uid  = attr->va_uid;
+            request->query_info.sd_gid  = attr->va_gid;
+            request->query_info.sd_mode = attr->va_mode;
+            if (acl) {
+                memcpy(request->query_info.sd_acl_storage, acl,
+                       chimera_acl_size(acl->num_aces));
+                request->query_info.sd_has_acl = 1;
+            } else {
+                request->query_info.sd_has_acl = 0;
+            }
+            request->query_info.sd_owner_sid.len = 0;
+            request->query_info.sd_group_sid.len = 0;
+            if (chimera_sid_present(owner_sid)) request->query_info.sd_owner_sid = *owner_sid;
+            if (chimera_sid_present(group_sid)) request->query_info.sd_group_sid = *group_sid;
+            resolve = 1;
+        }
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    if (status != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
-    acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
-
-    /* modefromsid mount: report the mode as an S-1-5-88-3 ACE (the emit's
-     * no-ACL path) rather than the Windows ACL memfs synthesizes from it, so a
-     * POSIX/CIFS-style client reads back the exact mode -- including the
-     * setuid/setgid/sticky bits a translated ACL cannot express. */
-    if (request->compound->thread->shared->config.mode_from_sid) {
-        acl = NULL;
-    }
-
-    /* The stored native owner / group SIDs, when the backend has them; an
-     * identity that already carries its SID needs no resolution. */
-    owner_sid = (attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) ?
-        attr->va_owner_sid : NULL;
-    group_sid = (attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) ?
-        attr->va_group_sid : NULL;
-
-    /* The owner and group SIDs and any USER/GROUP ACE need a real SID; count
-     * the principals not yet in the cache (those would block) so we know
-     * whether to resolve.  Principals with a stored native SID are skipped:
-     * it is emitted verbatim. */
-    if (!chimera_sid_present(owner_sid) &&
-        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
-                                     attr->va_uid, NULL)) {
-        nmiss++;
-    }
-    if (!chimera_sid_present(group_sid) &&
-        !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
-                                     attr->va_gid, NULL)) {
-        nmiss++;
-    }
-    if (acl) {
-        for (i = 0; i < acl->num_aces; i++) {
-            if (acl->aces[i].who.sid.len) {
-                continue;
-            }
-            if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_USER &&
-                !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
-                                             acl->aces[i].who.id, NULL)) {
-                nmiss++;
-            } else if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_GROUP &&
-                       !chimera_vfs_identity_cached(vfs,
-                                                    CHIMERA_VFS_IDENTITY_BY_GID,
-                                                    acl->aces[i].who.id, NULL)) {
-                nmiss++;
-            }
-        }
-    }
-
-    acl_fits = !acl || acl->num_aces <= 64;
-
-    /* Fast path: everything is cached (or the ACL is too large to copy) -- build
-     * the SD inline from the live attrs, exactly as before. */
-    if (nmiss == 0 || !acl_fits) {
-        chimera_smb_query_emit_sd(request, attr->va_uid, attr->va_gid,
-                                  attr->va_mode, acl, owner_sid, group_sid);
+    if (!resolve) {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
+        chimera_smb_complete_request(request, sd_status);
         return;
     }
 
-    /* Some principal is uncached: copy the attrs out (the live ones are only
-     * valid in this callback), resolve the missing identities off the event
-     * loop, and build the SD on the join. */
-    request->query_info.sd_uid  = attr->va_uid;
-    request->query_info.sd_gid  = attr->va_gid;
-    request->query_info.sd_mode = attr->va_mode;
-    if (acl) {
-        memcpy(request->query_info.sd_acl_storage, acl,
-               chimera_acl_size(acl->num_aces));
-        request->query_info.sd_has_acl = 1;
-    } else {
-        request->query_info.sd_has_acl = 0;
-    }
-    if (chimera_sid_present(owner_sid)) {
-        request->query_info.sd_owner_sid = *owner_sid;
-    } else {
-        request->query_info.sd_owner_sid.len = 0;
-    }
-    if (chimera_sid_present(group_sid)) {
-        request->query_info.sd_group_sid = *group_sid;
-    } else {
-        request->query_info.sd_group_sid.len = 0;
-    }
+    acl = request->query_info.sd_has_acl ?
+        (const struct chimera_acl *) request->query_info.sd_acl_storage : NULL;
 
     request->query_info.sd_pending = 1; /* guard until all resolves are issued */
 
-    if (!chimera_sid_present(owner_sid) &&
+    if (!chimera_sid_present(&request->query_info.sd_owner_sid) &&
         !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
-                                     attr->va_uid, NULL)) {
+                                     request->query_info.sd_uid, NULL)) {
         request->query_info.sd_pending++;
         chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
-                                     attr->va_uid, NULL,
+                                     request->query_info.sd_uid, NULL,
                                      chimera_smb_query_resolve_cb, request);
     }
-    if (!chimera_sid_present(group_sid) &&
+    if (!chimera_sid_present(&request->query_info.sd_group_sid) &&
         !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_GID,
-                                     attr->va_gid, NULL)) {
+                                     request->query_info.sd_gid, NULL)) {
         request->query_info.sd_pending++;
         chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_GID,
-                                     attr->va_gid, NULL,
+                                     request->query_info.sd_gid, NULL,
                                      chimera_smb_query_resolve_cb, request);
     }
     if (acl) {
@@ -1271,19 +1311,28 @@ chimera_smb_query_security_getattr_callback(
     }
 
     chimera_smb_query_resolve_decr(request); /* drop the guard */
-} /* chimera_smb_query_security_getattr_callback */
+} /* chimera_smb_query_security_sequence_complete */
 
 void
 chimera_smb_query_security(struct chimera_smb_request *request)
 {
-    chimera_vfs_getattr(
+    struct chimera_smb_open_file *open_file = request->query_info.open_file;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->query_info.open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
-        CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID,
-        chimera_smb_query_security_getattr_callback,
-        request);
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       open_file->handle,
+                                       open_file->open_flags);
+
+    chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT |
+                                     CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_query_security_sequence_complete,
+                                request);
 } /* chimera_smb_query_security */
 
 void
