@@ -14,6 +14,7 @@
 //   fstat()
 //   unlink()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define BUFSZ 8192

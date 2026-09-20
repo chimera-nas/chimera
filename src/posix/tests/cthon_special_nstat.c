@@ -7,6 +7,7 @@
 //
 // Performance test for stat operation
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

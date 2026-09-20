@@ -24,7 +24,7 @@
  * that is the mode used when (re)deriving the model's constants.
  */
 
-#include <getopt.h>
+#include "common/getopt.h"
 
 #include "nfs_aux_mbt_common.h"
 #include "common/mbt_watchdog.h"

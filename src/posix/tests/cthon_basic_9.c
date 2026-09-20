@@ -8,6 +8,7 @@
 // Uses the following important system calls:
 //   statfs() / statvfs()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 #include "common/platform.h"
 #include "posix/posix_types.h"

@@ -14,6 +14,7 @@
  * This is a simplified version focusing on POSIX-portable operations.
  */
 
+#include "common/getopt.h"
 #include <sys/wait.h>
 #ifdef _WIN32
 #include "common/platform.h"

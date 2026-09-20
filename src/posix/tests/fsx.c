@@ -64,7 +64,7 @@
 #include <liburing.h>
 #endif /* ifdef URING */
 #include <sys/syscall.h>
-#include <getopt.h>
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "posix/posix.h"

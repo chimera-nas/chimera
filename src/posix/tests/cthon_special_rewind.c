@@ -7,6 +7,7 @@
 //
 // Tests that file position is handled correctly after truncate
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

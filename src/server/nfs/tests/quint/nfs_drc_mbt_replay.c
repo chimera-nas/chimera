@@ -35,7 +35,7 @@
  * trace independent of its predecessors; trace_setup() carries the details.
  */
 
-#include <getopt.h>
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "nfs_drc_mbt_common.h"

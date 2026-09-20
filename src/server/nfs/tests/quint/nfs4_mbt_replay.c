@@ -30,7 +30,7 @@
  * nfs4_replay.py, in git history -- compared raw bytes.)
  */
 
-#include <getopt.h>
+#include "common/getopt.h"
 #include <jansson.h>
 #ifdef _WIN32
 #include "common/platform.h"

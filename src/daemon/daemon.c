@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/getopt.h"
 #include "common/host_file.h"
 #include "common/compiler.h"
 #include <stdio.h>

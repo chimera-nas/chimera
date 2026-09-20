@@ -5,6 +5,7 @@
 // Test read only
 // Based on cthon/basic/test5b.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define BUFSZ 8192

@@ -11,6 +11,7 @@
 // - server's returning bogus file attributes, confusing the client
 // - client and server not propagating "filesystem full" errors
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int   Tflag = 0;

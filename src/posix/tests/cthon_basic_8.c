@@ -11,6 +11,7 @@
 //   lstat()
 //   unlink()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define SNAME "/this/is/a/symlink"

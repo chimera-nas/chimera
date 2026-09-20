@@ -5,6 +5,7 @@
 // Test statvfs for file count
 // Based on cthon/special/fstat.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 #include "common/platform.h"
 #include "posix/posix_types.h"

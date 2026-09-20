@@ -5,6 +5,7 @@
 // Test write only
 // Based on cthon/basic/test5a.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define BUFSZ 8192

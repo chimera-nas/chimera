@@ -7,6 +7,7 @@
 //
 // Verifies that O_CREAT | O_EXCL properly fails with EEXIST on second create
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

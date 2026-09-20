@@ -29,7 +29,7 @@
  * from the same generator.
  */
 
-#include <getopt.h>
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "nfs3_mbt_common.h"

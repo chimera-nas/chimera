@@ -10,6 +10,7 @@
 //   creat()
 //   close()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int Tflag = 0;   // print timing

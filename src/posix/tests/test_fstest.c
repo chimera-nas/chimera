@@ -16,6 +16,7 @@
  * support memory-mapped I/O.
  */
 
+#include "common/getopt.h"
 #include <sys/wait.h>
 #include "posix_test_common.h"
 #include "common/dirent.h"

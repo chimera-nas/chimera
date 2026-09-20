@@ -7,6 +7,7 @@
 //
 // Creates n files in the test directory
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

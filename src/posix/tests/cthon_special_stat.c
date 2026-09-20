@@ -7,6 +7,7 @@
 //
 // Recursively walks a directory tree, statting all entries
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int stats = 0;

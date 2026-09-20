@@ -7,6 +7,7 @@
 //
 // Verifies that ftruncate can both shrink and extend a file
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

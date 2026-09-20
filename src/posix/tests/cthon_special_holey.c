@@ -5,6 +5,7 @@
 // Test read/write of holey (sparse) files
 // Based on cthon/special/holey.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define BUFSZ  8192

@@ -40,7 +40,7 @@
 #else
 #include <unistd.h>
 #endif
-#include <getopt.h>
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "s3_mbt_common.h"

@@ -60,3 +60,7 @@ if(WIN32)
     target_link_libraries(native_file_acl_test PRIVATE advapi32)
     add_test(NAME chimera/native/file_acl COMMAND native_file_acl_test)
 endif()
+
+add_executable(native_getopt_test ../getopt_test.c)
+target_include_directories(native_getopt_test PRIVATE "${CHIMERA_SOURCE_ROOT}/src")
+add_test(NAME chimera/native/getopt COMMAND native_getopt_test)

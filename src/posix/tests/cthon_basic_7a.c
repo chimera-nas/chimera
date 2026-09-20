@@ -5,6 +5,7 @@
 // Test rename only
 // Based on cthon/basic/test7a.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int Tflag = 0;

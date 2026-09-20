@@ -13,6 +13,7 @@
 //   creat()
 //   unlink()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define NFILES 200

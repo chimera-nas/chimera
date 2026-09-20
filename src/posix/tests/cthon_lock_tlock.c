@@ -8,6 +8,7 @@
 // Tests POSIX record locking functionality using fcntl() and lockf()
 //
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 #include <signal.h>
 #include <sys/wait.h>

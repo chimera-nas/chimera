@@ -8,6 +8,7 @@
 // Repeatedly creates, links, and unlinks files to stress test
 // non-idempotent request handling
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

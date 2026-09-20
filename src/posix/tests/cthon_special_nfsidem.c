@@ -8,6 +8,7 @@
 // Performs a sequence of operations to stress test idempotent behavior:
 //   mkdir, create, chmod, rename, link, symlink, unlink, rmdir, stat
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define STRCHARS 100

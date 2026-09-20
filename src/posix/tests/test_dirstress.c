@@ -13,6 +13,7 @@
  * Originally from xfstests, ported to Chimera POSIX userspace API.
  */
 
+#include "common/getopt.h"
 #include <sys/wait.h>
 #include "posix_test_common.h"
 

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/getopt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

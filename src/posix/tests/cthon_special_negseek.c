@@ -7,6 +7,7 @@
 //
 // Verifies that seeking to negative offsets fails properly
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

@@ -16,6 +16,7 @@
  * generates test filenames programmatically for simplicity.
  */
 
+#include "common/getopt.h"
 #include "posix_test_common.h"
 #include <ctype.h>
 #include <limits.h>

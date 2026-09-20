@@ -9,6 +9,7 @@
 // is renamed over it, we can still read/write to the originally
 // opened file.
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define TBUFSIZ 100

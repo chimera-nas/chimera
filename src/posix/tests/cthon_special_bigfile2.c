@@ -9,6 +9,7 @@
 
 #define _LARGEFILE64_SOURCE 1
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define HIGH_WORD(n) ((unsigned int) (((unsigned int) ((n) >> 32)) & 0xffffffff))

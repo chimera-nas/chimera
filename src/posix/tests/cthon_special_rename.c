@@ -5,6 +5,7 @@
 // Test rename a file n times
 // Based on cthon/special/rename.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

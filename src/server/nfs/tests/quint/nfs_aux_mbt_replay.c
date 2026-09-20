@@ -33,7 +33,7 @@
  * details.
  */
 
-#include <getopt.h>
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "nfs_aux_mbt_common.h"

@@ -13,6 +13,7 @@
 //   5. rewind
 //   6. read data back
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define TBUFSIZ 100

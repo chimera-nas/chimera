@@ -7,6 +7,7 @@
 //
 // Creates files in a subdirectory and stats them multiple times
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

@@ -8,6 +8,7 @@
 // Creates files, walks directory with telldir, then uses seekdir
 // to verify cookies work correctly
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int          debug    = 0;

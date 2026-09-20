@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <getopt.h>
+#include "common/getopt.h"
 #undef NDEBUG
 #include <assert.h>
 #ifdef _WIN32
