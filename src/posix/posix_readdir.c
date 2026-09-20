@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -90,6 +90,7 @@ chimera_posix_readdir(CHIMERA_DIR *dirp)
     req.readdir.complete     = chimera_posix_readdir_complete;
     req.readdir.private_data = &ctx;
     req.readdir.handle       = entry->handle;
+    req.readdir.open_flags   = chimera_posix_fd_open_flags(entry);
     req.readdir.cookie       = dirp->cookie;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_readdir_exec);
