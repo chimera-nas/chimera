@@ -33,66 +33,64 @@ chimera_smb_sparse_status(enum chimera_vfs_error error_code)
 /* FSCTL_SET_SPARSE                                                    */
 /* ------------------------------------------------------------------ */
 
-static void
-chimera_smb_set_sparse_setattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
-    chimera_smb_complete_request(request, chimera_smb_sparse_status(error_code));
-} /* chimera_smb_set_sparse_setattr_cb */
+/* The DOS-word read and the DOS-word write in one sequence: the value to set is
+ * a function of the value just read -- the one bit changed, the settable bits
+ * (READONLY/HIDDEN/SYSTEM/ARCHIVE) preserved -- which is exactly what the
+ * gate's argument edit expresses.  Assigned, never accumulated: a re-executed
+ * sequence re-reads and re-derives the same word. */
+#define CHIMERA_SMB_SET_SPARSE_OP_GETATTR 1
+#define CHIMERA_SMB_SET_SPARSE_OP_SETATTR 2
 
 static void
-chimera_smb_set_sparse_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_smb_set_sparse_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
-    uint32_t                    dos;
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *getattr;
+    struct chimera_vfs_compound_op       *setattr;
+    uint32_t                              dos;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
-        chimera_smb_complete_request(request, chimera_smb_sparse_status(error_code));
+    if (index != CHIMERA_SMB_SET_SPARSE_OP_GETATTR ||
+        *status != CHIMERA_VFS_OK) {
         return;
     }
 
-    /* The sparse attribute applies only to data streams: FSCTL_SET_SPARSE on a
-     * directory is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_dir_flag). */
-    if (S_ISDIR(attr->va_mode)) {
-        chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
-        return;
-    }
+    getattr = chimera_vfs_compound_op(compound, index);
+    setattr = chimera_vfs_compound_op_edit(compound,
+                                           CHIMERA_SMB_SET_SPARSE_OP_SETATTR);
 
-    /* Read-modify-write so the SPARSE toggle preserves the settable DOS bits
-     * (READONLY/HIDDEN/SYSTEM/ARCHIVE). */
-    dos = attr->va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
+    dos = getattr->attr.va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
+
     if (request->ioctl.sp_set_sparse) {
         dos |= SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
     }
 
-    memset(&request->ioctl.sp_set_attr, 0, sizeof(request->ioctl.sp_set_attr));
-    request->ioctl.sp_set_attr.va_req_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
-    request->ioctl.sp_set_attr.va_set_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
-    request->ioctl.sp_set_attr.va_dos_attributes = dos;
+    memset(&setattr->set_attr, 0, sizeof(setattr->set_attr));
+    setattr->set_attr.va_req_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    setattr->set_attr.va_set_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    setattr->set_attr.va_dos_attributes = dos;
+} /* chimera_smb_set_sparse_gate */
 
-    chimera_vfs_setattr(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.sp_open_file->handle,
-        &request->ioctl.sp_set_attr,
-        0,
-        0,
-        chimera_smb_set_sparse_setattr_cb,
-        request);
-} /* chimera_smb_set_sparse_getattr_cb */
+/* PUTHANDLE, GETATTR(DOS), SETATTR(in_handle). */
+static void
+chimera_smb_set_sparse_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
+    chimera_smb_complete_request(request, chimera_smb_sparse_status(status));
+} /* chimera_smb_set_sparse_sequence_complete */
 
 void
 chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
@@ -118,15 +116,40 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
         return;
     }
 
+    /* The sparse attribute applies only to data streams: FSCTL_SET_SPARSE on a
+     * directory is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_dir_flag).  The
+     * open already knows what it opened -- which is what every SET_INFO class
+     * with the same "a directory has no data stream" rule asks -- so the type
+     * is settled here rather than vetoed from a mode the sequence read. */
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     request->ioctl.sp_open_file = open_file;
 
-    chimera_vfs_getattr(
-        vfs_thread,
-        &request->session_handle->session->cred,
-        open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        chimera_smb_set_sparse_getattr_cb,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       open_file->handle,
+                                       open_file->open_flags);
+
+    chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                     CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+
+    chimera_vfs_compound_add_setattr(request->vfs_compound,
+                                     open_file->handle,
+                                     &request->ioctl.sp_set_attr,
+                                     0, 0);
+
+    chimera_vfs_compound_set_gate(request->vfs_compound,
+                                  chimera_smb_set_sparse_gate, request);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_set_sparse_sequence_complete,
+                                request);
 } /* chimera_smb_ioctl_set_sparse */
 
 /* ------------------------------------------------------------------ */

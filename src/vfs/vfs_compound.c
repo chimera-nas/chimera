@@ -5190,12 +5190,20 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                 (op->in_handle ||
                  (op->handle_from >= 0 &&
                   target->cache_id != CHIMERA_VFS_OPEN_ID_PATH))) {
+                if (op->have_io_owner) {
+                    chimera_vfs_fsetattr_owned(compound->thread, compound->cred,
+                                               target, &op->set_attr,
+                                               op->pre_attr_mask, op->attr_mask,
+                                               chimera_vfs_compound_setattr_callback,
+                                               compound, &op->io_owner);
+                } else {
                 chimera_vfs_fsetattr(compound->thread, compound->cred,
                                      target,
                                      &op->set_attr,
                                      op->pre_attr_mask, op->attr_mask,
                                      chimera_vfs_compound_setattr_callback,
                                      compound);
+                }
             } else {
                 chimera_vfs_setattr(compound->thread, compound->cred,
                                     target,
