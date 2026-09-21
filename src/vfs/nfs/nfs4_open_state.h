@@ -71,9 +71,9 @@ struct chimera_nfs4_open_state {
  * Counting that here, rather than sharing the whole open state, is what keeps
  * the layout per handle: this holds only what the wire CLOSE needs.
  *
- * Share bits need no such care because every OPEN this client sends asks for
- * SHARE_ACCESS_BOTH / SHARE_DENY_NONE, so an upgrade never widens anything and
- * there is nothing for OPEN_DOWNGRADE to narrow on the way out.
+ * Each OPEN requests its caller's access with SHARE_DENY_NONE.  The server
+ * unions access on upgrades; this client retains that union until the last
+ * close rather than sending OPEN_DOWNGRADE as individual handles depart.
  */
 struct chimera_nfs4_open_file {
     /* All guarded by server->open_state_lock, hash linkage included: the count

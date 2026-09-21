@@ -241,6 +241,7 @@ struct chimera_vfs_mount_options {
 
 #define CHIMERA_VFS_ACCESS_MODE_RW              0
 #define CHIMERA_VFS_ACCESS_MODE_RO              1
+#define CHIMERA_VFS_ACCESS_MODE_WO              2
 
 /* The error CHIMERA_VFS_OPEN_REGULAR_ONLY refuses a non-regular object with.
  * Shared so every module answers the same way; a caller that maps these onto

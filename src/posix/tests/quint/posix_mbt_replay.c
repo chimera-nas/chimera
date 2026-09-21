@@ -19,9 +19,10 @@
  * ext/specs/quint/posix/corpus.schema.json), so the trace's expectation already
  * IS chimera's behaviour and replay is an exact match.  Where the standard
  * permits several answers per call the model emits a sibling <field>Accept set
- * and this file membership-tests it (see accepts()).  There is no registry of
- * forgivable differences here any more -- what remains is the residue named in
- * check_status(): allowances a model branch cannot state.
+ * and this file membership-tests it (see accepts()).  Residual harness
+ * allowances remain in check_status() and the operation/audit checks; see
+ * README.md for their scope and outstanding review.  They apply to strict
+ * replays too, so an empty model deviation list does not imply no allowances.
  */
 
 #define POSIX_DRIVER_ENGINE_ONLY
@@ -220,26 +221,20 @@ static int           g_ndevhits;
 static char          g_exempt[64][256];
 static int           g_nexempt;
 
-/* NFS-loopback divergence containment (ND3/ND4).  When a reconciled
- * divergence makes chimera fail an op the model completed (today: EACCES
- * from the server's directory-search enforcement, which neither the model
- * nor chimera's own resolution -- issue #1771 -- implements), the two sides
- * fall out of sync: a descriptor, stream, or whole file exists on one side
- * only.  Rather than drown the trace in follow-on mismatches, the harness
- * marks what was lost and reconciles exactly the consequences: EBADF on a
- * lost descriptor, ENOENT on a lost file, and attribute/content checks on an
- * inode the model mutated through a lost descriptor.  All tallied, so the
- * masking stays visible per trace; the whole family retires when the specs
- * model grows search-permission semantics. */
-static int         g_lost_fd[R_MAXPID][R_MAXFD];
-static int         g_lost_sid[R_MAXSID];
-static int         g_lost_ino[R_MAXINO];
-static int         g_cur_pid;
-static const char *g_last_recon;    /* deviation id check_status last
+/* Divergence containment (ND4).  If an operation fails after the model
+ * completed it, track the missing descriptor or inode so its consequences do
+ * not obscure the original mismatch.  NFS per-operation DAC (ND6) can also
+ * cause this divergence after a successful open.  Path permission failures
+ * are asserted directly; the model includes directory-search semantics. */
+static int           g_lost_fd[R_MAXPID][R_MAXFD];
+static int           g_lost_sid[R_MAXSID];
+static int           g_lost_ino[R_MAXINO];
+static int           g_cur_pid;
+static const char   *g_last_recon;  /* deviation id check_status last
                                      * reconciled, or NULL              */
-static int         g_cur_step;      /* ITF state index of the op under replay
+static int           g_cur_step;    /* ITF state index of the op under replay
                                      * (0 during the final audit)       */
-static int         g_nquarantine;   /* ND5 quarantine dirs minted this trace */
+static int           g_nquarantine; /* ND5 quarantine dirs minted this trace */
 
 static void
 state_reset(void)
@@ -786,70 +781,14 @@ apply_cred(int pid)
     }
 } /* apply_cred */
 
-/* ---- root redo for reconciled DAC denials -------------------------------- */
+/* ---- privileged audits and residue housekeeping -------------------------- */
 
-/* Re-execute credential: root, with the failing pid's umask left active so a
- * creating redo's mode arithmetic is preserved. */
+/* Privileged credential for audits and NFS residue housekeeping. */
 static void
 apply_root_cred(void)
 {
     chimera_posix_set_cred(&g_root_cred);
 } /* apply_root_cred */
-
-/* True when check_status just reconciled ND3 (a directory-search DAC denial
- * the model does not share) on an op the model COMPLETED.  Chimera refused a
- * mutation the model performed, and the two namespaces are about to drift --
- * so the caller re-executes the exact operation as root, which passes every
- * DAC check, and the sides converge again instead of cascading through the
- * lost-inode machinery. */
-static int
-nd3_redo_wanted(
-    json_t *res_v,
-    int     rc)
-{
-    return rc < 0 && tf_field(res_v, "e") == 0 &&
-           g_last_recon && strcmp(g_last_recon, "ND3") == 0;
-} /* nd3_redo_wanted */
-
-/* A root redo creates nodes owned by root where the model attributes them to
- * the calling credential: align with the model's post-state.  Compares
- * before writing so a pre-existing node is untouched -- even a same-owner
- * chown would bump ctime. */
-static void
-redo_fix_owner(
-    const char *path,
-    json_t     *pth,
-    int         follow)
-{
-    struct stat st;
-    json_t     *node;
-    int64_t     ino, uid, gid;
-
-    if (!g_cur_fs) {
-        return;
-    }
-    ino = path_ino(g_cur_fs, json_object_get(pth, "comps"));
-    if (ino < 0) {
-        return;
-    }
-    node = map_get_int(json_object_get(g_cur_fs, "inodes"), ino);
-    if (!node) {
-        return;
-    }
-    uid = tf_field(node, "uid");
-    gid = tf_field(node, "gid");
-    if ((follow ? chimera_posix_stat(path, &st)
-                : chimera_posix_lstat(path, &st)) != 0) {
-        return;
-    }
-    if ((int64_t) st.st_uid != uid || (int64_t) st.st_gid != gid) {
-        if (follow) {
-            (void) chimera_posix_chown(path, (uid_t) uid, (gid_t) gid);
-        } else {
-            (void) chimera_posix_lchown(path, (uid_t) uid, (gid_t) gid);
-        }
-    }
-} /* redo_fix_owner */
 
 /* True when some exempt path's final component is `name` (see the readdir
  * ND5 use: only the basename is available there). */
@@ -1103,12 +1042,6 @@ check_status(
      *         describing a divergence, so it stays a harness-side allowance
      *         (with the stray-descriptor and O_CREAT-residue bookkeeping that
      *         goes with it).
-     *   PD19  clone_file_range with a source range past EOF: diskfs does not
-     *         validate it and grows the destination.  memfs has since gained
-     *         the check -- and memfs and diskfs replay the SAME cell -- so no
-     *         config can enable it without breaking the other backend.  It
-     *         retires when diskfs validates offSrc+len <= source size in
-     *         clone_range, as memfs does.
      *   SD-DFD-REUSE  a path-only mount (SMB, like cifs.ko) resolves a
      *         dirfd-relative op through the dirfd's interned PATH, not its
      *         inode, so a dirfd whose directory was removed and whose name was
@@ -1149,12 +1082,6 @@ check_status(
         g_last_recon = "PD24";
         return 0;
     }
-    if (actual == 0 && expected == 22 &&
-        strcmp(g_cur_tag, "RCloneRange") == 0) {
-        record_dev("PD19");
-        g_last_recon = "PD19";
-        return 0;
-    }
     if (g_smb && actual == 20 && expected == 2 &&
         tf_field(g_cur_rv, "dfd") != -1 &&
         json_object_get(g_cur_rv, "pth")) {
@@ -1163,29 +1090,6 @@ check_status(
         return 0;
     }
     if (g_strict_dac) {
-        /* ND3: EACCES from directory-search enforcement the model does not
-         * share.  On the NFS loopback the server denies the
-         * component-by-component resolution; on a passthrough backend the
-         * engine's own prefix gate does (chimera_vfs_gate_needed_prefix) --
-         * either way chimera implements search permission where this trace
-         * profile's model does not, so any path-taking op can draw an EACCES
-         * the model maps to another outcome.  Retires when the model grows
-         * search-perm semantics. */
-        if (actual == 13 && expected != 13 &&
-            json_object_get(g_cur_rv, "pth")) {
-            record_dev("ND3");
-            g_last_recon = "ND3";
-            return 0;
-        }
-        /* The same gap in the other direction: the model's EACCES masks
-         * what lies behind an unsearchable directory, while chimera reports
-         * the true state -- typically ENOENT for a name that is not there. */
-        if (expected == 13 && actual == 2 &&
-            json_object_get(g_cur_rv, "pth")) {
-            record_dev("ND3");
-            g_last_recon = "ND3";
-            return 0;
-        }
         /* ND4 consequences of a lost descriptor / lost file (see the g_lost_*
          * block comment): EBADF where the model still holds the descriptor,
          * ENOENT where the model still has the file. */
@@ -1637,32 +1541,8 @@ op_open(
             }
         }
     } else if (tf_field(res_v, "e") == 0 && rc < 0) {
-        int redone = -1;
-        if (g_last_recon && strcmp(g_last_recon, "ND3") == 0) {
-            /* A search-permission denial of an open the model completed:
-             * re-execute as root (see nd3_redo_wanted) so the descriptor --
-             * and, for O_CREAT, the file -- exists on both sides.  The
-             * active umask is still the failing pid's, so a creating open's
-             * mode arithmetic is preserved; the owner is aligned with the
-             * model's post-state afterwards.  I/O through the root-opened
-             * descriptor then succeeds, which is exactly what the model
-             * expects of a descriptor it granted. */
-            apply_root_cred();
-            redone = dfd == -1
-                ? chimera_posix_open(path, flags, tf_field(fl, "mode"))
-                : chimera_posix_openat(rfd(pid, dfd), path, flags,
-                                       tf_field(fl, "mode"));
-            if (redone >= 0) {
-                redo_fix_owner(path, json_object_get(rv, "pth"), 1);
-                set_fd(pid, tf_field(res_v, "fd"), redone);
-            }
-        }
-        if (redone < 0) {
-            /* The model holds a descriptor chimera never obtained: mark it
-             * and the file it names lost, so the consequences reconcile
-             * instead of cascading. */
-            lose_fd(pid, tf_field(res_v, "fd"));
-        }
+        /* Keep following failures attributable to the missing descriptor. */
+        lose_fd(pid, tf_field(res_v, "fd"));
     } else if (tf_field(res_v, "e") != 0 && e == 0 && rc >= 0) {
         /* The model expected this open to fail but chimera minted a
          * descriptor (over the NFS loopback, opens whose expected EACCES the
@@ -1965,12 +1845,7 @@ op_truncate(
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     rc = chimera_posix_truncate(path, (off_t) tf_field(rv, "len"));
     e  = ERRV(rc);
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) chimera_posix_truncate(path, (off_t) tf_field(rv, "len"));
-    }
+    check_status(tf_field(res_v, "e"), e);
     if (tf_field(res_v, "e") == 0) {
         int64_t ino = path_ino(g_cur_fs, json_object_get(
                                    json_object_get(rv, "pth"), "comps"));
@@ -2100,17 +1975,6 @@ op_mkdir(
                                 (mode_t) tf_field(rv, "mode"));
     e = ERRV(rc);
     if (!check_status(tf_field(res_v, "e"), e)) {
-        if (nd3_redo_wanted(res_v, rc)) {
-            /* Redo as root; align the owner with the model (op_open). */
-            apply_root_cred();
-            rc = dfd == -1
-                ? chimera_posix_mkdir(path, (mode_t) tf_field(rv, "mode"))
-                : chimera_posix_mkdirat(rfd(pid, dfd), path,
-                                        (mode_t) tf_field(rv, "mode"));
-            if (rc == 0) {
-                redo_fix_owner(path, json_object_get(rv, "pth"), 1);
-            }
-        }
         if (tf_field(res_v, "e") == 0 && rc < 0 && g_cur_fs) {
             /* The model created this directory behind a reconciled
              * divergence; chimera did not.  Everything under it is lost. */
@@ -2153,13 +2017,6 @@ op_mknod(
     rc = chimera_posix_mknod(path, mode, dev);
     e  = ERRV(rc);
     if (!check_status(tf_field(res_v, "e"), e)) {
-        if (nd3_redo_wanted(res_v, rc)) {
-            apply_root_cred();
-            rc = chimera_posix_mknod(path, mode, dev);
-            if (rc == 0) {
-                redo_fix_owner(path, json_object_get(rv, "pth"), 0);
-            }
-        }
         if (tf_field(res_v, "e") == 0 && rc < 0 && g_cur_fs) {
             int64_t lost_ino = path_ino(g_cur_fs, json_object_get(
                                             json_object_get(rv, "pth"),
@@ -2188,13 +2045,6 @@ op_symlink(
     rc = chimera_posix_symlink(tgt, path);
     e  = ERRV(rc);
     if (!check_status(tf_field(res_v, "e"), e)) {
-        if (nd3_redo_wanted(res_v, rc)) {
-            apply_root_cred();
-            rc = chimera_posix_symlink(tgt, path);
-            if (rc == 0) {
-                redo_fix_owner(path, json_object_get(rv, "pth"), 0);
-            }
-        }
         if (tf_field(res_v, "e") == 0 && rc < 0 && g_cur_fs) {
             int64_t lost_ino = path_ino(g_cur_fs, json_object_get(
                                             json_object_get(rv, "pth"),
@@ -2224,15 +2074,7 @@ op_link(
         ? chimera_posix_linkat(AT_FDCWD, o, AT_FDCWD, n, AT_SYMLINK_FOLLOW)
         : chimera_posix_link(o, n);
     e = ERRV(rc);
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) (tf_bool(rv, "followOld")
-                ? chimera_posix_linkat(AT_FDCWD, o, AT_FDCWD, n,
-                                       AT_SYMLINK_FOLLOW)
-                : chimera_posix_link(o, n));
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_link */
 
 static void
@@ -2254,13 +2096,7 @@ op_unlink(
                        tf_field(res_v, "e"), e)) {
         return;
     }
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) (dfd == -1 ? chimera_posix_unlink(path)
-                          : chimera_posix_unlinkat(rfd(pid, dfd), path, 0));
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_unlink */
 
 static void
@@ -2299,14 +2135,7 @@ op_rmdir(
                        tf_field(res_v, "e"), e)) {
         return;
     }
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) (dfd == -1
-                ? chimera_posix_rmdir(path)
-                : chimera_posix_unlinkat(rfd(pid, dfd), path, AT_REMOVEDIR));
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_rmdir */
 
 static void
@@ -2323,12 +2152,7 @@ op_rename(
     real_path(json_object_get(rv, "pthNew"), n, sizeof(n));
     rc = chimera_posix_rename(o, n);
     e  = ERRV(rc);
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) chimera_posix_rename(o, n);
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_rename */
 
 static void
@@ -2379,17 +2203,7 @@ op_opendir(
         }
     } else if (tf_field(res_v, "e") == 0 && !d) {
         int64_t msid = tf_field(res_v, "sid");
-        if (g_last_recon && strcmp(g_last_recon, "ND3") == 0) {
-            /* Redo as root (see nd3_redo_wanted). */
-            apply_root_cred();
-            d = chimera_posix_opendir(path);
-        }
-        if (d && msid >= 0 && msid < R_MAXSID) {
-            g_dirmap[msid]   = d;
-            g_lost_sid[msid] = 0;
-        } else if (d) {
-            chimera_posix_closedir(d);
-        } else if (msid >= 0 && msid < R_MAXSID) {
+        if (msid >= 0 && msid < R_MAXSID) {
             g_lost_sid[msid] = 1;
         }
     } else if (d) {
@@ -2674,12 +2488,7 @@ op_chmod(
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     rc = chimera_posix_chmod(path, (mode_t) tf_field(rv, "mode"));
     e  = ERRV(rc);
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) chimera_posix_chmod(path, (mode_t) tf_field(rv, "mode"));
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_chmod */
 
 static void
@@ -2713,14 +2522,7 @@ op_chown(
     rc = tf_bool(rv, "follow") ? chimera_posix_chown(path, u, g)
                                : chimera_posix_lchown(path, u, g);
     e = ERRV(rc);
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) (tf_bool(rv, "follow")
-                ? chimera_posix_chown(path, u, g)
-                : chimera_posix_lchown(path, u, g));
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_chown */
 
 static void
@@ -2757,13 +2559,7 @@ op_utimens(
     rc = chimera_posix_utimensat(dfd == -1 ? AT_FDCWD : rfd(pid, dfd),
                                  path, times, 0);
     e = ERRV(rc);
-    if (!check_status(tf_field(res_v, "e"), e) &&
-        nd3_redo_wanted(res_v, rc)) {
-        /* Redo as root (see nd3_redo_wanted). */
-        apply_root_cred();
-        (void) chimera_posix_utimensat(dfd == -1 ? AT_FDCWD : rfd(pid, dfd),
-                                       path, times, 0);
-    }
+    check_status(tf_field(res_v, "e"), e);
 } /* op_utimens */
 
 static void

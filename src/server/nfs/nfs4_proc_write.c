@@ -273,12 +273,11 @@ chimera_nfs4_write(
     }
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        open_state   = state_void;
-        state_handle = open_state->handle;
+        open_state = state_void;
     } else {
-        open_state   = ((struct nfs_lock_state *) state_void)->open_state;
-        state_handle = ((struct nfs_lock_state *) state_void)->handle;
+        open_state = ((struct nfs_lock_state *) state_void)->open_state;
     }
+    state_handle = nfs_state_io_handle(state_void, state_type, OPEN4_SHARE_ACCESS_WRITE);
 
     if (req->minorversion == 0) {
         uint32_t current_seqid = (state_type == NFS4_SLOT_TYPE_OPEN) ?

@@ -112,10 +112,9 @@ static FILE                      *proto_out;
 static const char                *g_module;     /* VFS module (memfs/...)     */
 static int                        g_nfs_version; /* 0 = direct; 3/4 = loopback */
 static int                        g_smb;         /* 1 = SMB2 loopback          */
-static int                        g_strict_dac; /* chimera enforces DAC beyond
-                                                 * the model: NFS loopback or a
-                                                 * passthrough backend (engine
-                                                 * prefix/search gates) */
+static int                        g_strict_dac; /* NFS or passthrough: retain
+                                                 * divergence bookkeeping for
+                                                 * external DAC enforcement. */
 static int                        g_fs_counter; /* bumped per newfs -> fsN     */
 static char                       g_fsname[32] = "fs0";
 static struct chimera_vfs_cred    g_root_cred;

@@ -511,21 +511,20 @@ chimera_nfs4_open_install_state(
                                 args->share_access, args->share_deny,
                                 &req->thread->shared->nfs4_state_table,
                                 out_stateid);
-        /* The coalesced state keeps ONE vfs handle, and every stateid
-         * READ/WRITE/SETATTR runs through it.  When the state was born from
-         * a read-only OPEN, that handle is a read-only open (on a
-         * passthrough backend, literally an O_RDONLY descriptor) -- a
-         * write-share coalesce must adopt this OPEN's write-capable handle
-         * or every subsequent stateid WRITE fails against the read-only
-         * descriptor.  The superseded handle may still be borrowed by
-         * in-flight I/O, so park it on the state rather than releasing it
-         * here; open_state_cleanup releases it with the state. */
-        if (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RW &&
-            existing->handle &&
+        /* Keep the write-capable handle as the primary handle.  A separate
+         * read-only handle must survive when the primary is write-only: the
+         * union of two OPEN grants does not turn an O_WRONLY host fd into
+         * O_RDWR.  Retain both until state cleanup, also protecting in-flight
+         * I/O that borrowed the old handle before this upgrade. */
+        if (existing->handle && !existing->handle_superseded &&
             existing->handle->access_mode != CHIMERA_VFS_ACCESS_MODE_RW &&
-            !existing->handle_superseded) {
-            existing->handle_superseded = existing->handle;
-            existing->handle            = handle;
+            handle->access_mode != existing->handle->access_mode) {
+            if (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RO) {
+                existing->handle_superseded = handle;
+            } else {
+                existing->handle_superseded = existing->handle;
+                existing->handle            = handle;
+            }
         } else {
             chimera_vfs_release(req->thread->vfs_thread, handle);
         }
