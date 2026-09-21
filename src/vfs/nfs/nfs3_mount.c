@@ -175,6 +175,7 @@ chimera_mount_mountd_mnt_callback(
 
     request->mount.r_mount_private = mount;
 
+    evpl_mutex_lock(&shared->lock);
     mount->status = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTED;
     evpl_mutex_unlock(&shared->lock);
 
