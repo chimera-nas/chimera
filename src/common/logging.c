@@ -547,10 +547,33 @@ chimera_crash_handler(int signum)
     raise(signum);
 } /* chimera_crash_handler */
 
+#ifdef _WIN32
+static LONG WINAPI
+chimera_windows_exception(EXCEPTION_POINTERS *exception)
+{
+    HMODULE module  = NULL;
+    void   *address = exception->ExceptionRecord->ExceptionAddress;
+    char    path[MAX_PATH];
+
+    fprintf(stderr, "Unhandled Windows exception 0x%08lx at %p\n",
+            exception->ExceptionRecord->ExceptionCode, address);
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR) address, &module) &&
+        GetModuleFileNameA(module, path, sizeof(path))) {
+        fprintf(stderr, "Fault location: %s + 0x%llx\n", path,
+                (unsigned long long) ((uintptr_t) address - (uintptr_t) module));
+    }
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+} /* chimera_windows_exception */
+#endif /* ifdef _WIN32 */
+
 SYMBOL_EXPORT void
 chimera_enable_crash_handler(void)
 {
 #ifdef _WIN32
+    SetUnhandledExceptionFilter(chimera_windows_exception);
     signal(SIGSEGV, chimera_crash_handler);
     signal(SIGFPE, chimera_crash_handler);
     signal(SIGILL, chimera_crash_handler);

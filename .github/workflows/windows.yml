@@ -97,6 +97,28 @@ jobs:
           key: vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
       - name: Build server
         run: cmake --build build --target chimera --config ${{ matrix.config }} --parallel 4
+      # Fail common runtime paths before spending time generating the full
+      # model corpus. The full suite below remains the final gate.
+      - name: Build application smoke tests
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4 --target vfs_kv_test vfs_notify_test vfs_claim_test vfs_umount_wait_test diskfs_smoke_test vfs_clone_range_test vfs_zerorange_test client_read_into s3_mbt_probe posix_test_mknod
+      - name: Test application smoke paths
+        id: smoke
+        continue-on-error: true
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --parallel 4 --timeout 60 --output-junit smoke-results.xml -R 'chimera/(daemon/native_lifecycle|server/mount_create|vfs/(kv_test|notify_test|claim_test|umount_wait_test|diskfs/smoke_test|clone_range_test|zerorange_memfs)|server/s3/mbt/probe_memfs|posix/mknod_nfs3_memfs|client/read_into)$'
+      - name: Upload smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-smoke-${{ matrix.arch }}-${{ matrix.config }}
+          path: |
+            build/smoke-results.xml
+            build/Testing/Temporary/
+            build/**/*.debug.log
+            build/**/*.map
+          if-no-files-found: ignore
+      - name: Require application smoke tests
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1
       - name: Build tests and SDK example
         run: cmake --build build --config ${{ matrix.config }} --parallel 4
       - name: Test native backends
@@ -109,4 +131,7 @@ jobs:
           path: |
             build/results.xml
             build/Testing/Temporary/
+            build/**/*.debug.log
+            build/**/*.metrics.prom
+            build/**/*.map
           if-no-files-found: ignore

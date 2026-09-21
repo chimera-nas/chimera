@@ -94,6 +94,7 @@ mbt_debug_log_start(void)
 
     chimera_log_set_file(fp);
     chimera_log_init();
+    chimera_enable_crash_handler();
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 } /* mbt_debug_log_start */
 
