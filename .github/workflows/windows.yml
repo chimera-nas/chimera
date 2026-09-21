@@ -82,13 +82,22 @@ jobs:
           Invoke-WebRequest https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip -OutFile $archive
           if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135') { throw 'WinFlexBison checksum mismatch' }
           Expand-Archive $archive "$env:RUNNER_TEMP/winflexbison"
+      # Model traces depend on the generator, models and cell configuration,
+      # not on the C implementation being tested. Only an exact input match
+      # can reuse them; configure still validates every registered cell.
+      - uses: actions/cache/restore@v4
+        id: corpus-cache
+        with:
+          path: build/specs-corpus
+          key: windows-specs-v1-${{ matrix.arch }}-${{ hashFiles('ext/specs/.quint-version', 'ext/specs/CMakeLists.txt', 'ext/specs/cmake/**', 'ext/specs/quint/**', 'ext/specs/tools/**', 'src/**/quint/configs/**', 'src/**/CMakeLists.txt', 'CMakeLists.txt', 'cmake/**', 'vcpkg.json', '.github/workflows/windows.yml') }}
       - name: Configure native Windows with dependencies
         shell: pwsh
         run: |
           & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
+          $prebuiltCorpus = if ('${{ steps.corpus-cache.outputs.cache-hit }}' -eq 'true') { 'ON' } else { 'OFF' }
+          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DSPECS_CORPUS_PREBUILT=$prebuiltCorpus" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/cache/save@v4
         if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -121,6 +130,11 @@ jobs:
         run: exit 1
       - name: Build tests and SDK example
         run: cmake --build build --config ${{ matrix.config }} --parallel 4
+      - uses: actions/cache/save@v4
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        with:
+          path: build/specs-corpus
+          key: ${{ steps.corpus-cache.outputs.cache-primary-key }}
       - name: Test native backends
         run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --parallel 4 --timeout 300 --output-junit results.xml
       - name: Upload test results
