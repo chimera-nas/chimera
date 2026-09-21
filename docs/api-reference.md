@@ -172,7 +172,10 @@ curl -X DELETE http://localhost:8080/api/v1/users/alice
 
 ## NFS Exports
 
-NFS exports map an export name to a VFS path served over NFSv3/NFSv4.
+NFS exports map an export name to a VFS path served over NFSv3/NFSv4. An
+export name must be a single path component (`"/share"` or `"share"`), or
+`"/"` for the root export; a nested name such as `"/a/b"` is rejected
+because the NFSv4 pseudo-root could not present it to clients.
 
 ### List exports
 
@@ -256,10 +259,11 @@ POST /api/v1/exports
 { "message": "Export created" }
 ```
 
-**Errors:** `400` (invalid JSON, missing `name`/`path`, out-of-range
-`export_id`, an unrecognized `access`/`squash` value, a non-integer or
-out-of-range `anonuid`/`anongid`, a malformed `sec` array or unknown sec
-flavor, or the legacy `options` field), `409` (export name or `export_id`
+**Errors:** `400` (invalid JSON, missing `name`/`path`, a `name` that is not
+a single path component, out-of-range `export_id`, an unrecognized
+`access`/`squash` value, a non-integer or out-of-range `anonuid`/`anongid`,
+a malformed `sec` array or unknown sec flavor, or the legacy `options`
+field), `409` (export name or `export_id`
 already in use, or the `nfs_max_exports` limit is reached), `500`
 (creation failed).
 

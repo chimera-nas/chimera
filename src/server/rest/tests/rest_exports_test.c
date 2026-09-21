@@ -17,6 +17,8 @@
  *   7. Auto-assignment skips slots pinned by explicit ids
  *   8. Delete frees the id so it can be pinned again
  *   9. Missing required fields return 400; a duplicate name returns 409
+ *  9b. A multi-component, trailing-slash or empty export name returns 400
+ *      and creates nothing
  *  10. The access mode round-trips; the legacy "options" key and invalid
  *      access/squash/anonuid/anongid values are rejected with 400 rather
  *      than silently ignored; squash aliases are accepted
@@ -457,6 +459,43 @@ main(
                         "POST", "/api/v1/exports",
                         "{\"name\":\"exp1b\",\"path\":\"/share\"}",
                         409, "already exists", 1, &failures);
+
+    /* ===== Test 9b: export name shape =====
+     * The NFSv4 pseudo-root presents each export as one directory entry and
+     * clients walk paths one component at a time, so a multi-component name
+     * would be created but unreachable: LOOKUP of the first component finds
+     * no export and the pseudo-root listing skips the entry.  Reject the
+     * name at creation rather than publishing an unmountable export.  (The
+     * "/" root export names the namespace root itself rather than an entry
+     * within it and stays valid; the root-export suites cover it, and this
+     * endpoint cannot address it anyway -- an empty path parameter does not
+     * match the route.) */
+    fprintf(stderr, "\n  Test: export name shape...\n");
+    check_body_contains("Multi-component name returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"/a/b\",\"path\":\"/share\"}",
+                        400, "single path component", 1, &failures);
+
+    /* Query the name exactly as posted (the extra slash puts "/a/b" in the
+     * path parameter): asking for "a/b" would 404 even when the export was
+     * created, and would not catch the export being published. */
+    check_code("Rejected export /a/b does not exist (404)",
+               "GET", "/api/v1/exports//a/b", NULL, 404, &failures);
+
+    check_body_contains("Multi-component name without leading slash returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"a/b\",\"path\":\"/share\"}",
+                        400, "single path component", 1, &failures);
+
+    check_body_contains("Trailing slash in name returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"/trail/\",\"path\":\"/share\"}",
+                        400, "single path component", 1, &failures);
+
+    check_body_contains("Empty name returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"\",\"path\":\"/share\"}",
+                        400, "single path component", 1, &failures);
 
     /* ===== Test 10: access mode round-trip; legacy "options" rejected ===== */
     fprintf(stderr, "\n  Test: access mode round-trip and legacy key...\n");

@@ -221,6 +221,14 @@ becomes visible in the Chimera namespace at `/<name>`.
 An object keyed by export name. Each export publishes a VFS path
 (`/<mount-name>[/subdir]`) over NFSv3/NFSv4.
 
+An export name must be a single path component -- `"/share"` (or `"share"`)
+-- or `"/"` for the root export. A nested name such as `"/a/b"` fails
+startup: the NFSv4 pseudo-root publishes one directory entry per export and
+clients walk a path one component at a time, so there is no `a` to walk
+through and the export would be unmountable and invisible (RFC 7530
+section 7.7). To serve a nested namespace, export `"/"` over a directory
+tree instead; its intermediate directories are real and walkable.
+
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | required | VFS path to export; a missing or non-string value fails startup. |
