@@ -146,7 +146,8 @@ chimera_posix_openat(
         return -1;
     }
 
-    posix->fds[fd].ofd->oflags = (unsigned int) flags;
+    posix->fds[fd].ofd->oflags    = (unsigned int) flags;
+    posix->fds[fd].ofd->file_type = req.sync_open_type;
 
     return fd;
 } /* chimera_posix_openat */

@@ -45,6 +45,24 @@ target_include_directories(posix_mbt_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(posix_mbt_replay
     chimera_posix chimera_client chimera_server chimera_metrics jansson)
 
+add_executable(unlinkat_dirfd_probe unlinkat_dirfd_probe.c)
+target_include_directories(unlinkat_dirfd_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(unlinkat_dirfd_probe
+    chimera_posix chimera_client chimera_server chimera_metrics jansson)
+set(unlinkat_dirfd_backends memfs nfs3_memfs nfs4_memfs)
+if(CHIMERA_LINUX)
+    list(APPEND unlinkat_dirfd_backends nfs3_linux nfs4_linux)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    list(APPEND unlinkat_dirfd_backends nfs3_io_uring nfs4_io_uring)
+endif()
+foreach(backend ${unlinkat_dirfd_backends})
+    add_test(NAME chimera/posix/mbt/unlinkat_dirfd_${backend}
+        COMMAND $<TARGET_FILE:unlinkat_dirfd_probe> ${backend})
+    set_tests_properties(chimera/posix/mbt/unlinkat_dirfd_${backend} PROPERTIES
+        LABELS "quint;posix_mbt" SKIP_RETURN_CODE 77 TIMEOUT 60)
+endforeach()
+
 # Ground-truth probe for the SMB2 loopback.  Corpus-free (a fixed script, not a
 # model replay), so it runs whether or not a trace bundle is available -- and it
 # is what actually executes src/vfs/smb in the quick tier while the MBT batch

@@ -702,6 +702,9 @@ struct chimera_vfs_request {
              * set_attr (a non-create open) -- open_at requires a non-NULL
              * set_attr that the backend only consults when creating. */
             struct chimera_vfs_attrs        scratch_set_attr;
+            /* Lookup result retained through the asynchronous non-create
+             * open so the caller receives the opened object's attributes. */
+            struct chimera_vfs_attrs        r_attr;
         } open;
 
         struct {
