@@ -1588,18 +1588,12 @@ test_midbreak_deepen_one_epoch(void)
     CHECK(rec.fired == 1, "mid-break write sends no new notification");
     CHECK(grant->epoch == epoch0 + 1, "mid-break write bumps no epoch");
 
-    /* Ack RH: the deepened floor drives the cascade on, RH -> R, same
-     * epoch. */
+    /* Ack RH: the pending write deepened the floor to NONE. Notify that
+     * floor directly, retaining the epoch of the original break event. */
     chimera_vfs_claim_ack(&grant->claim, CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H);
-    CHECK(rec.fired == 2 && rec.last_needed_mode == CHIMERA_CLAIM_CR,
-          "ack drives RH -> R (cascade continues to the deepened floor)");
+    CHECK(rec.fired == 2 && rec.last_needed_mode == 0,
+          "ack drives RH -> NONE at the deepened floor");
     CHECK(grant->epoch == epoch0 + 1, "cascade step keeps the epoch");
-
-    /* Ack R: R -> NONE, same epoch. */
-    chimera_vfs_claim_ack(&grant->claim, CHIMERA_CLAIM_CR);
-    CHECK(rec.fired == 3 && rec.last_needed_mode == 0,
-          "ack drives R -> NONE");
-    CHECK(grant->epoch == epoch0 + 1, "final step keeps the epoch");
 
     /* Final settle at NONE -> ACKED (inert). */
     chimera_vfs_claim_ack(&grant->claim, 0);
@@ -1725,6 +1719,7 @@ main(
     (void) argv;
 
     ChimeraLogLevel = CHIMERA_LOG_INFO;
+    chimera_vfs_clock_init();
 
     test_init_destroy();
     test_file_state_lookup();

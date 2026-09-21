@@ -1148,6 +1148,7 @@ main(
     (void) argv;
 
     ChimeraLogLevel = CHIMERA_LOG_INFO;
+    chimera_vfs_clock_init();
 
     /* Required for the RPL cache test — its insert/invalidate paths
      * use call_rcu which relies on the URCU thread registry. */
