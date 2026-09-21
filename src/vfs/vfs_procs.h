@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include "vfs.h"
+#include "vfs_kv.h"
 
 struct evpl_iovec;
 
@@ -862,99 +863,6 @@ chimera_vfs_link_at(
     struct chimera_vfs_open_handle *op_handle,
     chimera_vfs_link_at_callback_t  callback,
     void                           *private_data);
-
-/* Key-Value Operations */
-
-void
-chimera_vfs_put_key(
-    struct chimera_vfs_thread     *thread,
-    const void                    *key,
-    uint32_t                       key_len,
-    const void                    *value,
-    uint32_t                       value_len,
-    chimera_vfs_put_key_callback_t callback,
-    void                          *private_data);
-
-/* fh-routed put: store a key/value associated with the backend serving `fh`
- * (used to persist handle-state for backends without native KV; see
- * chimera_vfs_kv_route_fh). */
-void
-chimera_vfs_put_key_at(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const void                    *key,
-    uint32_t                       key_len,
-    const void                    *value,
-    uint32_t                       value_len,
-    chimera_vfs_put_key_callback_t callback,
-    void                          *private_data);
-
-void
-chimera_vfs_get_key(
-    struct chimera_vfs_thread     *thread,
-    const void                    *key,
-    uint32_t                       key_len,
-    chimera_vfs_get_key_callback_t callback,
-    void                          *private_data);
-
-/* True if a handle-state record can be persisted for an open on `handle`'s
- * backend: either the backend persists it atomically (CAP_ATOMIC_HANDLE_STATE)
- * or a default KV module is configured to hold it.  Used by the SMB server to
- * decide whether a durable/persistent open can be granted. */
-int
-chimera_vfs_can_persist_handle_state(
-    struct chimera_vfs_thread      *thread,
-    struct chimera_vfs_open_handle *handle);
-
-void
-chimera_vfs_delete_key(
-    struct chimera_vfs_thread        *thread,
-    const void                       *key,
-    uint32_t                          key_len,
-    chimera_vfs_delete_key_callback_t callback,
-    void                             *private_data);
-
-/* fh-routed variants: operate on the backend serving `fh` rather than the
- * global kv_module (used for per-share handle-state records). */
-void
-chimera_vfs_delete_key_at(
-    struct chimera_vfs_thread        *thread,
-    const struct chimera_vfs_cred    *cred,
-    const void                       *fh,
-    int                               fhlen,
-    const void                       *key,
-    uint32_t                          key_len,
-    chimera_vfs_delete_key_callback_t callback,
-    void                             *private_data);
-
-void
-chimera_vfs_search_keys(
-    struct chimera_vfs_thread         *thread,
-    const void                        *start_key,
-    uint32_t                           start_key_len,
-    const void                        *end_key,
-    uint32_t                           end_key_len,
-    uint32_t                           flags,
-    chimera_vfs_search_keys_callback_t callback,
-    chimera_vfs_search_keys_complete_t complete,
-    void                              *private_data);
-
-void
-chimera_vfs_search_keys_at(
-    struct chimera_vfs_thread         *thread,
-    const struct chimera_vfs_cred     *cred,
-    const void                        *fh,
-    int                                fhlen,
-    const void                        *start_key,
-    uint32_t                           start_key_len,
-    const void                        *end_key,
-    uint32_t                           end_key_len,
-    uint32_t                           flags,
-    chimera_vfs_search_keys_callback_t callback,
-    chimera_vfs_search_keys_complete_t complete,
-    void                              *private_data);
 
 typedef void (*chimera_vfs_allocate_callback_t)(
     enum chimera_vfs_error    error_code,

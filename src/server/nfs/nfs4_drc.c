@@ -14,7 +14,7 @@
 #include "nfs_internal.h"
 #include "nfs_kv_keys.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 
 #define NFS4_DRC_SESSION_MAGIC   0x3153534Eu /* "NSS1" */
 /* Bumped from "NRP1" when the cached bytes changed from the whole on-wire

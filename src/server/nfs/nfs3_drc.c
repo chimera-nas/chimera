@@ -14,7 +14,7 @@
 #include "nfs_drc_reply.h"
 #include "nfs4_lease.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_program.h"

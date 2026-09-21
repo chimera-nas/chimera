@@ -32,7 +32,7 @@
 #include "smb_internal.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_compound.h"
 

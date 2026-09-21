@@ -21,7 +21,7 @@
 #include "smb_string.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/vfs_notify.h"
