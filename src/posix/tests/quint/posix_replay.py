@@ -444,7 +444,7 @@ class Replayer:
             # PD16: memfs creates symlinks with mode 0755; POSIX/Linux use
             # 0777 (and never consult it).  Skip the mode check for links.
             pass
-        elif res.get("mode") != rv["mode"]:
+        elif res.get("mode") not in (rv["mode"], rv["mode"] + rv.get("optionalSetids", 0)):
             mism.append(f"mode: expected {rv['mode']:#o}, "
                         f"got {res.get('mode', 0):#o}")
         if res.get("uid") != rv["uid"]:
@@ -1200,7 +1200,8 @@ class Replayer:
                     mism.append(f"audit: {cpath}: ftype "
                                 f"{st.get('ftype')} != {FTYPE_MAP[ftag]}")
                     continue
-                if ftag != "FLnk" and st.get("mode") != cnode["mode"]:
+                if ftag != "FLnk" and st.get("mode") not in (
+                        cnode["mode"], cnode["mode"] + cnode.get("optionalSetids", 0)):
                     mism.append(f"audit: {cpath}: mode "
                                 f"{st.get('mode', 0):#o} != "
                                 f"{cnode['mode']:#o}")

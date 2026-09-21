@@ -5,10 +5,13 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include "vfs/vfs.h"
+#include "nfs_internal.h"
+#include <xxhash.h>
 
 /*
  * NFS3 Open State
@@ -22,13 +25,16 @@
  */
 
 struct chimera_nfs3_open_state {
-    uint8_t                 server_index; /* NFS server index for dispatch routing */
-    atomic_int              dirty; /* Count of uncommitted unstable writes */
-    int                     silly_renamed; /* File has been silly renamed */
-    uint8_t                 dir_fh_len; /* Directory fh for silly remove on close */
-    uint8_t                 dir_fh[CHIMERA_VFS_FH_SIZE];
-    uint8_t                 file_fh_len; /* File fh -> silly name for remove on close */
-    uint8_t                 file_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                         server_index; /* Common NFS3/NFS4 dispatch prefix. */
+    struct chimera_nfs_shared      *shared;
+    struct chimera_nfs3_open_state *next;
+    unsigned int                    bucket;
+    atomic_int                      dirty; /* Count of uncommitted unstable writes */
+    int                             silly_renamed; /* File has been silly renamed */
+    uint8_t                         dir_fh_len; /* Directory fh for silly remove on close */
+    uint8_t                         dir_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                         file_fh_len; /* File fh -> silly name for remove on close */
+    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
 
     /*
      * Credentials for silly remove on close.
@@ -36,19 +42,22 @@ struct chimera_nfs3_open_state {
      * NOT from the original open. They are used ONLY for the silly remove RPC
      * when the file is finally closed.
      */
-    struct chimera_vfs_cred silly_remove_cred;
+    struct chimera_vfs_cred         silly_remove_cred;
 
     /*
      * The credential that opened this handle.  POSIX binds I/O rights at
      * open(2); NFS3 is stateless and the server re-checks DAC on every READ /
      * WRITE with whatever credential the RPC carries.  Issuing I/O with the
      * opening credential (exactly what the Linux kernel client's open context
-     * does) keeps a descriptor usable by the process that legitimately opened
-     * it, regardless of who calls or what chmod happened since.
+     * does) preserves the opening identity. Non-owners still face current
+     * server DAC after chmod; an owner's I/O uses the server owner override.
      */
-    int                     open_cred_valid;
-    struct chimera_vfs_cred open_cred;
+    int                             open_cred_valid;
+    struct chimera_vfs_cred         open_cred;
 };
+
+_Static_assert(offsetof(struct chimera_nfs3_open_state, server_index) == 0,
+               "NFS close dispatch requires server_index at offset zero");
 
 /*
  * Convert a file handle to a silly rename name.
@@ -93,13 +102,23 @@ chimera_nfs3_silly_name_from_fh(
  * Allocate and initialize a new open state.
  */
 static inline struct chimera_nfs3_open_state *
-chimera_nfs3_open_state_alloc(void)
+chimera_nfs3_open_state_alloc(
+    struct chimera_nfs_shared *shared,
+    const uint8_t             *fh,
+    int                        fh_len)
 {
     struct chimera_nfs3_open_state *state;
 
     state = calloc(1, sizeof(*state));
     if (state) {
         atomic_init(&state->dirty, 0);
+        state->shared      = shared;
+        state->file_fh_len = fh_len;
+        memcpy(state->file_fh, fh, fh_len);
+        state->bucket = XXH3_64bits(fh, fh_len) & 255;
+        pthread_mutex_lock(&shared->nfs3_open_lock);
+        LL_PREPEND(shared->nfs3_open_states[state->bucket], state);
+        pthread_mutex_unlock(&shared->nfs3_open_lock);
     }
 
     return state;
@@ -173,10 +192,19 @@ chimera_nfs3_open_state_mark_silly(
     int                             file_fh_len,
     const struct chimera_vfs_cred  *cred)
 {
-    if (state->silly_renamed) {
-        return -1;
-    }
+    struct chimera_nfs_shared      *shared = state->shared;
+    struct chimera_nfs3_open_state *other;
 
+    pthread_mutex_lock(&shared->nfs3_open_lock);
+    LL_FOREACH(shared->nfs3_open_states[state->bucket], other)
+    {
+        if (other->file_fh_len == file_fh_len &&
+            memcmp(other->file_fh, file_fh, file_fh_len) == 0 &&
+            other->silly_renamed) {
+            pthread_mutex_unlock(&shared->nfs3_open_lock);
+            return -1;
+        }
+    }
     state->silly_renamed = 1;
     state->dir_fh_len    = dir_fh_len;
     memcpy(state->dir_fh, dir_fh, dir_fh_len);
@@ -190,5 +218,34 @@ chimera_nfs3_open_state_mark_silly(
         memset(&state->silly_remove_cred, 0, sizeof(state->silly_remove_cred));
     }
 
+    pthread_mutex_unlock(&shared->nfs3_open_lock);
     return 1;
 } /* chimera_nfs3_open_state_mark_silly */
+
+/* The name pins the file, not one cached open. Transfer its cleanup to another
+ * open until the final backend handle closes; otherwise evicting an idle
+ * credential/access variant can unlink a file still used by another handle. */
+static inline void
+chimera_nfs3_open_state_detach(struct chimera_nfs3_open_state *state)
+{
+    struct chimera_nfs_shared      *shared = state->shared;
+    struct chimera_nfs3_open_state *other;
+
+    pthread_mutex_lock(&shared->nfs3_open_lock);
+    LL_DELETE(shared->nfs3_open_states[state->bucket], state);
+    if (state->silly_renamed) {
+        LL_FOREACH(shared->nfs3_open_states[state->bucket], other)
+        {
+            if (other->file_fh_len == state->file_fh_len &&
+                memcmp(other->file_fh, state->file_fh, state->file_fh_len) == 0) {
+                other->silly_renamed = 1;
+                other->dir_fh_len    = state->dir_fh_len;
+                memcpy(other->dir_fh, state->dir_fh, state->dir_fh_len);
+                other->silly_remove_cred = state->silly_remove_cred;
+                state->silly_renamed     = 0;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared->nfs3_open_lock);
+} /* chimera_nfs3_open_state_detach */

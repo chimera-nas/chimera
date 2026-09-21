@@ -88,6 +88,150 @@ test_write_only_permissions(struct posix_test_env *env)
     }
 } /* test_write_only_permissions */
 
+/* NFSv4 CLAIM_FH must bind rights at OPEN, including for a non-owner. */
+static void
+test_open_rights_after_chmod(struct posix_test_env *env)
+{
+    struct chimera_vfs_cred reader;
+    int                     fd, denied;
+    char                    byte;
+
+    if (strncmp(env->backend, "smb", 3) == 0) {
+        return;
+    }
+    fd = chimera_posix_open("/test/held_rights", O_CREAT | O_RDWR, 0666);
+    if (fd < 0 || chimera_posix_write(fd, "x", 1) != 1 ||
+        chimera_posix_fchmod(fd, 0666) != 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+    chimera_vfs_cred_init_unix(&reader, env->cred.uid == 12345 ? 12346 : 12345,
+                               12345, 0, NULL);
+    chimera_posix_set_cred(&reader);
+    fd = chimera_posix_open("/test/held_rights", O_RDWR, 0);
+    if (fd < 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&env->cred);
+    if (chimera_posix_chmod("/test/held_rights", 0000) != 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&reader);
+    if (env->nfs_version == 3) {
+        if (chimera_posix_read(fd, &byte, 1) != -1 || errno != EACCES ||
+            chimera_posix_write(fd, "y", 1) != -1 || errno != EACCES ||
+            chimera_posix_ftruncate(fd, 0) != -1 || errno != EACCES) {
+            fprintf(stderr, "stateless NFS I/O bypassed current DAC\n");
+            posix_test_fail(env);
+        }
+    } else if (chimera_posix_read(fd, &byte, 1) != 1 || byte != 'x' ||
+               chimera_posix_write(fd, "y", 1) != 1) {
+        fprintf(stderr, "chmod revoked an existing descriptor's I/O rights\n");
+        posix_test_fail(env);
+    }
+    denied = chimera_posix_open("/test/held_rights", O_RDWR, 0);
+    if (denied != -1 || errno != EACCES) {
+        fprintf(stderr, "new open reused rights granted before chmod\n");
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+    chimera_posix_set_cred(&env->cred);
+    if (chimera_posix_unlink("/test/held_rights") != 0) {
+        posix_test_fail(env);
+    }
+} /* test_open_rights_after_chmod */
+
+/* A denied unlink must not leave a phantom silly rename. Keep a second open
+ * alive when the first closes so cleanup cannot remove its backing name. */
+static void
+test_failed_unlink_then_open_io(struct posix_test_env *env)
+{
+    struct chimera_vfs_cred other;
+    struct stat             st;
+    char                    byte;
+    int                     first, second;
+
+    if (strncmp(env->backend, "smb", 3) == 0) {
+        return;
+    }
+    if (chimera_posix_mkdir("/test/unlink_rights", 0777) != 0 ||
+        chimera_posix_chmod("/test/unlink_rights", 0777) != 0) {
+        posix_test_fail(env);
+    }
+    first = chimera_posix_open("/test/unlink_rights/file", O_CREAT | O_RDWR, 0666);
+    if (first < 0 || chimera_posix_write(first, "x", 1) != 1 ||
+        chimera_posix_fchmod(first, 0666) != 0) {
+        posix_test_fail(env);
+    }
+    chimera_vfs_cred_init_unix(&other, env->cred.uid == 12345 ? 12346 : 12345,
+                               12345, 0, NULL);
+    chimera_posix_set_cred(&other);
+    second = chimera_posix_open("/test/unlink_rights/file", O_RDONLY, 0);
+    if (second < 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&env->cred);
+    if (chimera_posix_chmod("/test/unlink_rights", 0755) != 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&other);
+    if (chimera_posix_unlink("/test/unlink_rights/file") != -1 || errno != EACCES) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&env->cred);
+    if (chimera_posix_unlink("/test/unlink_rights/file") != 0 ||
+        chimera_posix_fstat(first, &st) != 0 ||
+        (env->nfs_version == 3 && st.st_nlink != 1)) {
+        fprintf(stderr, "failed unlink poisoned the later silly rename\n");
+        posix_test_fail(env);
+    }
+    chimera_posix_close(first);
+    chimera_posix_set_cred(&other);
+    if (chimera_posix_read(second, &byte, 1) != 1 || byte != 'x') {
+        fprintf(stderr, "closing another open invalidated the remaining descriptor\n");
+        posix_test_fail(env);
+    }
+    chimera_posix_close(second);
+    chimera_posix_set_cred(&env->cred);
+} /* test_failed_unlink_then_open_io */
+
+static void
+test_directory_read_after_chmod(struct posix_test_env *env)
+{
+    struct chimera_vfs_cred other;
+    int                     fd;
+    char                    byte;
+
+    if (strncmp(env->backend, "smb", 3) == 0) {
+        return;
+    }
+    if (chimera_posix_mkdir("/test/read_directory", 0777) != 0 ||
+        chimera_posix_chmod("/test/read_directory", 0777) != 0) {
+        posix_test_fail(env);
+    }
+    chimera_vfs_cred_init_unix(&other, env->cred.uid == 12345 ? 12346 : 12345,
+                               12345, 0, NULL);
+    chimera_posix_set_cred(&other);
+    fd = chimera_posix_open("/test/read_directory", O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&env->cred);
+    if (chimera_posix_chmod("/test/read_directory", 0) != 0) {
+        posix_test_fail(env);
+    }
+    chimera_posix_set_cred(&other);
+    if (chimera_posix_read(fd, &byte, 1) != -1 || errno != EISDIR) {
+        fprintf(stderr, "directory read did not report EISDIR after chmod: %s\n", strerror(errno));
+        posix_test_fail(env);
+    }
+    chimera_posix_close(fd);
+    chimera_posix_set_cred(&env->cred);
+    if (chimera_posix_rmdir("/test/read_directory") != 0) {
+        posix_test_fail(env);
+    }
+} /* test_directory_read_after_chmod */
+
 int
 main(
     int    argc,
@@ -139,6 +283,9 @@ main(
 
     test_access_modes(&env);
     test_write_only_permissions(&env);
+    test_open_rights_after_chmod(&env);
+    test_failed_unlink_then_open_io(&env);
+    test_directory_read_after_chmod(&env);
 
     fprintf(stderr, "openat tests passed\n");
 

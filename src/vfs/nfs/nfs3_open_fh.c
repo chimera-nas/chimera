@@ -15,7 +15,7 @@ chimera_nfs3_open_fh(
     struct chimera_nfs3_open_state *state;
 
     /* Allocate open state for dirty tracking and silly rename support */
-    state = chimera_nfs3_open_state_alloc();
+    state = chimera_nfs3_open_state_alloc(shared, request->fh, request->fh_len);
 
     if (!state) {
         request->status = CHIMERA_VFS_EFAULT;

@@ -6,6 +6,10 @@ add_executable(vfs_user_cache_test vfs_user_cache_test.c)
 target_link_libraries(vfs_user_cache_test chimera_vfs)
 add_test(chimera/vfs/user_cache_test vfs_user_cache_test)
 
+add_executable(vfs_clock_test vfs_clock_test.c)
+target_link_libraries(vfs_clock_test chimera_vfs)
+add_test(chimera/vfs/clock_test vfs_clock_test)
+
 add_executable(vfs_kv_test vfs_kv_test.c)
 target_link_libraries(vfs_kv_test chimera_vfs chimera_vfs_memkv evpl)
 if (SQLITE_ENABLED)

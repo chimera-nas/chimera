@@ -301,8 +301,16 @@ chimera_vfs_read_gate_complete(
         return;
     }
 
-    uint32_t                      granted = chimera_vfs_access_check(attr, gate->cred,
-                                                                     CHIMERA_ACE_MASK_ALL);
+    /* A data READ cannot target a directory. Check type before DAC, as
+     * nfsd's fh_verify(S_IFREG) does, even after an open directory is chmod'd. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISDIR(attr->va_mode)) {
+        gate->callback(CHIMERA_VFS_EISDIR, 0, 0, NULL, 0, NULL, gate->private_data);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
+        return;
+    }
+
+    uint32_t granted = chimera_vfs_access_check(attr, gate->cred,
+                                                CHIMERA_ACE_MASK_ALL);
 
     /* Owner override, as Linux nfsd applies to READ/WRITE (NFSD_MAY_OWNER_
      * OVERRIDE): a POSIX caller who OWNS the file may move its data through
