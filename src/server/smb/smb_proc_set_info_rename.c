@@ -65,18 +65,6 @@ chimera_smb_set_info_rename_callback(
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
 
     if (!error_code) {
-        /* Release the sharemode entry keyed by the old name before updating
-         * the path, then re-acquire under the new name below.  Without this,
-         * close would hash the new name and fail to find the entry registered
-         * under the old one, leaking it.
-         *
-         * Only the OPERATING handle is re-keyed, unlike the cached paths
-         * below: nothing calls chimera_smb_sharemode_acquire for a peer any
-         * more -- share arbitration moved to the VFS claim layer -- so a
-         * sibling has no reservation here to move. */
-        chimera_smb_sharemode_release(&request->tree->share->sharemode,
-                                      open_file);
-
         /* A rename renames the FILE, not the handle that asked for it.  Every
          * open handle carries the file's path as its own (parent_fh, name) --
          * that pair is the ONLY path the SMB layer keeps, and every later path
@@ -119,17 +107,11 @@ chimera_smb_set_info_rename_callback(
                                            chimera_smb_rename_repath_cb,
                                            &newpath);
 
-        /* Re-acquire sharemode entry under the new name */
-        if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
-            request->tree->share &&
-            (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK)) {
-            chimera_smb_sharemode_acquire(
-                &request->tree->share->sharemode,
-                open_file->parent_fh, open_file->parent_fh_len,
-                open_file->name, open_file->name_len,
-                open_file->desired_access, open_file->share_access,
-                open_file);
-        }
+        /* Sharing reservations are VFS claims keyed by the file handle, so
+         * they survive a rename without re-keying. Do not touch the legacy
+         * sharemode table: TREE_DISCONNECT may have released tree->share
+         * while the backend rename was in flight. The request holds the open
+         * alive until this callback releases it below. */
 
         /* Update VFS handle DOC path so close deletes the new name */
         if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&

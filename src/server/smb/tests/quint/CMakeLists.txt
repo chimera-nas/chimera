@@ -39,6 +39,20 @@ set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 60)
 
+# Hold a backend rename across TREE_DISCONNECT to exercise a completion after
+# the requesting tree has released its share.
+add_executable(smb2_rename_disconnect_probe smb2_rename_disconnect_probe.c)
+target_include_directories(smb2_rename_disconnect_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_rename_disconnect_probe chimera_server chimera_metrics
+    chimera_vfs_memfs evpl)
+
+add_test(NAME chimera/server/smb/mbt/rename_disconnect_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_rename_disconnect_probe>)
+set_tests_properties(chimera/server/smb/mbt/rename_disconnect_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_rename_disconnect_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 60)
+
 # Oplock/lease ground-truth probe (Increment 1): pins chimera's grant ->
 # break -> acknowledge behavior against MS-SMB2/MS-FSA, two connections
 # (holder + conflicting opener) on one in-process server.  Findings triaged
