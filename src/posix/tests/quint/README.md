@@ -20,15 +20,17 @@ between parents. These are useful distinctions: an error precedence should not
 be pinned when the interface permits either answer, but a required permission
 check should remain asserted.
 
-The NFSv3 config enables PD21 for set-id preservation when an emulated hole
-punch sends no writes; the other five POSIX configs have empty `deviations`
-lists. This does **not** mean the replay has no other exceptions. `posix_mbt_replay.c` still records harness
-allowances. Both the ordinary and strict corpora use this same replayer, so
+All six POSIX configs have empty `deviations` lists. PD21 was retired:
+a hole punch wholly beyond EOF may preserve set-id bits, as ext4 on Linux 6.8
+does, or clear them, as newer kernels do. The model carries exactly these two
+modes until chmod or a privilege-clearing mutation resolves the choice; it does
+not ignore mode differences for other operations. The replayer still records
+harness allowances. Both the ordinary and strict corpora use this same replayer, so
 strict twins do not disable those allowances. `devliveness.py` checks which
 configured branches the generated model exercised; it does not inspect whether
 the implementation still needs a harness allowance.
 
-Two such allowances were retired in this review:
+The following allowances were retired in this review:
 
 * **ND3:** broadly accepted path permission errors, and sometimes retried the
   operation as root. Its rationale predated search-permission support in the
@@ -48,7 +50,36 @@ Two such allowances were retired in this review:
   extents. The copy-range regression test also checks partial overlap in both
   directions, unchanged data on failure, and successful adjacent ranges.
 
-Neither fix weakens the model or adds an expected-failure entry.
+* **ND6:** accepted EACCES on descriptor operations for both NFS versions.
+  NFSv3's stateless READ/WRITE and size-setting SETATTR checks now live in the
+  model as a transport policy, so failures preserve offsets and contents.
+  Host-backed SETATTR checks DAC explicitly rather than relying on a privileged
+  cached descriptor's `ftruncate`.
+  NFSv4 keeps open-time rights: CLAIM_FH now uses the authorized open path
+  and binds its grant, including for non-owner openers after chmod.
+
+The SMB client also preserves a symlink's inherited setgid-directory group
+when stamping ownership after SET_REPARSE_POINT. NFSv3 rolls back a failed
+silly rename and keeps the marked handle alive until the RPC completes;
+cleanup follows the file across distinct cached opens until the last closes,
+then invalidates file and parent attributes. The final audit requires actual
+hidden names matching the inode to explain extra links; if cleanup races the
+scan, it rechecks the same inode against the exact model link count.
+
+Directory reads check object type before DAC, preserving EISDIR after chmod.
+The FUSE syscall adapter now matches glibc's read-lock probe for `F_TEST`,
+permits `F_TEST`/`F_ULOCK` on read-only descriptors, and clamps same-file copy
+ranges to source EOF before checking overlap. The corpus exercises these
+adapter rules independently from the POSIX client.
+
+The intermittent backwards timestamp was reproduced in the VFS clock's
+wall/stopwatch correction: descheduling between its two samples introduced a
+false positive offset that disappeared at the next refresh. Wall time now comes
+from stopwatch's dedicated API. The TSC path pairs samples, rejects long
+sampling gaps, and slews corrections without backwards steps; the non-TSC path
+reads `CLOCK_REALTIME` directly. Wall corrections leave monotonic timing alone.
+Deterministic stopwatch tests cover both correction directions, convergence,
+preemption, concurrency, and the fallback, with a VFS integration test as well.
 
 ## Next allowances to adjudicate
 
@@ -60,7 +91,7 @@ These are investigation targets, not a claim that each is a filesystem bug:
 | ND8 | Copy-range overlap validation versus unsupported offload: capture both error conditions and determine the legal acceptance set. |
 | ND7 / PT2 | Represent emulated and extent-aware sparse seeks explicitly; preserve the resulting descriptor offset in the oracle. |
 | ND1 / ND2 / ND5 | NFS silly-rename visibility, link counts, and directory residue need an explicit adapter contract. |
-| ND6 / ND9 / ND10 | Narrow per-RPC permission and stale-handle allowances to demonstrated NFS cases and protocol versions. |
+| ND9 / ND10 | Narrow per-RPC permission and stale-handle allowances to demonstrated NFS cases and protocol versions. |
 | SD-DAC / SD-SETID | SMB replay skips multi-user DAC operations under one authenticated identity; this is a coverage limit. |
 | SD-DFD-REUSE | A replaced pathname must not silently stand in for a held directory's identity. Compare the adapter with a real kernel SMB client. |
 | SD-TIME / PD-DIRSIZE / PD24 | Separate timestamp precision, unspecified directory sizes, and finite-model descriptor bounds from conformance defects. |
@@ -96,24 +127,26 @@ Inspect successful replay output for `harness allowances:` as well as failures.
 
 ## Verification of this review (2026-09-21)
 
-* macOS Debug: all six POSIX MBT cells, three NFSv4 protocol MBT cells, and
-  twelve open/copy regression tests passed (21 CTest tests).
-* Linux Release: all twelve POSIX MBT cells passed, including linux/io_uring
-  and their NFS loopbacks with ext4 scratch storage. Fourteen focused
-  open/copy tests also passed, including diskfs's overlapping-clone checks.
-* The final unprivileged write-only regression passed on all six native
-  openat backends and all seven selected Linux openat backends.
-* One initial Linux SMB run reported a ctime moving backwards at step 118 of
-  `posixSmb_stepPerms_128_0x1_2`. Its isolated replay and the full rerun passed.
-  No new timestamp allowance was added; this remains an intermittent finding
-  to investigate under load.
-* Formatting uses uncrustify 0.78.1, matching CI. Homebrew 0.83 produces
-  incompatible formatting; its earlier failures were a tool-version mismatch.
-  The standalone SDK include check reports existing boundary violations. These
-  results are not a clean full repository gate.
+Validation on `quint-ci-enhance` uses the POSIX model at `b775722` and the
+stopwatch wall-time enhancement at `dac2e9f` (through libevpl `9aa21de`).
 
-The initial validation above ran on `pnfs-data-split` with the older model
-at `2717cb0`. The fixes are also ported to `quint-ci-enhance`; validation of
-that branch uses its current model at `20516c4`. Its Linux Release build and
-14 focused open/copy regressions plus three NFSv4 protocol MBT cells pass.
-The complete tree passes `make syntax-check` with uncrustify 0.78.1.
+* Linux Release: all 56 selected CTest checks passed. These cover all twelve
+  POSIX backend cells, normal and strict FUSE, five POSIX strict twins, six
+  deviation-liveness gates, three NFSv4 protocol cells, 27 focused openat,
+  symlink, and copy-range regressions, and the VFS clock regression. Host-backed
+  cells ran with root privileges on ext4 scratch storage; none were skipped.
+* macOS Release: all 39 selected checks passed: six normal POSIX cells, five
+  strict twins, six deviation-liveness gates, three NFSv4 protocol cells,
+  eighteen focused regressions, and the VFS clock regression.
+* The previously failing 512-step FUSE timestamp trace passed twenty repeated
+  replays after the clock replacement. No timestamp allowance was added.
+* Stopwatch's three CTest suites passed on macOS ARM64 and Linux ARM64. The
+  deterministic TSC tests exercise both the default slew limit and 500 ppm,
+  including concurrent refreshes and scheduling delays. ThreadSanitizer and
+  UndefinedBehaviorSanitizer passed. An x86 build under Rosetta selected TSC
+  and passed the live clock test across a refresh interval.
+* Model generation passed all three self-test suites and generated 746 traces.
+  A freshly generated 90-trace reference corpus passed against Linux 6.8 ext4
+  with its measured filesystem profile.
+* The full tree passed `make syntax-check` with uncrustify 0.78.1, matching CI,
+  and the standalone SDK include check passed.

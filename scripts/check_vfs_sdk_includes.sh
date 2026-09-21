@@ -45,11 +45,12 @@ MODULES="memfs linux io_uring cairn diskfs smb memkv sqlite"
 #                       it so the in-tree tests stay deterministic; an
 #                       out-of-tree arbiter brings its own clock (the core
 #                       never interprets a backend's deadlines).
-#   server/smb/smb2.h   SMB2 wire vocabulary, needed to speak SMB to a third
-#                       party -- not to interoperate with chimera.
+#   smb_common/         SMB wire vocabulary and signing/encryption/compression
+#                       helpers shared by the client and server; these speak
+#                       SMB to third parties, not the Chimera module ABI.
 #   ../linux/           io_uring is the linux passthrough backend with a
 #                       different I/O engine, not an independent module.
-ALLOWED='^(vfs/sdk/|common/|evpl/|\.\./linux/|vfs/vfs_fsid\.h$|vfs/vfs_clock\.h$|server/smb/smb2\.h$)'
+ALLOWED='^(vfs/sdk/|common/|evpl/|\.\./linux/|vfs/vfs_fsid\.h$|vfs/vfs_clock\.h$|smb_common/(smb2|smb_signing|smb_encrypt|smb_compress)\.h$)'
 
 fail=0
 
@@ -61,6 +62,10 @@ for mod in $MODULES; do
     while IFS=: read -r file line inc; do
         # Strip everything but the quoted include path.
         inc=$(printf '%s' "$inc" | sed -E 's/.*#include[[:space:]]*"([^"]+)".*/\1/')
+
+        # White-box test fixture compiled into diskfs for its MBT harness,
+        # equivalent to the tests/ subtree excluded below.
+        [ "$file" = "src/vfs/diskfs/diskfs_test.c" ] && continue
 
         case "$inc" in
             */*) ;;

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,9 @@ struct chimera_nfs4_open_state {
      */
     struct chimera_nfs4_layout layout;
 };
+
+_Static_assert(offsetof(struct chimera_nfs4_open_state, server_index) == 0,
+               "NFS close dispatch requires server_index at offset zero");
 
 /*
  * The open a file has on the server, which the handles above share whether they

@@ -35,16 +35,12 @@ chimera_vfs_hash(
 SYMBOL_EXPORT void
 chimera_vfs_realtime(struct timespec *ts)
 {
-    uint64_t ns;
-
     if (unlikely(!chimera_vfs_clock.initialized)) {
         clock_gettime(CLOCK_REALTIME, ts);
         return;
     }
 
-    ns          = chimera_vfs_wall_ns();
-    ts->tv_sec  = ns / 1000000000ULL;
-    ts->tv_nsec = ns % 1000000000ULL;
+    stopwatch_realtime(&chimera_vfs_clock.ctx, ts);
 } /* chimera_vfs_realtime */
 
 SYMBOL_EXPORT enum chimera_tcp_flavor

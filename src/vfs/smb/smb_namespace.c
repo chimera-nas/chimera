@@ -9,7 +9,6 @@
 
 #include "smb_internal.h"
 #include "vfs/sdk/vfs_attrs.h"
-#include "vfs/vfs_open_cache.h"
 #include "evpl/evpl.h"
 
 /* A namespace op retargets a path-id: after a rename the source resolves to
@@ -26,16 +25,14 @@ smb_evict_pathid(
     const char                     *path,
     int                             pathlen)
 {
-    struct chimera_vfs *vfs = request->thread->vfs;
-    uint64_t            id  = chimera_smb_path_intern(conn->server, path, pathlen);
-    uint8_t             fh[CHIMERA_VFS_FH_SIZE];
-    int                 nf;
+    uint64_t id = chimera_smb_path_intern(conn->server, path, pathlen);
+    uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+    int      nf;
 
     for (nf = 0; nf <= 1; nf++) {
         int len = chimera_smb_encode_open_fh(request->fh, id, nf, fh);
 
-        chimera_vfs_open_cache_evict(request->thread, vfs->vfs_open_path_cache, fh, len);
-        chimera_vfs_open_cache_evict(request->thread, vfs->vfs_open_file_cache, fh, len);
+        chimera_vfs_request_evict_cached_fh(request, fh, len);
     }
 } /* smb_evict_pathid */
 
@@ -295,11 +292,16 @@ chimera_smb_symlink_ioctl_reply(
      * own. */
     if (status == SMB2_STATUS_SUCCESS) {
         struct chimera_vfs_attrs        owner;
-        const struct chimera_vfs_attrs *mode_src =
+        const struct chimera_vfs_attrs *create_attr =
             (request->opcode == CHIMERA_VFS_OP_MKNOD_AT) ?
-            request->mknod_at.set_attr : NULL;
+            request->mknod_at.set_attr : request->symlink_at.set_attr;
 
-        if (smb_build_create_owner_attrs(request, mode_src, &owner)) {
+        if (smb_build_create_owner_attrs(request, create_attr, &owner)) {
+            /* The VFS resolved setgid inheritance for symlinks too. Preserve
+             * that group when stamping ownership after SET_REPARSE_POINT. */
+            if (request->opcode == CHIMERA_VFS_OP_SYMLINK_AT) {
+                owner.va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+            }
             smb_send_set_security(conn, request, &state->file_id, &owner,
                                   chimera_smb_symlink_secured_reply);
             return;

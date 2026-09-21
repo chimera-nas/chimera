@@ -223,8 +223,7 @@ static int           g_nexempt;
 
 /* Divergence containment (ND4).  If an operation fails after the model
  * completed it, track the missing descriptor or inode so its consequences do
- * not obscure the original mismatch.  NFS per-operation DAC (ND6) can also
- * cause this divergence after a successful open.  Path permission failures
+ * not obscure the original mismatch. Path permission failures
  * are asserted directly; the model includes directory-search semantics. */
 static int           g_lost_fd[R_MAXPID][R_MAXFD];
 static int           g_lost_sid[R_MAXSID];
@@ -1110,21 +1109,6 @@ check_status(
         }
     }
     if (g_nfs_version) {
-        /* ND6: EACCES on descriptor I/O the model completed.  NFS3 is
-         * stateless, so the server re-checks DAC per READ/WRITE with the
-         * credential the RPC carries; the proxy sends the OPENING
-         * credential and the server owner-overrides, which covers every
-         * owner case -- what remains is a NON-owner opener whose access
-         * was chmod'ed away after open, where real NFS diverges from
-         * POSIX by design.  Retires if the model grows an nfs-per-op-DAC
-         * capability. */
-        if (actual == 13 && expected != 13 &&
-            !json_object_get(g_cur_rv, "pth") &&
-            json_object_get(g_cur_rv, "fd")) {
-            record_dev("ND6");
-            g_last_recon = "ND6";
-            return 0;
-        }
         /* ND8: the nfs3 profile pins copyRange=false, which the model
          * flattens to ENOTSUP for every copy_file_range -- but argument
          * validation comes first in POSIX and Linux alike, so a same-file
@@ -1172,6 +1156,33 @@ check_status(
     mism("errno: expected %lld, got %d", (long long) expected, actual);
     return 0;
 } /* check_status */
+
+/* True when the model still holds an open description on `ino`.  A silly
+ * rename lives exactly as long as one does: the NFS client renames the name
+ * out of the way at unlink and removes it at last close, so while the model
+ * has the file open chimera carries one link the model has already dropped. */
+static int
+model_ino_open(
+    json_t *ps,
+    int64_t ino)
+{
+    json_t *pairs = ps ? json_object_get(ps, "ofds") : NULL;
+    size_t  i;
+
+    pairs = json_is_object(pairs) ? json_object_get(pairs, "#map") : NULL;
+    if (!json_is_array(pairs)) {
+        return 0;
+    }
+    for (i = 0; i < json_array_size(pairs); i++) {
+        json_t *pair = json_array_get(pairs, i);
+        json_t *v    = json_array_get(pair, 1);
+
+        if (json_is_object(v) && tf_field(v, "ino") == ino) {
+            return 1;
+        }
+    }
+    return 0;
+} /* model_ino_open */
 
 static const char *
 ftype_of(const char *tag)
@@ -1338,7 +1349,8 @@ check_statres(
     }
     if (strcmp(ftag, "FLnk") != 0) {
         int64_t wmode = tf_field(rv, "mode");
-        if ((int64_t) (st->st_mode & 07777) != wmode) {
+        if ((int64_t) (st->st_mode & 07777) != wmode &&
+            (int64_t) (st->st_mode & 07777) != wmode + tf_field(rv, "optionalSetids")) {
             unsigned diff = (st->st_mode & 07777) ^ (unsigned) wmode;
 
             /* SD-SETID: killpriv (clear set-user/-group-ID on write) runs at
@@ -1363,10 +1375,18 @@ check_statres(
              st->st_gid);
     }
     if ((int64_t) st->st_nlink != tf_field(rv, "nlink")) {
-        if (g_nfs_version && tf_field(rv, "nlink") == 0 &&
-            st->st_nlink == 1) {
+        if (g_nfs_version && strcmp(ftag, "FLnk") != 0 &&
+            (int64_t) st->st_nlink == tf_field(rv, "nlink") + 1 &&
+            (tf_field(rv, "nlink") == 0 ||
+             model_ino_open(g_cur_ps, tf_field(rv, "ino")))) {
             /* Unlinked-while-open: the silly-renamed name keeps one link
-             * alive until the last close (ND2). */
+             * alive until the last close (ND2).  The model may still have
+             * OTHER links to the same file -- unlinking one of two leaves the
+             * model at 1 and chimera at 2 -- so this is one more link than the
+             * model has, not necessarily exactly one.  Guarded on the model
+             * still holding the file open, which is precisely as long as the
+             * silly name lives; the nlink == 0 arm needs no such check because
+             * a file with no names left is open by construction. */
             record_dev("ND2");
         } else if (g_nfs_version && g_nexempt > 0 &&
                    strcmp(ftag, "FDir") == 0 &&
@@ -3099,6 +3119,74 @@ audit_readdir(
     return n;
 } /* audit_readdir */
 
+/* Cached backend opens can outlive the model's last descriptor. Account for
+ * their hidden links only when the actual namespace proves the extra links
+ * belong to this inode, including names in a different hard-link parent. */
+static int
+audit_silly_links(const struct stat *target)
+{
+    struct auditent *stack = calloc(4096, sizeof(*stack));
+    int              sp = 1, count = 0, visited = 0;
+
+    if (!stack) {
+        return -1;
+    }
+    while (sp && visited++ < 4096) {
+        struct auditent entry = stack[--sp];
+        char            full[4400], names[256][256];
+        CHIMERA_DIR    *dir;
+        int             n;
+
+        snprintf(full, sizeof(full), "%s%.4095s", MOUNT, entry.path);
+        dir = chimera_posix_opendir(full);
+        if (!dir) {
+            continue;
+        }
+        n = audit_readdir(dir, names, 256);
+        chimera_posix_closedir(dir);
+        for (int i = 0; i < n; i++) {
+            struct stat st;
+            char        path[4096];
+
+            if (!strcmp(names[i], ".") || !strcmp(names[i], "..")) {
+                continue;
+            }
+            snprintf(path, sizeof(path), "%.3800s/%.255s", entry.path, names[i]);
+            snprintf(full, sizeof(full), "%s%s", MOUNT, path);
+            if (chimera_posix_lstat(full, &st) != 0) {
+                continue;
+            }
+            if (is_nfs_silly_name(names[i]) &&
+                st.st_dev == target->st_dev && st.st_ino == target->st_ino) {
+                count++;
+            } else if (S_ISDIR(st.st_mode) && sp < 4096) {
+                snprintf(stack[sp++].path, sizeof(stack[0].path), "%s", path);
+            }
+        }
+    }
+    free(stack);
+    return sp ? -1 : count;
+} /* audit_silly_links */
+
+static int
+audit_nfs_link_count(
+    const char        *path,
+    const struct stat *observed,
+    int64_t            expected)
+{
+    struct stat refreshed;
+
+    if ((int64_t) observed->st_nlink - expected == audit_silly_links(observed)) {
+        return 1;
+    }
+    /* The idle-close thread can remove a hidden link during the walk. In
+     * that case require the same inode to now report the exact model count. */
+    return chimera_posix_lstat(path, &refreshed) == 0 &&
+           refreshed.st_dev == observed->st_dev &&
+           refreshed.st_ino == observed->st_ino &&
+           (int64_t) refreshed.st_nlink == expected;
+} /* audit_nfs_link_count */
+
 /* Walk the final model tree (out-of-band as root pid 3) and verify identity,
  * attributes, directory contents, link targets and file bytes.  Returns the
  * number of objects audited. */
@@ -3228,7 +3316,8 @@ final_audit(json_t *fs)
                 continue;
             }
             if (strcmp(ftag, "FLnk") != 0 &&
-                (int64_t) (st.st_mode & 07777) != tf_field(cnode, "mode")) {
+                (int64_t) (st.st_mode & 07777) != tf_field(cnode, "mode") &&
+                (int64_t) (st.st_mode & 07777) != tf_field(cnode, "mode") + tf_field(cnode, "optionalSetids")) {
                 unsigned diff = (st.st_mode & 07777) ^
                     (unsigned) tf_field(cnode, "mode");
 
@@ -3253,6 +3342,10 @@ final_audit(json_t *fs)
                     strcmp(ftag, "FDir") == 0 &&
                     (int64_t) st.st_nlink > tf_field(cnode, "nlink")) {
                     record_dev("ND5");   /* residue subdir (see check_statres) */
+                } else if (g_nfs_version && strcmp(ftag, "FDir") != 0 &&
+                           (int64_t) st.st_nlink > tf_field(cnode, "nlink") &&
+                           audit_nfs_link_count(full, &st, tf_field(cnode, "nlink"))) {
+                    record_dev("ND2");
                 } else {
                     mism("audit: %s: nlink %llu != %lld", cpath,
                          (unsigned long long) st.st_nlink,
@@ -3397,6 +3490,7 @@ replay_trace(const char *path)
             json_decref(root);
             return -1;
         }
+
     }
 
     audited = last_fs ? final_audit(last_fs) : 0;

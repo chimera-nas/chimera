@@ -1168,6 +1168,7 @@ static void
 chimera_nfs4_open_claim_fh_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
     struct nfs_request             *req           = private_data;
@@ -1591,12 +1592,9 @@ chimera_nfs4_open_parent_complete(
              * the delegation against.  A client issues this in response to a
              * CB_RECALL, so failing it (NFS4ERR_NOTSUPP) stalls the recall and
              * prevents a clean DELEGRETURN. */
-            chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                                req->fh,
-                                req->fhlen,
-                                flags,
-                                chimera_nfs4_open_claim_fh_complete,
-                                req);
+            chimera_vfs_open(req->thread->vfs_thread, &req->cred,
+                             req->fh, req->fhlen, "", 0, flags, NULL, 0,
+                             chimera_nfs4_open_claim_fh_complete, req);
             break;
         default:
             /* CLAIM_DELEGATE_PREV (delegation reclaim across a client reboot)

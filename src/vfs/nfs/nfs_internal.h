@@ -423,6 +423,9 @@ struct chimera_nfs_shared {
 
     /* Granted byte-range claims, keyed by the token we minted for them (see
      * struct chimera_nfs3_range above). */
+    /* Per-file lifetime across NFS3 opens with different credentials/access. */
+    pthread_mutex_t                     nfs3_open_lock;
+    struct chimera_nfs3_open_state     *nfs3_open_states[256];
     pthread_mutex_t                     nlm_range_lock;
     struct chimera_nfs3_range          *nlm_ranges;
     uint64_t                            nlm_next_token;
