@@ -21,9 +21,9 @@ chimera_nfs4_putfh_attrdir_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    struct nfs_request     *req = private_data;
-    struct PUTFH4res       *res = &req->res_compound.resarray[req->index].opputfh;
-    enum chimera_vfs_error  error_code;
+    struct nfs_request    *req = private_data;
+    struct PUTFH4res      *res = &req->res_compound.resarray[req->index].opputfh;
+    enum chimera_vfs_error error_code;
 
     error_code = chimera_vfs_compound_status(compound);
 

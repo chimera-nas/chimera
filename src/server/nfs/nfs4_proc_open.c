@@ -1186,9 +1186,16 @@ chimera_nfs4_open_run_complete(
     }
 
     /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular file.  The
-     * type gate already refused one for every shape that asked for it; an
-     * exclusive create, which does not, is judged here on what it opened. */
-    if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+     * type gate already refused one for every shape that asked for it; a create
+     * that did not ask is judged here on what it opened.
+     *
+     * An exclusive-create COLLISION is the exception, and answers for the type
+     * below instead: whatever is in the way, it cannot be carrying the verifier
+     * this create stamped, so what the protocol wants is NFS4ERR_EXIST (RFC
+     * 7530 §16.16.4) and not a type error -- which is the answer the verifier
+     * comparison reaches for it. */
+    if (!(existed && nfs4_open_is_exclusive(args)) &&
+        (op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
         !S_ISREG(op->attr.va_mode)) {
         res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
                                                       op->attr.va_mode);
