@@ -4,11 +4,46 @@
 #include <assert.h>
 #include "common/test_host.h"
 
+#ifndef _WIN32
+static void
+test_renamed_parent(void)
+{
+    char directory[] = "./fixtureXXXXXX";
+    char outside[]   = "./outsideXXXXXX";
+    char moved[256], child[256], sentinel[256];
+    int  parent, fd;
+
+    assert(mkdtemp(directory));
+    assert(mkdtemp(outside));
+    snprintf(child, sizeof(child), "%s/child", directory);
+    assert(!mkdir(child, 0700));
+    snprintf(sentinel, sizeof(sentinel), "%s/child", outside);
+    fd = open(sentinel, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0);
+    assert(!close(fd));
+
+    parent = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    assert(parent >= 0);
+    snprintf(moved, sizeof(moved), "%s-moved", directory);
+    assert(!rename(directory, moved));
+    assert(!symlink(outside, directory));
+
+    /* Replacing the parent's pathname cannot redirect child removal. */
+    assert(!chimera_test_remove_tree_at(parent, "child"));
+    assert(!close(parent));
+    assert(!access(sentinel, F_OK));
+    assert(!chimera_test_remove_tree(directory));
+    assert(!access(sentinel, F_OK));
+    assert(!chimera_test_remove_tree(moved));
+    assert(!chimera_test_remove_tree(outside));
+} /* test_renamed_parent */
+#endif /* ifndef _WIN32 */
+
 int
 main(void)
 {
     char directory[] = "./fixtureXXXXXX";
-    char file[256], child[256];
+    char file[512], child[256];
     int  fd;
 
     assert(mkdtemp(directory));
@@ -84,6 +119,9 @@ main(void)
 #ifndef _WIN32
     snprintf(file, sizeof(file), "%s/outside", child);
     assert(!symlink("../..", file));
+    snprintf(file, sizeof(file), "%s/dangling", child);
+    assert(!symlink("missing", file));
+    test_renamed_parent();
 #endif /* ifndef _WIN32 */
     assert(!chimera_test_remove_tree(directory));
     assert(!opendir(directory));

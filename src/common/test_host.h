@@ -121,20 +121,22 @@ chimera_test_session_root(void)
     return path;
 } // chimera_test_session_root
 #else // ifdef _WIN32
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #define chimera_test_mkdir mkdir
 #endif // ifdef _WIN32
 
 /* Remove only the fixture subtree; never traverse symlinks or junctions. */
+#ifdef _WIN32
 static inline int
 chimera_test_remove_tree(const char *path)
 {
     DIR           *dir;
     struct dirent *entry;
 
-#ifdef _WIN32
     DWORD          attributes = GetFileAttributesA(path);
+
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return -1;
     }
@@ -144,15 +146,6 @@ chimera_test_remove_tree(const char *path)
     if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         return _rmdir(path);
     }
-#else // ifdef _WIN32
-    struct stat st;
-    if (lstat(path, &st)) {
-        return -1;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        return unlink(path);
-    }
-#endif // ifdef _WIN32
     dir = opendir(path);
     if (!dir) {
         return -1;
@@ -186,6 +179,62 @@ chimera_test_remove_tree(const char *path)
         }
     }
 } // chimera_test_remove_tree
+#else // ifdef _WIN32
+/* Open each directory without following a link, and resolve its children
+ * relative to that descriptor even if its pathname is renamed or replaced. */
+static inline int
+chimera_test_remove_tree_at(
+    int         parent,
+    const char *name)
+{
+    DIR           *dir;
+    struct dirent *entry;
+    int            fd, error;
+
+    fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOTDIR || errno == ELOOP) {
+            return unlinkat(parent, name, 0);
+        }
+        return -1;
+    }
+    dir = fdopendir(fd);
+    if (!dir) {
+        error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    for (;;) {
+        errno = 0;
+        entry = readdir(dir);
+        if (!entry) {
+            error = errno;
+            closedir(dir);
+            if (error) {
+                errno = error;
+                return -1;
+            }
+            return unlinkat(parent, name, AT_REMOVEDIR);
+        }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) {
+            continue;
+        }
+        if (chimera_test_remove_tree_at(fd, entry->d_name)) {
+            error = errno;
+            closedir(dir);
+            errno = error;
+            return -1;
+        }
+    }
+} // chimera_test_remove_tree_at
+
+static inline int
+chimera_test_remove_tree(const char *path)
+{
+    return chimera_test_remove_tree_at(AT_FDCWD, path);
+} // chimera_test_remove_tree
+#endif // ifdef _WIN32
 
 /* Heap-owned absolute fixture path, released with free(). */
 static inline char *
