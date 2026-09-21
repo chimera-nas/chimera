@@ -525,7 +525,7 @@ add_posix_testprog(test_root_export)
 
 # Leak detection is disabled for this test only: it performs ~10 NFS client
 # mounts in one process, and every v4 mount past the worker-thread count
-# trips a PRE-EXISTING client leak -- chimera_nfs4_mount unconditionally
+# trips a PRE-EXISTING client leak -- chimera_vfs_nfs4_mount unconditionally
 # overwrites thread->server_threads[server->index] with a freshly allocated
 # server_thread, orphaning the previous one along with its claimed slot
 # table (src/vfs/nfs/nfs4_mount.c).  No prior test mounted often enough to

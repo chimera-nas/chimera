@@ -47,7 +47,7 @@ __lsan_default_suppressions(void)
         "leak:chimera_nfs4_session_pool_init\n"
         "leak:chimera_nfs4_slot_table_init\n"
         "leak:chimera_nfs4_ctx_alloc\n"
-        "leak:chimera_nfs4_mount\n"
+        "leak:chimera_vfs_nfs4_mount\n"
         "leak:chimera_nfs4_cb_exchange_id_callback\n"
         /* GSSAPI/Kerberos internal allocations */
         "leak:gss_accept_sec_context\n"
@@ -57,4 +57,3 @@ __lsan_default_suppressions(void)
 } /* __lsan_default_suppressions */
 
 #endif /* CHIMERA_SANITIZE */
-
