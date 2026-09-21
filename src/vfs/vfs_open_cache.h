@@ -126,10 +126,8 @@ chimera_vfs_open_cache_shard_remove(
  * Find a handle in the shard matching fh, access_mode, and credential identity.
  *
  * The cache is keyed by cred_hash so each caller gets its own handle (and its
- * own authorization result); the RW/RO pooling below therefore applies only
- * within a single identity.  For RW requests, only an exact RW match is
- * returned.  For RO requests, any matching handle (RW or RO) is returned, since
- * a RW handle can satisfy reads.
+ * own authorization result).  Within one identity, a RW handle can satisfy
+ * any access mode; RO and WO handles can only satisfy their own mode.
  */
 static inline struct chimera_vfs_open_handle *
 chimera_vfs_open_cache_shard_find(
@@ -145,7 +143,7 @@ chimera_vfs_open_cache_shard_find(
         if (h->fh_len == fhlen && h->cred_hash == cred_hash &&
             memcmp(h->fh, fh, fhlen) == 0) {
             if (h->access_mode == CHIMERA_VFS_ACCESS_MODE_RW ||
-                access_mode == CHIMERA_VFS_ACCESS_MODE_RO) {
+                h->access_mode == access_mode) {
                 return h;
             }
         }
@@ -157,11 +155,17 @@ chimera_vfs_open_cache_shard_find(
 static inline uint8_t
 chimera_vfs_open_access_mode(unsigned int open_flags)
 {
-    /* O_RDWR sets both READ_ONLY and WRITE_ONLY; only a pure read-only open
-     * (READ_ONLY without WRITE_ONLY) maps to a read-only handle. */
-    return ((open_flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
-            !(open_flags & CHIMERA_VFS_OPEN_WRITE_ONLY)) ?
-           CHIMERA_VFS_ACCESS_MODE_RO : CHIMERA_VFS_ACCESS_MODE_RW;
+    /* Keep write-only handles separate: proxy backends open real protocol
+     * state with these rights, so a write-only handle cannot serve a reader. */
+    if ((open_flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+        !(open_flags & CHIMERA_VFS_OPEN_WRITE_ONLY)) {
+        return CHIMERA_VFS_ACCESS_MODE_RO;
+    }
+    if ((open_flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
+        !(open_flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
+        return CHIMERA_VFS_ACCESS_MODE_WO;
+    }
+    return CHIMERA_VFS_ACCESS_MODE_RW;
 } // chimera_vfs_open_access_mode
 
 /* --- Init / Destroy --- */

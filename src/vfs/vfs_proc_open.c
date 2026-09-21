@@ -443,6 +443,50 @@ chimera_vfs_open_lookup_complete(
         request);
 } /* chimera_vfs_open_lookup_complete */
 
+/* A data open of the supplied file handle needs the same authorization and
+ * bound grant as a pathname open.  The initial path handle only obtains attrs. */
+static void
+chimera_vfs_open_self_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    struct chimera_vfs_attrs    resolved;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* getattr need not repeat its input file handle (the host backends
+         * return stat fields only), but the lookup continuation needs it. */
+        resolved = *attr;
+        memcpy(resolved.va_fh, request->fh, request->fh_len);
+        resolved.va_fh_len    = request->fh_len;
+        resolved.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    }
+    chimera_vfs_release(request->thread, request->open.parent_handle);
+    chimera_vfs_open_lookup_complete(error_code,
+                                     error_code == CHIMERA_VFS_OK ? &resolved : NULL,
+                                     request);
+} /* chimera_vfs_open_self_getattr_complete */
+
+static void
+chimera_vfs_open_self_handle_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_open_lookup_complete(error_code, NULL, request);
+        return;
+    }
+    request->open.parent_handle = handle;
+    chimera_vfs_getattr(request->thread, request->cred, handle,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_OPEN_GATE_MASK,
+                        chimera_vfs_open_self_getattr_complete, request);
+} /* chimera_vfs_open_self_handle_complete */
+
 SYMBOL_EXPORT void
 chimera_vfs_open(
     struct chimera_vfs_thread     *thread,
@@ -477,6 +521,14 @@ chimera_vfs_open(
         request->open.callback      = callback;
         request->open.private_data  = private_data;
         request->open.granted_valid = 0;
+        request->open.flags         = flags;
+
+        if (!(flags & (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH))) {
+            chimera_vfs_open_fh(thread, cred, fh, fhlen,
+                                CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                chimera_vfs_open_self_handle_complete, request);
+            return;
+        }
 
         chimera_vfs_open_fh(
             thread,

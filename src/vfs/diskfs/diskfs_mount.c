@@ -9,6 +9,7 @@
  * metrics registration.
  */
 
+#include <inttypes.h>
 #include "common/atomic.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
@@ -932,6 +933,74 @@ diskfs_parse_hex(
 } /* diskfs_parse_hex */
 
 
+static void
+diskfs_device_open_complete(
+    struct evpl              *evpl,
+    struct evpl_block_device *bdev,
+    int                       status,
+    void                     *private_data)
+{
+    struct diskfs_device *device = private_data;
+
+    chimera_diskfs_abort_if(status != 0, "Failed to open device %s: %s",
+                            device->name, strerror(status));
+    device->bdev             = bdev;
+    device->size             = evpl_block_size(bdev);
+    device->max_request_size = evpl_block_max_request_size(bdev);
+
+    chimera_diskfs_info("Device %s size %" PRIu64 " max_request_size %" PRIu64,
+                        device->name, device->size, device->max_request_size);
+} /* diskfs_device_open_complete */
+
+/* The opening loop owns the device until close, including backend events.
+* Keep it running independently of the temporary mount I/O loops and the
+* worker queues. evpl_thread_create waits for initialization to finish. */
+static void *
+diskfs_device_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_shared *shared = private_data;
+
+    for (int i = 0; i < shared->num_devices; i++) {
+        struct diskfs_device *device = &shared->devices[i];
+
+        if (device->role == SM_DEV_REMOTE) {
+            continue;
+        }
+        evpl_block_open_device(evpl, device->protocol_id, shared->device_paths[i],
+                               diskfs_device_open_complete, device);
+        while (!device->bdev) {
+            evpl_continue(evpl);
+        }
+    }
+    return shared;
+} /* diskfs_device_thread_init */
+
+static void
+diskfs_device_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_shared *shared = private_data;
+
+    for (int i = 0; i < shared->num_devices; i++) {
+        struct diskfs_device       *device = &shared->devices[i];
+        struct diskfs_mount_io_wait w      = { 0, 0 };
+
+        if (!device->bdev) {
+            continue;
+        }
+        evpl_block_close_device(evpl, device->bdev, diskfs_mount_io_complete, &w);
+        device->bdev = NULL;
+        while (!w.done) {
+            evpl_continue(evpl);
+        }
+        chimera_diskfs_abort_if(w.status != 0, "Failed to close device %s: %s",
+                                device->name, strerror(w.status));
+    }
+} /* diskfs_device_thread_shutdown */
+
 void *
 diskfs_init(
     const char                *cfgdata,
@@ -1049,8 +1118,6 @@ diskfs_init(
             chimera_diskfs_abort("Unsupported protocol: %s", protocol_name);
         }
 
-        device->protocol_id = protocol_id;
-
         /* For the file-backed backends a missing path is auto-created + sized.
          * A vfio device's "path" is a PCI BDF (e.g. "01:00.0"), not a file:
          * stat'ing it ENOENTs, so skip the create -- otherwise we'd drop a
@@ -1072,18 +1139,15 @@ diskfs_init(
             }
         }
 
-        device->bdev = evpl_block_open_device(protocol_id, device_path);
-
-        device->size             = evpl_block_size(device->bdev);
-        device->max_request_size = evpl_block_max_request_size(device->bdev);
-
-        chimera_diskfs_info("Device %s size %lu max_request_size %lu",
-                            device_path, device->size, device->max_request_size);
+        device->protocol_id = protocol_id;
 
         if (i == 0) {
             device0_path = strdup(device_path);
         }
     }
+
+    shared->device_thread = evpl_thread_create(NULL, diskfs_device_thread_init,
+                                               diskfs_device_thread_shutdown, shared);
 
     /* Opt-in unsafe async I/O: when set, block writes are submitted without
      * FUA/sync, so diskfs runs lighter at the cost of crash safety.  Off by
@@ -1740,11 +1804,7 @@ diskfs_teardown(
         diskfs_mount_io_close(mio);
     }
 
-    for (int i = 0; i < shared->num_devices; i++) {
-        if (shared->devices[i].bdev) {
-            evpl_block_close_device(shared->devices[i].bdev);
-        }
-    }
+    evpl_thread_destroy(shared->device_thread);
 
     diskfs_block_cache_destroy(shared);
 

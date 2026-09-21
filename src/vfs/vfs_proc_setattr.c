@@ -579,11 +579,13 @@ chimera_vfs_setattr_common(
     struct chimera_vfs_setattr_gate *gate;
     uint32_t                         required;
 
-    /* Engine-authoritative backend and a non-exempt caller: authorize the
-     * mutation against a fresh attr+ACL fetch before applying it.  (For
-     * delegated/AUTH_NONE/root cases the kernel or engine grants anyway, so we
-     * dispatch directly and avoid the extra round-trip.) */
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    /* Size changes need an engine check even on delegated backends: their
+     * ftruncate uses a privileged cached fd, which does not recheck current
+     * DAC for a stateless NFS SETATTR or a path-based truncate. Other metadata
+     * operations still receive the kernel's per-operation permission checks. */
+    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred) ||
+        ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+         chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred))) {
         /* Preliminary (current attrs unknown): worst-case required set, just to
          * decide whether the pre-step is needed.  The real check in the gate
          * callback recomputes once the current owner/group is known. */
@@ -601,7 +603,7 @@ chimera_vfs_setattr_common(
          * per-operation owner rules -- ownership does not bind at open. */
         if (fd_rights && required != 0 &&
             (required & ~(uint32_t) CHIMERA_ACE_WRITE_DATA) == 0 &&
-            handle->granted_valid &&
+            handle->granted_valid && handle->granted_bound &&
             (handle->granted_access & CHIMERA_ACE_WRITE_DATA)) {
             required = 0;
         }

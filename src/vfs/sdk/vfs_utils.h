@@ -28,14 +28,31 @@ chimera_vfs_hash(
     const void *data,
     int         len);
 
-/* Fill ts with the current wall-clock time.  Equivalent to
- * clock_gettime(CLOCK_REALTIME, ts) but served from the VFS core's
- * TSC-based clock, avoiding the per-call syscall/read. */
+/* Fill ts with wall-clock time. Stopwatch slews corrections on the TSC
+ * path to avoid backwards steps, and reads CLOCK_REALTIME directly otherwise. */
 void
 chimera_vfs_realtime(
     struct timespec *ts);
 
 struct chimera_vfs_request;
+
+/* Evict cached opens after a path-based backend changes the object denoted by
+ * fh. Existing referenced handles remain valid until their holders release
+ * them; subsequent opens must resolve the new object. */
+void
+chimera_vfs_request_evict_cached_fh(
+    struct chimera_vfs_request *request,
+    const void                 *fh,
+    int                         fh_len);
+
+/* Invalidate attributes after a backend-internal mutation, such as NFS
+ * hidden-link cleanup, that did not pass through a VFS mutation operation. */
+void
+chimera_vfs_request_invalidate_attrs(
+    struct chimera_vfs_request *request,
+    const void                 *fh,
+    int                         fh_len);
+
 
 /* TCP transport flavor configured for outbound (client) connections
  * (chimera_vfs_set_tcp_flavor).  Backends that open their own TCP

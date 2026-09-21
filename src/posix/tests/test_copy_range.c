@@ -527,6 +527,29 @@ test_clone_self(void)
         die("clone self pwrite tail", n);
     }
 
+    /* Identical and partially overlapping ranges must fail without changing
+     * either half.  Exercise both overlap directions before the valid clone. */
+    const chimera_off_t overlap_src[] = { 0, 0, 4096 };
+    const chimera_off_t overlap_dst[] = { 0, 4096, 0 };
+    for (size_t i = 0; i < 3; i++) {
+        errno = 0;
+        rc    = chimera_posix_clone_file_range(fd, overlap_dst[i], fd,
+                                               overlap_src[i], CLONE_PROBE_LEN);
+        if (rc != -1 || errno != EINVAL) {
+            die("clone self overlap should fail with EINVAL", rc);
+        }
+    }
+    n = chimera_posix_pread(fd, verify, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN)) {
+        die("rejected clone changed source", n);
+    }
+    fill_pattern(src_buf, CLONE_PROBE_LEN, 'm');
+    n = chimera_posix_pread(fd, verify, CLONE_PROBE_LEN, CLONE_PROBE_LEN);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN)) {
+        die("rejected clone changed destination", n);
+    }
+    fill_pattern(src_buf, CLONE_PROBE_LEN, 'k');
+
     /* [0, LEN) -> [LEN, 2*LEN): disjoint, same inode.  Must not hang. */
     rc = chimera_posix_clone_file_range(fd, CLONE_PROBE_LEN, fd, 0,
                                         CLONE_PROBE_LEN);

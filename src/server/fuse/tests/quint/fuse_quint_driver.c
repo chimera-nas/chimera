@@ -24,10 +24,8 @@
  * only meaningful insofar as it is substitutable for that one, so any
  * divergence in the request/response shape is a harness bug, not a finding.
  *
- * Operations the FUSE protocol has no request for (copy_file_range, which the
- * server leaves to the kernel's fallback) answer ENOSYS rather than guessing,
- * so the replay reports them as unsupported instead of silently scoring a
- * divergence against the server.
+ * Operations without a supported FUSE request answer ENOSYS rather than
+ * guessing, so the replay reports them as unsupported.
  */
 
 /* Must precede every system header: SEEK_DATA/SEEK_HOLE and the FALLOC_FL_*
@@ -1286,12 +1284,6 @@ fuse_exec_op(json_t *req)
             return res_int(-1, EBADF);
         }
 
-        /* lockf(3) is defined only on a descriptor open for writing, and
-         * that is checked before the filesystem is reached. */
-        if ((o->flags & O_ACCMODE) == O_RDONLY) {
-            return res_int(-1, EBADF);
-        }
-
         /* lockf locks relative to the current file position and is always
          * exclusive. */
         start = o->offset;
@@ -1303,6 +1295,14 @@ fuse_exec_op(json_t *req)
             ltype  = F_UNLCK;
         } else if (cmds && strcmp(cmds, "test") == 0) {
             opcode = FUSE_GETLK;
+            ltype  = F_RDLCK; /* glibc F_TEST probes conflicts with a reader. */
+        }
+
+        /* Only acquiring an exclusive lock requires write access. F_TEST
+         * and F_ULOCK are valid on read-only descriptors too. */
+        if (opcode != FUSE_GETLK && ltype != F_UNLCK &&
+            (o->flags & O_ACCMODE) == O_RDONLY) {
+            return res_int(-1, EBADF);
         }
 
         end = (len > 0) ? start + (uint64_t) len - 1 : FUSE_SIM_LOCK_EOF;
@@ -1320,10 +1320,10 @@ fuse_exec_op(json_t *req)
                 return res_int(-1, rc);
             }
 
-            /* F_TEST reports EACCES/EAGAIN when the region is locked by
-             * someone else, and 0 when it is free. */
+            /* glibc translates a conflicting F_GETLK reply to EACCES;
+             * EAGAIN is the kernel's acquisition failure, not this probe. */
             return conflict.type == F_UNLCK ? res_int(0, 0)
-                                            : res_int(-1, EAGAIN);
+                                            : res_int(-1, EACCES);
         }
 
         rc = fuse_sim_lock(&g_fsim.sim, o->nodeid, o->fh, g_fsim.sim.cur_pid,
@@ -1359,10 +1359,25 @@ fuse_exec_op(json_t *req)
             return res_int(-1, EINVAL);
         }
 
-        /* Overlapping ranges within one file are rejected by the kernel. */
-        if (in->nodeid == out->nodeid &&
-            off_in < off_out + len && off_out < off_in + len) {
-            return res_int(-1, EINVAL);
+        /* generic_copy_file_checks() clamps to source EOF before testing
+         * overlap. Reproduce that kernel validation before sending FUSE. */
+        if (in->nodeid == out->nodeid) {
+            struct fuse_attr_out attr;
+            uint64_t             count = len;
+
+            rc = fsim_stat_nodeid(&g_fsim, in->nodeid, &attr);
+            if (rc != 0) {
+                return res_int(-1, rc);
+            }
+            if ((uint64_t) off_in >= attr.attr.size) {
+                count = 0;
+            } else if (count > attr.attr.size - off_in) {
+                count = attr.attr.size - off_in;
+            }
+            if (count && (uint64_t) off_in < (uint64_t) off_out + count &&
+                (uint64_t) off_out < (uint64_t) off_in + count) {
+                return res_int(-1, EINVAL);
+            }
         }
 
         rc = fuse_sim_copy_file_range(&g_fsim.sim, in->nodeid, in->fh,

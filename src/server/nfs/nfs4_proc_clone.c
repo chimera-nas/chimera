@@ -23,17 +23,6 @@ struct nfs4_clone_state_refs {
     struct nfs_request *req;
 };
 
-static struct chimera_vfs_open_handle *
-chimera_nfs4_clone_state_handle(
-    void   *state,
-    uint8_t state_type)
-{
-    if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        return ((struct nfs_open_state *) state)->handle;
-    }
-    return ((struct nfs_lock_state *) state)->handle;
-} /* chimera_nfs4_clone_state_handle */
-
 static void
 chimera_nfs4_clone_finish(
     struct nfs_request *req,
@@ -84,8 +73,8 @@ chimera_nfs4_clone_issue(
     struct chimera_vfs_open_handle *src_handle;
     struct chimera_vfs_open_handle *dst_handle;
 
-    src_handle = chimera_nfs4_clone_state_handle(refs->src_state, refs->src_type);
-    dst_handle = chimera_nfs4_clone_state_handle(refs->dst_state, refs->dst_type);
+    src_handle = nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
+    dst_handle = nfs_state_io_handle(refs->dst_state, refs->dst_type, OPEN4_SHARE_ACCESS_WRITE);
 
     /* Reflink requires both files be served by the same module and that module
      * support clone_range; otherwise it is not a supported operation. */
@@ -188,7 +177,7 @@ chimera_nfs4_clone(
     }
 
     /* Resolve the source size to bound a clone-to-EOF. */
-    src_handle = chimera_nfs4_clone_state_handle(refs->src_state, refs->src_type);
+    src_handle = nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
     chimera_vfs_getattr(thread->vfs_thread, &req->cred,
                         src_handle,
                         CHIMERA_VFS_ATTR_SIZE,

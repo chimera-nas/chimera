@@ -336,10 +336,9 @@ struct nfs_open_state {
 
     struct chimera_vfs_open_handle *handle;             /* +1 via chimera_vfs_dup_handle */
 
-    /* The read-only handle a write-share coalesce superseded (see
-     * chimera_nfs4_open_install_state): in-flight I/O may still be borrowing
-     * it, so its reference is parked here and released with the state.  A
-     * state upgrades at most once (RO -> RW), so one slot suffices. */
+    /* Retained companion handle after an access upgrade.  In-flight I/O may
+     * still use it; when the primary is write-only, reads use this handle.
+     * Two complementary handles cover the complete READ|WRITE union. */
     struct chimera_vfs_open_handle *handle_superseded;
 
     struct nfs_lock_state          *locks;              /* utlist via next_in_open */
@@ -596,6 +595,34 @@ struct nfs_state_table {
      * nfs4_stateid.h.  Set once at nfs_state_table_init. */
     uint32_t               epoch;
 };
+
+/* Select backend access from the open's retained handles, including after a
+ * lock was created before a later OPEN broadened its parent's access. */
+static inline struct chimera_vfs_open_handle *
+nfs_state_io_handle(
+    void    *state,
+    uint8_t  type,
+    uint32_t access)
+{
+    struct nfs_open_state *open;
+
+    if (!state) {
+        return NULL;
+    }
+    if (type == NFS4_SLOT_TYPE_OPEN) {
+        open = state;
+    } else if (type == NFS4_SLOT_TYPE_LOCK) {
+        open = ((struct nfs_lock_state *) state)->open_state;
+    } else {
+        return NULL;
+    }
+    if (access == OPEN4_SHARE_ACCESS_READ && open->handle &&
+        open->handle->access_mode == CHIMERA_VFS_ACCESS_MODE_WO &&
+        open->handle_superseded) {
+        return open->handle_superseded;
+    }
+    return open->handle;
+} /* nfs_state_io_handle */
 
 static inline struct nfs_client *
 nfs_state_owner_client(

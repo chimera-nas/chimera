@@ -3160,6 +3160,17 @@ diskfs_allocate_finalize(struct chimera_vfs_request *request)
     inode->ctime_nsec = now.tv_nsec;
     inode->change++;
 
+    /* POSIX kill-priv, as on the write path: fallocate changes the file, so it
+     * clears set-user-ID and set-group-ID (the latter when group-executable).
+     * Both arms reach here -- allocation and the punch loop -- and both write.
+     *
+     * No deferral guard is needed the way the write path needs one: allocate
+     * and punch both move extents or the size, so the inode's home block is in
+     * the transaction this commits either way.  (WRITE_SAME borrows the punch
+     * loop but returns to its fill phase before finalize, and clears on its
+     * own write.) */
+    inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+
     diskfs_map_attrs(thread, &request->allocate.r_post_attr, inode);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_allocate_finalize */

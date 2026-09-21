@@ -1200,6 +1200,20 @@ diskfs_clone_range(
         return;
     }
 
+    /* Like memfs, reject overlapping ranges of the same file.  The extent
+     * walk mutates the destination as it reads the source, so sharing an inode
+     * is safe only when the ranges are disjoint.  Use subtraction to avoid
+     * overflowing either range's end. */
+    if (src == dst && request->clone_range.length &&
+        (request->clone_range.src_offset <= request->clone_range.dst_offset
+         ? request->clone_range.dst_offset - request->clone_range.src_offset
+         : request->clone_range.src_offset - request->clone_range.dst_offset) <
+        request->clone_range.length) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     /* Block-aligned ranges only (reflink shares whole device blocks). */
     if ((request->clone_range.src_offset & 4095) ||
         (request->clone_range.dst_offset & 4095) ||

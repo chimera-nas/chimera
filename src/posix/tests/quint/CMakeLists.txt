@@ -12,8 +12,8 @@ set(CHIMERA_TEST_TIER quick)
 # replayer that runs the model oracle in-process against chimera's POSIX client
 # over an in-process memfs mount) and posix_driver.c / posix_replay.py (the
 # JSON line-protocol driver + Python replayer, now used only by the FUSE
-# suite) -- which drive that corpus against chimera and fail on ANY
-# divergence.
+# suite) -- which drive that corpus against chimera.  Residual harness
+# allowances are documented in README.md and reported in replay summaries.
 #
 # The corpus is generated from the configs in configs/ beside this file.  Each
 # one binds every constant posix.qnt declares -- which offloads the surface
@@ -29,10 +29,10 @@ set(CHIMERA_TEST_TIER quick)
 #
 # Each config also names the KNOWN DEVIATIONS that profile's stack still
 # carries.  The model takes chimera's branch for each, so a trace's expectation
-# already IS chimera's behaviour and replay is an exact match -- the harnesses
-# carry no registry of forgivable differences.  The strict twin of every cell
-# regenerates it with all of them off and measures the debt; devliveness.py
-# fails the build when a config enables one its corpus never exercises.
+# already IS chimera's behaviour.  The strict twin of every cell regenerates
+# it with all configured deviations off; devliveness.py fails the build when
+# a config enables one its corpus never exercises.  Harness allowances still
+# apply to both corpora and are not covered by that liveness check.
 
 add_executable(posix_quint_driver posix_driver.c)
 target_link_libraries(posix_quint_driver
@@ -320,9 +320,8 @@ set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
 # cell rather than the disk one, and the per-trace newfs recycle mkfs-cycles it
 # exactly like memfs.  The replay process self-provisions its scratch device
 # image under its own mkdtemp session dir (posix_env_setup) and takes whichever
-# libevpl block backend the platform has (CHIMERA_DISKFS_DEVICE_TYPE).  Five
-# traces are declined BY NAME in posix_mbt_declines (posix_mbt_replay.c), each
-# naming the diskfs bug that retires the entry.
+# libevpl block backend the platform has (CHIMERA_DISKFS_DEVICE_TYPE).
+# The former per-trace diskfs declines have all been retired by fixes.
 add_test(NAME chimera/posix/mbt/batch_diskfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend diskfs
@@ -485,16 +484,15 @@ endforeach()
 # The strict twins, and the gate that keeps a deviation honest.
 #
 # Each cell above is registered with a STRICT_OUT_DIR, which generates a second
-# corpus from the SAME config with every deviation forced off -- the standard,
-# not chimera.  Replaying it measures the conformance debt instead of
-# remembering it: its failures ARE the open deviations, re-counted on every
-# run, so a deviation that has been fixed shows up as a strict cell that got
-# quieter rather than as a registry entry nobody revisits.  These are REPORTING
-# tests, not gates.
+# corpus from the SAME config with every configured deviation forced off.
+# These REPORTING tests measure model-configured conformance debt.  They use
+# the same replayer and retain its harness allowances, so inspect the allowance
+# summaries too; a green strict replay does not prove those exceptions retired.
 #
 # devliveness.py is the other half, and it IS a gate: it fails when a config
-# enables a deviation its corpus never records taking.  That is what stops an
-# entry outliving its fix -- a claim nobody exercises stops being a claim.
+# enables a deviation its corpus never records taking.  This verifies corpus
+# coverage of configured deviations; retiring an implementation allowance
+# still requires replay without that allowance.
 set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 

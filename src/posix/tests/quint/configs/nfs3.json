@@ -18,6 +18,7 @@
 
   "policies": {
     "strictAtime": "supported",
+    "statelessIoDac": true,
     "chownSuppGroup": "supported"
   },
 
@@ -39,8 +40,7 @@
   // the live conformance debt.  Every id is declared, with its citation, root
   // cause and candidate fix, in the posix corpus.schema.json; tools/
   // devliveness.py fails the build if one listed here is never exercised.
-  "deviations": [
-  ],
+  "deviations": [],
 
   "batches": [
     { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },

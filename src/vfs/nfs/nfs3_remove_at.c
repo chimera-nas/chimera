@@ -27,6 +27,7 @@ struct chimera_nfs3_remove_ctx {
     struct chimera_nfs_client_server *server;
     char                              silly_name[5 + CHIMERA_VFS_FH_SIZE * 2 + 1];
     int                               silly_name_len;
+    struct chimera_vfs_open_handle   *silly_handle;
 };
 
 static void
@@ -64,6 +65,27 @@ chimera_nfs3_remove_callback(
     request->complete(request);
 } /* chimera_nfs3_remove_callback */
 
+/* Keep the marked open alive until RENAME answers. A failed rename must not
+ * make a later unlink believe a hidden link already protects the inode. */
+static void
+chimera_nfs3_remove_finish_silly(
+    struct chimera_vfs_request *request,
+    int                         success)
+{
+    struct chimera_nfs3_remove_ctx *ctx   = request->plugin_data;
+    struct chimera_nfs3_open_state *state =
+        (struct chimera_nfs3_open_state *) ctx->silly_handle->vfs_private;
+
+    if (!success) {
+        evpl_mutex_lock(&ctx->shared->nfs3_open_lock);
+        state->silly_renamed = 0;
+        evpl_mutex_unlock(&ctx->shared->nfs3_open_lock);
+    }
+    chimera_vfs_open_cache_release(request->thread,
+                                   request->thread->vfs->vfs_open_file_cache,
+                                   ctx->silly_handle, 0);
+} /* chimera_nfs3_remove_finish_silly */
+
 static void
 chimera_nfs3_remove_rename_callback(
     struct evpl                 *evpl,
@@ -73,6 +95,8 @@ chimera_nfs3_remove_rename_callback(
     void                        *private_data)
 {
     struct chimera_vfs_request *request = private_data;
+
+    chimera_nfs3_remove_finish_silly(request, !status && res->status == NFS3_OK);
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -105,6 +129,7 @@ chimera_nfs3_remove_do_silly_rename(
     server_thread = chimera_nfs_thread_get_server_thread(ctx->thread, request->fh, request->fh_len);
 
     if (!server_thread) {
+        chimera_nfs3_remove_finish_silly(request, 0);
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
@@ -319,10 +344,8 @@ chimera_vfs_nfs3_remove_at(
                                             request->remove_at.child_fh_len,
                                             request->cred);
 
-    /* Release the handle ref - we're done with it */
-    chimera_vfs_open_cache_release(request->thread, cache, handle, 0);
-
     if (rc == -1) {
+        chimera_vfs_open_cache_release(request->thread, cache, handle, 0);
         /*
          * The open state is per-INODE, and an inode can carry several names.
          * Already silly-renamed therefore does not mean "this name is already
@@ -343,6 +366,8 @@ chimera_vfs_nfs3_remove_at(
         chimera_nfs3_remove_do_remove(request, ctx);
         return;
     }
+
+    ctx->silly_handle = handle;
 
     /* Successfully marked for silly rename - generate silly name and rename */
     ctx->silly_name_len = chimera_nfs3_silly_name_from_fh(request->remove_at.child_fh,

@@ -43,6 +43,13 @@ chimera_nfs3_close_remove_callback(
         chimera_nfsclient_error("Silly remove failed with transport error");
     } else if (res->status != NFS3_OK) {
         chimera_nfsclient_error("Silly remove failed with NFS status %d", res->status);
+    } else {
+        struct chimera_nfs3_close_ctx *ctx = request->plugin_data;
+
+        /* This RPC bypasses vfs_remove_at's normal cache invalidation. A
+        * surviving hard link must observe the decremented link count. */
+        chimera_vfs_request_invalidate_attrs(request, ctx->file_fh, ctx->file_fh_len);
+        chimera_vfs_request_invalidate_attrs(request, ctx->dir_fh, ctx->dir_fh_len);
     }
 
     chimera_nfs3_close_complete(request);
@@ -188,11 +195,13 @@ chimera_vfs_nfs3_close(
         return;
     }
 
+    chimera_nfs3_open_state_detach(open_state);
+
     /* Extract state info before freeing. Copy dir_fh since we need it for
      * async silly remove after state is freed. */
     ctx->dirty         = chimera_nfs3_open_state_get_dirty(open_state);
     ctx->silly_renamed = open_state->silly_renamed;
-    ctx->was_last      = 1; /* Each open handle has its own state, always last */
+    ctx->was_last      = 1; /* detach transferred cleanup if other opens remain */
 
     if (ctx->silly_renamed) {
         ctx->dir_fh_len = open_state->dir_fh_len;

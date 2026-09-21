@@ -366,12 +366,11 @@ chimera_nfs4_read_plus(
     }
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        open_state   = state_void;
-        state_handle = open_state->handle;
+        open_state = state_void;
     } else {
-        open_state   = ((struct nfs_lock_state *) state_void)->open_state;
-        state_handle = ((struct nfs_lock_state *) state_void)->handle;
+        open_state = ((struct nfs_lock_state *) state_void)->open_state;
     }
+    state_handle = nfs_state_io_handle(state_void, state_type, OPEN4_SHARE_ACCESS_READ);
 
     status = nfs_open_state_check_io_denied(open_state,
                                             OPEN4_SHARE_ACCESS_READ);

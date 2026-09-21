@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <sys/stat.h>
 #include <string.h>
 #include <stdlib.h>
 #include "vfs_procs.h"
@@ -250,6 +251,24 @@ chimera_vfs_mkdir_at(
                                          chimera_vfs_mkdir_at_toolong,
                                          callback, private_data);
         return;
+    }
+
+    /* mkdir cannot set either set-id bit from the requested mode.  XSH mkdir
+     * initializes "the file permission bits" from mode, and gives neither
+     * S_ISUID nor S_ISGID a meaning there; the implementations mask both off
+     * before the filesystem is reached -- Linux in vfs_mkdir()
+     * (mode &= S_IRWXUGO|S_ISVTX) and FreeBSD in ufs_mkdir() (va_mode & 0777).
+     *
+     * S_ISGID goes too, not just S_ISUID: the bit a new subdirectory may
+     * legitimately carry is INHERITED from a set-group-ID parent
+     * (inode_init_owner), never taken from the caller's mode.  Chimera does
+     * not inherit it -- policies.sgidInherit is unsupported for every posix
+     * cell -- so masking here is the whole of the rule.
+     *
+     * Done once here rather than in each backend, so memfs, diskfs and cairn
+     * cannot drift apart on it. */
+    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        attr->va_mode &= ~(S_ISUID | S_ISGID);
     }
 
     if (chimera_vfs_gate_needed_create(handle->vfs_module->capabilities,

@@ -91,6 +91,7 @@ chimera_nfs_init(
     evpl_mutex_init(&shared->pnfs_devcache.lock, NULL);
     evpl_mutex_init(&shared->pnfs_layout_lock, NULL);
     evpl_mutex_init(&shared->nlm_range_lock, NULL);
+    evpl_mutex_init(&shared->nfs3_open_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -167,6 +168,7 @@ chimera_nfs_destroy(void *private_data)
     }
 
     evpl_mutex_destroy(&shared->nlm_range_lock);
+    evpl_mutex_destroy(&shared->nfs3_open_lock);
     evpl_mutex_destroy(&shared->pnfs_devcache.lock);
     evpl_mutex_destroy(&shared->pnfs_layout_lock);
 
@@ -207,6 +209,8 @@ chimera_nfs_protocol_to_string(enum evpl_protocol_id protocol)
             return "LIBFABRIC-MSG-DGRAM";
         case EVPL_DATAGRAM_LIBFABRIC_RDM:
             return "LIBFABRIC-RDM";
+        case EVPL_STREAM_SPDK_TCP:
+            return "SPDK-TCP";
         case EVPL_NUM_PROTO:
             return "UNKNOWN";
     } /* switch */

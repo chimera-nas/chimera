@@ -431,8 +431,8 @@ struct diskfs_request_private {
 
 
 struct diskfs_device {
-    enum evpl_block_protocol_id protocol_id;
     struct evpl_block_device   *bdev;          /* NULL for a REMOTE (pNFS data) device */
+    enum evpl_block_protocol_id protocol_id;
     uint64_t                    id;
     uint64_t                    size;
     uint64_t                    max_request_size;
@@ -1699,6 +1699,7 @@ struct diskfs_fs {
 
 struct diskfs_shared {
     struct diskfs_device       *devices;
+    struct evpl_thread         *device_thread; /* owns block devices until all queues close */
     char                      **device_paths;    /* for unmount-time persistence */
     int                         num_devices;
     struct diskfs_inode_cache  *inode_cache;

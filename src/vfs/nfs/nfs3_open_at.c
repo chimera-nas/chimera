@@ -118,7 +118,8 @@ chimera_nfs3_open_at_lookup_callback(
      * Skip for inferred opens (use synthetic handles which don't call close).
      * Always allocate for non-inferred opens since open_at always inserts fresh. */
     if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        state = chimera_nfs3_open_state_alloc();
+        state = chimera_nfs3_open_state_alloc(ctx->thread->shared, request->open_at.r_attr.va_fh,
+                                              request->open_at.r_attr.va_fh_len);
 
         if (!state) {
             request->status = CHIMERA_VFS_EFAULT;
@@ -225,7 +226,8 @@ chimera_nfs3_open_at_create_callback(
      * Skip for inferred opens (use synthetic handles which don't call close).
      * Always allocate for non-inferred opens since open_at always inserts fresh. */
     if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
-        state = chimera_nfs3_open_state_alloc();
+        state = chimera_nfs3_open_state_alloc(ctx->thread->shared, request->open_at.r_attr.va_fh,
+                                              request->open_at.r_attr.va_fh_len);
 
         if (!state) {
             request->status = CHIMERA_VFS_EFAULT;

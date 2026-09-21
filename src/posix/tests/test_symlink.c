@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -57,6 +57,21 @@ main(
     }
 
     fprintf(stderr, "Readlink successful: '%s'\n", target);
+
+    if (env.cred.uid == 0) {
+        chimera_posix_stat_t st;
+        gid_t                inherited_gid = env.cred.gid == 12345 ? 12346 : 12345;
+
+        if (chimera_posix_mkdir("/test/sgid", 0777) != 0 ||
+            chimera_posix_chown("/test/sgid", 0, inherited_gid) != 0 ||
+            chimera_posix_chmod("/test/sgid", 02777) != 0 ||
+            chimera_posix_symlink("missing", "/test/sgid/link") != 0 ||
+            chimera_posix_lstat("/test/sgid/link", &st) != 0 ||
+            st.st_gid != inherited_gid) {
+            fprintf(stderr, "symlink failed to inherit setgid directory group\n");
+            posix_test_fail(&env);
+        }
+    }
 
     rc = posix_test_umount();
 

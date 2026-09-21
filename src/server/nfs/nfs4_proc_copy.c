@@ -38,28 +38,8 @@ struct nfs4_copy_state_refs {
     struct evpl_iovec               rw_iov[CHIMERA_NFS4_COPY_IOV_MAX];
 };
 
-/* Returns NULL for any state type that carries no open handle -- a delegation
- * or layout stateid must not be reinterpreted as one of the two that do. */
-static struct chimera_vfs_open_handle *
-chimera_nfs4_copy_state_handle(
-    void   *state,
-    uint8_t state_type)
-{
-    if (!state) {
-        return NULL;
-    }
-    switch (state_type) {
-        case NFS4_SLOT_TYPE_OPEN:
-            return ((struct nfs_open_state *) state)->handle;
-        case NFS4_SLOT_TYPE_LOCK:
-            return ((struct nfs_lock_state *) state)->handle;
-        default:
-            return NULL;
-    } /* switch */
-} /* chimera_nfs4_copy_state_handle */
-
 /* The client that owns `state`, for attributing the copy's internal I/O.
- * Mirrors chimera_nfs4_copy_state_handle: only the two state types that carry
+ * Like nfs_state_io_handle, only the two state types that carry
  * an open handle carry an owning client. */
 static uint64_t
 chimera_nfs4_copy_state_client(
@@ -198,7 +178,7 @@ chimera_nfs4_copy_read_complete(
         return;
     }
 
-    dst_handle     = chimera_nfs4_copy_state_handle(refs->dst_state, refs->dst_type);
+    dst_handle     = nfs_state_io_handle(refs->dst_state, refs->dst_type, OPEN4_SHARE_ACCESS_WRITE);
     refs->rw_count = count;
     refs->rw_eof   = eof;
     refs->rw_niov  = niov;
@@ -241,7 +221,7 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
         chunk = refs->remaining;
     }
 
-    src_handle    = chimera_nfs4_copy_state_handle(refs->src_state, refs->src_type);
+    src_handle    = nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
     refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
 
     /* Attribute the read to the client that holds the source stateid, as
@@ -397,10 +377,10 @@ chimera_nfs4_copy_begin(struct nfs4_copy_state_refs *refs)
 
     src_handle = refs->src_own
         ? refs->src_own
-        : chimera_nfs4_copy_state_handle(refs->src_state, refs->src_type);
+        : nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
     dst_handle = refs->dst_own
         ? refs->dst_own
-        : chimera_nfs4_copy_state_handle(refs->dst_state, refs->dst_type);
+        : nfs_state_io_handle(refs->dst_state, refs->dst_type, OPEN4_SHARE_ACCESS_WRITE);
 
     if (!src_handle || !dst_handle) {
         chimera_nfs4_copy_release_refs(req, refs);

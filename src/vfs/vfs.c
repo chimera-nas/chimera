@@ -62,21 +62,14 @@ SYMBOL_EXPORT struct chimera_vfs_clock chimera_vfs_clock;
 SYMBOL_EXPORT void
 chimera_vfs_clock_init(void)
 {
-    struct timespec ts;
-
     if (chimera_vfs_clock.initialized) {
         return; /* process-global singleton; first vfs wins */
     }
 
     stopwatch_context_init(&chimera_vfs_clock.ctx);
 
-    clock_gettime(CLOCK_REALTIME, &ts);
-    chimera_vfs_clock.base_wall_ns = (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
     stopwatch_start(&chimera_vfs_clock.ctx, &chimera_vfs_clock.base_sw);
-    chimera_vfs_clock.delta_ns         = 0;
-    chimera_vfs_clock.last_refresh     = 0;
-    chimera_vfs_clock.refresh_interval = chimera_vfs_ns_to_ticks(1000000000ULL); /* ~1s */
-    chimera_vfs_clock.initialized      = 1;
+    chimera_vfs_clock.initialized = 1;
 } /* chimera_vfs_clock_init */
 
 SYMBOL_EXPORT void
@@ -1631,3 +1624,28 @@ chimera_vfs_iterate_builtin_users(
 {
     chimera_vfs_user_cache_iterate_builtin(vfs->vfs_user_cache, callback, data);
 } /* chimera_vfs_iterate_builtin_users */
+
+SYMBOL_EXPORT void
+chimera_vfs_request_evict_cached_fh(
+    struct chimera_vfs_request *request,
+    const void                 *fh,
+    int                         fh_len)
+{
+    struct chimera_vfs_thread *thread = request->thread;
+
+    chimera_vfs_open_cache_evict(thread, thread->vfs->vfs_open_path_cache, fh, fh_len);
+    chimera_vfs_open_cache_evict(thread, thread->vfs->vfs_open_file_cache, fh, fh_len);
+} /* chimera_vfs_request_evict_cached_fh */
+
+SYMBOL_EXPORT void
+chimera_vfs_request_invalidate_attrs(
+    struct chimera_vfs_request *request,
+    const void                 *fh,
+    int                         fh_len)
+{
+    struct chimera_vfs_thread *thread  = request->thread;
+    struct chimera_vfs_attrs   invalid = { 0 };
+
+    chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
+                                  chimera_vfs_hash(fh, fh_len), fh, fh_len, &invalid);
+} /* chimera_vfs_request_invalidate_attrs */

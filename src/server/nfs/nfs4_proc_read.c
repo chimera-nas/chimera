@@ -248,14 +248,13 @@ chimera_nfs4_read(
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
         open_state    = state_void;
-        state_handle  = open_state->handle;
         current_seqid = open_state->seqid;
     } else {
         lock_state    = state_void;
         open_state    = lock_state->open_state;
-        state_handle  = lock_state->handle;
         current_seqid = lock_state->seqid;
     }
+    state_handle = nfs_state_io_handle(state_void, state_type, OPEN4_SHARE_ACCESS_READ);
 
     if (req->minorversion == 0) {
         status = nfs4_stateid_check_seqid(current_seqid, args->stateid.seqid);
