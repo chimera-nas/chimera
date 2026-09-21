@@ -364,8 +364,17 @@ dh_fini(struct dh *dh)
  * the op, free.  An op that acts on a handle the caller already holds names it
  * (the adder's `handle` argument, or chimera_vfs_compound_op_set_handle where
  * the adder has none), which is the executor's in_handle and is exactly what
- * the per-op call took.  An op that resolves a NAME lends its directory with
- * PUTHANDLE, because a name op takes its directory from the current object.
+ * the per-op call took.
+ *
+ * An op that resolves a NAME takes its directory from the current object, and
+ * names it with PUTFH -- the NFS shape, and the one that leaves the trace this
+ * harness exists to produce.  Lending the directory with PUTHANDLE instead
+ * would be the closer translation of the *_at call it replaces, but these
+ * handles are opened INFERRED rather than PATH|DIRECTORY, and a lent handle
+ * that does not carry the directory bit costs the executor a GETATTR to ask
+ * the object what it is.  A real caller lends a handle it opened AS a
+ * directory and pays nothing; this one would pay once per namespace op, and
+ * put a dispatch in the trace that no server makes.
  */
 
 /* Root handle of the mounted fs (open handle on the "/test" mount root fh). */
@@ -459,7 +468,7 @@ dh_mkdir(
     sa.va_mode     = 0755;
 
     cp = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
-    chimera_vfs_compound_add_puthandle(cp, dirh, CHIMERA_VFS_OPEN_INFERRED);
+    chimera_vfs_compound_add_putfh(cp, dirh->fh, (int) dirh->fh_len);
     i_mkdir = chimera_vfs_compound_add_create(cp,
                                               CHIMERA_VFS_COMPOUND_CREATE_DIR,
                                               name, (int) strlen(name),
@@ -507,7 +516,7 @@ dh_create(
     sa.va_mode     = 0644;
 
     cp = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
-    chimera_vfs_compound_add_puthandle(cp, dirh, CHIMERA_VFS_OPEN_INFERRED);
+    chimera_vfs_compound_add_putfh(cp, dirh->fh, (int) dirh->fh_len);
     i_open = chimera_vfs_compound_add_open(cp, name, (int) strlen(name),
                                            CHIMERA_VFS_OPEN_CREATE, 0, &sa,
                                            CHIMERA_VFS_ATTR_FH, 0, 0);
@@ -551,7 +560,7 @@ dh_remove(
     struct chimera_vfs_compound *cp;
 
     cp = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
-    chimera_vfs_compound_add_puthandle(cp, dirh, CHIMERA_VFS_OPEN_INFERRED);
+    chimera_vfs_compound_add_putfh(cp, dirh->fh, (int) dirh->fh_len);
     chimera_vfs_compound_add_remove(cp, name, (int) strlen(name), 0, 0, 0);
 
     dh->status = compound_test_run(dh->evpl, cp);
@@ -738,7 +747,7 @@ dh_symlink(
     int i_sym;
 
     cp = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
-    chimera_vfs_compound_add_puthandle(cp, dirh, CHIMERA_VFS_OPEN_INFERRED);
+    chimera_vfs_compound_add_putfh(cp, dirh->fh, (int) dirh->fh_len);
     i_sym = chimera_vfs_compound_add_create(cp,
                                             CHIMERA_VFS_COMPOUND_CREATE_SYMLINK,
                                             name, (int) strlen(name),
