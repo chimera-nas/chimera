@@ -200,6 +200,26 @@ set_tests_properties(chimera/server/smb/mbt/compress_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Creator-SID seeding probe: whose native owner SID a CREATE stores, and which
+# CREATEs must store none.  Every other security test runs an ANONYMOUS session
+# against a server with no identity authority, so the seeding path is dark: both
+# identity probes miss and nothing is ever stamped.  This probe registers
+# accounts that carry real SIDs, which is the only configuration where the code
+# runs at all -- and then spends most of its assertions on the negative cases (a
+# non-owner's overwrite, a stream create on another user's file, a client-named
+# owner), because a seed that fires on a path that does not create the object
+# rewrites an existing file's owner and trips the setattr chown gate.
+add_executable(smb2_sidseed_probe smb2_sidseed_probe.c)
+target_include_directories(smb2_sidseed_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_sidseed_probe chimera_server chimera_metrics crypto)
+
+add_test(NAME chimera/server/smb/mbt/sidseed_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_sidseed_probe>)
+set_tests_properties(chimera/server/smb/mbt/sidseed_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_sidseed_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 120)
+
 # ---------------------------------------------------------------------------
 # Trace replay (ROADMAP-SMB.md Increment 3).  A single smb2_mbt_replay process
 # opens the server + client evpl once per CAPABILITY PROFILE (the corpus spans

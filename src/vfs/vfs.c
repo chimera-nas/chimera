@@ -1411,6 +1411,30 @@ chimera_vfs_remove_user(
     return chimera_vfs_user_cache_remove(vfs->vfs_user_cache, username);
 } /* chimera_vfs_remove_user */
 
+/* Register a group the identity authority is to know natively: the SID it
+ * carries is what gid_to_sid answers with (NULL leaves the group indexed by
+ * gid only, exactly as an NSS-resolved group is).  Mirrors chimera_vfs_add_user
+ * for the group half of a session's identity. */
+SYMBOL_EXPORT int
+chimera_vfs_add_group(
+    struct chimera_vfs *vfs,
+    const char         *groupname,
+    const char         *sid,
+    uint32_t            gid,
+    int                 pinned)
+{
+    return chimera_vfs_group_cache_add(vfs->vfs_user_cache, groupname, sid,
+                                       gid, pinned);
+} /* chimera_vfs_add_group */
+
+SYMBOL_EXPORT int
+chimera_vfs_remove_group(
+    struct chimera_vfs *vfs,
+    const char         *groupname)
+{
+    return chimera_vfs_group_cache_remove(vfs->vfs_user_cache, groupname);
+} /* chimera_vfs_remove_group */
+
 SYMBOL_EXPORT const struct chimera_vfs_user *
 chimera_vfs_lookup_user_by_name(
     struct chimera_vfs *vfs,

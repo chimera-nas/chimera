@@ -685,6 +685,40 @@ chimera_vfs_group_cache_add(
 } // chimera_vfs_group_cache_add
 
 /*
+ * Remove the group record named `groupname`.  Groups are chained by gid and
+ * by SID only, so this walks the gid buckets; it is an administrative path
+ * (configuration, tests), not a lookup.  Returns 0 when a record was removed,
+ * -1 when none carried that name.
+ */
+static inline int
+chimera_vfs_group_cache_remove(
+    struct chimera_vfs_user_cache *cache,
+    const char                    *groupname)
+{
+    struct chimera_vfs_group *group, *next;
+    unsigned int              i;
+    int                       found = -1;
+
+    pthread_mutex_lock(&cache->write_lock);
+
+    for (i = 0; i < cache->num_buckets && found != 0; i++) {
+        group = cache->group_gid_buckets[i].head;
+        while (group) {
+            next = group->next_by_gid;
+            if (strcmp(group->groupname, groupname) == 0) {
+                chimera_vfs_group_cache_remove_locked(cache, group);
+                found = 0;
+                break;
+            }
+            group = next;
+        }
+    }
+
+    pthread_mutex_unlock(&cache->write_lock);
+    return found;
+} // chimera_vfs_group_cache_remove
+
+/*
  * Resolve a gid to its cached group record (RCU read-side).
  *
  * Note this is NOT chimera_vfs_user_cache_lookup_by_gid below, which despite

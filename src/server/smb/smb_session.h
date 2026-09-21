@@ -12,6 +12,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
+#include "vfs/sdk/vfs_sid.h"
 #include "vfs/vfs_claim.h"
 #include "smb_common/smb2.h"
 
@@ -425,6 +426,19 @@ struct chimera_smb_session {
 
     struct chimera_vfs_cred     cred;
 
+    /* The session's own native identity: the owner and primary-group SIDs
+     * captured at SESSION_SETUP from the authority that answered the logon
+     * (winbind, or the local user and group records), held for the session's
+     * life.  A CREATE stamps them on the objects it makes.  len 0 = no
+     * authority named one, and the create stores nothing native.
+     *
+     * Held here rather than probed per create: the identity cache is
+     * TTL-bound (cache_ttl, 60 s by default) and a session is not, so a probe
+     * alone stops answering on every session older than the TTL, and nothing
+     * at logon warmed the group cache in the first place. */
+    struct chimera_sid          owner_sid;
+    struct chimera_sid          group_sid;
+
     /* Kerberos principal that ESTABLISHED the session, captured on the first
      * (authorizing) leg.  A multichannel bind over Kerberos compares the binding
      * connection's authenticated principal against this to enforce that the
@@ -473,6 +487,8 @@ chimera_smb_session_create()
      * TODO: Map authenticated SMB user to appropriate UID/GID
      */
     chimera_vfs_cred_init_attr(&session->cred, 0, 0, 0, NULL);
+    memset(&session->owner_sid, 0, sizeof(session->owner_sid));
+    memset(&session->group_sid, 0, sizeof(session->group_sid));
 
     return session;
 } /* chimera_smb_session_create */

@@ -315,6 +315,19 @@ chimera_vfs_remove_user(
     struct chimera_vfs *vfs,
     const char         *username);
 
+int
+chimera_vfs_add_group(
+    struct chimera_vfs *vfs,
+    const char         *groupname,
+    const char         *sid,
+    uint32_t            gid,
+    int                 pinned);
+
+int
+chimera_vfs_remove_group(
+    struct chimera_vfs *vfs,
+    const char         *groupname);
+
 const struct chimera_vfs_user *
 chimera_vfs_lookup_user_by_name(
     struct chimera_vfs *vfs,
