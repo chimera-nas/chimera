@@ -28,12 +28,12 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_kv.h"
 #include "vfs/vfs_compound.h"
 /* The two things below that are not sequence ops: the pool lifecycle (mkfs,
  * mount, umount, rmfs) and the key-value calls, which are a store beside
  * the filesystem rather than operations on it.  Both come from the core's
  * per-op header, which is where they still live. */
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_attrs.h"

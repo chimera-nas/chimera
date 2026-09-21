@@ -700,7 +700,7 @@ chimera_vfs_open(
  * Non-inline export of chimera_vfs_release() (defined inline in the internal
  * vfs_release.h).  Lets out-of-tree consumers that link libchimera_vfs -- e.g.
  * downstream in-process VFS module tests -- release open handles without
- * pulling in the internal open-cache headers.  Declared in vfs_procs.h.
+ * pulling in the internal open-cache headers.  Declared in vfs_internal_procs.h.
  */
 SYMBOL_EXPORT void
 chimera_vfs_release_handle(
