@@ -800,6 +800,8 @@ chimera_server_unmount(
     struct chimera_server *server,
     const char            *mount_path);
 
+/* Query share/export/bucket references without a VFS thread context or RCU
+ * reader registration. */
 int
 chimera_server_mount_in_use(
     struct chimera_server *server,
@@ -812,6 +814,10 @@ typedef int (*chimera_server_mount_iterate_cb)(
     const char *options,
     void       *data);
 
+/* Enumerate a snapshot of the mount metadata. Callback strings are valid for
+ * that callback only; returning nonzero stops enumeration. The callback runs
+ * without the mount-table lock and may call server APIs. No VFS thread context
+ * or RCU reader registration is required. */
 void
 chimera_server_iterate_mounts(
     struct chimera_server          *server,

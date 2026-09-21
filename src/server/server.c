@@ -3165,24 +3165,13 @@ chimera_server_iterate_buckets(
     chimera_s3_iterate_buckets(server->s3_shared, callback, data);
 } /* chimera_server_iterate_buckets */
 
-struct mount_iterate_ctx {
-    chimera_server_mount_iterate_cb callback;
-    void                           *data;
+struct mount_snapshot {
+    struct mount_snapshot *next;
+    char                  *path;
+    char                  *module;
+    char                  *module_path;
+    char                  *options;
 };
-
-static int
-mount_iterate_wrapper(
-    struct chimera_vfs_mount *mount,
-    void                     *data)
-{
-    struct mount_iterate_ctx *ctx = data;
-
-    return ctx->callback(mount->path,
-                         mount->module ? mount->module->name : "",
-                         mount->module_path ? mount->module_path : "",
-                         mount->options,
-                         ctx->data);
-} /* mount_iterate_wrapper */
 
 SYMBOL_EXPORT void
 chimera_server_iterate_mounts(
@@ -3190,10 +3179,52 @@ chimera_server_iterate_mounts(
     chimera_server_mount_iterate_cb callback,
     void                           *data)
 {
-    struct mount_iterate_ctx ctx = { .callback = callback, .data = data };
+    struct chimera_vfs_mount_table *table = server->vfs->mount_table;
+    struct mount_snapshot          *head = NULL, **tail = &head, *item;
+    uint32_t                        i;
+    int                             stopped = 0;
 
-    chimera_vfs_mount_table_foreach(server->vfs->mount_table,
-                                    mount_iterate_wrapper, &ctx);
+    /* This public API also runs on application threads without an RCU
+     * registration. Snapshot the metadata under the writer lock, then invoke
+     * callbacks unlocked so they can call back into the server safely. */
+    evpl_mutex_lock(&table->lock);
+    for (i = 0; i < table->num_buckets; i++) {
+        struct chimera_vfs_mount_table_entry *entry;
+
+        for (entry = table->buckets[i]; entry; entry = entry->next) {
+            struct chimera_vfs_mount *mount = entry->mount;
+
+            item = calloc(1, sizeof(*item));
+            if (!item) {
+                abort();
+            }
+            item->path        = strdup(mount->path);
+            item->module      = strdup(mount->module ? mount->module->name : "");
+            item->module_path = strdup(mount->module_path ? mount->module_path : "");
+            item->options     = mount->options ? strdup(mount->options) : NULL;
+            if (!item->path || !item->module || !item->module_path ||
+                (mount->options && !item->options)) {
+                abort();
+            }
+            *tail = item;
+            tail  = &item->next;
+        }
+    }
+    evpl_mutex_unlock(&table->lock);
+
+    while (head) {
+        item = head;
+        head = item->next;
+        if (!stopped) {
+            stopped = callback(item->path, item->module, item->module_path,
+                               item->options, data);
+        }
+        free(item->path);
+        free(item->module);
+        free(item->module_path);
+        free(item->options);
+        free(item);
+    }
 } /* chimera_server_iterate_mounts */
 
 struct mount_in_use_ctx {
@@ -3220,17 +3251,20 @@ mount_in_use_check_path(
         path++;
     }
 
-    mount = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
-                                                 path, strlen(path));
+    /* Like mount enumeration, this public query can originate on a thread
+     * with no VFS context. Consume the mount pointer while holding the lock. */
+    evpl_mutex_lock(&ctx->vfs->mount_table->lock);
+    mount = chimera_vfs_mount_table_find_by_path_protected(ctx->vfs->mount_table,
+                                                           path, strlen(path));
 
     if (mount &&
         mount->pathlen == (uint32_t) ctx->target_len &&
         memcmp(mount->path, ctx->target, ctx->target_len) == 0) {
         ctx->in_use = 1;
-        return 1;
     }
 
-    return 0;
+    evpl_mutex_unlock(&ctx->vfs->mount_table->lock);
+    return ctx->in_use;
 } /* mount_in_use_check_path */
 
 static int
