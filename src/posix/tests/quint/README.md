@@ -128,7 +128,8 @@ Inspect successful replay output for `harness allowances:` as well as failures.
 ## Verification of this review (2026-09-21)
 
 Validation on `quint-ci-enhance` uses the POSIX model at `b775722` and the
-stopwatch wall-time enhancement at `dac2e9f` (through libevpl `9aa21de`).
+merged stopwatch wall-time enhancement at `f98ac24` (through libevpl `336734a`).
+The merged stopwatch source tree is identical to the locally tested tree.
 
 * Linux Release: all 56 selected CTest checks passed. These cover all twelve
   POSIX backend cells, normal and strict FUSE, five POSIX strict twins, six
@@ -144,7 +145,9 @@ stopwatch wall-time enhancement at `dac2e9f` (through libevpl `9aa21de`).
   deterministic TSC tests exercise both the default slew limit and 500 ppm,
   including concurrent refreshes and scheduling delays. ThreadSanitizer and
   UndefinedBehaviorSanitizer passed. An x86 build under Rosetta selected TSC
-  and passed the live clock test across a refresh interval.
+  and passed the live clock test across a refresh interval. Upstream stopwatch
+  CI also passed Debug and Release on Linux x64/ARM64, macOS ARM64, and Windows
+  x64/ARM64, plus CodeQL.
 * Model generation passed all three self-test suites and generated 746 traces.
   A freshly generated 90-trace reference corpus passed against Linux 6.8 ext4
   with its measured filesystem profile.
