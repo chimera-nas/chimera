@@ -8,8 +8,7 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 
 /* RFC 7530 §16.31 (VERIFY) and §16.14 (NVERIFY).
  *
@@ -49,27 +48,38 @@ verify_is_nverify(struct nfs_request *req)
     return req->args_compound->argarray[req->index].argop == OP_NVERIFY;
 } /* verify_is_nverify */
 
+/* PUTFH, OPEN_CURRENT, GETATTR: the stat is op 2 of the run. */
+#define NFS4_VERIFY_OP_GETATTR 2
+
 static void
 chimera_nfs4_verify_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req = private_data;
+    struct nfs_request                   *req = private_data;
     /* VERIFY4res and NVERIFY4res are layout-identical (status only). */
-    struct VERIFY4res  *res = &req->res_compound.resarray[req->index].opverify;
-    nfsstat4            status;
+    struct VERIFY4res                    *res = &req->res_compound.resarray[req->index].opverify;
+    const struct chimera_vfs_compound_op *gop;
+    enum chimera_vfs_error                error_code;
+    nfsstat4                              status;
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_free(compound);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    status = chimera_nfs4_verify_status(req, req->index, attr,
+    /* The comparison marshals an ACL the compound owns, so it happens before
+     * the free. */
+    gop    = chimera_vfs_compound_op(compound, NFS4_VERIFY_OP_GETATTR);
+    status = chimera_nfs4_verify_status(req, req->index, &gop->attr,
                                         req->fh, req->fhlen);
+
+    chimera_vfs_compound_free(compound);
+
     res->status = status;
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_verify_complete */
@@ -152,34 +162,6 @@ chimera_nfs4_verify_status(
     return status;
 } /* chimera_nfs4_verify_status */
 
-static void
-chimera_nfs4_verify_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req  = private_data;
-    struct VERIFY4res  *res  = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4      *args = verify_args_fattr4(req);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    req->handle = handle;
-
-    uint64_t attr_mask = chimera_nfs4_attr2mask(args->attrmask,
-                                                args->num_attrmask);
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        attr_mask,
-                        chimera_nfs4_verify_complete,
-                        req);
-} /* chimera_nfs4_verify_open_callback */
-
 static nfsstat4
 verify_validate_mask(
     uint32_t        num,
@@ -240,8 +222,9 @@ chimera_nfs4_verify_dispatch(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
-    struct VERIFY4res *res  = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4     *args = verify_args_fattr4(req);
+    struct VERIFY4res           *res  = &req->res_compound.resarray[req->index].opverify;
+    struct fattr4               *args = verify_args_fattr4(req);
+    struct chimera_vfs_compound *compound;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -255,12 +238,19 @@ chimera_nfs4_verify_dispatch(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs4_verify_open_callback,
-                        req);
+    /* A PATH open: the whole operation is a stat and a comparison. */
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+    chimera_vfs_compound_add_getattr(compound,
+                                     chimera_nfs4_attr2mask(
+                                         args->attrmask,
+                                         args->num_attrmask));
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_verify_complete, req);
 } /* chimera_nfs4_verify_dispatch */
 
 void
