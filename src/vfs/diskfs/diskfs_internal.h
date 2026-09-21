@@ -431,6 +431,7 @@ struct diskfs_request_private {
 
 
 struct diskfs_device {
+    enum evpl_block_protocol_id protocol_id;
     struct evpl_block_device *bdev;            /* NULL for a REMOTE (pNFS data) device */
     uint64_t                  id;
     uint64_t                  size;

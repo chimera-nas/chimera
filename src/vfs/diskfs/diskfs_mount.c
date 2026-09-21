@@ -1049,6 +1049,8 @@ diskfs_init(
             chimera_diskfs_abort("Unsupported protocol: %s", protocol_name);
         }
 
+        device->protocol_id = protocol_id;
+
         /* For the file-backed backends a missing path is auto-created + sized.
          * A vfio device's "path" is a PCI BDF (e.g. "01:00.0"), not a file:
          * stat'ing it ENOENTs, so skip the create -- otherwise we'd drop a

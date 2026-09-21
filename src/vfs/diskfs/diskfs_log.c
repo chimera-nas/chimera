@@ -16,15 +16,16 @@
 /* Debug: live handle to the intent log + a per-queue CQ dumper (in libevpl),
  * so a wedge can be inspected from gdb with `call dbg_dump_push()`. */
 struct diskfs_intent_log *g_dbg_il;
+#ifdef CHIMERA_HAVE_VFIO
 extern void evpl_vfio_queue_dump(
     struct evpl_block_queue *bq);
+#endif
 
 SYMBOL_EXPORT void
 dbg_dump_push(void)
 {
     struct diskfs_intent_log *il = g_dbg_il;
     struct diskfs_shared     *shared;
-    int                       i;
 
     if (!il) {
         chimera_diskfs_error("DBG-PUSH: no il");
@@ -43,14 +44,16 @@ dbg_dump_push(void)
                          chimera_atomic_load_n(&il->log_tail, CHIMERA_MEMORY_RELAXED)),
         shared->num_devices);
 
-    if (il->log_queue) {
+#ifdef CHIMERA_HAVE_VFIO
+    if (il->log_queue && shared->devices[SM_INTENT_LOG_DEVICE].protocol_id == EVPL_BLOCK_PROTOCOL_VFIO) {
         evpl_vfio_queue_dump(il->log_queue);    /* redo / commit queue */
     }
-    for (i = 0; i < shared->num_devices; i++) {
-        if (il->home_queue[i]) {
+    for (int i = 0; i < shared->num_devices; i++) {
+        if (il->home_queue[i] && shared->devices[i].protocol_id == EVPL_BLOCK_PROTOCOL_VFIO) {
             evpl_vfio_queue_dump(il->home_queue[i]);
         }
     }
+#endif
 } /* dbg_dump_push */
 
 /* Forward declarations (definitions below, in call-graph order) */

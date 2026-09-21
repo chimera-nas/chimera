@@ -34,6 +34,10 @@ target_compile_definitions(chimera_vfs_diskfs PRIVATE
     XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
 
+if(CHIMERA_LINUX AND VFIO_INCLUDE_DIR)
+    target_compile_definitions(chimera_vfs_diskfs PRIVATE CHIMERA_HAVE_VFIO=1)
+endif()
+
 install(TARGETS chimera_vfs_diskfs DESTINATION lib)
 
 if (NOT DISABLE_TESTS)

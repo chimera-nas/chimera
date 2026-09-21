@@ -1304,7 +1304,7 @@ void chimera_nfs4_open_at(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_close(
+void chimera_vfs_nfs4_close(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -1312,7 +1312,7 @@ void chimera_nfs4_close(
 
 /* Terminal step of a close: drop this handle's reference to the file's open,
  * send the CLOSE if it was the last, then free the handle's open state and
- * complete the request.  Split out of chimera_nfs4_close so the pNFS close path
+ * complete the request.  Split out of chimera_vfs_nfs4_close so the pNFS close path
  * can run its LAYOUTCOMMIT/LAYOUTRETURN first and then hand the request here,
  * rather than completing with the layout still held.  Takes ownership of
  * open_state and of request->plugin_data. */

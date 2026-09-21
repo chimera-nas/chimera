@@ -47,7 +47,7 @@ chimera_nfs4_dispatch(
             chimera_nfs4_open_fh(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_CLOSE:
-            chimera_nfs4_close(thread, shared, request, private_data);
+            chimera_vfs_nfs4_close(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_READ:
             chimera_nfs4_read(thread, shared, request, private_data);

@@ -202,7 +202,7 @@ chimera_nfs4_close_send(
 } /* chimera_nfs4_close_send */
 
 void
-chimera_nfs4_close(
+chimera_vfs_nfs4_close(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -234,4 +234,4 @@ chimera_nfs4_close(
     }
 
     chimera_nfs4_close_send(thread, shared, request, open_state);
-} /* chimera_nfs4_close */
+} /* chimera_vfs_nfs4_close */
