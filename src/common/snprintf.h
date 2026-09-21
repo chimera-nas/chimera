@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2017 Sean Barrett
 //
 // SPDX-License-Identifier: Unlicense

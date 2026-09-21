@@ -53,6 +53,12 @@ CURRENT_YEAR=$(date +%Y)
 
     grep -q "$PATTERN" "$file" 2>/dev/null || continue
 
+    # Public-domain imports may deliberately have no copyright holder/year.
+    # REUSE permits NONE and NOASSERTION; do not invent a year for them.
+    if ! grep "$PATTERN" "$file" | grep -Eqv '(NONE|NOASSERTION)[[:space:]]*$'; then
+        continue
+    fi
+
     # Check if the file already contains the current year in a copyright line
     if grep "$PATTERN" "$file" | grep -q "$CURRENT_YEAR"; then
         continue
