@@ -554,6 +554,8 @@ chimera_windows_exception(EXCEPTION_POINTERS *exception)
     HMODULE module  = NULL;
     void   *address = exception->ExceptionRecord->ExceptionAddress;
     char    path[MAX_PATH];
+    void   *frames[BACKTRACE_SIZE];
+    USHORT  count;
 
     fprintf(stderr, "Unhandled Windows exception 0x%08lx at %p\n",
             exception->ExceptionRecord->ExceptionCode, address);
@@ -563,6 +565,27 @@ chimera_windows_exception(EXCEPTION_POINTERS *exception)
         GetModuleFileNameA(module, path, sizeof(path))) {
         fprintf(stderr, "Fault location: %s + 0x%llx\n", path,
                 (unsigned long long) ((uintptr_t) address - (uintptr_t) module));
+    }
+    if (exception->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        exception->ExceptionRecord->NumberParameters >= 2) {
+        ULONG_PTR access = exception->ExceptionRecord->ExceptionInformation[0];
+
+        fprintf(stderr, "Fault access: %s at %p, thread %lu\n",
+                access == 0 ? "read" : access == 1 ? "write" : "execute",
+                (void *) exception->ExceptionRecord->ExceptionInformation[1],
+                GetCurrentThreadId());
+    }
+    count = CaptureStackBackTrace(0, BACKTRACE_SIZE, frames, NULL);
+    for (USHORT i = 0; i < count; i++) {
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR) frames[i], &module) &&
+            GetModuleFileNameA(module, path, sizeof(path))) {
+            fprintf(stderr, "frame %u: %s + 0x%llx\n", i, path,
+                    (unsigned long long) ((uintptr_t) frames[i] - (uintptr_t) module));
+        } else {
+            fprintf(stderr, "frame %u: %p\n", i, frames[i]);
+        }
     }
     fflush(stderr);
     return EXCEPTION_EXECUTE_HANDLER;
