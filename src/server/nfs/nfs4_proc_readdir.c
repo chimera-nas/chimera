@@ -7,9 +7,7 @@
 #include "nfs4_status.h"
 #include "nfs4_named_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
-#include "vfs/vfs_release.h"
 
 /*
  * Marshal one directory entry into the reply and append it to `cursor`,
@@ -122,6 +120,10 @@ chimera_nfs4_readdir_entry_fill(
     return 0;
 } /* chimera_nfs4_readdir_entry_fill */
 
+/*
+ * Marshal one synthesized entry, for the named-attribute directory whose
+ * entries are built here rather than enumerated by a backend.
+ */
 static int
 chimera_nfs4_readdir_callback(
     uint64_t                        inum,
@@ -141,83 +143,125 @@ chimera_nfs4_readdir_callback(
                                            cookie, name, namelen, attrs);
 } /* chimera_nfs4_readdir_callback */
 
+/*
+ * PUTFH, OPEN_CURRENT(dir), READDIR -- the STREAMING shape, because the entries
+ * are marshalled into the reply as the backend produces them, which is where a
+ * per-entry ACL can be encoded at all: the attributes an append is handed are
+ * the backend's own and live only for the call.
+ *
+ * `reset` runs before every execution of the op, so it has to take back
+ * everything `append` did.  Rewinding the reply buffer to a mark, rather than
+ * merely stopping at it, is safe because during the run the entry fill is the
+ * only thing that allocates from that buffer: every other result of this
+ * one-op run is marshalled afterwards.
+ */
+#define NFS4_READDIR_OP_READDIR 2
+
+struct nfs4_readdir_ctx {
+    struct nfs_request *req;
+    uint32_t            mark;
+    uint8_t             have_mark;
+};
+
 static void
-chimera_nfs4_readdir_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
+chimera_nfs4_readdir_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct nfs4_readdir_ctx        *ctx    = private_data;
+    struct nfs_request             *req    = ctx->req;
+    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
+
+    if (ctx->have_mark) {
+        req->encoding->dbuf->used = ctx->mark;
+    } else {
+        ctx->mark      = req->encoding->dbuf->used;
+        ctx->have_mark = 1;
+    }
+
+    /* Fixed READDIR4resok overhead counted against maxcount: cookieverf (8)
+     * + the dirlist4 "entry present" and "eof" booleans (4 each). */
+    cursor->count   = 16;
+    cursor->entries = NULL;
+    cursor->last    = NULL;
+} /* chimera_nfs4_readdir_reset */
+
+static int
+chimera_nfs4_readdir_append(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    uint64_t                        inum,
     uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *dir_attr,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
     void                           *private_data)
 {
-    struct nfs_request             *req    = private_data;
-    struct READDIR4res             *res    = &req->res_compound.resarray[req->index].opreaddir;
-    nfsstat4                        status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
-    uint64_t                        cv;
+    struct nfs4_readdir_ctx              *ctx  = private_data;
+    struct nfs_request                   *req  = ctx->req;
+    struct READDIR4args                  *args = &req->args_compound->argarray[req->index].opreaddir;
+    const struct chimera_vfs_compound_op *vop;
+
+    (void) inum;
+
+    /* The directory being listed, as the op recorded it: req->fh still names
+     * it here, but the op's own record is what the sequence path reads and
+     * what survives an op that moved the cursor. */
+    vop = chimera_vfs_compound_op(compound, index);
+
+    return chimera_nfs4_readdir_entry_fill(req, args, &req->readdir4_cursor,
+                                           vop->fh, (int) vop->fh_len,
+                                           cookie, name, namelen, attrs);
+} /* chimera_nfs4_readdir_append */
+
+static void
+chimera_nfs4_readdir_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nfs4_readdir_ctx              *ctx    = private_data;
+    struct nfs_request                   *req    = ctx->req;
+    struct READDIR4res                   *res    = &req->res_compound.resarray[req->index].opreaddir;
+    struct nfs_nfs4_readdir_cursor       *cursor = &req->readdir4_cursor;
+    const struct chimera_vfs_compound_op *vop;
+    enum chimera_vfs_error                error_code;
+    nfsstat4                              status;
+    uint64_t                              cv;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    /* LISTXATTRS and READDIR both turn a too-small buffer into TOOSMALL. */
+    status = (error_code == CHIMERA_VFS_ERANGE) ?
+        NFS4ERR_TOOSMALL : chimera_nfs4_errno_to_nfsstat4(error_code);
+
+    vop = chimera_vfs_compound_op(compound, NFS4_READDIR_OP_READDIR);
 
     /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are
      * not at end-of-directory, the buffer is too small. Returning an empty,
      * non-eof page would stall a paging client. */
-    if (status == NFS4_OK && !eof && cursor->entries == NULL) {
+    if (status == NFS4_OK && !vop->eof && cursor->entries == NULL) {
         status = NFS4ERR_TOOSMALL;
     }
 
     res->status = status;
 
     if (status != NFS4_OK) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_vfs_compound_free(compound);
         chimera_nfs4_compound_complete(req, status);
         return;
     }
 
-    cv = verifier ? verifier : cookie;
+    cv = vop->r_verifier ? vop->r_verifier : vop->r_cookie;
     memcpy(res->resok4.cookieverf, &cv, sizeof(res->resok4.cookieverf));
 
-    res->resok4.reply.eof     = eof;
+    res->resok4.reply.eof     = vop->eof;
     res->resok4.reply.entries = cursor->entries;
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    chimera_vfs_compound_free(compound);
 
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_readdir_complete */
-
-static void
-chimera_nfs4_readdir_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct READDIR4args              *args   = &req->args_compound->argarray[req->index].opreaddir;
-    struct READDIR4res               *res    = &req->res_compound.resarray[req->index].opreaddir;
-    uint64_t                          attrmask;
-
-    req->handle = handle;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-    attrmask = chimera_nfs4_attr2mask(args->attr_request,
-                                      args->num_attr_request);
-    uint64_t cookieverf;
-    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-    chimera_vfs_readdir(thread->vfs_thread, &req->cred,
-                        handle,
-                        attrmask,
-                        0,
-                        args->cookie,
-                        cookieverf,
-                        0,
-                        NULL, 0, /* no search-pattern filter */
-                        chimera_nfs4_readdir_callback,
-                        chimera_nfs4_readdir_complete,
-                        req);
-} /* chimera_nfs4_readdir_open_callback */
 
 /* ---- Named-attribute directory READDIR ----------------------------------
  *
@@ -409,6 +453,7 @@ chimera_nfs4_readdir(
     struct READDIR4args            *args = &argop->opreaddir;
     struct READDIR4res             *res  = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
+    struct chimera_vfs_compound    *compound;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -469,11 +514,39 @@ chimera_nfs4_readdir(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_readdir_open_callback,
-                        req);
+    struct nfs4_readdir_ctx *ctx =
+        xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
 
+    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+
+    ctx->req       = req;
+    ctx->mark      = 0;
+    ctx->have_mark = 0;
+
+    uint64_t cookieverf;
+
+    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
+
+    req->handle = NULL;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    chimera_vfs_compound_add_readdir_stream(compound,
+                                            args->cookie,
+                                            cookieverf,
+                                            chimera_nfs4_attr2mask(
+                                                args->attr_request,
+                                                args->num_attr_request),
+                                            0,
+                                            0, NULL, 0,
+                                            chimera_nfs4_readdir_reset,
+                                            chimera_nfs4_readdir_append,
+                                            ctx);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_readdir_complete, ctx);
 } /* chimera_nfs4_readdir */
