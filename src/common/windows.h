@@ -6,6 +6,7 @@
  * they never imply Windows host impersonation or POSIX host permissions. */
 #include <evpl/evpl_platform.h>
 #include <ws2tcpip.h>
+#include <winioctl.h>
 #include <bcrypt.h>
 #include <io.h>
 #include <direct.h>
@@ -137,13 +138,34 @@ ftruncate(
     int     fd,
     int64_t length)
 {
-    errno_t error = _chsize_s(fd, length);
+    FILE_END_OF_FILE_INFO info;
+    HANDLE                handle;
+    DWORD                 bytes, error;
 
-    if (error) {
-        errno = error;
+    if (length < 0) {
+        errno = EINVAL;
         return -1;
     }
-    return 0;
+    if (fd < 0 || (handle = (HANDLE) _get_osfhandle(fd)) == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return -1;
+    }
+
+    /* The CRT grows files by writing zero buffers. Mark sparse-capable files
+     * sparse and set EOF directly, preserving both zero-filled holes and the
+     * descriptor position without allocating every byte of a device image.
+     * Sparse marking is only an optimization; other filesystems can still
+     * resize through FileEndOfFileInfo. */
+    DeviceIoControl(handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytes, NULL);
+    info.EndOfFile.QuadPart = length;
+    if (SetFileInformationByHandle(handle, FileEndOfFileInfo, &info, sizeof(info))) {
+        return 0;
+    }
+    error = GetLastError();
+    errno = error == ERROR_DISK_FULL ? ENOSPC :
+        error == ERROR_ACCESS_DENIED ? EACCES :
+        error == ERROR_INVALID_HANDLE ? EBADF : EIO;
+    return -1;
 } // ftruncate
 
 /* Stable per-host identity for protocol metadata. The computer name is a

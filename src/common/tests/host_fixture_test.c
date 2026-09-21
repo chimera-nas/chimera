@@ -51,6 +51,36 @@ main(void)
         free(line);
         fclose(input);
     }
+#ifdef _WIN32
+    /* Diskfs fixtures use large, mostly empty images. Resize must retain the
+     * descriptor position, preserve existing data, and leave zero-filled holes
+     * without allocating the entire logical image on NTFS. */
+    fd = _open(file, _O_RDWR | _O_BINARY);
+    assert(fd >= 0);
+    assert(_lseeki64(fd, 3, SEEK_SET) == 3);
+    assert(!ftruncate(fd, (INT64_C(1) << 33) + 123));
+    assert(_lseeki64(fd, 0, SEEK_CUR) == 3);
+    {
+        char                    byte = 1;
+        LARGE_INTEGER           size;
+        FILE_ATTRIBUTE_TAG_INFO attrs;
+        HANDLE                  handle = (HANDLE) _get_osfhandle(fd);
+        assert(GetFileSizeEx(handle, &size));
+        assert(size.QuadPart == (INT64_C(1) << 33) + 123);
+        assert(GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
+                                            &attrs, sizeof(attrs)));
+        assert(attrs.FileAttributes & FILE_ATTRIBUTE_SPARSE_FILE);
+        assert(_read(fd, &byte, 1) == 1 && byte == 'x');
+        assert(_lseeki64(fd, -1, SEEK_END) == size.QuadPart - 1);
+        assert(_read(fd, &byte, 1) == 1 && byte == 0);
+        assert(!ftruncate(fd, 4));
+        assert(_lseeki64(fd, 0, SEEK_CUR) == size.QuadPart);
+        assert(GetFileSizeEx(handle, &size) && size.QuadPart == 4);
+        errno = 0;
+        assert(ftruncate(fd, -1) == -1 && errno == EINVAL);
+    }
+    assert(!close(fd));
+#endif /* ifdef _WIN32 */
 #ifndef _WIN32
     snprintf(file, sizeof(file), "%s/outside", child);
     assert(!symlink("../..", file));
