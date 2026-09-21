@@ -8,27 +8,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
-#ifdef _WIN32
-#include "common/platform.h"
-#endif // ifdef _WIN32
 #include <sys/stat.h>
-#ifdef _WIN32
-#include "common/platform.h"
-#endif // ifdef _WIN32
-#include "posix/posix_types.h"
-#ifdef _WIN32
-#include "common/platform.h"
-#else // ifdef _WIN32
-#include <sys/uio.h>
-#endif // ifdef _WIN32
-#ifdef _WIN32
-#include "common/platform.h"
-#else // ifdef _WIN32
-#include <unistd.h>
-#endif // ifdef _WIN32
-
 #include "common/platform.h"
 #include "posix_types.h"
+#ifndef _WIN32
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 #include "vfs/sdk/vfs_cred.h"
 
 struct chimera_posix_client;
