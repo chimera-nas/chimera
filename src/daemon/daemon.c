@@ -66,6 +66,12 @@ static void CHIMERA_NORETURN
 startup_validation_fail(void)
 {
     chimera_log_flush();
+#ifdef _WIN32
+    /* The CRT's _exit still reaches DLL process-detach callbacks. They cannot
+     * safely tear down a partially started server whose threads have not been
+     * joined. TerminateProcess skips those callbacks, like _exit on Unix. */
+    TerminateProcess(GetCurrentProcess(), 1);
+#endif /* ifdef _WIN32 */
     _exit(1);
 } /* startup_validation_fail */
 
