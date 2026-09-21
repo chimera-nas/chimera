@@ -10,12 +10,28 @@
 /*
  * VFS compounds: submit a whole sequence of operations, get one callback.
  *
- * The existing per-op API is unchanged and remains the way most callers work.
- * This is an ADDITIONAL entrance for a caller that already knows, at the time
- * it starts, everything it wants to do -- which is true of every protocol
- * front end: one NFS3 RPC, one NFS4 COMPOUND, one SMB2 chain, one FUSE
- * request, one SDK call.  Such a caller builds the whole sequence, submits it,
- * and is called back once when the sequence is over.
+ * This is how the VFS is entered.  A protocol front end, the client and the SDK
+ * reach a file system through a sequence and through nothing else: they build
+ * the whole thing, submit it, and are called back once when it is over.  That
+ * suits them, because each already knows at the time it starts everything it
+ * wants to do -- one NFS3 RPC, one NFS4 COMPOUND, one SMB2 chain, one FUSE
+ * request, one S3 handler, one POSIX call, one SDK call.
+ *
+ * The per-op API is no longer an entrance.  It lives in vfs_internal_procs.h
+ * and is the executor's own implementation vocabulary: the path walkers, the
+ * DAC gate, the open cache, `find`, the copy fallback, the recall machinery and
+ * the root module call it from inside src/vfs, no header exposes it, and
+ * nothing above the VFS includes it.
+ *
+ * A handful of calls into the VFS are not sequence ops, and they are
+ * enumerated rather than left to taste: the lifecycle calls and the
+ * synchronous queries (vfs.h), reference drops and the open cache's own close
+ * (vfs_release.h, vfs_open_cache.h), claim transitions (vfs_claim.h), change
+ * notification (vfs_notify.h), the key-value side-store (vfs_kv.h), and the
+ * protocol-only state machines that keep their own tables (the NFSv4 state
+ * table, NLM's lock list).  Each is there for one reason, which is THE RULE
+ * below: it addresses no object through the cursors and mutates nothing the
+ * sequence holds.  Anything that does either is an op here.
  *
  * WHY.  Two things follow from the VFS owning the sequence rather than the
  * caller driving it op by op.  The obvious one is that the chaining every
@@ -50,6 +66,13 @@
  * two objects and read (SAVED FH, CURRENT FH); COPY_RANGE, CLONE_RANGE and
  * MOVE_RANGE act on two open files and read (SAVED OPEN, CURRENT OPEN).
  *
+ * THE RULE.  An operation belongs in a sequence when it addresses an object
+ * through the cursors, or when it mutates state the sequence itself holds.  A
+ * lock release, a claim ack, a delete-on-close FLAG set, a notify watch, a
+ * key-value record, a refcount drop touch neither and stay out of band -- for
+ * every front end alike, which is the point of stating it: an exception that
+ * one protocol takes and another does not is a bug in one of them.
+ *
  * OPENING IS EXPLICIT.  The sequence never opens anything by itself.  A caller
  * that wants to GETATTR an object says PUTFH, OPEN, GETATTR -- which is what it
  * already wrote by hand before sequences existed, and it is the caller, not the
@@ -74,10 +97,10 @@
  *      with PUTHANDLE.
  *
  * WHAT THIS IS NOT.  The sequence is not handed to a backend as a batch and it
- * is not atomic.  The VFS executes the ops one at a time through the ordinary
- * per-op path, so every backend, every cache and every claim behaves exactly
- * as it does for an unsequenced op.  Nothing here changes what an operation
- * means; it changes who holds the sequence.
+ * is not atomic.  The executor runs the ops one at a time through the per-op
+ * calls, so every backend, every cache and every claim behaves exactly as it
+ * did when a front end made those calls itself.  Nothing here changes what an
+ * operation means; it changes who holds the sequence.
  *
  * ERRORS.  Execution stops at the first op that fails -- the NFS4 rule, and
  * the only sane one for a sequence whose later ops address what the earlier
@@ -87,8 +110,8 @@
  * MUTATION.  Most ops here are read-only, but SETXATTR and REMOVEXATTR are not.
  * Stopping at a failure therefore leaves the mutations of the ops that already
  * ran applied: a sequence is not a transaction and is not rolled back.  That is
- * exactly what the op-at-a-time path does with the same sequence of calls -- the
- * ops are the same ops -- and it is the only behaviour available while nothing
+ * exactly what the same calls made one at a time would leave behind -- the ops
+ * are the same ops -- and it is the only behaviour available while nothing
  * retries, which nothing does yet.  A caller that needs all-or-nothing wants the
  * VFS transaction API, not this.
  *
@@ -1303,7 +1326,7 @@ typedef void (*chimera_vfs_compound_callback_t)(
  * can also park inside the claim layer: on the implicit claim's own break,
  * where chimera_vfs_io_try parks the request on the file's io-wait queue, or
  * on the namespace recall a name op fires.  The executor cannot see it.  It
- * called an ordinary per-op entrance and is waiting for that op's callback,
+ * called an ordinary per-op implementation and is waiting for that op's callback,
  * and the core offers no hook on the way in -- the parking happens several
  * frames below, on a request the executor does not hold.  Such a park does
  * not fire this callback and cannot be cancelled; the run simply waits, as it
@@ -1336,8 +1359,8 @@ chimera_vfs_compound_alloc(
 
 /* Append one op.  Returns its index, or -1 if the sequence is full (or the
  * name is too long).  A caller that cannot express an operation should build
- * no sequence at all and use the per-op API, rather than submitting a partial
- * one. */
+ * no sequence at all and answer the request from what it already knows, rather
+ * than submitting a partial one. */
 int
 chimera_vfs_compound_add_putfh(
     struct chimera_vfs_compound *compound,
