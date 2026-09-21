@@ -15,7 +15,7 @@
 #include "nfs_nlm_state.h"
 #include "nfs_kv_keys.h"
 #include "portmap_xdr.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 

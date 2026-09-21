@@ -18,7 +18,7 @@
 #include "nfs_internal.h"
 #include "nfs_kv_keys.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 
 /* Record magics (little-endian first word of each value blob). */
 #define NFS_RECOVERY_RECORD_MAGIC_V1 0x3152464Eu /* "NFR1": no renewal stamp */
