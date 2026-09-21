@@ -327,6 +327,16 @@ function(add_test)
             _add_test(${_args} CONFIGURATIONS extended)
         endif()
     endif()
+
+    # Each diskfs fixture runs several polling/event-loop threads. On the
+    # four-core Windows runners, four concurrent fixtures starve one another:
+    # the smoke workload passes alone but times out during the full suite.
+    # Account for that CPU demand in CTest's scheduler while preserving the
+    # workloads and their timeouts. Larger -j values can still run multiple
+    # diskfs fixtures concurrently.
+    if(WIN32 AND _name MATCHES "^chimera/.*diskfs")
+        set_tests_properties("${_name}" PROPERTIES PROCESSORS 4)
+    endif()
 endfunction()
 
 # Overriding a built-in command leaves the original reachable under a leading
