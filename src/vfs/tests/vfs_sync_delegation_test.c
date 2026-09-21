@@ -26,6 +26,10 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
+/* This test drives the KEY-VALUE calls and the pool lifecycle, neither of
+ * which is a sequence op: the KV store sits beside the filesystem rather
+ * than being operations on it, and mkfs / mount / umount / rmfs are
+ * administration.  Both still live in the core's per-op header. */
 #include "vfs/vfs_procs.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
