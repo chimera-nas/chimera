@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+name: Publish Windows dependencies
+
+# Build the native MSVC dependencies separately from Chimera's test matrix.
+# Dispatch after merging dependency changes, or after a runner toolchain update.
+# Consumers use this same manifest/baseline and restore with --only-binarycaching.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Let an expensive publication finish instead of cancelling it on redispatch.
+concurrency:
+  group: publish-windows-dependencies
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.triplet }} (Debug and Release)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, triplet: x64-windows, vs: '[17.0,18.0)'}
+          - {runner: windows-11-vs2026-arm, triplet: arm64-windows, vs: '[18.0,19.0)'}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_USE_NUGET_CACHE: 'false'
+      X_VCPKG_NUGET_ID_PREFIX: chimera-
+      VCPKG_NUGET_REPOSITORY: https://github.com/${{ github.repository }}.git
+      TRIPLET: ${{ matrix.triplet }}
+      VS_VERSION_RANGE: ${{ matrix.vs }}
+    steps:
+      - name: Checkout dependency manifest
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Read pinned vcpkg revision
+        id: manifest
+        run: |
+          $manifest = Get-Content vcpkg.json -Raw | ConvertFrom-Json
+          $baseline = $manifest.'builtin-baseline'
+          if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'Expected a pinned vcpkg baseline' }
+          "baseline=$baseline" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout pinned vcpkg
+        uses: actions/checkout@v5
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.manifest.outputs.baseline }}
+          path: _vcpkg
+          persist-credentials: false
+
+      - name: Select the runner's Visual Studio and bootstrap vcpkg
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -version $env:VS_VERSION_RANGE -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio $env:VS_VERSION_RANGE is required" }
+          "VCPKG_VISUAL_STUDIO_PATH=$vs" >> $env:GITHUB_ENV
+          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $metadata = [ordered]@{
+            revision = $env:GITHUB_SHA
+            manifest_sha256 = (Get-FileHash vcpkg.json -Algorithm SHA256).Hash.ToLowerInvariant()
+            baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+            triplet = $env:TRIPLET
+            runner_image = $env:ImageVersion
+            visual_studio = $vs
+            msvc_tools = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
+          }
+          New-Item -ItemType Directory -Force dependency-report | Out-Null
+          $metadata | ConvertTo-Json | Set-Content dependency-report/build.json
+          Copy-Item vcpkg.json dependency-report/vcpkg.json
+          $metadata | ConvertTo-Json
+
+      - name: Configure GitHub Packages authentication
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $nuget = & ./_vcpkg/vcpkg.exe fetch nuget | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $feed = "https://nuget.pkg.github.com/$($env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant())/index.json"
+          '<configuration><packageSources><clear /></packageSources></configuration>' | Set-Content $config
+          & $nuget sources Add -Name Chimera -Source $feed -UserName $env:GITHUB_ACTOR -Password $env:GH_PACKAGES_TOKEN -StorePasswordInClearText -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $nuget setapikey $env:GH_PACKAGES_TOKEN -Source $feed -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,readwrite" >> $env:GITHUB_ENV
+
+      # Standard Windows triplets build both configurations. Debug and Release
+      # test jobs can therefore share these packages instead of building twice.
+      # NuGet stores each ABI-addressed package independently; reruns retain
+      # completed dependencies even if a later package failed to build.
+      - name: Build and publish dependency packages
+        run: |
+          & ./_vcpkg/vcpkg.exe install --triplet $env:TRIPLET --host-triplet $env:TRIPLET --clean-after-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # A vcpkg build can succeed even when binary-cache uploads fail. Verify
+      # publication by restoring into a NEW install tree, from the feed alone.
+      # Disable NuGet's local cache as well as vcpkg's default file cache.
+      - name: Verify a fresh binary-only restore
+        run: |
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $env:VCPKG_BINARY_SOURCES = "clear;nugetconfig,$config,read"
+          $restore = "$env:RUNNER_TEMP/chimera-dependencies-verify"
+          if (Test-Path $restore) { throw 'Verification requires a fresh install directory' }
+          & ./_vcpkg/vcpkg.exe install --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$restore" --only-binarycaching
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$restore/vcpkg/status" dependency-report/package-status.txt
+          @(
+            "### Windows dependency publication: $env:TRIPLET"
+            ''
+            'Debug and Release packages published; a fresh binary-only restore from GitHub Packages passed.'
+            ''
+            "Manifest SHA256: $((Get-FileHash vcpkg.json -Algorithm SHA256).Hash.ToLowerInvariant())"
+            "Runner image: $env:ImageVersion"
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload dependency build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-dependencies-${{ matrix.triplet }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            dependency-report/
+            vcpkg_installed/**/share/*/vcpkg_abi_info.txt
+            _vcpkg/buildtrees/**/*.log
+
+      - name: Remove temporary package credentials
+        if: always()
+        run: |
+          Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue
