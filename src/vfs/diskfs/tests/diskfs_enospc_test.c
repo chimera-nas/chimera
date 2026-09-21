@@ -2,44 +2,87 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-/*
- * diskfs ENOSPC-boundary white-box test -- the in-process analogue of the
- * nfstest_alloc "alloc06" case (`Verify ALLOCATE reserves the disk space`),
- * which is what the kvm nfstest shards run over NFSv4.2.
- *
- * alloc06 allocates a small file, reads the free space the filesystem reports,
- * and then allocates all but 256 KiB of it -- which must succeed, because the
- * reported free space is supposed to be what a fresh allocation can still
- * place.  The interesting part is not the assertion but the aftermath: the
- * boundary allocation walks the pool down to its last extents, and if it fails
- * the failure path has to leave the space map exactly as it found it.
- *
- * Reaching that boundary at all needs a *bounded* pool, so this mounts the same
- * geometry the kvm wrapper uses for alloc06 (2 x 128 MiB devices behind a
- * 64 MiB intent log).  The default multi-gigabyte test pools never get near it,
- * which is why no in-process suite covered this before.
- */
-
+/* The bounded-pool alloc06/dealloc06 sequence from nfstest_alloc. Exercise
+ * both sides of the reported capacity, before and after journal retirement.
+ * The quick test must reject over-allocation as well as accept the initial
+ * fill; checking only the latter missed an unenforced internal reserve. */
 #include <inttypes.h>
-
 #include "diskfs_test_harness.h"
 
-#define CHECK(dh) do { \
-            char _e[256]; \
-            if (diskfs_test_check((dh)->vfs, _e, sizeof(_e)) != 0) { \
-                fprintf(stderr, "INVARIANT VIOLATION at %s:%d: %s\n", \
-                        __func__, __LINE__, _e); \
-                exit(1); \
-            } \
-} while (0)
+#define SMALL (256ULL * 1024)
+#define BLOCK 4096ULL
 
-/* The geometry kvm/kvm_nfstest_test_wrapper.sh gives nfstest_alloc. */
-#define ENOSPC_NDEV      2
-#define ENOSPC_DEV_BYTES (128ULL << 20)
-#define ENOSPC_LOG_BYTES (64ULL << 20)
+struct attr_result {
+    struct dh               *dh;
+    struct chimera_vfs_attrs attr;
+};
 
-/* alloc06's own numbers: a 256 KiB first file, and "the rest" is free-256 KiB. */
-#define ENOSPC_SMALL     (256ULL * 1024)
+static void
+attrs_cb(
+    enum chimera_vfs_error    status,
+    struct chimera_vfs_attrs *attr,
+    void                     *pd)
+{
+    struct attr_result *result = pd;
+
+    assert(status == CHIMERA_VFS_OK);
+    result->attr     = *attr;
+    result->dh->done = 1;
+} /* attrs_cb */
+
+static struct chimera_vfs_attrs
+attrs(
+    struct dh                      *dh,
+    struct chimera_vfs_open_handle *h)
+{
+    struct attr_result result = { .dh = dh };
+
+    /* STATFS forces dispatch, so size is not answered from the attr cache. */
+    chimera_vfs_getattr(dh->thread, &dh->cred, h,
+                        CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_MASK_STATFS,
+                        attrs_cb, &result);
+    dh_wait(dh);
+    return result.attr;
+} /* attrs */
+
+static uint64_t
+snapshot(
+    struct dh                      *dh,
+    struct chimera_vfs_open_handle *h,
+    const char                     *phase)
+{
+    struct diskfs_test_space sp;
+    struct chimera_vfs_attrs attr = attrs(dh, h);
+    char                     error[256];
+
+    assert(diskfs_test_space(dh->vfs, &sp) == 0);
+    printf("%s: reported=%" PRIu64 " live=%" PRIu64 " committed_free=%" PRIu64
+           " reserve=%" PRIu64 " claims=%" PRIu64 "\n", phase,
+           attr.va_fs_space_avail, sp.available_bytes, sp.ag_free_sum,
+           sp.reserve_bytes, sp.claim_bytes);
+    assert(attr.va_fs_space_free == attr.va_fs_space_avail);
+    assert(sp.available_bytes <= sp.ag_free_sum);
+    if (diskfs_test_check(dh->vfs, error, sizeof(error))) {
+        fprintf(stderr, "%s: %s\n", phase, error);
+        abort();
+    }
+    return attr.va_fs_space_avail;
+} /* snapshot */
+
+static void
+check_data(
+    struct dh                      *dh,
+    struct chimera_vfs_open_handle *h,
+    uint64_t                        off,
+    uint8_t                         value)
+{
+    uint8_t buf[4096];
+
+    assert(dh_read(dh, h, off, sizeof(buf), buf) == CHIMERA_VFS_OK);
+    for (unsigned i = 0; i < sizeof(buf); i++) {
+        assert(buf[i] == value);
+    }
+} /* check_data */
 
 int
 main(
@@ -47,111 +90,92 @@ main(
     char **argv)
 {
     struct dh                       dh;
-    struct chimera_vfs_open_handle *root, *h;
-    struct diskfs_test_space        sp;
+    struct chimera_vfs_open_handle *root, *small, *big, *other;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        fhlen;
-    uint64_t                        free_before, ask;
-    int                             r, boundary;
+    uint64_t                        available, ask, before, fill;
 
     (void) argc;
     (void) argv;
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    dh_init(&dh, ENOSPC_NDEV, ENOSPC_DEV_BYTES, ENOSPC_LOG_BYTES, 16384);
-
+    dh_init(&dh, 2, 128ULL << 20, 64ULL << 20, 16384);
     root = dh_root_handle(&dh);
-    CHECK(&dh);
+    assert(dh_create(&dh, root, "small", fh, &fhlen, &small) == CHIMERA_VFS_OK);
+    assert(dh_allocate(&dh, small, 0, SMALL, 0) == CHIMERA_VFS_OK);
+    assert(dh_write(&dh, small, 0, BLOCK, 0x5a) == CHIMERA_VFS_OK);
+    /* Do not drain the journal before asking what can still be allocated. */
+    available = snapshot(&dh, small, "after small allocation");
+    assert(available > SMALL);
+    ask = (available - SMALL) & ~(BLOCK - 1);
+    assert(dh_create(&dh, root, "big", fh, &fhlen, &big) == CHIMERA_VFS_OK);
+    assert(dh_allocate(&dh, big, 0, ask, 0) == CHIMERA_VFS_OK);
+    snapshot(&dh, big, "after boundary allocation");
 
-    /* alloc06 step 1: a small allocation that must succeed. */
-    r = dh_create(&dh, root, "small", fh, &fhlen, &h);
-    assert(r == CHIMERA_VFS_OK);
-    r = dh_allocate(&dh, h, 0, ENOSPC_SMALL, 0);
-    assert(r == CHIMERA_VFS_OK);
-    dh_release(&dh, h);
-    CHECK(&dh);
+    /* An over-allocation may fail after several successful internal bumps.
+     * It must roll back every extent and charge, including before retirement. */
+    for (int settled = 0; settled < 2; settled++) {
+        if (settled) {
+            diskfs_test_await_reclaim(dh.vfs, dh.evpl, 30000);
+        }
+        before = snapshot(&dh, small, settled ? "settled" : "immediate");
+        assert(dh_allocate(&dh, small, SMALL, before + SMALL, 0) == CHIMERA_VFS_ENOSPC);
+        assert(attrs(&dh, small).va_size == SMALL);
+        assert(snapshot(&dh, small, "after rejected allocation") == before);
+        check_data(&dh, small, 0, 0x5a);
+    }
 
-    /* alloc06 step 2: everything still reported free, less 256 KiB. */
-    r = diskfs_test_space(dh.vfs, &sp);
-    assert(r == 0);
-    /* What a writer can actually place: the free-extent sum less the internal
-     * reserve, which is what statfs reports as available (va_fs_space_avail). */
-    free_before = sp.ag_free_sum > sp.reserve_bytes
-        ? sp.ag_free_sum - sp.reserve_bytes : 0;
-    printf("free before boundary allocate: %" PRIu64 "\n", free_before);
-    printf("  usable=%" PRIu64 " free=%" PRIu64 " reserve=%" PRIu64
-           " largest_extent=%" PRIu64 " claims=%" PRIu64 " ags=%u\n",
-           sp.usable_capacity, sp.ag_free_sum, sp.reserve_bytes,
-           sp.largest_free_extent, sp.claim_bytes, sp.num_ags);
-    assert(free_before > ENOSPC_SMALL);
-    ask = free_before - ENOSPC_SMALL;
+    assert(dh_create(&dh, root, "other", fh, &fhlen, &other) == CHIMERA_VFS_OK);
+    fill = snapshot(&dh, other, "before final fill") & ~(BLOCK - 1);
+    assert(fill > 0);
+    assert(dh_allocate(&dh, other, 0, fill, 0) == CHIMERA_VFS_OK);
+    assert(snapshot(&dh, other, "full") < BLOCK);
+    assert(dh_write(&dh, other, fill, BLOCK, 0x22) == CHIMERA_VFS_ENOSPC);
+    assert(dh_write(&dh, small, SMALL, BLOCK, 0x33) == CHIMERA_VFS_ENOSPC);
+    /* ALLOCATE's guarantee: existing backing remains writable at ENOSPC. */
+    assert(dh_write(&dh, small, 0, BLOCK, 0x6b) == CHIMERA_VFS_OK);
+    check_data(&dh, small, 0, 0x6b);
+    assert(attrs(&dh, small).va_size == SMALL);
 
-    r = dh_create(&dh, root, "big", fh, &fhlen, &h);
-    assert(r == CHIMERA_VFS_OK);
-    boundary = dh_allocate(&dh, h, 0, ask, 0);
-    printf("boundary allocate of %" PRIu64 " bytes: %d\n", ask, boundary);
+    assert(dh_allocate(&dh, small, 0, BLOCK, CHIMERA_VFS_ALLOCATE_DEALLOCATE) == CHIMERA_VFS_OK);
+    diskfs_test_await_reclaim(dh.vfs, dh.evpl, 30000);
+    assert(snapshot(&dh, small, "after deallocate") >= BLOCK);
+    check_data(&dh, small, 0, 0);
+    /* Another file consumes the released backing; writing the hole must fail. */
+    assert(dh_allocate(&dh, other, fill, BLOCK, 0) == CHIMERA_VFS_OK);
+    assert(dh_write(&dh, small, 0, BLOCK, 0x77) == CHIMERA_VFS_ENOSPC);
+    check_data(&dh, small, 0, 0);
 
-    r = diskfs_test_space(dh.vfs, &sp);
-    assert(r == 0);
-    printf("free after boundary allocate: %" PRIu64 "\n", sp.ag_free_sum);
-
-    /* A failed allocate must leave the file exactly as it found it.  The
-     * allocator hands blocks out of a per-thread reservation and marks them
-     * used only when the transaction's redo retires, so a transaction that
-     * aborts leaves its blocks free -- while the extent records it wrote into
-     * the file's b+tree survive the abort (the block cache keeps the mutated
-     * nodes, it does not revert them).  The file then references space the
-     * allocator believes is free, which the next allocation can hand to
-     * somebody else and which double-frees the pool when the file is deleted.
-     * The full-stack version of that is chimera/posix/diskfs_enospc_*, which
-     * has the reclaim workers this harness does not run; here the allocator's
-     * own invariants and its free-space accounting are the oracle. */
-    dh_release(&dh, h);
-
-    /* Whatever the boundary allocation returned, the allocator must still be
-     * self-consistent -- and tearing the file down must free exactly what it
-     * allocated, no more.  A failed allocation that leaves an extent record
-     * behind for space it never committed double-frees here. */
-    CHECK(&dh);
-
+    dh_release(&dh, small);
+    dh_release(&dh, big);
+    dh_release(&dh, other);
+    dh_release(&dh, root);
+    diskfs_test_await_reclaim(dh.vfs, dh.evpl, 30000);
+    /* Both clean reload and redo recovery must seed the same live accounting. */
+    for (int crash = 0; crash < 2; crash++) {
+        if (crash) {
+            dh_remount_crash(&dh);
+        } else {
+            dh_remount_clean(&dh);
+        }
+        root = dh_root_handle(&dh);
+        assert(dh_lookup(&dh, root->fh, root->fh_len, "small") == CHIMERA_VFS_OK);
+        small = dh_open_handle(&dh, dh.fh, dh.fh_len);
+        assert(small);
+        assert(snapshot(&dh, small, crash ? "recovered" : "remounted") < BLOCK);
+        assert(dh_write(&dh, small, 0, BLOCK, 0x77) == CHIMERA_VFS_ENOSPC);
+        check_data(&dh, small, 0, 0);
+        dh_release(&dh, small);
+        dh_release(&dh, root);
+    }
+    root = dh_root_handle(&dh);
     assert(dh_remove(&dh, root, "big") == CHIMERA_VFS_OK);
     assert(dh_remove(&dh, root, "small") == CHIMERA_VFS_OK);
-
+    assert(dh_remove(&dh, root, "other") == CHIMERA_VFS_OK);
     diskfs_test_await_reclaim(dh.vfs, dh.evpl, 30000);
-    CHECK(&dh);
-
-    r = diskfs_test_space(dh.vfs, &sp);
-    assert(r == 0);
-    printf("free after delete: %" PRIu64 " (was %" PRIu64 ")\n",
-           sp.ag_free_sum, free_before);
-
-    /* This harness runs no reclaim workers, so the deleted files' space does
-     * not come back here -- what matters is the ceiling: the pool must never
-     * report more free than it has, which is what a rolled-back-but-still-
-     * referenced extent would eventually produce. */
-    assert(sp.ag_free_sum <= sp.usable_capacity);
-
-    /*
-     * The boundary allocation must succeed.  This used to be tolerated: space
-     * sitting inside another thread's live bump reservation was counted free by
-     * statfs but could not be handed out, so asking for "everything free" hit
-     * ENOSPC with tens of megabytes still reported -- the claim_bytes line above
-     * was the evidence, and at this geometry the allocator stopped roughly
-     * 58 MiB short.
-     *
-     * Two changes make it a hard assert.  Claim recall
-     * (sm_ag_recall_claims_locked) takes back the unallocated tail of a claim
-     * when an AG would otherwise report ENOSPC, so an idle worker's reservation
-     * no longer strands the pool; and statfs now nets the internal reserve out
-     * of space_free, so what it reports is what a writer can actually place.
-     * The reserve is what covers the extent records this allocation itself
-     * writes -- the residual the allocator cannot reach is a few blocks of
-     * metadata, far inside it.
-     */
-    assert(boundary == CHIMERA_VFS_OK);
-
+    snapshot(&dh, root, "after delete");
     dh_release(&dh, root);
     dh_fini(&dh);
-    printf("PASS\n");
+    puts("PASS");
     return 0;
 } /* main */

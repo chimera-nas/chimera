@@ -348,7 +348,7 @@ diskfs_bt_alloc_node(
      * space (bt_run's RESERVE phase) so this draws from the thread cache and
      * never journals -- hence no_suspend and the rc != 0 abort. */
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_sm_no_suspend, NULL);
-    rc = space_map_bump_alloc(&thread->meta_resv, &jnl, DISKFS_BLOCK_SIZE,
+    rc = space_map_bump_alloc(&thread->meta_resv, &jnl, DISKFS_BLOCK_SIZE, 0,
                               &device_id, &device_offset);
     chimera_diskfs_abort_if(rc != 0,
                             "b+tree node alloc: metadata reservation exhausted "

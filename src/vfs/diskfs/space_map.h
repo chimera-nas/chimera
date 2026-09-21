@@ -412,13 +412,14 @@ struct sm_claim {
  * [cursor, base+len) thread-locally with no lock and no per-block allocator
  * call; refills via space_map_reserve_chunk when exhausted. */
 struct sm_reservation {
-    uint32_t         device_id;
-    uint32_t         ag_index;
-    uint64_t         base;
-    uint64_t         len;           /* grant size at claim time; diagnostics only */
-    struct sm_claim *claim;         /* the AG claim backing this reservation;
+    struct space_map *sm;
+    uint32_t          device_id;
+    uint32_t          ag_index;
+    uint64_t          base;
+    uint64_t          len;          /* grant size at claim time; diagnostics only */
+    struct sm_claim  *claim;        /* the AG claim backing this reservation;
                                      * carries the live cursor/end (see above) */
-    int              valid;
+    int               valid;
 };
 
 struct sm_device;
@@ -466,27 +467,28 @@ struct sm_ag {
 };
 
 struct sm_device {
-    uint32_t      device_id;
-    uint64_t      size;
-    uint32_t      num_ags;
-    uint32_t      ag_rotor;
-    uint32_t      role;                       /* SM_DEV_LOCAL | SM_DEV_REMOTE */
-    uint8_t       deviceid[SM_DEVICEID_SIZE];  /* REMOTE: pNFS deviceid */
-    uint64_t      sig_offset;                 /* REMOTE: SIMPLE-volume signature */
-    uint32_t      sig_len;
-    uint8_t       sig[SM_SIG_MAX];
-    struct sm_ag *ags;
+    struct space_map *sm;
+    uint32_t          device_id;
+    uint64_t          size;
+    uint32_t          num_ags;
+    uint32_t          ag_rotor;
+    uint32_t          role;                   /* SM_DEV_LOCAL | SM_DEV_REMOTE */
+    uint8_t           deviceid[SM_DEVICEID_SIZE]; /* REMOTE: pNFS deviceid */
+    uint64_t          sig_offset;             /* REMOTE: SIMPLE-volume signature */
+    uint32_t          sig_len;
+    uint8_t           sig[SM_SIG_MAX];
+    struct sm_ag     *ags;
 
     /* Lock-free free-space index: maxclass_bits[c] is a bit array over AG
      * indices; bit a is set iff ags[a].maxclass == c.  Maintained with atomic
      * OR/AND on AG max-class transitions (no shared lock -> allocators never
      * serialize on it).  sm_pick_and_alloc scans these to jump straight to an
      * AG with an adequate extent instead of walking every AG. */
-    uint64_t     *maxclass_bits[SM_SIZE_CLASSES];
-    uint32_t      mc_class_count[SM_SIZE_CLASSES]; /* #AGs in each class (atomic) -- lets the
-                                                    * lookup skip empty classes without scanning */
-    uint32_t      mc_words;        /* (num_ags + 63) / 64 */
-    uint32_t      mc_rotor;        /* spreads the lookup start to balance AGs */
+    uint64_t         *maxclass_bits[SM_SIZE_CLASSES];
+    uint32_t          mc_class_count[SM_SIZE_CLASSES]; /* #AGs in each class (atomic) -- lets the
+                                                        * lookup skip empty classes without scanning */
+    uint32_t          mc_words;    /* (num_ags + 63) / 64 */
+    uint32_t          mc_rotor;    /* spreads the lookup start to balance AGs */
 
     /* Running sum of this device's AGs' free_bytes (atomic; adjusted under the
      * AG lock on every alloc/free).  Lets space_map_free_bytes report total free
@@ -494,13 +496,17 @@ struct sm_device {
      * (~30K/device) -- the old scan was an O(all-AGs) lock storm on the
      * reservation hot path.  Seeded by sm_init_device_free_totals after
      * format/load. */
-    uint64_t      free_bytes;
+    uint64_t          free_bytes;
 };
 
 struct space_map {
     struct sm_device *devices;
     uint32_t          num_devices;
     uint32_t          device_rotor;
+    /* Runtime free bytes: excludes allocations as soon as they are handed
+    * out, including transactions not yet applied to the committed free tree.
+    * Admission debits this atomically; commit does not debit it again. */
+    uint64_t          available_bytes;
     uint64_t          total_capacity;  /* raw sum of device sizes */
     uint64_t          usable_capacity; /* allocatable total (sum of AG data
                                         * ranges, metadata excluded); constant
@@ -625,12 +631,14 @@ space_map_reserve_chunk(
     uint32_t               seed);
 
 /* Hand out `need` from `r` thread-locally (records the ALLOC delta).  Returns 0,
- * or 1 if exhausted (caller refills via space_map_reserve_chunk and retries). */
+ * or 1 if the claim is exhausted (caller refills), -1 if admission would
+ * cross reserve_floor. Metadata passes zero; file data preserves its reserve. */
 int
 space_map_bump_alloc(
     struct sm_reservation   *r,
     const struct sm_journal *jnl,
     uint64_t                 need,
+    uint64_t                 reserve_floor,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);
 
@@ -659,6 +667,7 @@ space_map_reservation_alloc(
     uint32_t                 role,
     uint64_t                 need,
     uint64_t                 chunk,
+    uint64_t                 reserve_floor,
     uint32_t                 seed,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);

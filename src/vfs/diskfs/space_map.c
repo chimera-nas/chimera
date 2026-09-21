@@ -331,6 +331,7 @@ sm_ag_alloc_locked(
 
     ag->free_bytes -= size;
     chimera_atomic_sub_fetch(&ag->dev->free_bytes, size, CHIMERA_MEMORY_RELAXED);
+    chimera_atomic_sub_fetch(&ag->dev->sm->available_bytes, size, CHIMERA_MEMORY_RELAXED);
     return 0;
 } /* sm_ag_alloc_locked */
 
@@ -439,6 +440,7 @@ sm_ag_free_locked(
 
     ag->free_bytes += length;
     chimera_atomic_add_fetch(&ag->dev->free_bytes, length, CHIMERA_MEMORY_RELAXED);
+    chimera_atomic_add_fetch(&ag->dev->sm->available_bytes, length, CHIMERA_MEMORY_RELAXED);
 } /* sm_ag_free_locked */
 
 struct space_map *
@@ -471,6 +473,7 @@ space_map_create(
      * region (which is reserved out of device 0's AG 0) can be sized first. */
     for (d = 0; d < num_devices; d++) {
         dev            = &sm->devices[d];
+        dev->sm        = sm;
         dev->device_id = d;
         dev->size      = cfg[d].size;
         dev->role      = cfg[d].role;
@@ -1185,7 +1188,8 @@ static void
 sm_ag_mark_used_locked(
     struct sm_ag *ag,
     uint64_t      offset,
-    uint64_t      length);
+    uint64_t      length,
+    int           charge);
 
 static void
 sm_ag_remove_claim_locked(
@@ -1219,7 +1223,7 @@ space_map_alloc_apply(
     evpl_mutex_lock(&ag->lock);
     /* The claim kept this range free in the tree until now; remove it.  (mark_used
      * asserts the range is within a free extent, catching any double-apply.) */
-    sm_ag_mark_used_locked(ag, offset, aligned);
+    sm_ag_mark_used_locked(ag, offset, aligned, 0);
     ag->ckpt_dirty = 1;
 
     /* Unpin the claim backing this range; GC it if its owner has moved on
@@ -1273,6 +1277,7 @@ space_map_alloc_discard(
         }
     }
     evpl_mutex_unlock(&ag->lock);
+    chimera_atomic_add_fetch(&sm->available_bytes, aligned, CHIMERA_MEMORY_RELAXED);
 } /* space_map_alloc_discard */
 
 /* --- Reservation claim list (per-AG, protected by ag->lock) --- */
@@ -1571,6 +1576,7 @@ space_map_reserve_chunk(
                     if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
                                                &claim) == 0) {
                         evpl_mutex_unlock(&ag->lock);
+                        r->sm        = sm;
                         r->device_id = dev_id;
                         r->ag_index  = ai;
                         r->base      = base;
@@ -1612,6 +1618,7 @@ space_map_reserve_chunk(
             if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
                                        &claim) == 0) {
                 evpl_mutex_unlock(&ag->lock);
+                r->sm        = sm;
                 r->device_id = dev_id;
                 r->ag_index  = ai;
                 r->base      = base;
@@ -1658,6 +1665,7 @@ space_map_reserve_chunk(
             if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
                                        &claim) == 0) {
                 evpl_mutex_unlock(&ag->lock);
+                r->sm        = sm;
                 r->device_id = dev_id;
                 r->ag_index  = a;
                 r->base      = base;
@@ -1678,17 +1686,18 @@ space_map_reserve_chunk(
  * no per-block allocator call.  Records the ALLOC delta (rides the txn redo and
  * is applied to the free tree at retire via space_map_alloc_apply).  Returns 0
  * on success; 1 if the reservation can't satisfy `need` (caller must refill via
- * space_map_reserve_chunk and retry).
+ * space_map_reserve_chunk and retry); -1 if the live budget is exhausted.
  */
 int
 space_map_bump_alloc(
     struct sm_reservation   *r,
     const struct sm_journal *jnl,
     uint64_t                 need,
+    uint64_t                 reserve_floor,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
 {
-    uint64_t w, nw;
+    uint64_t w, nw, available;
     uint32_t cur, lim;
 
     need = SM_ALIGN_UP(need);
@@ -1706,6 +1715,22 @@ space_map_bump_alloc(
      * see the lowered limit.  There is no window in which both sides believe
      * they won, and so no way for the same region to be handed out twice.
      */
+    /* Charge the exact allocation, not its speculative claim. A claim's
+     * unused tail is recallable and spending it must still obey the reserve.
+     * One CAS arbitrates admission across workers before any block is handed
+     * out. Metadata passes zero and can use the internal reserve. */
+    available = chimera_atomic_load_n(&r->sm->available_bytes, CHIMERA_MEMORY_RELAXED);
+    for (;;) {
+        if (available < need || available - need < reserve_floor) {
+            return -1;
+        }
+        if (chimera_atomic_compare_exchange_n(&r->sm->available_bytes, &available,
+                                              available - need, 0,
+                                              CHIMERA_MEMORY_RELAXED, CHIMERA_MEMORY_RELAXED)) {
+            break;
+        }
+    }
+
     w = chimera_atomic_load_n(&r->claim->bump, CHIMERA_MEMORY_ACQUIRE);
 
     for (;;) {
@@ -1715,6 +1740,7 @@ space_map_bump_alloc(
         /* 64-bit math: `need` is caller-supplied and may exceed what is left
          * (or even the AG), so the sum must not wrap the 32-bit halves. */
         if ((uint64_t) cur + need > (uint64_t) lim) {
+            chimera_atomic_add_fetch(&r->sm->available_bytes, need, CHIMERA_MEMORY_RELAXED);
             return 1;   /* exhausted, or recalled out from under us */
         }
 
@@ -1824,11 +1850,12 @@ space_map_reservation_alloc(
     uint32_t                 role,
     uint64_t                 need,
     uint64_t                 chunk,
+    uint64_t                 reserve_floor,
     uint32_t                 seed,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
 {
-    int attempt;
+    int attempt, rc;
 
     /*
      * Loop rather than "grab once, then it must satisfy".  That used to hold:
@@ -1839,14 +1866,8 @@ space_map_reservation_alloc(
      * whole thing back in the window between the grab and this thread's first
      * bump.
      *
-     * Returning -1 there would be a *spurious* ENOSPC, reported while the pool
-     * has room, and that is far worse than a retry: the caller fails the
-     * operation mid-flight, and an allocation failure part-way through (say a
-     * multi-extent fallocate) has to unwind b+tree state that the abort does
-     * not revert.  diskfs_enospc_test's comment spells out where that ends --
-     * "the file then references space the allocator believes is free, which the
-     * next allocation can hand to somebody else and which double-frees the pool
-     * when the file is deleted".
+     * A recall collision is not ENOSPC: retry without making the caller
+     * roll back a transaction while usable space remains.
      *
      * So only a grab that genuinely finds no space (ensure != 0, after its own
      * recall pass) is ENOSPC.  Losing the race is retried.  The bound keeps a
@@ -1855,8 +1876,10 @@ space_map_reservation_alloc(
      * from the caller's point of view.
      */
     for (attempt = 0; attempt < SM_RESERVATION_GRAB_RETRIES; attempt++) {
-        if (space_map_bump_alloc(r, jnl, need, r_device_id, r_device_offset) == 0) {
-            return 0;
+        rc = space_map_bump_alloc(r, jnl, need, reserve_floor,
+                                  r_device_id, r_device_offset);
+        if (rc <= 0) {
+            return rc;
         }
 
         /* Exhausted, or recalled out from under us: retire the old claim and
@@ -2036,7 +2059,8 @@ static void
 sm_ag_mark_used_locked(
     struct sm_ag *ag,
     uint64_t      offset,
-    uint64_t      length)
+    uint64_t      length,
+    int           charge)
 {
     struct sm_extent *e = NULL;
     uint64_t          e_off, e_len;
@@ -2065,6 +2089,9 @@ sm_ag_mark_used_locked(
     }
     ag->free_bytes -= length;
     chimera_atomic_sub_fetch(&ag->dev->free_bytes, length, CHIMERA_MEMORY_RELAXED);
+    if (charge) {
+        chimera_atomic_sub_fetch(&ag->dev->sm->available_bytes, length, CHIMERA_MEMORY_RELAXED);
+    }
     free(e);
 } /* sm_ag_mark_used_locked */
 
@@ -2112,7 +2139,7 @@ space_map_recover_delta(
     evpl_mutex_lock(&ag->lock);
     if (op == SM_AG_LOG_OP_ALLOC) {
         if (sm_ag_range_is_free_locked(ag, offset, length)) {
-            sm_ag_mark_used_locked(ag, offset, length);
+            sm_ag_mark_used_locked(ag, offset, length, 1);
         }
     } else {
         if (!sm_ag_range_is_free_locked(ag, offset, length)) {
@@ -2303,7 +2330,7 @@ sm_ag_reconstruct(
     }
     for (i = 0; i < h->delta_count; i++) {
         if (deltas[i].op == SM_AG_LOG_OP_ALLOC) {
-            sm_ag_mark_used_locked(ag, deltas[i].offset, deltas[i].length);
+            sm_ag_mark_used_locked(ag, deltas[i].offset, deltas[i].length, 1);
         } else {
             sm_ag_free_locked(ag, deltas[i].offset, deltas[i].length);
         }
@@ -2514,6 +2541,7 @@ sm_init_device_free_totals(struct space_map *sm)
         }
         chimera_atomic_store_n(&dev->free_bytes, total, CHIMERA_MEMORY_RELAXED);
     }
+    sm->available_bytes = space_map_free_bytes(sm);
 } /* sm_init_device_free_totals */
 
 int

@@ -59,7 +59,9 @@ main(
 {
     struct posix_test_env env;
     uint64_t              baseline, avail, ask, reclaimed;
-    int                   fd, rc, i, alloc_errno = 0;
+    int                   fd, small_fd, rc, i, alloc_errno = 0;
+    struct stat           st;
+    char                  block[4096];
 
     posix_test_diskfs_device_count = ENOSPC_DEV_COUNT;
     posix_test_diskfs_device_bytes = ENOSPC_DEV_BYTES;
@@ -113,6 +115,49 @@ main(
     fprintf(stderr, "fallocate %" PRIu64 " (free - 256K): rc=%d errno=%d (%s)\n",
             ask, rc, alloc_errno, rc ? strerror(alloc_errno) : "ok");
     chimera_posix_close(fd);
+    if (rc != 0) {
+        posix_test_fail(&env);
+    }
+
+    /* The other half of alloc06: consuming the reported capacity must not
+     * leave the internal reserve available to file data. Exercise a failed
+     * multi-extent allocation before and after the journal can retire it. */
+    small_fd = chimera_posix_open("/test/small", O_RDWR, 0644);
+    if (small_fd < 0) {
+        posix_test_fail(&env);
+    }
+    for (i = 0; i < 2; i++) {
+        uint64_t left = free_bytes(&env);
+        rc = chimera_posix_fallocate(small_fd, ENOSPC_HEADROOM,
+                                     left + ENOSPC_HEADROOM);
+        fprintf(stderr, "over-allocation: free=%" PRIu64 " rc=%d errno=%d\n",
+                left, rc, rc ? errno : 0);
+        if (rc == 0 || errno != ENOSPC ||
+            chimera_posix_fstat(small_fd, &st) != 0 ||
+            st.st_size != ENOSPC_HEADROOM) {
+            posix_test_fail(&env);
+        }
+        /* No file data was committed by the rejected operation. */
+        if (free_bytes(&env) != left) {
+            fprintf(stderr, "failed allocation leaked a space charge\n");
+            posix_test_fail(&env);
+        }
+        usleep(100000);
+    }
+    memset(block, 0x5a, sizeof(block));
+    if (chimera_posix_pwrite(small_fd, block, sizeof(block), 0) != sizeof(block)) {
+        posix_test_fail(&env);
+    }
+    memset(block, 0, sizeof(block));
+    if (chimera_posix_pread(small_fd, block, sizeof(block), 0) != sizeof(block)) {
+        posix_test_fail(&env);
+    }
+    for (i = 0; i < sizeof(block); i++) {
+        if (block[i] != 0x5a) {
+            posix_test_fail(&env);
+        }
+    }
+    chimera_posix_close(small_fd);
 
     /* Whether or not the boundary allocation succeeded, tear the file down:
      * the failure path has to leave the space map consistent. */
@@ -151,16 +196,6 @@ main(
                 " < baseline %" PRIu64 " less %" PRIu64 " slack\n",
                 reclaimed, baseline, (uint64_t) ENOSPC_CONVERGE_SLACK);
         posix_test_fail(&env);
-    }
-
-    /* Separate, still-open defect: space held inside live reservation claims is
-     * reported free by statfs but cannot be allocated, so asking for "all of
-     * it" hits ENOSPC.  Not what this test gates -- see the diskfs enospc
-     * white-box test for the accounting numbers. */
-    if (rc != 0) {
-        fprintf(stderr, "KNOWN GAP: statfs reported %" PRIu64
-                " free but allocating %" PRIu64 " got %s\n",
-                avail, ask, strerror(alloc_errno));
     }
 
     rc = posix_test_umount();
