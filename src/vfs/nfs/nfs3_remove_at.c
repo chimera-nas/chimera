@@ -244,7 +244,7 @@ chimera_nfs3_remove_do_rmdir(
 } /* chimera_nfs3_remove_do_rmdir */
 
 void
-chimera_nfs3_remove_at(
+chimera_vfs_nfs3_remove_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -350,4 +350,4 @@ chimera_nfs3_remove_at(
                                                           ctx->silly_name, sizeof(ctx->silly_name));
 
     chimera_nfs3_remove_do_silly_rename(request, ctx);
-} /* chimera_nfs3_remove_at */
+} /* chimera_vfs_nfs3_remove_at */

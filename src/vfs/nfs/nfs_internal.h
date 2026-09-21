@@ -346,7 +346,7 @@ struct chimera_nfs_client_mount {
      * must resolve to the root itself: the real parent on the server is the
      * pseudo-fs node above the export, which a mounted client must never see
      * (the kernel client likewise never sends LOOKUPP across its mount root).
-     * chimera_nfs4_lookup_at compares against this to clamp. */
+     * chimera_vfs_nfs4_lookup_at compares against this to clamp. */
     uint8_t                           root_fh[CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
     int                               root_fh_len;
 };
@@ -1062,12 +1062,12 @@ void chimera_nfs4_mount_resume_after_session(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_vfs_request              *request);
 
-void chimera_nfs3_dispatch(
+void chimera_vfs_nfs3_dispatch(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_dispatch(
+void chimera_vfs_nfs4_dispatch(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -1076,7 +1076,7 @@ void chimera_nfs4_dispatch(
 /* ---- NFSv4.1 session fore-channel slot layer (nfs4_slot.c) -------------- */
 
 /* How a parked request is replayed once a slot frees.  For plain VFS ops this
- * is chimera_nfs4_dispatch (re-routes by request->opcode); internal multi-step
+ * is chimera_vfs_nfs4_dispatch (re-routes by request->opcode); internal multi-step
  * issuers (mount, pNFS) pass a shim that re-runs that step. */
 typedef void (*chimera_nfs4_retry_fn)(
     struct chimera_nfs_thread *,
@@ -1145,161 +1145,163 @@ void chimera_nfs4_pnfs_conn_connected(
 void chimera_nfs4_pnfs_conn_failed(
     struct chimera_nfs_client_server_thread *server_thread);
 
-void chimera_nfs3_mount(
+/* Client operations have their own namespace: the Windows static link also
+ * contains the server's chimera_nfs[34]_* RPC handlers with different ABIs. */
+void chimera_vfs_nfs3_mount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs3_umount(
+void chimera_vfs_nfs3_umount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs3_lookup_at(
+void chimera_vfs_nfs3_lookup_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_getattr(
+void chimera_vfs_nfs3_getattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_setattr(
+void chimera_vfs_nfs3_setattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_mkdir_at(
+void chimera_vfs_nfs3_mkdir_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_remove_at(
+void chimera_vfs_nfs3_remove_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_readdir(
+void chimera_vfs_nfs3_readdir(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_open_fh(
+void chimera_vfs_nfs3_open_fh(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_open_at(
+void chimera_vfs_nfs3_open_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_close(
+void chimera_vfs_nfs3_close(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_read(
+void chimera_vfs_nfs3_read(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_allocate(
+void chimera_vfs_nfs3_allocate(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data);
 
-void chimera_nfs3_write(
+void chimera_vfs_nfs3_write(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_commit(
+void chimera_vfs_nfs3_commit(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_symlink_at(
+void chimera_vfs_nfs3_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_readlink(
+void chimera_vfs_nfs3_readlink(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_rename_at(
+void chimera_vfs_nfs3_rename_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_mknod_at(
+void chimera_vfs_nfs3_mknod_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_link_at(
+void chimera_vfs_nfs3_link_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_claim_acquire(
+void chimera_vfs_nfs3_claim_acquire(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_claim_release(
+void chimera_vfs_nfs3_claim_release(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs4_mount(
+void chimera_vfs_nfs4_mount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_lookup_at(
+void chimera_vfs_nfs4_lookup_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_getattr(
+void chimera_vfs_nfs4_getattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_setattr(
+void chimera_vfs_nfs4_setattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_mkdir_at(
+void chimera_vfs_nfs4_mkdir_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_remove_at(
+void chimera_vfs_nfs4_remove_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_readdir(
+void chimera_vfs_nfs4_readdir(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_open_fh(
+void chimera_vfs_nfs4_open_fh(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_open_at(
+void chimera_vfs_nfs4_open_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -1351,57 +1353,57 @@ void chimera_nfs4_open_file_close_done(
 void chimera_nfs4_open_file_drain(
     struct chimera_nfs_client_server *server);
 
-void chimera_nfs4_umount(
+void chimera_vfs_nfs4_umount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_read(
+void chimera_vfs_nfs4_read(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_write(
+void chimera_vfs_nfs4_write(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_commit(
+void chimera_vfs_nfs4_commit(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_allocate(
+void chimera_vfs_nfs4_allocate(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_seek(
+void chimera_vfs_nfs4_seek(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_symlink_at(
+void chimera_vfs_nfs4_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_readlink(
+void chimera_vfs_nfs4_readlink(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_rename_at(
+void chimera_vfs_nfs4_rename_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_mknod_at(
+void chimera_vfs_nfs4_mknod_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_link_at(
+void chimera_vfs_nfs4_link_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,

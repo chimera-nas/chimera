@@ -164,7 +164,7 @@ chimera_nfs3_close_do_commit(
 } /* chimera_nfs3_close_do_commit */
 
 void
-chimera_nfs3_close(
+chimera_vfs_nfs3_close(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -220,4 +220,4 @@ chimera_nfs3_close(
     /* Nothing to do, close complete */
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_nfs3_close */
+} /* chimera_vfs_nfs3_close */

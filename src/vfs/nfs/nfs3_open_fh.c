@@ -6,7 +6,7 @@
 #include "nfs3_open_state.h"
 
 void
-chimera_nfs3_open_fh(
+chimera_vfs_nfs3_open_fh(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -34,5 +34,5 @@ chimera_nfs3_open_fh(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_nfs3_open_fh */
+} /* chimera_vfs_nfs3_open_fh */
 

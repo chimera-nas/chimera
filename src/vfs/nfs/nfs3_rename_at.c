@@ -169,7 +169,7 @@ chimera_nfs3_rename_do_silly_link(
 } /* chimera_nfs3_rename_do_silly_link */
 
 void
-chimera_nfs3_rename_at(
+chimera_vfs_nfs3_rename_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -282,4 +282,4 @@ chimera_nfs3_rename_at(
                                                           ctx->silly_name, sizeof(ctx->silly_name));
 
     chimera_nfs3_rename_do_silly_link(request, ctx);
-} /* chimera_nfs3_rename_at */
+} /* chimera_vfs_nfs3_rename_at */

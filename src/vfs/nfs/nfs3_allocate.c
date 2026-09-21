@@ -273,7 +273,7 @@ chimera_nfs3_allocate_getattr_callback(
 } /* chimera_nfs3_allocate_getattr_callback */
 
 void
-chimera_nfs3_allocate(
+chimera_vfs_nfs3_allocate(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -314,4 +314,4 @@ chimera_nfs3_allocate(
                                               0, 0,
                                               chimera_nfs3_allocate_getattr_callback,
                                               request);
-} /* chimera_nfs3_allocate */
+} /* chimera_vfs_nfs3_allocate */

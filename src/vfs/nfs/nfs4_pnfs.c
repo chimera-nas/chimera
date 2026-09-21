@@ -391,7 +391,7 @@ chimera_nfs4_devcache_put(
 
 /* ---------------------------------------------------------------------------
 * Data-server registration: a DS becomes another chimera_nfs_client_server in
-* shared->servers[], reusing the array-growth pattern from chimera_nfs4_mount.
+* shared->servers[], reusing the array-growth pattern from chimera_vfs_nfs4_mount.
 * Deduplicated by (host, port).  Returns the server index, or -1.
 * ------------------------------------------------------------------------- */
 
@@ -426,7 +426,7 @@ chimera_nfs4_pnfs_register_ds(
     }
 
     if (idx < 0) {
-        /* Expand server array (same scheme as chimera_nfs4_mount). */
+        /* Expand server array (same scheme as chimera_vfs_nfs4_mount). */
         idx                  = shared->max_servers;
         shared->max_servers *= 2;
         new_servers          = calloc(shared->max_servers, sizeof(*new_servers));
@@ -566,9 +566,9 @@ chimera_nfs4_pnfs_replay(
     struct chimera_vfs_request *request)
 {
     if (request->opcode == CHIMERA_VFS_OP_READ) {
-        chimera_nfs4_read(layout->acq_thread, layout->acq_shared, request, layout->acq_private);
+        chimera_vfs_nfs4_read(layout->acq_thread, layout->acq_shared, request, layout->acq_private);
     } else {
-        chimera_nfs4_write(layout->acq_thread, layout->acq_shared, request, layout->acq_private);
+        chimera_vfs_nfs4_write(layout->acq_thread, layout->acq_shared, request, layout->acq_private);
     }
 } /* chimera_nfs4_pnfs_replay */
 
@@ -591,9 +591,9 @@ chimera_nfs4_pnfs_conn_connected(struct chimera_nfs_client_server_thread *server
         next    = w->next;
         w->next = NULL;
         if (w->opcode == CHIMERA_VFS_OP_READ) {
-            chimera_nfs4_read(server_thread->thread, server_thread->shared, w, server_thread->thread);
+            chimera_vfs_nfs4_read(server_thread->thread, server_thread->shared, w, server_thread->thread);
         } else {
-            chimera_nfs4_write(server_thread->thread, server_thread->shared, w, server_thread->thread);
+            chimera_vfs_nfs4_write(server_thread->thread, server_thread->shared, w, server_thread->thread);
         }
     }
 } /* chimera_nfs4_pnfs_conn_connected */
@@ -1252,7 +1252,7 @@ chimera_nfs4_pnfs_ds_write_callback(
      * DS, but the MDS only learns the new file size from a LAYOUTCOMMIT, which
      * this proxy issues lazily (close-time, deferred by the open-handle cache).
      * Forcing UNSTABLE makes the upper client issue a COMMIT on close/sync, which
-     * chimera_nfs4_commit turns into a LAYOUTCOMMIT -- so a re-open sees the real
+     * chimera_vfs_nfs4_commit turns into a LAYOUTCOMMIT -- so a re-open sees the real
      * size.  Reporting the DS's FILE_SYNC here would let the client skip COMMIT
      * and read back a stale (often zero) size, breaking close-to-open. */
     request->write.r_sync   = CHIMERA_VFS_WRITE_UNSTABLE;
@@ -1337,7 +1337,7 @@ chimera_nfs4_pnfs_ds_write(
 } /* chimera_nfs4_pnfs_ds_write */
 
 /* ---------------------------------------------------------------------------
-* Read/write redirect entry points (called from chimera_nfs4_read/write).
+* Read/write redirect entry points (called from chimera_vfs_nfs4_read/write).
 * ------------------------------------------------------------------------- */
 
 /*
@@ -1396,7 +1396,7 @@ chimera_nfs4_pnfs_read(
                 expected = CHIMERA_NFS4_LAYOUT_NONE;
                 if (atomic_compare_exchange_strong(&layout->state, &expected, CHIMERA_NFS4_LAYOUT_ACQUIRING)) {
                     chimera_nfs4_layout_acquire(thread, shared, request, private_data,
-                                                server_thread, open_state, chimera_nfs4_read);
+                                                server_thread, open_state, chimera_vfs_nfs4_read);
                     return 1;
                 }
                 continue;       /* lost the race; re-evaluate (now ACQUIRING). */
@@ -1446,7 +1446,7 @@ chimera_nfs4_pnfs_write(
                 expected = CHIMERA_NFS4_LAYOUT_NONE;
                 if (atomic_compare_exchange_strong(&layout->state, &expected, CHIMERA_NFS4_LAYOUT_ACQUIRING)) {
                     chimera_nfs4_layout_acquire(thread, shared, request, private_data,
-                                                server_thread, open_state, chimera_nfs4_write);
+                                                server_thread, open_state, chimera_vfs_nfs4_write);
                     return 1;
                 }
                 continue;

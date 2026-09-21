@@ -404,10 +404,10 @@ chimera_nfs_dispatch(
 
     switch (nfsvers) {
         case 3:
-            chimera_nfs3_dispatch(thread, shared, request, private_data);
+            chimera_vfs_nfs3_dispatch(thread, shared, request, private_data);
             break;
         case 4:
-            chimera_nfs4_dispatch(thread, shared, request, private_data);
+            chimera_vfs_nfs4_dispatch(thread, shared, request, private_data);
             break;
         default:
             request->status = CHIMERA_VFS_EFAULT;

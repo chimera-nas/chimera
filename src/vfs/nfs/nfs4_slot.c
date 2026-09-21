@@ -519,7 +519,7 @@ chimera_nfs4_session_put(struct chimera_nfs4_client_session *session)
 /*
  * The session this reply accounts against is the one the slot table borrowed
  * its ids from (st->session) -- NOT whatever the server publishes now.
- * chimera_nfs4_umount unpublishes server->nfs4_session the moment the last
+ * chimera_vfs_nfs4_umount unpublishes server->nfs4_session the moment the last
  * mount goes away, and a remount publishes a different one, either of which
  * can land while this call is in flight.  The table's own reference is what
  * keeps the borrowed-from session mapped until every reply has been accounted

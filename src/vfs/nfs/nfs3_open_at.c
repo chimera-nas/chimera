@@ -216,7 +216,7 @@ chimera_nfs3_open_at_create_callback(
     chimera_nfs3_get_wcc_data(&request->open_at.r_dir_pre_attr, &request->open_at.r_dir_post_attr, &res->resok.dir_wcc);
 
     /* A GUARDED success proves the object was created by this call (all
-     * creates go out GUARDED -- see chimera_nfs3_open_at); the engine's open
+     * creates go out GUARDED -- see chimera_vfs_nfs3_open_at); the engine's open
      * gate then grants the requested access unconditionally, per POSIX (a
      * creating open is not subject to the new file's own mode). */
     request->open_at.r_created = 1;
@@ -249,7 +249,7 @@ chimera_nfs3_open_at_create_callback(
 } /* chimera_nfs3_open_at_create_callback */
 
 void
-chimera_nfs3_open_at(
+chimera_vfs_nfs3_open_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -305,5 +305,5 @@ chimera_nfs3_open_at(
     } else {
         chimera_nfs3_open_at_send_lookup(thread, request);
     }
-} /* chimera_nfs3_open_at */
+} /* chimera_vfs_nfs3_open_at */
 

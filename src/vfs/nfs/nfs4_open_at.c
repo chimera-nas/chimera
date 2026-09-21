@@ -19,12 +19,12 @@ struct chimera_nfs4_open_at_ctx {
 };
 
 /* private_data sentinel marking the symlink-fallback re-entry into
- * chimera_nfs4_open_at, which must preserve ctx->lookup_fallback.  Every other
+ * chimera_vfs_nfs4_open_at, which must preserve ctx->lookup_fallback.  Every other
  * entry (dispatch, including a slot-park replay) starts a fresh attempt. */
 #define CHIMERA_NFS4_OPEN_AT_LOOKUP_RETRY ((void *) (uintptr_t) 1)
 
 void
-chimera_nfs4_open_at(
+chimera_vfs_nfs4_open_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -110,8 +110,8 @@ chimera_nfs4_open_at_callback(
              * GUARDED-create EEXIST recovery likewise returns the existing
              * object. */
             ctx->lookup_fallback = 1;
-            chimera_nfs4_open_at(ctx->thread, ctx->thread->shared, request,
-                                 CHIMERA_NFS4_OPEN_AT_LOOKUP_RETRY);
+            chimera_vfs_nfs4_open_at(ctx->thread, ctx->thread->shared, request,
+                                     CHIMERA_NFS4_OPEN_AT_LOOKUP_RETRY);
             return;
         } else {
             request->status = chimera_nfs4_status_to_errno(res->status);
@@ -410,11 +410,11 @@ chimera_nfs4_open_at_send(
         0, 0, NULL, 0, 0,
         chimera_nfs4_open_at_callback,
         request,
-        chimera_nfs4_dispatch, private_data);
+        chimera_vfs_nfs4_dispatch, private_data);
 } /* chimera_nfs4_open_at_send */
 
 void
-chimera_nfs4_open_at(
+chimera_vfs_nfs4_open_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -425,4 +425,4 @@ chimera_nfs4_open_at(
     ctx->nocreate = 0;
 
     chimera_nfs4_open_at_send(thread, shared, request, private_data);
-} /* chimera_nfs4_open_at */
+} /* chimera_vfs_nfs4_open_at */

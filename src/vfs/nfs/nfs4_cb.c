@@ -400,7 +400,7 @@ chimera_nfs4_cb_exchange_id_callback(
     session->clientid = eid_res->eir_clientid;
 
     /* The server's own reference, released when the last mount goes away and
-     * the session is destroyed on the wire (chimera_nfs4_umount). */
+     * the session is destroyed on the wire (chimera_vfs_nfs4_umount). */
     atomic_store(&session->refcnt, 1);
 
     /* The MDS confirms pNFS support by echoing USE_PNFS_MDS; only then does the

@@ -472,7 +472,7 @@ chimera_portmap_null_callback(
 } /* chimera_portmap_null_callback */
 
 void
-chimera_nfs3_mount(
+chimera_vfs_nfs3_mount(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -608,4 +608,4 @@ chimera_nfs3_mount(
                                                    0, 0, NULL, 0, 0,
                                                    chimera_portmap_null_callback, server_thread);
     }
-} /* chimera_nfs3_mount */
+} /* chimera_vfs_nfs3_mount */

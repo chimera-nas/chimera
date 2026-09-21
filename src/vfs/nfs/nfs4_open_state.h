@@ -115,7 +115,7 @@ chimera_nfs4_open_state_alloc(void)
 /*
  * True when a real OPEN stateid was issued by the server.
  *
- * Only chimera_nfs4_open_at obtains one.  open_fh has no way to OPEN by file
+ * Only chimera_vfs_nfs4_open_at obtains one.  open_fh has no way to OPEN by file
  * handle (that needs CLAIM_FH), so a file reached only that way keeps the
  * all-zero anonymous stateid and READ/WRITE fall back to it.  Such an open holds
  * nothing on the server, so CLOSE has nothing to release -- and a CLOSE naming

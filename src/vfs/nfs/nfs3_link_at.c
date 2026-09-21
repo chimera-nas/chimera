@@ -47,7 +47,7 @@ chimera_nfs3_link_callback(
 } /* chimera_nfs3_link_callback */
 
 void
-chimera_nfs3_link_at(
+chimera_vfs_nfs3_link_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -82,5 +82,5 @@ chimera_nfs3_link_at(
 
     shared->nfs_v3.send_call_NFSPROC3_LINK(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                            &args, 0, 0, NULL, 0, 0, chimera_nfs3_link_callback, request);
-} /* chimera_nfs3_link_at */
+} /* chimera_vfs_nfs3_link_at */
 

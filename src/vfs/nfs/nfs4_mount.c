@@ -618,7 +618,7 @@ chimera_nfs4_mount_null_callback(
 } /* chimera_nfs4_mount_null_callback */
 
 void
-chimera_nfs4_mount(
+chimera_vfs_nfs4_mount(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -792,4 +792,4 @@ chimera_nfs4_mount(
             chimera_nfs4_mount_null_callback,
             request);
     }
-} /* chimera_nfs4_mount */
+} /* chimera_vfs_nfs4_mount */

@@ -229,7 +229,7 @@ chimera_nfs4_umount_send_destroy_session(struct chimera_nfs4_umount_teardown *td
 } /* chimera_nfs4_umount_send_destroy_session */
 
 void
-chimera_nfs4_umount(
+chimera_vfs_nfs4_umount(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -294,4 +294,4 @@ chimera_nfs4_umount(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 
-} /* chimera_nfs4_umount */
+} /* chimera_vfs_nfs4_umount */

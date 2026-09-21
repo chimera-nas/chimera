@@ -475,7 +475,7 @@ chimera_nfs3_lock_getattr_callback(
 } /* chimera_nfs3_lock_getattr_callback */
 
 void
-chimera_nfs3_claim_acquire(
+chimera_vfs_nfs3_claim_acquire(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -555,7 +555,7 @@ chimera_nfs3_claim_acquire(
     } else {
         chimera_nfs3_do_lock(thread, shared, server_thread, request);
     }
-} /* chimera_nfs3_claim_acquire */
+} /* chimera_vfs_nfs3_claim_acquire */
 
 static void
 chimera_nfs3_unlock_ranged_callback(
@@ -783,7 +783,7 @@ chimera_nfs3_claim_release_ranged(
 } /* chimera_nfs3_claim_release_ranged */
 
 void
-chimera_nfs3_claim_release(
+chimera_vfs_nfs3_claim_release(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -856,4 +856,4 @@ chimera_nfs3_claim_release(
                                              server_thread->nlm_conn, &rpc2_cred,
                                              &args, 0, 0, NULL, 0, 0,
                                              chimera_nfs3_unlock_callback, request);
-} /* chimera_nfs3_claim_release */
+} /* chimera_vfs_nfs3_claim_release */
