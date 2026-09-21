@@ -272,7 +272,8 @@ chimera_nfs_mount_mnt(
     rc = chimera_nfs_find_export_path(shared, args->path.str, args->path.len, &full_path, &export);
     if (rc) {
         // Export not found, return error
-        chimera_nfs_debug("NFS mount request for unknown export '%s'", args->path.str);
+        chimera_nfs_debug("NFS mount request for unknown export '%.*s'",
+                          args->path.len, args->path.str);
         if (full_path) {
             free(full_path);
         }
