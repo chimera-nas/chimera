@@ -3,12 +3,15 @@
 name: Native Windows
 on:
   push:
-    branches: [main, windows-msvc]
+    branches: [main]
   pull_request:
   merge_group:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   native-runtime:
     name: Runtime ${{ matrix.arch }} ${{ matrix.config }}
@@ -69,12 +72,21 @@ jobs:
           repository: microsoft/vcpkg
           ref: a1cae005c39be7b18ba319fced856b68d7276271
           path: _vcpkg
+      - name: Identify dependency toolchain image
+        id: dependency-image
+        shell: pwsh
+        run: |
+          if (-not $env:ImageVersion) { throw 'Hosted runner image version is missing' }
+          "version=$env:ImageVersion" >> $env:GITHUB_OUTPUT
       - uses: actions/cache/restore@v4
         id: vcpkg-cache
         with:
           path: ~/AppData/Local/vcpkg/archives
-          key: vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ matrix.arch }}-
+          key: vcpkg-v2-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}-${{ steps.dependency-image.outputs.version }}
+          restore-keys: |
+            vcpkg-v2-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-v2-${{ matrix.arch }}-
+            vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
       - name: Install parser generators
         shell: pwsh
         run: |
@@ -91,6 +103,7 @@ jobs:
           path: build/specs-corpus
           key: windows-specs-v1-${{ matrix.arch }}-${{ hashFiles('ext/specs/.quint-version', 'ext/specs/CMakeLists.txt', 'ext/specs/cmake/**', 'ext/specs/quint/**', 'ext/specs/tools/**', 'src/**/quint/configs/**', 'src/**/CMakeLists.txt', 'CMakeLists.txt', 'cmake/**', 'vcpkg.json', '.github/workflows/windows.yml') }}
       - name: Configure native Windows with dependencies
+        id: configure
         shell: pwsh
         run: |
           & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
@@ -99,11 +112,16 @@ jobs:
           $prebuiltCorpus = if ('${{ steps.corpus-cache.outputs.cache-hit }}' -eq 'true') { 'ON' } else { 'OFF' }
           cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DSPECS_CORPUS_PREBUILT=$prebuiltCorpus" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Cache entries are immutable. Publish only after all dependencies are
+      # installed; saving after a failure can freeze an incomplete archive
+      # under an exact key and force expensive rebuilds on every later run.
+      # A new runner image gets a fresh key, allowing changed compiler/SDK
+      # binaries to replace packages restored from the previous image.
       - uses: actions/cache/save@v4
-        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: steps.configure.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
         with:
           path: ~/AppData/Local/vcpkg/archives
-          key: vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
       - name: Build server
         run: cmake --build build --target chimera --config ${{ matrix.config }} --parallel 4
       # Fail common runtime paths before spending time generating the full
