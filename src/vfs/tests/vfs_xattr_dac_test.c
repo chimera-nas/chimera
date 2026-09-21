@@ -141,7 +141,7 @@ set_xattr_as(
 {
     struct chimera_vfs_compound *cp;
     enum chimera_vfs_error       st = open_as(ctx, cred, fh, fh_len);
-    int                          i_set;
+    int i_set;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
@@ -173,7 +173,7 @@ get_xattr_as(
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                st = open_as(ctx, cred, fh, fh_len);
-    int                                   i_get;
+    int i_get;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
@@ -213,7 +213,7 @@ list_xattrs_as(
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                st = open_as(ctx, cred, fh, fh_len);
-    int                                   i_list;
+    int i_list;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
@@ -252,7 +252,7 @@ remove_xattr_as(
 {
     struct chimera_vfs_compound *cp;
     enum chimera_vfs_error       st = open_as(ctx, cred, fh, fh_len);
-    int                          i_rm;
+    int i_rm;
 
     if (st != CHIMERA_VFS_OK) {
         return st;

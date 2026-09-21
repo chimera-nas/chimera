@@ -78,7 +78,7 @@ compound_test_lookup(
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                status;
-    int                                   i_lookup;
+    int i_lookup;
 
     cp = chimera_vfs_compound_alloc(thread, cred);
     chimera_vfs_compound_add_putfh(cp, dir_fh, (int) dir_fh_len);
@@ -111,7 +111,7 @@ compound_test_mount_root(
     uint8_t                       *out_fh,
     uint32_t                      *out_fh_len)
 {
-    uint8_t  root_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t root_fh_len;
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
@@ -135,7 +135,7 @@ compound_test_open_fh(
 {
     struct chimera_vfs_compound *cp;
     enum chimera_vfs_error       status;
-    int                          i_gh;
+    int i_gh;
 
     *out_handle = NULL;
 
