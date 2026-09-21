@@ -28,14 +28,19 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
+/* The two things below that are not sequence ops: the pool lifecycle (mkfs,
+ * mount, umount, rmfs) and the key-value calls, which are a store beside
+ * the filesystem rather than operations on it.  Both come from the core's
+ * per-op header, which is where they still live. */
+#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
+#include "vfs/tests/compound_test_util.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 
@@ -83,39 +88,6 @@ mount_cb(
 } /* mount_cb */
 
 static void
-lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK && attr) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    ctx->done = 1;
-} /* lookup_cb */
-
-static void
-mkdir_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK && attr &&
-        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    ctx->done = 1;
-} /* mkdir_cb */
-
-static void
 compound_cb(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
@@ -127,27 +99,12 @@ compound_cb(
     ctx->done      = 1;
 } /* compound_cb */
 
-static void
-open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
+/* ---- fixture builders ----
+ * The tree these tests run against is built the way everything else reaches
+ * the VFS: one op, one sequence.  Nothing here is under test -- what is under
+ * test starts at the first sequence with more than one op in it. */
 
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK && attr &&
-        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    if (oh) {
-        chimera_vfs_release_handle(ctx->vfs_thread, oh);
-    }
-    ctx->done = 1;
-} /* open_cb */
-
+/* PUTFH(parent); CREATE(dir).  The new directory's fh lands in ctx->fh. */
 static void
 mkdir_under(
     struct test_ctx               *ctx,
@@ -156,19 +113,108 @@ mkdir_under(
     uint32_t                       parent_fh_len,
     const char                    *name)
 {
-    struct chimera_vfs_attrs sattr;
+    struct chimera_vfs_compound          *cp;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              sattr;
+    int                                   i_mkdir;
 
     memset(&sattr, 0, sizeof(sattr));
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = 0755;
 
-    chimera_vfs_mkdir(ctx->vfs_thread, cred, parent_fh, (int) parent_fh_len,
-                      name, (int) strlen(name), &sattr,
-                      CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                      mkdir_cb, ctx);
-    wait_done(ctx);
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_putfh(cp, parent_fh, (int) parent_fh_len);
+    i_mkdir = chimera_vfs_compound_add_create(cp,
+                                              CHIMERA_VFS_COMPOUND_CREATE_DIR,
+                                              name, (int) strlen(name),
+                                              NULL, 0, &sattr,
+                                              CHIMERA_VFS_ATTR_FH |
+                                              CHIMERA_VFS_ATTR_MASK_STAT, 0, 0);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
     assert(ctx->status == CHIMERA_VFS_OK);
+
+    op = chimera_vfs_compound_op(cp, (uint32_t) i_mkdir);
+    assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+    memcpy(ctx->fh, op->attr.va_fh, op->attr.va_fh_len);
+    ctx->fh_len = op->attr.va_fh_len;
+
+    chimera_vfs_compound_free(cp);
 } /* mkdir_under */
+
+/* PUTFH(base); OPEN_PATH(path, CREATE) of a regular file -- a PATH open, so
+ * `path` may be several components deep.  The new file's fh lands in ctx->fh;
+ * the handle stays the compound's and dies with it, which is what every caller
+ * of this wants. */
+static void
+create_under(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *base_fh,
+    uint32_t                       base_fh_len,
+    const char                    *path)
+{
+    struct chimera_vfs_compound          *cp;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              sattr;
+    int                                   i_open;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = S_IFREG | 0644;
+
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_putfh(cp, base_fh, (int) base_fh_len);
+    i_open = chimera_vfs_compound_add_open_path(cp, path, (int) strlen(path),
+                                                CHIMERA_VFS_OPEN_CREATE |
+                                                CHIMERA_VFS_OPEN_CREATE_REGULAR,
+                                                &sattr,
+                                                CHIMERA_VFS_ATTR_FH |
+                                                CHIMERA_VFS_ATTR_MASK_STAT);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    op = chimera_vfs_compound_op(cp, (uint32_t) i_open);
+    assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+    memcpy(ctx->fh, op->attr.va_fh, op->attr.va_fh_len);
+    ctx->fh_len = op->attr.va_fh_len;
+
+    chimera_vfs_compound_free(cp);
+} /* create_under */
+
+/* PUTFH(parent); LOOKUP(name) with `attr_mask`.  Used both to resolve a name
+ * and, in the ACL-copy check, to make the backend overwrite its own scratch
+ * between a sequence finishing and its results being read. */
+static void
+lookup_under(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *parent_fh,
+    uint32_t                       parent_fh_len,
+    const char                    *name,
+    uint64_t                       attr_mask)
+{
+    struct chimera_vfs_compound          *cp;
+    const struct chimera_vfs_compound_op *op;
+    int                                   i_lookup;
+
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_putfh(cp, parent_fh, (int) parent_fh_len);
+    i_lookup = chimera_vfs_compound_add_lookup(cp, name, (int) strlen(name),
+                                               attr_mask, 0);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    op = chimera_vfs_compound_op(cp, (uint32_t) i_lookup);
+    if (op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
+        memcpy(ctx->fh, op->attr.va_fh, op->attr.va_fh_len);
+        ctx->fh_len = op->attr.va_fh_len;
+    }
+
+    chimera_vfs_compound_free(cp);
+} /* lookup_under */
 
 /* A streaming READDIR's two callbacks, with a budget expressed the way a
  * marshalling caller expresses one: refuse the Nth entry.  `reset` counts
@@ -787,14 +833,8 @@ main(
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
-                       "mem", 3, CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                       0, lookup_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-    memcpy(root_fh, ctx.fh, ctx.fh_len);
-    root_fh_len = ctx.fh_len;
+    assert(compound_test_mount_root(ctx.vfs_thread, ctx.evpl, &cred, "mem",
+                                    root_fh, &root_fh_len) == CHIMERA_VFS_OK);
 
     /* A two-level tree to chain through: /mem/a/b */
     mkdir_under(&ctx, &cred, root_fh, root_fh_len, "a");
@@ -966,15 +1006,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0644;
 
-        chimera_vfs_open(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
-                         "f", 1,
-                         CHIMERA_VFS_OPEN_CREATE |
-                         CHIMERA_VFS_OPEN_CREATE_REGULAR,
-                         &sattr,
-                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                         open_cb, &ctx);
-        wait_done(&ctx);
-        assert(ctx.status == CHIMERA_VFS_OK);
+        create_under(&ctx, &cred, root_fh, root_fh_len, "f");
         memcpy(f_fh, ctx.fh, ctx.fh_len);
         f_fh_len = ctx.fh_len;
 
@@ -1125,15 +1157,7 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = S_IFREG | 0644;
 
-        chimera_vfs_open(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
-                         "c", 1,
-                         CHIMERA_VFS_OPEN_CREATE |
-                         CHIMERA_VFS_OPEN_CREATE_REGULAR,
-                         &sattr,
-                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                         open_cb, &ctx);
-        wait_done(&ctx);
-        assert(ctx.status == CHIMERA_VFS_OK);
+        create_under(&ctx, &cred, root_fh, root_fh_len, "c");
         memcpy(c_fh, ctx.fh, ctx.fh_len);
         c_fh_len = ctx.fh_len;
 
@@ -1851,13 +1875,9 @@ main(
          * per-op lookup of a DIRECTORY with the ACL requested puts a
          * mode-synthesized directory ACL where the file's used to be.  A
          * result that merely pointed at the scratch would now read that. */
-        chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
-                           "a", 1,
-                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
-                           CHIMERA_VFS_ATTR_ACL,
-                           0, lookup_cb, &ctx);
-        wait_done(&ctx);
-        assert(ctx.status == CHIMERA_VFS_OK);
+        lookup_under(&ctx, &cred, root_fh, root_fh_len, "a",
+                     CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+                     CHIMERA_VFS_ATTR_ACL);
 
         lk = chimera_vfs_compound_op(cp, i_lk);
         assert(lk->status == CHIMERA_VFS_OK);
@@ -5362,15 +5382,7 @@ main(
         sattr.va_mode     = S_IFREG | 0644;
 
         for (i = 0; i < 4; i++) {
-            chimera_vfs_open(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
-                             files[i], (int) strlen(files[i]),
-                             CHIMERA_VFS_OPEN_CREATE |
-                             CHIMERA_VFS_OPEN_CREATE_REGULAR,
-                             &sattr,
-                             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                             open_cb, &ctx);
-            wait_done(&ctx);
-            assert(ctx.status == CHIMERA_VFS_OK);
+            create_under(&ctx, &cred, root_fh, root_fh_len, files[i]);
             if (i == 0) {
                 memcpy(f1_fh, ctx.fh, ctx.fh_len);
                 f1_fh_len = ctx.fh_len;
@@ -7421,7 +7433,7 @@ main(
         struct chimera_vfs_attrs sattr, tattr;
         uint8_t                  e_fh[CHIMERA_VFS_FH_SIZE];
         uint32_t                 e_fh_len;
-        int                      i_open, i_sa, i_lk;
+        int                      i_open, i_sa, i_lk, i_mk;
 
         chimera_vfs_cred_init_unix(&ucred, 1000, 1000, 0, NULL);
 
@@ -7429,13 +7441,20 @@ main(
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = 0777;
 
-        chimera_vfs_mkdir(ctx.vfs_thread, &cred, root_fh, (int) root_fh_len,
-                          "e14", 3, &sattr,
-                          CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                          mkdir_cb, &ctx);
-        wait_done(&ctx);
-        assert(ctx.status == CHIMERA_VFS_OK);
-        memcpy(e_fh, ctx.fh, ctx.fh_len);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
+        i_mk = chimera_vfs_compound_add_create(cp,
+                                               CHIMERA_VFS_COMPOUND_CREATE_DIR,
+                                               "e14", 3, NULL, 0, &sattr,
+                                               CHIMERA_VFS_ATTR_FH |
+                                               CHIMERA_VFS_ATTR_MASK_STAT,
+                                               0, 0);
+        assert(compound_test_run(ctx.evpl, cp) == CHIMERA_VFS_OK);
+        op = chimera_vfs_compound_op(cp, (uint32_t) i_mk);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        memcpy(e_fh, op->attr.va_fh, op->attr.va_fh_len);
+        e_fh_len = op->attr.va_fh_len;
+        chimera_vfs_compound_free(cp);
         e_fh_len = ctx.fh_len;
 
         /* Created read-only, opened for write: open_at grants a freshly
