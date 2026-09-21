@@ -329,12 +329,14 @@ void
 chimera_posix_rewinddir(
     CHIMERA_DIR *dirp);
 
+/* Directory positions are opaque cookies. Preserve the full value returned
+ * by telldir; a Windows long cannot hold all backend cookies. */
 void
 chimera_posix_seekdir(
-    CHIMERA_DIR *dirp,
-    long         loc);
+    CHIMERA_DIR     *dirp,
+    chimera_dirpos_t loc);
 
-long
+chimera_dirpos_t
 chimera_posix_telldir(
     CHIMERA_DIR *dirp);
 

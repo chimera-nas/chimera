@@ -103,8 +103,9 @@ namespaces, and external Unix Samba tools remain Unix test paths.
   registration. This preserves one copy of shared state across the cyclic
   VFS/server dependency graph. Loading external VFS modules through
   `module_path` is not supported by this build.
-* The public client API uses `chimera_off_t`, `chimera_dev_t`, and
-  `chimera_posix_stat_t` so file offsets, device IDs, and metadata remain
+* The public client API uses `chimera_off_t`, `chimera_dev_t`,
+  `chimera_dirpos_t`, and `chimera_posix_stat_t` so file offsets, device IDs, directory
+  positions, and metadata remain
   full width under Windows' LLP64 ABI. On Unix these alias the corresponding
   native types. Code consuming the API should use the Chimera names.
 

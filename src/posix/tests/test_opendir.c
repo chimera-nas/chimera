@@ -5,6 +5,7 @@
 // Test for opendir, closedir, readdir, dirfd, rewinddir, seekdir, telldir, scandir
 
 #include "common/dirent.h"
+#include "common/format.h"
 #include "posix_test_common.h"
 
 static void
@@ -156,10 +157,10 @@ test_rewinddir(void)
 static void
 test_seekdir_telldir(void)
 {
-    CHIMERA_DIR   *dir;
-    struct dirent *entry;
-    long           pos;
-    char           saved_name[256];
+    CHIMERA_DIR     *dir;
+    struct dirent   *entry;
+    chimera_dirpos_t pos;
+    char             saved_name[256];
 
     fprintf(stderr, "Testing seekdir/telldir...\n");
 
@@ -177,7 +178,7 @@ test_seekdir_telldir(void)
     }
 
     pos = chimera_posix_telldir(dir);
-    fprintf(stderr, "After first entry, telldir=%ld\n", pos);
+    fprintf(stderr, "After first entry, telldir=%" PRId64 "\n", (int64_t) pos);
 
     // Read second entry and save its name
     entry = chimera_posix_readdir(dir);

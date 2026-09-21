@@ -921,7 +921,7 @@ handle(json_t *req)
         if (sid < 0 || sid >= MAX_DIRS || !driver_dirs[sid]) {
             return res_int(-1, EBADF);
         }
-        chimera_posix_seekdir(driver_dirs[sid], (long) jint64(req, "loc", 0));
+        chimera_posix_seekdir(driver_dirs[sid], (chimera_dirpos_t) jint64(req, "loc", 0));
         return res_int(0, 0);
     }
 

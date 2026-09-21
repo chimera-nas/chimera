@@ -2511,7 +2511,7 @@ op_dir_simple(
             e = chimera_posix_telldir(d) < 0 ? host_to_linux(errno) : 0;
             break;
         case 2:
-            chimera_posix_seekdir(d, (long) tf_field(rv, "loc"));
+            chimera_posix_seekdir(d, (chimera_dirpos_t) tf_field(rv, "loc"));
             break;
         case 3:
             e = chimera_posix_closedir(d) < 0 ? host_to_linux(errno) : 0;

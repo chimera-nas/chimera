@@ -205,7 +205,9 @@ chimera_aligned_free(void *ptr)
 #ifdef _WIN32
 typedef int64_t chimera_off_t;
 typedef uint64_t chimera_dev_t;
+typedef int64_t chimera_dirpos_t;
 #else // ifdef _WIN32
 typedef off_t chimera_off_t;
 typedef dev_t chimera_dev_t;
+typedef long chimera_dirpos_t;
 #endif // ifdef _WIN32
