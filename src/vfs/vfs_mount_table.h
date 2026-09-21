@@ -304,17 +304,10 @@ chimera_vfs_mount_table_foreach(
     return rc;
 } /* chimera_vfs_mount_table_foreach */
 
-/*
- * Find a mount by path prefix match.
- * Returns the mount whose path is a prefix of the given path,
- * or NULL if not found. Uses RCU read lock internally.
- *
- * IMPORTANT: The returned mount pointer is only valid while RCU read lock
- * is held. If caller needs to use the mount after this returns, they must
- * copy necessary data or hold their own RCU read lock.
- */
+/* Find a mount by path prefix match.  The caller must hold table->lock or
+* an RCU read lock throughout the lookup and use of the returned mount. */
 static inline struct chimera_vfs_mount *
-chimera_vfs_mount_table_find_by_path(
+chimera_vfs_mount_table_find_by_path_protected(
     struct chimera_vfs_mount_table *table,
     const char                     *path,
     int                             pathlen)
@@ -322,8 +315,6 @@ chimera_vfs_mount_table_find_by_path(
     struct chimera_vfs_mount_table_entry *entry;
     struct chimera_vfs_mount             *found = NULL;
     uint32_t                              i;
-
-    urcu_qsbr_read_lock();
 
     for (i = 0; i < table->num_buckets && !found; i++) {
         entry = rcu_dereference(table->buckets[i]);
@@ -339,8 +330,22 @@ chimera_vfs_mount_table_find_by_path(
         }
     }
 
-    urcu_qsbr_read_unlock();
+    return found;
+} /* chimera_vfs_mount_table_find_by_path_protected */
 
+/* RCU-reader convenience wrapper.  The caller must retain its own RCU
+ * protection while using the returned pointer. */
+static inline struct chimera_vfs_mount *
+chimera_vfs_mount_table_find_by_path(
+    struct chimera_vfs_mount_table *table,
+    const char                     *path,
+    int                             pathlen)
+{
+    struct chimera_vfs_mount *found;
+
+    urcu_qsbr_read_lock();
+    found = chimera_vfs_mount_table_find_by_path_protected(table, path, pathlen);
+    urcu_qsbr_read_unlock();
     return found;
 } /* chimera_vfs_mount_table_find_by_path */
 

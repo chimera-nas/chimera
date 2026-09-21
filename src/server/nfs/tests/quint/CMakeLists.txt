@@ -54,6 +54,19 @@ target_link_libraries(nfs3_mbt_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs3_mbt_probe)
 
+add_executable(nfs_pnfs_probe nfs_pnfs_probe.c)
+target_include_directories(nfs_pnfs_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs_pnfs_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_pnfs_probe)
+add_test(NAME chimera/server/nfs/mbt/pnfs_startup
+    COMMAND $<TARGET_FILE:nfs_pnfs_probe>)
+set_tests_properties(chimera/server/nfs/mbt/pnfs_startup PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs_pnfs_startup"
+    LABELS "quint;nfs4_mbt;memfs"
+    TIMEOUT 90)
+
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)

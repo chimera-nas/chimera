@@ -2543,10 +2543,15 @@ chimera_server_pnfs_resolve(struct chimera_server *server)
             bpath++;
         }
 
-        m = chimera_vfs_mount_table_find_by_path(vfs->mount_table,
-                                                 bpath,
-                                                 strlen(bpath));
+        /* Startup callers need not be registered RCU readers.  Hold the
+         * writer mutex until the backing root and mount metadata are copied,
+         * so a concurrent unmount cannot retire the mount under us. */
+        evpl_mutex_lock(&vfs->mount_table->lock);
+        m = chimera_vfs_mount_table_find_by_path_protected(vfs->mount_table,
+                                                           bpath,
+                                                           strlen(bpath));
         if (!m) {
+            evpl_mutex_unlock(&vfs->mount_table->lock);
             chimera_server_error(
                 "pNFS data server %d: backing mount '%s' not found (mount it via the nfs module)",
                 i, ds->backing_path);
@@ -2567,6 +2572,7 @@ chimera_server_pnfs_resolve(struct chimera_server *server)
             i, ds->backing_path,
             m->module ? m->module->name : "?",
             m->path ? m->path : "?", m->root_fh_len, ds->backing_local);
+        evpl_mutex_unlock(&vfs->mount_table->lock);
         resolved++;
     }
 
