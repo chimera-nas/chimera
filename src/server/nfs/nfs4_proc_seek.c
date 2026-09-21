@@ -212,11 +212,7 @@ chimera_nfs4_seek(
         return;
     }
 
-    if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        state_handle = ((struct nfs_open_state *) state_void)->handle;
-    } else {
-        state_handle = ((struct nfs_lock_state *) state_void)->handle;
-    }
+    state_handle = nfs_state_io_handle(state_void, state_type, OPEN4_SHARE_ACCESS_READ);
 
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;

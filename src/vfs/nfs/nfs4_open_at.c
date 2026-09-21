@@ -325,10 +325,13 @@ chimera_nfs4_open_at_send(
     open_args->seqid = 0; /* Sequence ID for open state - 0 for new opens */
 
     /* Set share access based on flags.  O_RDWR sets both READ_ONLY and
-     * WRITE_ONLY; only a pure read-only open requests READ share access. */
+     * WRITE_ONLY; request exactly the access the caller needs, as open_fh does. */
     if ((request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
         !(request->open_at.flags & CHIMERA_VFS_OPEN_WRITE_ONLY)) {
         open_args->share_access = OPEN4_SHARE_ACCESS_READ;
+    } else if ((request->open_at.flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
+               !(request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
+        open_args->share_access = OPEN4_SHARE_ACCESS_WRITE;
     } else {
         open_args->share_access = OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE;
     }

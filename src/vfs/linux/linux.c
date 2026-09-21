@@ -787,6 +787,9 @@ chimera_linux_set_open_flags(uint32_t in_flags)
             ((in_flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
              !(in_flags & CHIMERA_VFS_OPEN_WRITE_ONLY))) {
             flags |= O_RDONLY;
+        } else if ((in_flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
+                   !(in_flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
+            flags |= O_WRONLY;
         } else {
             flags |= O_RDWR;
         }

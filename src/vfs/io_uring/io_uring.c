@@ -1738,6 +1738,9 @@ chimera_io_uring_open_fh(
         ((request->open_fh.flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
          !(request->open_fh.flags & CHIMERA_VFS_OPEN_WRITE_ONLY))) {
         flags |= O_RDONLY;
+    } else if ((request->open_fh.flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
+               !(request->open_fh.flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
+        flags |= O_WRONLY;
     } else {
         flags |= O_RDWR;
     }
@@ -1807,6 +1810,9 @@ chimera_io_uring_open_at_flags(struct chimera_vfs_request *request)
                !(request->open_at.flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
                !(request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
         flags |= O_RDONLY;
+    } else if ((request->open_at.flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
+               !(request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
+        flags |= O_WRONLY;
     } else {
         flags |= O_RDWR;
     }
