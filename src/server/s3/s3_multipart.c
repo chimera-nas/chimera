@@ -1617,7 +1617,7 @@ chimera_s3_upload_part_copy(
     struct chimera_s3_upload_copy_ctx  *ctx;
     const char                         *copy_source, *copy_range;
     const struct s3_bucket             *src_bucket;
-    const char                         *src_path;
+    char                               *src_path;
 
     /* Validate part number first (cheap). */
     if (request->multipart.part_number < 1 ||
@@ -1685,7 +1685,12 @@ chimera_s3_upload_part_copy(
         return;
     }
 
-    src_path = chimera_s3_bucket_get_path(src_bucket);
+    src_path = strdup(chimera_s3_bucket_get_path(src_bucket));
+    chimera_s3_release_bucket(shared);
+    if (!src_path) {
+        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        return;
+    }
 
     chimera_vfs_lookup(thread->vfs,
                        &request->cred,
@@ -1698,7 +1703,7 @@ chimera_s3_upload_part_copy(
                        chimera_s3_upc_lookup_src_bucket_callback,
                        ctx);
 
-    chimera_s3_release_bucket(shared);
+    free(src_path);
 } /* chimera_s3_upload_part_copy */
 
 /* ----- CompleteMultipartUpload body accumulation + parser ----- */

@@ -851,7 +851,7 @@ chimera_s3_copy(
     const char                      *copy_source;
     const char                      *directive;
     const struct s3_bucket          *src_bucket;
-    const char                      *src_path;
+    char                            *src_path;
 
     copy_source = evpl_http_request_header(request->http_request,
                                            "x-amz-copy-source");
@@ -895,10 +895,8 @@ chimera_s3_copy(
         return;
     }
 
-    /* chimera_s3_get_bucket() acquires the bucket-map read lock and leaves it
-     * held; chimera_s3_release_bucket() drops it. The path string stays valid
-     * past the unlock for the duration of the request (buckets are not freed
-     * underneath in-flight operations), matching the dispatch path. */
+    /* Snapshot the source path while the bucket-map lock protects it. VFS
+    * callbacks may run inline, so do not hold the map across dispatch. */
     src_bucket = chimera_s3_get_bucket(shared, ctx->src_bucket_name);
 
     if (src_bucket == NULL) {
@@ -907,7 +905,12 @@ chimera_s3_copy(
         return;
     }
 
-    src_path = chimera_s3_bucket_get_path(src_bucket);
+    src_path = strdup(chimera_s3_bucket_get_path(src_bucket));
+    chimera_s3_release_bucket(shared);
+    if (!src_path) {
+        chimera_s3_copy_finish(ctx, 0, CHIMERA_S3_STATUS_INTERNAL_ERROR, NULL);
+        return;
+    }
 
     chimera_vfs_lookup(thread->vfs,
                        &request->cred,
@@ -920,5 +923,5 @@ chimera_s3_copy(
                        chimera_s3_copy_lookup_src_bucket_callback,
                        ctx);
 
-    chimera_s3_release_bucket(shared);
+    free(src_path);
 } /* chimera_s3_copy */
