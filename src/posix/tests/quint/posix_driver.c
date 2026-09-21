@@ -103,7 +103,7 @@ static int                        g_smb_client_compress; /* client asks to compr
 * leaves a half-built environment -- a running server, a client with no mount,
 * evpl pools on both -- and unwinding that is the hazardous part, not the
 * refusal itself.  A caller whose verdict is already decided sets this and
-* _exit()s instead, which cannot abort on any platform.  See
+* exits without cleanup instead, preserving the refusal verdict.  See
 * posix_env_setup_unwind for what is being skipped and why it is a hazard. */
 static int                        g_expect_mount_failure;
 
