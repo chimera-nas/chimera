@@ -133,13 +133,17 @@ jobs:
       - name: Require application smoke tests
         if: steps.smoke.outcome == 'failure'
         run: exit 1
-      - name: Build tests and SDK example
-        run: cmake --build build --config ${{ matrix.config }} --parallel 4
+      # Publish the complete corpus before compiling the remaining tests, so
+      # an unrelated compiler error does not discard expensive model work.
+      - name: Generate protocol model corpus
+        run: cmake --build build --target specs_corpus --config ${{ matrix.config }} --parallel 4
       - uses: actions/cache/save@v4
         if: steps.corpus-cache.outputs.cache-hit != 'true'
         with:
           path: build/specs-corpus
           key: ${{ steps.corpus-cache.outputs.cache-primary-key }}
+      - name: Build tests and SDK example
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4
       - name: Test native backends
         run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --parallel 4 --timeout 300 --output-junit results.xml
       - name: Upload test results
