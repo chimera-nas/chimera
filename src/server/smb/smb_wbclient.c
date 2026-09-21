@@ -108,6 +108,7 @@ smb_wbclient_auth_ntlm(
     uint32_t      *ngids,
     uint32_t      *gids,
     char          *sid_out,
+    char          *group_sid_out,
     uint8_t       *session_key)
 {
     wbcErr                   wbc_err;
@@ -173,13 +174,22 @@ smb_wbclient_auth_ntlm(
         return -1;
     }
 
-    // Get primary group SID and convert to Unix GID
+    // Get primary group SID and convert to Unix GID.  The SID goes out with
+    // the gid it mapped to, and only then: a SID beside a gid it does not
+    // describe is worse than none.
+    if (group_sid_out) {
+        group_sid_out[0] = '\0';
+    }
     if (info->num_sids > 1) {
         // The second SID is typically the primary group
         wbc_err = wbcSidToGid(&info->sids[1].sid, &unix_gid);
         if (wbc_err != WBC_ERR_SUCCESS) {
             // Fall back to the user's UID as GID
             unix_gid = unix_uid;
+        } else if (group_sid_out &&
+                   wbc_sid_to_string(&info->sids[1].sid, group_sid_out,
+                                     SMB_WBCLIENT_SID_MAX_LEN) < 0) {
+            group_sid_out[0] = '\0';
         }
     } else {
         unix_gid = unix_uid;
@@ -223,10 +233,12 @@ smb_wbclient_map_principal(
     uint32_t   *gid,
     uint32_t   *ngids,
     uint32_t   *gids,
-    char       *sid_out)
+    char       *sid_out,
+    char       *group_sid_out)
 {
     wbcErr               wbc_err;
     struct wbcDomainSid  user_sid;
+    struct wbcDomainSid  group_sid;
     enum wbcSidType      sid_type;
     char                *domain = NULL;
     char                *name   = NULL;
@@ -307,6 +319,17 @@ smb_wbclient_map_principal(
 
     *uid = unix_uid;
     *gid = unix_gid;
+
+    // The primary group's SID, for the gid winbind just named; empty when
+    // winbind maps that gid to none.
+    if (group_sid_out) {
+        group_sid_out[0] = '\0';
+        if (wbcGidToSid(unix_gid, &group_sid) == WBC_ERR_SUCCESS &&
+            wbc_sid_to_string(&group_sid, group_sid_out,
+                              SMB_WBCLIENT_SID_MAX_LEN) < 0) {
+            group_sid_out[0] = '\0';
+        }
+    }
 
     // Get supplementary groups
     wbc_err = wbcLookupUserSids(&user_sid, 0, &num_groups, &groups_sids);
@@ -666,6 +689,7 @@ smb_wbclient_auth_ntlm(
     uint32_t      *ngids,
     uint32_t      *gids,
     char          *sid_out,
+    char          *group_sid_out,
     uint8_t       *session_key)
 {
     (void) username;
@@ -681,6 +705,7 @@ smb_wbclient_auth_ntlm(
     (void) ngids;
     (void) gids;
     (void) sid_out;
+    (void) group_sid_out;
     (void) session_key;
 
     return -1;
@@ -693,7 +718,8 @@ smb_wbclient_map_principal(
     uint32_t   *gid,
     uint32_t   *ngids,
     uint32_t   *gids,
-    char       *sid_out)
+    char       *sid_out,
+    char       *group_sid_out)
 {
     (void) principal;
     (void) uid;
@@ -701,6 +727,7 @@ smb_wbclient_map_principal(
     (void) ngids;
     (void) gids;
     (void) sid_out;
+    (void) group_sid_out;
 
     return -1;
 } // smb_wbclient_map_principal

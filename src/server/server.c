@@ -3033,6 +3033,25 @@ chimera_server_remove_user(
     return chimera_vfs_remove_user(server->vfs, username);
 } /* chimera_server_remove_user */
 
+SYMBOL_EXPORT int
+chimera_server_add_group(
+    struct chimera_server *server,
+    const char            *groupname,
+    const char            *sid,
+    uint32_t               gid,
+    int                    pinned)
+{
+    return chimera_vfs_add_group(server->vfs, groupname, sid, gid, pinned);
+} /* chimera_server_add_group */
+
+SYMBOL_EXPORT int
+chimera_server_remove_group(
+    struct chimera_server *server,
+    const char            *groupname)
+{
+    return chimera_vfs_remove_group(server->vfs, groupname);
+} /* chimera_server_remove_group */
+
 SYMBOL_EXPORT const struct chimera_vfs_user *
 chimera_server_get_user(
     struct chimera_server *server,

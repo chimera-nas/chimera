@@ -949,6 +949,22 @@ chimera_server_remove_user(
     struct chimera_server *server,
     const char            *username);
 
+/* A group the server knows natively, with the SID a native-SID backend stores
+ * for it.  Mirrors chimera_server_add_user for the group half of an identity;
+ * the same pinning rules apply. */
+int
+chimera_server_add_group(
+    struct chimera_server *server,
+    const char            *groupname,
+    const char            *sid,
+    uint32_t               gid,
+    int                    pinned);
+
+int
+chimera_server_remove_group(
+    struct chimera_server *server,
+    const char            *groupname);
+
 const struct chimera_vfs_user *
 chimera_server_get_user(
     struct chimera_server *server,

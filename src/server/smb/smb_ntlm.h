@@ -87,6 +87,7 @@ struct smb_ntlm_ctx {
     char     username[256];
     char     domain[256];
     char     sid[SMB_NTLM_SID_MAX_LEN];
+    char     group_sid[SMB_NTLM_SID_MAX_LEN];  // primary group's SID (winbind), or empty
     uint32_t uid;
     uint32_t gid;
     uint32_t ngids;
@@ -145,6 +146,11 @@ smb_ntlm_get_gid(
 
 const char *
 smb_ntlm_get_sid(
+    struct smb_ntlm_ctx *ctx);
+
+// The primary group's SID as winbind named it at logon, NULL when unknown
+const char *
+smb_ntlm_get_group_sid(
     struct smb_ntlm_ctx *ctx);
 
 int

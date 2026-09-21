@@ -257,6 +257,27 @@ struct chimera_vfs_attrs {
     uint8_t             va_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
 
+/*
+ * A create's group SID companion (CHIMERA_VFS_ATTR_GROUP_SID on the create's
+ * set_attr) names the credential's primary group: the group the new object
+ * gets unless its parent is set-group-ID, in which case the object takes the
+ * parent's group instead.  Whoever forces the parent's gid -- the engine's
+ * gid pre-step for a CHIMERA_VFS_CAP_CREATE_GID_ENGINE backend, the backend
+ * itself otherwise -- calls this first, so the companion is never stored
+ * beside a gid it does not describe.  The algorithmic form the backend then
+ * falls back to follows the inherited gid.
+ */
+static inline void
+chimera_vfs_attrs_drop_group_sid(struct chimera_vfs_attrs *attr)
+{
+    if (!attr) {
+        return;
+    }
+    attr->va_group_sid = NULL;
+    attr->va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_GROUP_SID;
+    attr->va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_GROUP_SID;
+} /* chimera_vfs_attrs_drop_group_sid */
+
 /* relatime: update atime on a read at most once per this period when the file
  * is otherwise idle (matches the Linux default). */
 #define CHIMERA_VFS_RELATIME_PERIOD_SEC (24 * 60 * 60)

@@ -3218,6 +3218,10 @@ cairn_mkdir_at(
         (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
         ? request->mkdir_at.set_attr->va_acl : NULL;
 
+    if (parent_inode->mode & S_ISGID) {
+        chimera_vfs_attrs_drop_group_sid(request->mkdir_at.set_attr);
+    }
+
     cairn_apply_attrs(&inode, request->mkdir_at.set_attr);
 
     cairn_inherit_acl(thread, &inode, parent_inode->inum,
@@ -3352,6 +3356,10 @@ cairn_mknod_at(
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
         inode.rdev = request->mknod_at.set_attr->va_rdev;
+    }
+
+    if (parent_inode->mode & S_ISGID) {
+        chimera_vfs_attrs_drop_group_sid(request->mknod_at.set_attr);
     }
 
     cairn_apply_attrs(&inode, request->mknod_at.set_attr);
@@ -3948,6 +3956,10 @@ cairn_open_at(
         const struct chimera_acl *new_acl_open =
             (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
             ? request->open_at.set_attr->va_acl : NULL;
+
+        if (parent_inode->mode & S_ISGID) {
+            chimera_vfs_attrs_drop_group_sid(request->open_at.set_attr);
+        }
 
         cairn_apply_attrs(&new_inode, request->open_at.set_attr);
 

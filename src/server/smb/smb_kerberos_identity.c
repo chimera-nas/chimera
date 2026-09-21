@@ -33,7 +33,8 @@ smb_kerberos_resolve_identity(
         }
 
         if (smb_wbclient_map_principal(principal, &out->uid, &out->gid,
-                                       &out->ngids, out->gids, out->sid) != 0) {
+                                       &out->ngids, out->gids, out->sid,
+                                       out->group_sid) != 0) {
             chimera_smb_error("Kerberos logon refused for %s: winbind cannot map the principal "
                               "to a Unix identity",
                               principal);
