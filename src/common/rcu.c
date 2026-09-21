@@ -149,8 +149,14 @@ chimera_rcu_quiescent_state(void)
 {
     assert(self && !self->depth);
     evpl_mutex_lock(&lock);
-    self->epoch = epoch;
-    evpl_cond_broadcast(&changed);
+    /* The callback worker can only be waiting for the current epoch. A
+     * repeated report changes no wait predicate and must not wake it on every
+     * busy-poll iteration. Keep the check and publication under the lock so a
+     * newly started grace period still receives its notification. */
+    if (self->epoch != epoch) {
+        self->epoch = epoch;
+        evpl_cond_broadcast(&changed);
+    }
     evpl_mutex_unlock(&lock);
 } /* chimera_rcu_quiescent_state */
 
@@ -159,8 +165,10 @@ chimera_rcu_thread_offline(void)
 {
     assert(self && !self->depth);
     evpl_mutex_lock(&lock);
+    if (self->online && self->epoch != epoch) {
+        evpl_cond_broadcast(&changed);
+    }
     self->online = 0;
-    evpl_cond_broadcast(&changed);
     evpl_mutex_unlock(&lock);
 } /* chimera_rcu_thread_offline */
 
