@@ -8,3 +8,8 @@ chimera_add_netns_test(chimera/daemon/config_test ${CMAKE_CURRENT_SOURCE_DIR}/da
             $<TARGET_FILE:chimera>)
 set_tests_properties(chimera/daemon/config_test PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/src/server/smb/tests/suppressions.txt")
+
+add_test(NAME chimera/daemon/native_lifecycle
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_native_test.py
+            $<TARGET_FILE:chimera>)
+set_tests_properties(chimera/daemon/native_lifecycle PROPERTIES TIMEOUT 120)

@@ -45,7 +45,7 @@
 #include "metrics/metrics.h"
 #include "daemon.h"
 
-int SigInt = 0;
+static volatile sig_atomic_t SigInt;
 
 void
 signal_handler(int sig)
@@ -281,8 +281,8 @@ main(
     const char                          *rest_ssl_cert   = NULL;
     const char                          *rest_ssl_key    = NULL;
     int                                  rest_https_port = 0;
-    static char                          auto_cert_path[256];
-    static char                          auto_key_path[256];
+    static char                          auto_cert_path[PATH_MAX];
+    static char                          auto_key_path[PATH_MAX];
 
     chimera_log_init();
 
@@ -388,11 +388,17 @@ main(
             evpl_global_config_set_tls_cert(evpl_global_config, rest_ssl_cert);
             evpl_global_config_set_tls_key(evpl_global_config, rest_ssl_key);
         } else {
-            /* Generate self-signed certificate */
-            snprintf(auto_cert_path, sizeof(auto_cert_path),
-                     "/tmp/chimera-rest-%d.crt", getpid());
-            snprintf(auto_key_path, sizeof(auto_key_path),
-                     "/tmp/chimera-rest-%d.key", getpid());
+            /* Use the host temporary directory, including Windows' TEMP. */
+            char temp_directory[PATH_MAX];
+            if (chimera_host_temp_directory(temp_directory, sizeof(temp_directory)) ||
+                snprintf(auto_cert_path, sizeof(auto_cert_path),
+                         "%schimera-rest-%d.crt", temp_directory, getpid()) >= sizeof(auto_cert_path) ||
+                snprintf(auto_key_path, sizeof(auto_key_path),
+                         "%schimera-rest-%d.key", temp_directory, getpid()) >= sizeof(auto_key_path)) {
+                fprintf(stderr, "Temporary certificate path is too long\n");
+                json_decref(config);
+                return 1;
+            }
 
             if (generate_self_signed_cert(auto_cert_path, auto_key_path) != 0) {
                 fprintf(stderr, "Failed to generate self-signed certificate\n");
@@ -420,6 +426,9 @@ main(
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+#ifdef _WIN32
+    signal(SIGBREAK, signal_handler);
+#endif
 
     chimera_server_info("Initializing server...");
 
