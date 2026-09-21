@@ -41,11 +41,12 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
+#include "vfs/tests/compound_test_util.h"
 #include "vfs/sdk/vfs_module.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
@@ -105,121 +106,6 @@ mount_cb(
     ctx->done   = 1;
 } /* mount_cb */
 
-static void
-lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    ctx->done = 1;
-} /* lookup_cb */
-
-static void
-openfh_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->handle = oh;
-    ctx->done   = 1;
-} /* openfh_cb */
-
-static void
-openat_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre,
-    struct chimera_vfs_attrs       *dir_post,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->handle = oh;
-    if (error_code == CHIMERA_VFS_OK) {
-        memcpy(ctx->fh, oh->fh, oh->fh_len);
-        ctx->fh_len = oh->fh_len;
-    }
-    ctx->done = 1;
-} /* openat_cb */
-
-static void
-get_xattr_cb(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status    = error_code;
-    ctx->value_len = value_len;
-    ctx->done      = 1;
-} /* get_xattr_cb */
-
-static void
-set_xattr_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->done   = 1;
-} /* set_xattr_cb */
-
-static void
-list_xattrs_cb(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status    = error_code;
-    ctx->names_len = 0;
-    ctx->count     = 0;
-    if (error_code == CHIMERA_VFS_OK) {
-        assert(names_len <= sizeof(ctx->names));
-        if (names && names != ctx->names) {
-            memcpy(ctx->names, names, names_len);
-        }
-        ctx->names_len = names_len;
-        ctx->count     = count;
-    }
-    ctx->done = 1;
-} /* list_xattrs_cb */
-
-static void
-remove_xattr_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->done   = 1;
-} /* remove_xattr_cb */
-
 /* Open `fh` as `cred` (access inferred); the handle is left in ctx->handle. */
 static enum chimera_vfs_error
 open_as(
@@ -228,15 +114,17 @@ open_as(
     const uint8_t                 *fh,
     uint32_t                       fh_len)
 {
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
-    wait_done(ctx);
+    ctx->status = compound_test_open_fh(ctx->vfs_thread, ctx->evpl, cred,
+                                        fh, fh_len,
+                                        CHIMERA_VFS_OPEN_INFERRED,
+                                        &ctx->handle);
     return ctx->status;
 } /* open_as */
 
 /* Each *_as helper opens `fh` as `cred`, runs one xattr op through the
  * handle and releases it.  A denial at the open is reported as the result:
- * it is a denial of the op all the same. */
+ * it is a denial of the op all the same.  The xattr adders address the
+ * current object, so the handle is named with op_set_handle. */
 
 static enum chimera_vfs_error
 set_xattr_as(
@@ -247,17 +135,22 @@ set_xattr_as(
     const char                    *name,
     const char                    *value)
 {
-    enum chimera_vfs_error st = open_as(ctx, cred, fh, fh_len);
+    struct chimera_vfs_compound *cp;
+    enum chimera_vfs_error       st = open_as(ctx, cred, fh, fh_len);
+    int                          i_set;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
     }
 
-    chimera_vfs_set_xattr(ctx->vfs_thread, cred, ctx->handle,
-                          CHIMERA_VFS_XATTR_EITHER, name, strlen(name),
-                          value, strlen(value), set_xattr_cb, ctx);
-    wait_done(ctx);
-    st = ctx->status;
+    cp    = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    i_set = chimera_vfs_compound_add_setxattr(cp, CHIMERA_VFS_XATTR_EITHER,
+                                              name, (int) strlen(name),
+                                              value, (uint32_t) strlen(value));
+    chimera_vfs_compound_op_set_handle(cp, (uint32_t) i_set, ctx->handle);
+
+    st = compound_test_run(ctx->evpl, cp);
+    chimera_vfs_compound_free(cp);
 
     chimera_vfs_release(ctx->vfs_thread, ctx->handle);
     return st;
@@ -273,16 +166,34 @@ get_xattr_as(
     void                          *value,
     uint32_t                       value_maxlen)
 {
-    enum chimera_vfs_error st = open_as(ctx, cred, fh, fh_len);
+    struct chimera_vfs_compound          *cp;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                st = open_as(ctx, cred, fh, fh_len);
+    int                                   i_get;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
     }
 
-    chimera_vfs_get_xattr(ctx->vfs_thread, cred, ctx->handle, name,
-                          strlen(name), value, value_maxlen, get_xattr_cb, ctx);
-    wait_done(ctx);
-    st = ctx->status;
+    ctx->value_len = 0;
+
+    cp    = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    i_get = chimera_vfs_compound_add_getxattr(cp, name, (int) strlen(name),
+                                              value_maxlen);
+    chimera_vfs_compound_op_set_handle(cp, (uint32_t) i_get, ctx->handle);
+
+    st = compound_test_run(ctx->evpl, cp);
+
+    if (st == CHIMERA_VFS_OK) {
+        /* The answer lands in a buffer the compound owns; copy it out before
+         * the free that releases it. */
+        op             = chimera_vfs_compound_op(cp, (uint32_t) i_get);
+        ctx->value_len = op->buffer_len;
+        assert(ctx->value_len <= value_maxlen);
+        memcpy(value, op->buffer, ctx->value_len);
+    }
+
+    chimera_vfs_compound_free(cp);
 
     chimera_vfs_release(ctx->vfs_thread, ctx->handle);
     return st;
@@ -295,16 +206,33 @@ list_xattrs_as(
     const uint8_t                 *fh,
     uint32_t                       fh_len)
 {
-    enum chimera_vfs_error st = open_as(ctx, cred, fh, fh_len);
+    struct chimera_vfs_compound          *cp;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                st = open_as(ctx, cred, fh, fh_len);
+    int                                   i_list;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
     }
 
-    chimera_vfs_list_xattrs(ctx->vfs_thread, cred, ctx->handle, 0,
-                            ctx->names, sizeof(ctx->names), list_xattrs_cb, ctx);
-    wait_done(ctx);
-    st = ctx->status;
+    ctx->names_len = 0;
+    ctx->count     = 0;
+
+    cp     = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    i_list = chimera_vfs_compound_add_listxattrs(cp, 0, sizeof(ctx->names));
+    chimera_vfs_compound_op_set_handle(cp, (uint32_t) i_list, ctx->handle);
+
+    st = compound_test_run(ctx->evpl, cp);
+
+    if (st == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(cp, (uint32_t) i_list);
+        assert(op->buffer_len <= sizeof(ctx->names));
+        memcpy(ctx->names, op->buffer, op->buffer_len);
+        ctx->names_len = op->buffer_len;
+        ctx->count     = op->buffer_count;
+    }
+
+    chimera_vfs_compound_free(cp);
 
     chimera_vfs_release(ctx->vfs_thread, ctx->handle);
     return st;
@@ -318,16 +246,20 @@ remove_xattr_as(
     uint32_t                       fh_len,
     const char                    *name)
 {
-    enum chimera_vfs_error st = open_as(ctx, cred, fh, fh_len);
+    struct chimera_vfs_compound *cp;
+    enum chimera_vfs_error       st = open_as(ctx, cred, fh, fh_len);
+    int                          i_rm;
 
     if (st != CHIMERA_VFS_OK) {
         return st;
     }
 
-    chimera_vfs_remove_xattr(ctx->vfs_thread, cred, ctx->handle, name,
-                             strlen(name), remove_xattr_cb, ctx);
-    wait_done(ctx);
-    st = ctx->status;
+    cp   = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    i_rm = chimera_vfs_compound_add_removexattr(cp, name, (int) strlen(name));
+    chimera_vfs_compound_op_set_handle(cp, (uint32_t) i_rm, ctx->handle);
+
+    st = compound_test_run(ctx->evpl, cp);
+    chimera_vfs_compound_free(cp);
 
     chimera_vfs_release(ctx->vfs_thread, ctx->handle);
     return st;
@@ -431,19 +363,16 @@ main(
     }
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &root, root_fh, root_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-    memcpy(root_fh, ctx.fh, ctx.fh_len);
-    root_fh_len = ctx.fh_len;
+    assert(compound_test_mount_root(ctx.vfs_thread, ctx.evpl, &root, "test",
+                                    root_fh, &root_fh_len) == CHIMERA_VFS_OK);
 
     /* Root creates a 0600 file owned by 1000:1000 (root runs as the server
      * identity, so the chown is privileged). */
     {
-        struct chimera_vfs_open_handle *root_handle;
+        struct chimera_vfs_open_handle       *root_handle;
+        struct chimera_vfs_compound          *cp;
+        const struct chimera_vfs_compound_op *op;
+        int                                   i_open;
 
         assert(open_as(&ctx, &root, root_fh, root_fh_len) == CHIMERA_VFS_OK);
         root_handle = ctx.handle;
@@ -455,15 +384,23 @@ main(
         sattr.va_uid  = 1000;
         sattr.va_gid  = 1000;
 
-        chimera_vfs_open_at(ctx.vfs_thread, &root, root_handle, "f", 1,
-                            CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
-                            0, 0, openat_cb, &ctx);
-        wait_done(&ctx);
-        assert(ctx.status == CHIMERA_VFS_OK);
-        memcpy(file_fh, ctx.fh, ctx.fh_len);
-        file_fh_len = ctx.fh_len;
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &root);
+        chimera_vfs_compound_add_puthandle(cp, root_handle,
+                                           CHIMERA_VFS_OPEN_INFERRED);
+        i_open = chimera_vfs_compound_add_open(cp, "f", 1,
+                                               CHIMERA_VFS_OPEN_CREATE, 0,
+                                               &sattr, CHIMERA_VFS_ATTR_FH,
+                                               0, 0);
 
-        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+        assert(compound_test_run(ctx.evpl, cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, (uint32_t) i_open);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        memcpy(file_fh, op->attr.va_fh, op->attr.va_fh_len);
+        file_fh_len = op->attr.va_fh_len;
+
+        /* The OPEN's handle is the compound's: freeing it releases it. */
+        chimera_vfs_compound_free(cp);
         chimera_vfs_release(ctx.vfs_thread, root_handle);
     }
 

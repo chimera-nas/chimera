@@ -43,11 +43,12 @@
 #include "evpl/evpl.h"
 #include "evpl/evpl_memory.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
+#include "vfs/tests/compound_test_util.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 
@@ -65,13 +66,8 @@ struct test_ctx {
     struct chimera_vfs             *vfs;
     struct chimera_vfs_thread      *vfs_thread;
     struct evpl                    *evpl;
-    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                        fh_len;
-    struct chimera_vfs_open_handle *handle;     /* generic op result handle */
     struct chimera_vfs_open_handle *fhandle;    /* persistent file handle */
     uint8_t                        *readbuf;
-    uint32_t                        read_dst;
-    uint32_t                        readlen;
 };
 
 static uint64_t g_rng = 0x12345678ULL;
@@ -105,114 +101,6 @@ mount_cb(
 } /* mount_cb */
 
 static void
-lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    ctx->done = 1;
-} /* lookup_cb */
-
-static void
-openfh_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->handle = oh;
-    ctx->done   = 1;
-} /* openfh_cb */
-
-static void
-openat_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre,
-    struct chimera_vfs_attrs       *dir_post,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->handle = oh;
-    if (error_code == CHIMERA_VFS_OK) {
-        memcpy(ctx->fh, oh->fh, oh->fh_len);
-        ctx->fh_len = oh->fh_len;
-    }
-    ctx->done = 1;
-} /* openat_cb */
-
-static void
-write_cb(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->done   = 1;
-} /* write_cb */
-
-static void
-allocate_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->done   = 1;
-} /* allocate_cb */
-
-static void
-read_cb(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-    uint32_t         off = 0;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK) {
-        for (int i = 0; i < niov && off < ctx->readlen; i++) {
-            uint32_t len = evpl_iovec_length(&iov[i]);
-
-            if (len > ctx->readlen - off) {
-                len = ctx->readlen - off;
-            }
-            memcpy(ctx->readbuf + ctx->read_dst + off, evpl_iovec_data(&iov[i]),
-                   len);
-            off += len;
-        }
-        evpl_iovecs_release(ctx->evpl, iov, niov);
-    }
-    ctx->done = 1;
-} /* read_cb */
-
-static void
 do_write(
     struct test_ctx               *ctx,
     const struct chimera_vfs_cred *cred,
@@ -220,8 +108,9 @@ do_write(
     uint64_t                       len,
     uint8_t                        byte)
 {
-    struct evpl_iovec iov[WRITE_NIOV];
-    int               niov;
+    struct chimera_vfs_compound *cp;
+    struct evpl_iovec            iov[WRITE_NIOV];
+    int                          niov;
 
     niov = evpl_iovec_alloc(ctx->evpl, (unsigned int) len, 4096, WRITE_NIOV, 0,
                             iov);
@@ -230,10 +119,15 @@ do_write(
         memset(evpl_iovec_data(&iov[i]), byte, evpl_iovec_length(&iov[i]));
     }
 
-    chimera_vfs_write(ctx->vfs_thread, cred, ctx->fhandle, off, (uint32_t) len,
-                      CHIMERA_VFS_WRITE_FILESYNC, 0, 0, iov, niov, write_cb, ctx);
-    wait_done(ctx);
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_write(cp, ctx->fhandle, off, (uint32_t) len,
+                                   CHIMERA_VFS_WRITE_FILESYNC, iov, niov,
+                                   0, 0, NULL);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
     assert(ctx->status == CHIMERA_VFS_OK);
+    chimera_vfs_compound_free(cp);
+
     evpl_iovecs_release(ctx->evpl, iov, niov);
 } /* do_write */
 
@@ -247,9 +141,14 @@ do_allocate(
     uint64_t                       len,
     uint32_t                       flags)
 {
-    chimera_vfs_allocate(ctx->vfs_thread, cred, ctx->fhandle, off, len, flags,
-                         0, 0, allocate_cb, ctx);
-    wait_done(ctx);
+    struct chimera_vfs_compound *cp;
+
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_allocate(cp, ctx->fhandle, off, len, flags, 0, 0);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
+    chimera_vfs_compound_free(cp);
+
     return ctx->status;
 } /* do_allocate */
 
@@ -262,19 +161,45 @@ read_all(
     memset(ctx->readbuf, 0, FILE_LEN);
 
     for (uint64_t off = 0; off < FILE_LEN; off += READ_CHUNK) {
-        struct evpl_iovec iov[READ_NIOV];
-        uint32_t          chunk = READ_CHUNK;
+        struct chimera_vfs_compound          *cp;
+        const struct chimera_vfs_compound_op *op;
+        struct evpl_iovec                     iov[READ_NIOV];
+        struct evpl_iovec                    *got;
+        uint32_t                              chunk = READ_CHUNK;
+        uint32_t                              copied = 0;
+        int                                   i_read, ngot;
 
         if (chunk > FILE_LEN - off) {
             chunk = (uint32_t) (FILE_LEN - off);
         }
-        ctx->read_dst = (uint32_t) off;
-        ctx->readlen  = chunk;
 
-        chimera_vfs_read(ctx->vfs_thread, cred, ctx->fhandle, off, chunk, iov,
-                         READ_NIOV, 0, read_cb, ctx);
-        wait_done(ctx);
+        cp     = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+        i_read = chimera_vfs_compound_add_read(cp, ctx->fhandle, off, chunk,
+                                               iov, READ_NIOV, 0, NULL,
+                                               NULL, 0);
+
+        ctx->status = compound_test_run(ctx->evpl, cp);
         assert(ctx->status == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, (uint32_t) i_read);
+
+        for (int i = 0; i < op->niov && copied < chunk; i++) {
+            uint32_t len = evpl_iovec_length(&op->iov[i]);
+
+            if (len > chunk - copied) {
+                len = chunk - copied;
+            }
+            memcpy(ctx->readbuf + off + copied, evpl_iovec_data(&op->iov[i]),
+                   len);
+            copied += len;
+        }
+
+        chimera_vfs_compound_take_iov(cp, (uint32_t) i_read, &got, &ngot);
+        if (ngot) {
+            evpl_iovecs_release(ctx->evpl, got, ngot);
+        }
+
+        chimera_vfs_compound_free(cp);
     }
 } /* read_all */
 
@@ -416,43 +341,48 @@ main(
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-    memcpy(root_fh, ctx.fh, ctx.fh_len);
-    root_fh_len = ctx.fh_len;
-
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, root_fh, root_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
+    assert(compound_test_mount_root(ctx.vfs_thread, ctx.evpl, &cred, "test",
+                                    root_fh, &root_fh_len) == CHIMERA_VFS_OK);
 
     {
-        struct chimera_vfs_open_handle *root_handle = ctx.handle;
+        struct chimera_vfs_open_handle       *root_handle;
+        struct chimera_vfs_compound          *cp;
+        const struct chimera_vfs_compound_op *op;
+        int                                   i_open;
+
+        assert(compound_test_open_fh(ctx.vfs_thread, ctx.evpl, &cred,
+                                     root_fh, root_fh_len,
+                                     CHIMERA_VFS_OPEN_INFERRED,
+                                     &root_handle) == CHIMERA_VFS_OK);
 
         memset(&sattr, 0, sizeof(sattr));
         sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         sattr.va_mode     = 0644;
 
-        chimera_vfs_open_at(ctx.vfs_thread, &cred, root_handle, "f", 1,
-                            CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
-                            0, 0, openat_cb, &ctx);
-        wait_done(&ctx);
-        assert(ctx.status == CHIMERA_VFS_OK);
-        memcpy(file_fh, ctx.fh, ctx.fh_len);
-        file_fh_len = ctx.fh_len;
-        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_puthandle(cp, root_handle,
+                                           CHIMERA_VFS_OPEN_INFERRED);
+        i_open = chimera_vfs_compound_add_open(cp, "f", 1,
+                                               CHIMERA_VFS_OPEN_CREATE, 0,
+                                               &sattr, CHIMERA_VFS_ATTR_FH,
+                                               0, 0);
+
+        assert(compound_test_run(ctx.evpl, cp) == CHIMERA_VFS_OK);
+
+        op = chimera_vfs_compound_op(cp, (uint32_t) i_open);
+        assert(op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
+        memcpy(file_fh, op->attr.va_fh, op->attr.va_fh_len);
+        file_fh_len = op->attr.va_fh_len;
+
+        /* The OPEN's handle is the compound's: freeing it releases it. */
+        chimera_vfs_compound_free(cp);
         chimera_vfs_release(ctx.vfs_thread, root_handle);
     }
 
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, file_fh, file_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
-    ctx.fhandle = ctx.handle;
+    assert(compound_test_open_fh(ctx.vfs_thread, ctx.evpl, &cred,
+                                 file_fh, file_fh_len,
+                                 CHIMERA_VFS_OPEN_INFERRED,
+                                 &ctx.fhandle) == CHIMERA_VFS_OK);
 
     /* Seed the whole file with a non-zero pattern so zeroed ranges are
      * distinguishable from stale data. */
