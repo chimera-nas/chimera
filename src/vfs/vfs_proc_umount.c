@@ -116,6 +116,7 @@ struct chimera_vfs_umount_wait {
     struct evpl_timer           timer;
     struct chimera_vfs_request *request;
     uint64_t                    waited_us;
+    uint64_t                    started_ticks;
 };
 
 static void chimera_vfs_umount_progress(
@@ -164,7 +165,9 @@ chimera_vfs_umount_wait_timer(
     struct chimera_vfs_umount_wait *wait =
         container_of(timer, struct chimera_vfs_umount_wait, timer);
 
-    wait->waited_us += CHIMERA_VFS_UMOUNT_POLL_US;
+    /* Timers may fire late (notably with Windows timer granularity). Bound
+     * the actual wait, rather than counting callbacks as exact intervals. */
+    wait->waited_us = chimera_vfs_elapsed_ns(wait->started_ticks) / 1000;
 
     chimera_vfs_umount_progress(wait->request);
 } /* chimera_vfs_umount_wait_timer */
@@ -386,6 +389,7 @@ chimera_vfs_umount_progress(struct chimera_vfs_request *request)
         }
         wait                 = calloc(1, sizeof(*wait));
         wait->request        = request;
+        wait->started_ticks  = chimera_vfs_now_ticks();
         request->umount.wait = wait;
     } else if (wait->waited_us >= vfs->umount_timeout_us) {
         if (fence_wait) {
