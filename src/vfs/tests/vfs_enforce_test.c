@@ -21,7 +21,10 @@
 /* ...and the core's own per-op header, for the ONE thing below that is not a
  * sequence: the NAME_MAX bound lookup_at applies before it dispatches.  See
  * the over-long-component check in main(). */
-#include "vfs/vfs_procs.h"
+/* The ENAMETOOLONG bound below is the per-op entry point's own last line of
+ * defence and a sequence cannot reach it -- the adder refuses an over-long
+ * name at build time, so the proc never runs.  Testing it means calling it. */
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"

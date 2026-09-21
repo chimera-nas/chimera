@@ -30,7 +30,7 @@
  * which is a sequence op: the KV store sits beside the filesystem rather
  * than being operations on it, and mkfs / mount / umount / rmfs are
  * administration.  Both still live in the core's per-op header. */
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 
