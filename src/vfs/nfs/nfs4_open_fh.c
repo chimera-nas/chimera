@@ -99,14 +99,12 @@ chimera_nfs4_open_fh(
     int                                      fhlen;
 
     /*
-     * For inferred opens (internal opens used for path traversal, like
-     * opening a parent directory before open_at), we don't need to do an
-     * actual NFS4 OPEN operation.  Just return OK with no state.
-     *
-     * Similarly, directories don't need NFS4 OPEN - they're accessed via
-     * READDIR, LOOKUP etc.
+     * Path handles and directories do not need NFS4 OPEN state.  INFERRED
+     * alone does not mean path-only: truncate requests an inferred data
+     * open, which the file cache may reuse for a later ordinary open.
+     * Such a handle needs real state to survive unlink while held.
      */
-    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_INFERRED) ||
+    if ((request->open_fh.flags & CHIMERA_VFS_OPEN_PATH) ||
         (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
         request->open_fh.r_vfs_private = 0;
         request->status                = CHIMERA_VFS_OK;
