@@ -43,8 +43,10 @@ run_case(
     struct smb2_env          env;
     struct smb2_env_opts     opts = { .oplocks = 1, .leases = 1 };
     struct smb2_wire_profile wire = {
-        .name        = "lease identity",        .max_dialect = 0x0311,
-        .ntlmv2      = 1,                       .encrypt     = encrypted,
+        .name        = "lease identity",
+        .max_dialect = 0x0311,
+        .ntlmv2      = 1,
+        .encrypt     = encrypted,
         .cipher      = SMB2W_CIPHER_AES128_GCM,
         .signing_alg = SMB2W_SIGN_AES_GMAC,
     };
