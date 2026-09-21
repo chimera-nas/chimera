@@ -25,3 +25,6 @@ if (NOT DISABLE_TESTS)
 endif()
 
 install(TARGETS chimera_common DESTINATION lib)
+if(TARGET chimera_openssl_legacy)
+    add_dependencies(chimera_common chimera_openssl_legacy)
+endif()

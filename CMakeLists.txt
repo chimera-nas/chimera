@@ -715,6 +715,18 @@ else()
 endif()
 add_subdirectory(ext)
 
+if(WIN32 AND TARGET oteltracing-c)
+    # The standalone tracing project sets its own runtime directory. Keep its
+    # DLLs (including the optional SQLite sink) and tools in our common runtime
+    # directory so every consumer can load them without a build-tree PATH.
+    get_property(_otel_targets DIRECTORY ext/libevpl/ext/oteltracing-c
+                 PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _otel_targets)
+        set_target_properties(${_target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    endforeach()
+endif()
+
 include_directories(ext/libevpl/include)
 
 # OpenTelemetry tracing (oteltracing-c, built under libevpl/ext).  The public

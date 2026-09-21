@@ -27,6 +27,11 @@
     },
     "jansson",
     "xxhash",
-    "rocksdb"
+    {
+      "name": "rocksdb",
+      "features": [
+        "lz4"
+      ]
+    }
   ]
 }
