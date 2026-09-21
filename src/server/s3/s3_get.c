@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 #include "common/format.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -239,10 +239,10 @@ chimera_s3_get_metadata_done(
 } /* chimera_s3_get_metadata_done */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_open_callback,
-    (enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data),
-    (error_code, oh, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
@@ -266,10 +266,10 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_open_callback,
 } /* chimera_s3_get_open_callback */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_lookup_callback,
-    (enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data),
-    (error_code, attr, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
@@ -418,10 +418,10 @@ chimera_s3_get(
  * a well-formed 200 response.
  */
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_object_attributes_lookup_callback,
-    (enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data),
-    (error_code, attr, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;

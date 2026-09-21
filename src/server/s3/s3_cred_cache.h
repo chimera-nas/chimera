@@ -51,7 +51,7 @@ struct chimera_s3_cred {
 
 struct chimera_s3_cred_cache_bucket {
     struct chimera_s3_cred *head;
-    evpl_mutex_t         lock;
+    evpl_mutex_t            lock;
 };
 
 struct chimera_s3_cred_cache {
@@ -59,9 +59,9 @@ struct chimera_s3_cred_cache {
     int                                  ttl;
     int                                  num_credentials;
     struct chimera_s3_cred_cache_bucket *buckets;
-    evpl_native_thread_t                            expiry_thread;
-    evpl_mutex_t                      expiry_lock;
-    evpl_cond_t                       expiry_cond;
+    evpl_native_thread_t                 expiry_thread;
+    evpl_mutex_t                         expiry_lock;
+    evpl_cond_t                          expiry_cond;
     int                                  shutdown;
     /* Synthetic addition to CLOCK_REALTIME, applied to every expiry
      * decision (stamping at add, comparing at sweep).  Zero in production;
@@ -217,7 +217,7 @@ chimera_s3_cred_cache_create(
     evpl_cond_init(&cache->expiry_cond, NULL);
 
     evpl_native_thread_create(&cache->expiry_thread, NULL,
-                   chimera_s3_cred_cache_expiry_thread, cache);
+                              chimera_s3_cred_cache_expiry_thread, cache);
 
     return cache;
 } // chimera_s3_cred_cache_create

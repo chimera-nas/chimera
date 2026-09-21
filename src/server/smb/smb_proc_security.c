@@ -17,7 +17,7 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#endif
+#endif /* ifdef _WIN32 */
 
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -40,16 +40,16 @@
 #define SMB_SE_DACL_PROTECTED          0x1000
 
 /* Size of a SID with 3 sub-authorities: S-1-5-88-X-Y */
-#define SID_UNIX_SIZE              20 /* 1+1+6+3*4 */
+#define SID_UNIX_SIZE                  20 /* 1+1+6+3*4 */
 
 /* Size of an ACE containing a 3-sub-authority SID */
-#define ACE_UNIX_SIZE              28 /* 1+1+2+4 + SID_UNIX_SIZE */
+#define ACE_UNIX_SIZE                  28 /* 1+1+2+4 + SID_UNIX_SIZE */
 
 /* Size of an ACL containing one ACE */
-#define ACL_UNIX_SIZE              36 /* 2+2+2+2 + ACE_UNIX_SIZE */
+#define ACL_UNIX_SIZE                  36 /* 2+2+2+2 + ACE_UNIX_SIZE */
 
 /* Size of the security descriptor header */
-#define SD_HEADER_SIZE             20
+#define SD_HEADER_SIZE                 20
 
 /*
  * True when the `need` bytes at wire offset `off` lie inside a `len`-byte

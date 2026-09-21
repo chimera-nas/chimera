@@ -371,13 +371,13 @@ chimera_s3_request_drop(struct chimera_s3_request *request)
  * in a wrapper avoids compiler-specific scope-exit attributes. The signature
  * and argument list are parenthesized; the final argument is private_data. */
 #define CHIMERA_S3_REQUEST_CALLBACK(name, signature, arguments) \
-    static void name ## _body signature; \
-    static void name signature \
-    { \
-        name ## _body arguments; \
-        chimera_s3_request_drop(private_data); \
-    } \
-    static void name ## _body signature
+        static void name ## _body signature; \
+        static void name signature \
+        { \
+            name ## _body arguments; \
+            chimera_s3_request_drop(private_data); \
+        } \
+        static void name ## _body signature
 
 static inline struct chimera_s3_io *
 chimera_s3_io_alloc(

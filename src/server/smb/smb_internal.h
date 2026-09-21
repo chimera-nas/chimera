@@ -16,13 +16,13 @@
 #include <utlist.h>
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else // ifdef _WIN32
 #include <netinet/in.h>
-#endif
+#endif // ifdef _WIN32
 #ifdef CHIMERA_HAVE_GSSAPI
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_krb5.h>
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "common/macros.h"
@@ -1283,7 +1283,7 @@ struct chimera_smb_session_handle {
     struct chimera_smb_session_handle *next;
 #ifdef CHIMERA_HAVE_GSSAPI
     gss_ctx_id_t                       ctx;
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 };
 
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
@@ -1330,7 +1330,7 @@ struct chimera_smb_conn {
     OM_uint32                          gss_flags;
     gss_ctx_id_t                       nascent_ctx;
     gss_buffer_desc                    gss_output;
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
     struct smb_ntlm_ctx                ntlm_ctx;
     struct smb_gssapi_ctx              gssapi_ctx;
     uint8_t                           *ntlm_output;
@@ -1684,7 +1684,7 @@ struct chimera_smb_durable_entry {
 };
 
 struct chimera_smb_durable_table {
-    evpl_mutex_t                   lock;
+    evpl_mutex_t                      lock;
     struct chimera_smb_durable_entry *by_pid;
 };
 
@@ -1723,7 +1723,7 @@ struct chimera_server_smb_shared {
 #ifdef CHIMERA_HAVE_GSSAPI
     gss_name_t                        svc;
     gss_cred_id_t                     srv_cred;
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
     struct chimera_vfs               *vfs;
     struct prometheus_metrics        *metrics;
     struct evpl_endpoint             *endpoint;
@@ -1731,16 +1731,16 @@ struct chimera_server_smb_shared {
     struct evpl_listener             *listener;
     struct chimera_smb_session       *sessions;
     struct chimera_smb_session       *free_sessions;
-    evpl_mutex_t                   sessions_lock;
+    evpl_mutex_t                      sessions_lock;
     struct chimera_smb_share         *shares;
-    evpl_mutex_t                   shares_lock;
+    evpl_mutex_t                      shares_lock;
     /* Set when any share has encrypt_data enabled.  Used by SESSION_SETUP to
      * decide whether to derive per-session encryption keys even when the global
      * smb_encryption knob is off (a client may still tree-connect to a
      * per-share-encrypted share). */
     int                               any_share_encrypt;
     struct chimera_smb_tree          *free_trees;
-    evpl_mutex_t                   trees_lock;
+    evpl_mutex_t                      trees_lock;
     /* Monotonic, process-global allocator for file persistent ids.  Replaces
      * the old per-tree counter so persistent ids stay unique across tree
      * teardowns — a precondition for durable-handle reconnect lookup. */
@@ -1752,7 +1752,7 @@ struct chimera_server_smb_shared {
      * OPLOCK_BREAK ack settles a lease that a CREATE parked on another thread is
      * waiting for. */
     struct chimera_server_smb_thread *threads;
-    evpl_mutex_t                   threads_lock;
+    evpl_mutex_t                      threads_lock;
 };
 
 /* Forward decl so the inline open_file release paths can call into
@@ -2011,7 +2011,7 @@ struct chimera_server_smb_thread {
      * then ring the doorbell so the SMB thread processes them. */
     struct evpl_doorbell                notify_doorbell;
     struct chimera_smb_notify_request  *notify_ready;
-    evpl_mutex_t                     notify_ready_lock;
+    evpl_mutex_t                        notify_ready_lock;
 
     /* Lease-break doorbell: a lease break_cb may fire on any thread (the
      * breaker's), but the OPLOCK_BREAK notification must be sent on the holder
@@ -2022,7 +2022,7 @@ struct chimera_server_smb_thread {
      * run on this thread, so draining on disconnect needs no extra sync. */
     struct evpl_doorbell                lease_break_doorbell;
     struct chimera_smb_lease_break_msg *lease_break_ready;
-    evpl_mutex_t                     lease_break_lock;
+    evpl_mutex_t                        lease_break_lock;
     /* Count of compounds this thread is currently processing (dispatch ..
      * reply).  A break_cb that queues a notification while this is non-zero
      * skips the doorbell: the in-flight request's reply path flushes the queue
@@ -2816,7 +2816,7 @@ chimera_smb_conn_free(
                                    &session_handle->ctx, NULL);
             session_handle->ctx = GSS_C_NO_CONTEXT;
         }
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 
         if (session_handle->session) {
             /* A bound additional channel is going away; free its slot so the
@@ -2859,7 +2859,7 @@ chimera_smb_conn_free(
         conn->gss_output.value  = NULL;
         conn->gss_output.length = 0;
     }
-#endif
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 
     if (conn->ntlm_output) {
         free(conn->ntlm_output);

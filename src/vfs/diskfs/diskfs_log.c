@@ -19,7 +19,7 @@ struct diskfs_intent_log *g_dbg_il;
 #ifdef CHIMERA_HAVE_VFIO
 extern void evpl_vfio_queue_dump(
     struct evpl_block_queue *bq);
-#endif
+#endif /* ifdef CHIMERA_HAVE_VFIO */
 
 SYMBOL_EXPORT void
 dbg_dump_push(void)
@@ -53,7 +53,7 @@ dbg_dump_push(void)
             evpl_vfio_queue_dump(il->home_queue[i]);
         }
     }
-#endif
+#endif /* ifdef CHIMERA_HAVE_VFIO */
 } /* dbg_dump_push */
 
 /* Forward declarations (definitions below, in call-graph order) */

@@ -8,17 +8,20 @@
 #include <aclapi.h>
 
 static inline int
-chimera_host_temp_directory(char *path, size_t capacity)
+chimera_host_temp_directory(
+    char  *path,
+    size_t capacity)
 {
     WCHAR wide[32768];
     DWORD length = GetTempPathW(32768, wide);
+
     if (!length || length >= 32768 || capacity > INT_MAX ||
         !WideCharToMultiByte(CP_UTF8, 0, wide, -1, path, (int) capacity, NULL, NULL)) {
         errno = ENAMETOOLONG;
         return -1;
     }
     return 0;
-}
+} // chimera_host_temp_directory
 
 /* Configuration keys and metrics files use 0600/0644. Express those policies
  * with native DACLs, not the CRT read-only attribute. A distinct Unix group
@@ -190,12 +193,16 @@ chimera_host_create_private(const char *path)
 #define chimera_host_fchmod fchmod
 
 static inline int
-chimera_host_temp_directory(char *path, size_t capacity)
+chimera_host_temp_directory(
+    char  *path,
+    size_t capacity)
 {
-    if (capacity < sizeof("/tmp/")) { errno = ENAMETOOLONG; return -1; }
+    if (capacity < sizeof("/tmp/")) {
+        errno = ENAMETOOLONG; return -1;
+    }
     memcpy(path, "/tmp/", sizeof("/tmp/"));
     return 0;
-}
+} // chimera_host_temp_directory
 static inline int
 chimera_host_create_private(const char *path)
 {

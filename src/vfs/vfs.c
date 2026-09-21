@@ -573,7 +573,12 @@ chimera_vfs_find_module(const char *symbol)
     extern struct chimera_vfs_module vfs_sqlite;
 #endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
     struct chimera_vfs_module       *builtins[] = {
-        &vfs_root,   &vfs_memfs, &vfs_memkv, &vfs_nfs, &vfs_smb, &vfs_diskfs,
+        &vfs_root,
+        &vfs_memfs,
+        &vfs_memkv,
+        &vfs_nfs,
+        &vfs_smb,
+        &vfs_diskfs,
 #ifdef HAVE_CAIRN
         &vfs_cairn,
 #endif /* ifdef HAVE_CAIRN */

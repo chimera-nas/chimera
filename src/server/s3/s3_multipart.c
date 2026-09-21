@@ -530,7 +530,7 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
             char    tmp_name[64];
         } CHIMERA_PACKED seed;
         CHIMERA_PACK_END
-        XXH128_hash_t h;
+        XXH128_hash_t    h;
 
         memset(&seed, 0, sizeof(seed));
         seed.size         = part->size;
@@ -756,12 +756,12 @@ chimera_s3_upload_part_recv(
 } /* chimera_s3_upload_part_recv */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_unlinked_callback,
-    (enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data),
-    (error_code, oh, set_attr, attr, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             struct chimera_vfs_attrs *set_attr,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, oh, set_attr, attr, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
@@ -787,14 +787,14 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_unlinked_callback,
 } /* chimera_s3_upload_part_create_unlinked_callback */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_callback,
-    (enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data),
-    (error_code, oh, set_attr, attr, dir_pre_attr, dir_post_attr, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             struct chimera_vfs_attrs *set_attr,
+                             struct chimera_vfs_attrs *attr,
+                             struct chimera_vfs_attrs *dir_pre_attr,
+                             struct chimera_vfs_attrs *dir_post_attr,
+                             void *private_data),
+                            (error_code, oh, set_attr, attr, dir_pre_attr, dir_post_attr, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
@@ -820,10 +820,10 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_callback,
 } /* chimera_s3_upload_part_create_callback */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_open_dir_callback,
-    (enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data),
-    (error_code, oh, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
@@ -886,10 +886,10 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_open_dir_callback,
 } /* chimera_s3_upload_part_open_dir_callback */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_lookup_callback,
-    (enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data),
-    (error_code, attr, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;

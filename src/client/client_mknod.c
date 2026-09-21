@@ -11,7 +11,7 @@ chimera_mknod(
     const char                   *path,
     int                           path_len,
     mode_t                        mode,
-    chimera_dev_t                         dev,
+    chimera_dev_t                 dev,
     chimera_mknod_callback_t      callback,
     void                         *private_data)
 {

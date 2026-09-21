@@ -14,7 +14,7 @@
 #ifndef _WIN32
 #include <sys/uio.h>
 #include <unistd.h>
-#endif
+#endif // ifndef _WIN32
 #include "vfs/sdk/vfs_cred.h"
 
 struct chimera_posix_client;

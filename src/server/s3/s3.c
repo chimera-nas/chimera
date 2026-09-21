@@ -491,10 +491,10 @@ s3_server_notify(
 } /* chimera_metrics_notify */
 
 CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_dispatch_callback,
-    (enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data),
-    (error_code, attr, private_data))
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
     struct chimera_s3_request       *s3_request = private_data;
     struct chimera_server_s3_thread *thread     = s3_request->thread;

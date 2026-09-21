@@ -30,9 +30,9 @@ chimera_posix_mknod_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_mknod(
-    const char *path,
-    mode_t      mode,
-    chimera_dev_t       dev)
+    const char   *path,
+    mode_t        mode,
+    chimera_dev_t dev)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);

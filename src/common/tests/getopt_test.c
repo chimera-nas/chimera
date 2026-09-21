@@ -11,11 +11,31 @@ main(void)
                                    "-file" };
     int                 flag = 0, index = -1;
     const struct option options[] = {
-        { "trace",  required_argument,  NULL,                  't'                  },
-        { "buffer", required_argument,  NULL,                  'b'                  },
-        { "flag",   no_argument,        &flag,                 7                    },
-        { "tracer", no_argument,        NULL,                  'r'                  },
-        { NULL,     0,                  NULL,                  0                    }
+        {
+            .name    = "trace",
+            .has_arg = required_argument,
+            .flag    = NULL,
+            .val     = 't'
+        },
+        {
+            .name    = "buffer",
+            .has_arg = required_argument,
+            .flag    = NULL,
+            .val     = 'b'
+        },
+        {
+            .name    = "flag",
+            .has_arg = no_argument,
+            .flag    = &flag,
+            .val     = 7
+        },
+        {
+            .name    = "tracer",
+            .has_arg = no_argument,
+            .flag    = NULL,
+            .val     = 'r'
+        },
+        { 0 }
     };
 
     optind = 0;

@@ -5,14 +5,14 @@
 #ifdef _WIN32
 #include "common/thread.h"
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <sys/time.h>
-#endif
+#endif /* ifdef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
-#else
+#else  /* ifdef _WIN32 */
 #include <strings.h>
-#endif
+#endif /* ifdef _WIN32 */
 #include "smb_common/smb2.h"
 #include "server/smb/smb_session.h"
 #include "smb_internal.h"

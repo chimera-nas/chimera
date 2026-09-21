@@ -432,30 +432,30 @@ struct diskfs_request_private {
 
 struct diskfs_device {
     enum evpl_block_protocol_id protocol_id;
-    struct evpl_block_device *bdev;            /* NULL for a REMOTE (pNFS data) device */
-    uint64_t                  id;
-    uint64_t                  size;
-    uint64_t                  max_request_size;
-    char                      name[256];
-    evpl_mutex_t              lock;
+    struct evpl_block_device   *bdev;          /* NULL for a REMOTE (pNFS data) device */
+    uint64_t                    id;
+    uint64_t                    size;
+    uint64_t                    max_request_size;
+    char                        name[256];
+    evpl_mutex_t                lock;
 
     /* Block-mode (pNFS) device identity.  role == SM_DEV_REMOTE means this
      * device's storage lives outside this system: diskfs allocates space on it
      * and hands the layout to the block client but never opens or touches it. */
-    uint32_t                  role;             /* SM_DEV_LOCAL | SM_DEV_REMOTE */
-    uint8_t                   deviceid[SM_DEVICEID_SIZE];
-    uint64_t                  sig_offset;
-    uint32_t                  sig_len;
-    uint8_t                   sig[SM_SIG_MAX];
+    uint32_t                    role;           /* SM_DEV_LOCAL | SM_DEV_REMOTE */
+    uint8_t                     deviceid[SM_DEVICEID_SIZE];
+    uint64_t                    sig_offset;
+    uint32_t                    sig_len;
+    uint8_t                     sig[SM_SIG_MAX];
 
     /* SCSI-layout (RFC 8154) hardware identity: the LU's VPD-0x83 designator a
      * pNFS-SCSI client matches against (nothing written to the data disk).
      * Used when the share is in scsi_layout mode instead of sig_*. */
-    uint32_t                  scsi_code_set;     /* 1=binary, 2=ascii */
-    uint32_t                  scsi_desig_type;   /* 1=T10, 2=EUI64, 3=NAA */
-    uint32_t                  scsi_desig_len;
-    uint8_t                   scsi_desig[32];
-    uint64_t                  scsi_pr_key;
+    uint32_t                    scsi_code_set;   /* 1=binary, 2=ascii */
+    uint32_t                    scsi_desig_type; /* 1=T10, 2=EUI64, 3=NAA */
+    uint32_t                    scsi_desig_len;
+    uint8_t                     scsi_desig[32];
+    uint64_t                    scsi_pr_key;
 };
 
 

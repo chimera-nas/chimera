@@ -428,7 +428,7 @@ main(
     signal(SIGTERM, signal_handler);
 #ifdef _WIN32
     signal(SIGBREAK, signal_handler);
-#endif
+#endif /* ifdef _WIN32 */
 
     chimera_server_info("Initializing server...");
 
