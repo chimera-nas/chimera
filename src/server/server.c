@@ -47,6 +47,7 @@
 #endif /* ifdef __linux__ */
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -1834,34 +1835,25 @@ chimera_server_rmfs(
  * "create" mount option.  A backend's MOUNT op only walks the path read-only
  * (it returns ENOENT for a missing component), and creating a directory needs
  * an open handle to its parent -- which in turn needs the backend registered in
- * the mount table.  So: transiently mount the backend root, walk the target
- * path component by component creating any that are missing, unmount, and let
- * the caller perform the real mount of the now-existing path.
+ * the mount table.  So: transiently mount the backend root, run one CREATE_PATH
+ * sequence with intermediates against it -- mkdir -p, which accepts a component
+ * that is already there, the leaf included -- unmount, and let the caller
+ * perform the real mount of the now-existing path.
  *
- * Synchronous (init-time) wrapper around an async lookup-or-mkdir chain, driven
- * on a private evpl like chimera_server_mount.  Returns 0 on success.
+ * Synchronous (init-time) wrapper around that sequence, driven on a private
+ * evpl like chimera_server_mount.  Returns 0 on success.
  */
 #define CHIMERA_MKPATH_TMP_NAME "__chimera_mkpath_tmp"
 
 struct chimera_mkpath_ctx {
-    struct chimera_vfs             *vfs;
-    struct chimera_vfs_thread      *thread;
-    char                            path[256];
-    int                             pathlen;
-    int                             offset;
-    uint32_t                        mode;
-    struct chimera_vfs_open_handle *oh;      /* current parent directory */
-    char                            comp[256];
-    int                             complen;
-    uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE + 16];
-    uint32_t                        child_fh_len;
-    struct chimera_vfs_attrs        set_attr;
-    enum chimera_vfs_error status;
-    int                             done;
+    struct chimera_vfs        *vfs;
+    struct chimera_vfs_thread *thread;
+    char                       path[256];
+    int                        pathlen;
+    struct chimera_vfs_attrs   set_attr;
+    enum chimera_vfs_error     status;
+    int                        done;
 };
-
-static void chimera_mkpath_next(
-    struct chimera_mkpath_ctx *ctx);
 
 static void
 chimera_mkpath_umount_cb(
@@ -1874,8 +1866,8 @@ chimera_mkpath_umount_cb(
     ctx->done = 1;
 } /* chimera_mkpath_umount_cb */
 
-/* Release the current handle and tear down the transient root mount, recording
- * the final walk status.  Both the success and failure paths funnel here. */
+/* Tear down the transient root mount, recording the final status.  Both the
+ * success and failure paths funnel here. */
 static void
 chimera_mkpath_finish(
     struct chimera_mkpath_ctx *ctx,
@@ -1883,158 +1875,22 @@ chimera_mkpath_finish(
 {
     ctx->status = status;
 
-    if (ctx->oh) {
-        chimera_vfs_release(ctx->thread, ctx->oh);
-        ctx->oh = NULL;
-    }
-
     chimera_vfs_umount(ctx->thread, chimera_vfs_get_server_cred(),
                        CHIMERA_MKPATH_TMP_NAME, chimera_mkpath_umount_cb, ctx);
 } /* chimera_mkpath_finish */
 
-/* The just-resolved/created child becomes the new parent; descend. */
 static void
-chimera_mkpath_descend_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_mkpath_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_mkpath_ctx *ctx = private_data;
+    struct chimera_mkpath_ctx *ctx    = private_data;
+    enum chimera_vfs_error     status = chimera_vfs_compound_status(compound);
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_mkpath_finish(ctx, error_code);
-        return;
-    }
+    chimera_vfs_compound_free(compound);
 
-    if (ctx->oh) {
-        chimera_vfs_release(ctx->thread, ctx->oh);
-    }
-    ctx->oh = oh;
-    chimera_mkpath_next(ctx);
-} /* chimera_mkpath_descend_cb */
-
-static void
-chimera_mkpath_open_child(struct chimera_mkpath_ctx *ctx)
-{
-    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(),
-                        ctx->child_fh, ctx->child_fh_len,
-                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
-                        chimera_mkpath_descend_cb, ctx);
-} /* chimera_mkpath_open_child */
-
-static void
-chimera_mkpath_mkdir_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_mkpath_ctx *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK || attr->va_fh_len == 0) {
-        chimera_mkpath_finish(ctx, error_code != CHIMERA_VFS_OK ? error_code : CHIMERA_VFS_EIO);
-        return;
-    }
-
-    memcpy(ctx->child_fh, attr->va_fh, attr->va_fh_len);
-    ctx->child_fh_len = attr->va_fh_len;
-    chimera_mkpath_open_child(ctx);
-} /* chimera_mkpath_mkdir_cb */
-
-static void
-chimera_mkpath_lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
-{
-    struct chimera_mkpath_ctx *ctx = private_data;
-
-    if (error_code == CHIMERA_VFS_OK) {
-        /* Component already exists; descend into it. */
-        if (attr->va_fh_len == 0) {
-            chimera_mkpath_finish(ctx, CHIMERA_VFS_EIO);
-            return;
-        }
-        memcpy(ctx->child_fh, attr->va_fh, attr->va_fh_len);
-        ctx->child_fh_len = attr->va_fh_len;
-        chimera_mkpath_open_child(ctx);
-        return;
-    }
-
-    if (error_code == CHIMERA_VFS_ENOENT) {
-        memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
-        ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
-            CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-        ctx->set_attr.va_mode = S_IFDIR | (ctx->mode & 07777);
-        /* Own created dirs as the server identity (0/0 when running as root,
-         * as CI does).  Hardcoding 0/0 would make the next component's
-         * ADD_SUBDIRECTORY gate deny an unprivileged server its own
-         * freshly-created parent. */
-        ctx->set_attr.va_uid = chimera_vfs_get_server_cred()->uid;
-        ctx->set_attr.va_gid = chimera_vfs_get_server_cred()->gid;
-
-        chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
-                             ctx->comp, ctx->complen, &ctx->set_attr,
-                             CHIMERA_VFS_ATTR_FH, 0, 0,
-                             chimera_mkpath_mkdir_cb, ctx);
-        return;
-    }
-
-    chimera_mkpath_finish(ctx, error_code);
-} /* chimera_mkpath_lookup_cb */
-
-/* Advance to the next '/'-separated component; when none remain the path is
- * fully present and we finish successfully. */
-static void
-chimera_mkpath_next(struct chimera_mkpath_ctx *ctx)
-{
-    int start;
-
-    while (ctx->offset < ctx->pathlen && ctx->path[ctx->offset] == '/') {
-        ctx->offset++;
-    }
-
-    if (ctx->offset >= ctx->pathlen) {
-        chimera_mkpath_finish(ctx, CHIMERA_VFS_OK);
-        return;
-    }
-
-    start = ctx->offset;
-    while (ctx->offset < ctx->pathlen && ctx->path[ctx->offset] != '/') {
-        ctx->offset++;
-    }
-
-    ctx->complen = ctx->offset - start;
-    if (ctx->complen >= (int) sizeof(ctx->comp)) {
-        chimera_mkpath_finish(ctx, CHIMERA_VFS_ENAMETOOLONG);
-        return;
-    }
-    memcpy(ctx->comp, ctx->path + start, ctx->complen);
-    ctx->comp[ctx->complen] = '\0';
-
-    chimera_vfs_lookup_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
-                          ctx->comp, ctx->complen, CHIMERA_VFS_ATTR_FH, 0,
-                          chimera_mkpath_lookup_cb, ctx);
-} /* chimera_mkpath_next */
-
-static void
-chimera_mkpath_root_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_mkpath_ctx *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_mkpath_finish(ctx, error_code);
-        return;
-    }
-    ctx->oh = oh;
-    chimera_mkpath_next(ctx);
-} /* chimera_mkpath_root_open_cb */
+    chimera_mkpath_finish(ctx, status);
+} /* chimera_mkpath_complete */
 
 static void
 chimera_mkpath_mounted_cb(
@@ -2042,8 +1898,9 @@ chimera_mkpath_mounted_cb(
     enum chimera_vfs_error     status,
     void                      *private_data)
 {
-    struct chimera_mkpath_ctx *ctx = private_data;
-    struct chimera_vfs_mount  *m;
+    struct chimera_mkpath_ctx   *ctx = private_data;
+    struct chimera_vfs_mount    *m;
+    struct chimera_vfs_compound *compound;
 
     if (status != CHIMERA_VFS_OK) {
         /* Root mount failed -- nothing registered, nothing to unmount. */
@@ -2060,10 +1917,22 @@ chimera_mkpath_mounted_cb(
         return;
     }
 
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
-                        m->root_fh, m->root_fh_len,
-                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
-                        chimera_mkpath_root_open_cb, ctx);
+    /* An empty remainder -- a CAP_MKFS module whose module_path named the
+     * filesystem and nothing else -- walks to the mount root itself, which the
+     * transient mount has already proved exists. */
+    compound = chimera_vfs_compound_alloc(thread,
+                                          chimera_vfs_get_server_cred());
+
+    chimera_vfs_compound_add_putfh(compound, m->root_fh, m->root_fh_len);
+
+    chimera_vfs_compound_add_create_path(compound,
+                                         CHIMERA_VFS_COMPOUND_CREATE_DIR,
+                                         ctx->path, ctx->pathlen,
+                                         NULL, 0,
+                                         &ctx->set_attr, 0,
+                                         1 /* intermediates */);
+
+    chimera_vfs_compound_submit(compound, chimera_mkpath_complete, ctx);
 } /* chimera_mkpath_mounted_cb */
 
 SYMBOL_EXPORT int
@@ -2073,13 +1942,14 @@ chimera_server_mkpath(
     const char            *module_path,
     uint32_t               mode)
 {
-    struct evpl               *evpl;
-    struct chimera_mkpath_ctx  ctx;
-    struct chimera_vfs_module *module = NULL;
-    const char                *walk   = module_path;
-    const char                *slash;
-    char                       mount_root[256] = "/";
-    int                        i;
+    struct evpl                   *evpl;
+    struct chimera_mkpath_ctx      ctx;
+    struct chimera_vfs_module     *module = NULL;
+    const struct chimera_vfs_cred *cred   = chimera_vfs_get_server_cred();
+    const char                    *walk   = module_path;
+    const char                    *slash;
+    char                           mount_root[256] = "/";
+    int                            i;
 
     memset(&ctx, 0, sizeof(ctx));
 
@@ -2118,9 +1988,17 @@ chimera_server_mkpath(
     evpl        = evpl_create(NULL);
     ctx.vfs     = server->vfs;
     ctx.thread  = chimera_vfs_thread_init(evpl, server->vfs);
-    ctx.mode    = mode ? mode : 0755;
     ctx.status  = CHIMERA_VFS_OK;
     ctx.pathlen = snprintf(ctx.path, sizeof(ctx.path), "%s", walk);
+
+    /* Own created dirs as the server identity (0/0 when running as root, as CI
+     * does).  Hardcoding 0/0 would make the next component's ADD_SUBDIRECTORY
+     * gate deny an unprivileged server its own freshly-created parent. */
+    ctx.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    ctx.set_attr.va_mode = S_IFDIR | ((mode ? mode : 0755) & 07777);
+    ctx.set_attr.va_uid  = cred->uid;
+    ctx.set_attr.va_gid  = cred->gid;
 
     /* Transiently mount the backend root so we have a handle to walk under. */
     chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
@@ -2137,30 +2015,62 @@ chimera_server_mkpath(
     return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
 } /* chimera_server_mkpath */
 
-/* ---- test-only symbolic-link seeding -------------------------------------
- * The WPTS MS-SMB2 CreateClose symlink cases expect a small set of symbolic
- * links to already exist on the share:
+/* ---- test-only fixture seeding --------------------------------------------
+ * Two WPTS suites open fixtures they expect to pre-exist on the share.
+ *
+ * The MS-SMB2 CreateClose symlink cases want a small set of symbolic links:
  *   <root>/SymlinkTest          (a directory)
  *   <root>/SymlinkTest/link  -> "target"      (a link reached mid-path / as the leaf)
  *   <root>/badlink           -> "nonexistent" (a deliberately dangling link)
  * The server never resolves these -- a CREATE that traverses one returns
  * STATUS_STOPPED_ON_SYMLINK -- so the link targets need not exist.  No client
- * can create a Windows reparse-point symlink against an empty share, so the
- * fixtures are seeded here at startup, mirroring chimera_server_mkpath's
- * transient-mount/evpl_continue drive loop.  Best-effort: failures are logged
- * but do not abort the daemon (only the symlink WPTS cases depend on them). */
+ * can create a Windows reparse-point symlink against an empty share.
+ *
+ * The MS-FSA suite wants:
+ *   <root>/ExistingFolder    (a directory)
+ *   <root>/ExistingFile.txt  (a regular file)
+ *
+ * Both are seeded here at startup, gated by env, mirroring
+ * chimera_server_mkpath's transient-mount/evpl_continue drive loop.
+ * Best-effort: failures are logged but do not abort the daemon (only the
+ * fixtures' own WPTS cases depend on them).
+ */
 #define CHIMERA_SEED_TMP_NAME "__chimera_seed_tmp"
+
+/* One fixture, relative to the share root.  A non-NULL `target` makes a
+ * symlink to it; otherwise `mode` says whether it is a directory or a regular
+ * file, and carries the permission bits. */
+struct chimera_seed_step {
+    const char *path;
+    const char *target;
+    uint32_t    mode;
+};
+
+static const struct chimera_seed_step chimera_seed_symlink_steps[] = {
+    { "SymlinkTest",      NULL,          S_IFDIR | 0755 },
+    { "SymlinkTest/link", "target",      0              },
+    { "badlink",          "nonexistent", 0              },
+};
+
+static const struct chimera_seed_step chimera_seed_fsa_steps[] = {
+    { "ExistingFolder",   NULL, S_IFDIR | 0755 },
+    { "ExistingFile.txt", NULL, S_IFREG | 0644 },
+};
 
 struct chimera_seed_ctx {
     struct chimera_vfs             *vfs;
     struct chimera_vfs_thread      *thread;
-    struct chimera_vfs_open_handle *root_oh;
-    struct chimera_vfs_open_handle *dir_oh;
-    uint8_t                         dir_fh[CHIMERA_VFS_FH_SIZE + 16];
-    uint32_t                        dir_fh_len;
-    enum chimera_vfs_error status;
+    const struct chimera_seed_step *steps;
+    int                             nsteps;
+    int                             step;
+    uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                        root_fh_len;
+    enum chimera_vfs_error          status;
     int                             done;
 };
+
+static void chimera_seed_next(
+    struct chimera_seed_ctx *ctx);
 
 static void
 chimera_seed_umount_cb(
@@ -2180,137 +2090,83 @@ chimera_seed_finish(
 {
     ctx->status = status;
 
-    if (ctx->dir_oh) {
-        chimera_vfs_release(ctx->thread, ctx->dir_oh);
-        ctx->dir_oh = NULL;
-    }
-    if (ctx->root_oh) {
-        chimera_vfs_release(ctx->thread, ctx->root_oh);
-        ctx->root_oh = NULL;
-    }
-
     chimera_vfs_umount(ctx->thread, chimera_vfs_get_server_cred(),
                        CHIMERA_SEED_TMP_NAME, chimera_seed_umount_cb, ctx);
 } /* chimera_seed_finish */
 
-/* Creating the dangling root-level "badlink" is the last step. */
 static void
-chimera_seed_badlink_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
+chimera_seed_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_seed_ctx *ctx = private_data;
+    struct chimera_seed_ctx *ctx    = private_data;
+    enum chimera_vfs_error   status = chimera_vfs_compound_status(compound);
 
-    /* EEXIST is fine -- idempotent re-seed of a persistent backend. */
-    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_EEXIST) {
-        chimera_seed_finish(ctx, error_code);
-        return;
-    }
-    chimera_seed_finish(ctx, CHIMERA_VFS_OK);
-} /* chimera_seed_badlink_cb */
+    chimera_vfs_compound_free(compound);
 
-/* The in-subfolder "SymlinkTest/link" was created; now make the dangling
- * root-level "badlink". */
-static void
-chimera_seed_dirlink_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_seed_ctx *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_EEXIST) {
-        chimera_seed_finish(ctx, error_code);
+    /* EEXIST is fine -- an idempotent re-seed of a persistent backend. */
+    if (status != CHIMERA_VFS_OK && status != CHIMERA_VFS_EEXIST) {
+        chimera_seed_finish(ctx, status);
         return;
     }
 
-    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(),
-                           ctx->root_oh, "badlink", 7,
-                           "nonexistent", 11, NULL,
-                           0, 0, 0, chimera_seed_badlink_cb, ctx);
-} /* chimera_seed_dirlink_cb */
+    ctx->step++;
+    chimera_seed_next(ctx);
+} /* chimera_seed_complete */
 
-/* The "SymlinkTest" directory is open; create the symlink "link" inside it. */
+/* One fixture per sequence rather than all of them in one: a sequence stops at
+ * its first failure, and each fixture's EEXIST has to be accepted on its own
+ * before the next is attempted. */
 static void
-chimera_seed_diropen_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_seed_next(struct chimera_seed_ctx *ctx)
 {
-    struct chimera_seed_ctx *ctx = private_data;
+    const struct chimera_seed_step *step;
+    struct chimera_vfs_compound    *compound;
+    struct chimera_vfs_attrs        set_attr;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_seed_finish(ctx, error_code);
+    if (ctx->step >= ctx->nsteps) {
+        chimera_seed_finish(ctx, CHIMERA_VFS_OK);
         return;
     }
 
-    ctx->dir_oh = oh;
-
-    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(),
-                           ctx->dir_oh, "link", 4,
-                           "target", 6, NULL,
-                           0, 0, 0, chimera_seed_dirlink_cb, ctx);
-} /* chimera_seed_diropen_cb */
-
-/* The "SymlinkTest" directory was created (or already existed); open it. */
-static void
-chimera_seed_mkdir_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_seed_ctx *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK || attr->va_fh_len == 0) {
-        chimera_seed_finish(ctx, error_code != CHIMERA_VFS_OK ? error_code : CHIMERA_VFS_EIO);
-        return;
-    }
-
-    memcpy(ctx->dir_fh, attr->va_fh, attr->va_fh_len);
-    ctx->dir_fh_len = attr->va_fh_len;
-
-    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(),
-                        ctx->dir_fh, ctx->dir_fh_len,
-                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
-                        chimera_seed_diropen_cb, ctx);
-} /* chimera_seed_mkdir_cb */
-
-static void
-chimera_seed_rootopen_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_seed_ctx *ctx = private_data;
-    struct chimera_vfs_attrs set_attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_seed_finish(ctx, error_code);
-        return;
-    }
-
-    ctx->root_oh = oh;
+    step = &ctx->steps[ctx->step];
 
     memset(&set_attr, 0, sizeof(set_attr));
     set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
         CHIMERA_VFS_ATTR_GID;
-    set_attr.va_mode = S_IFDIR | 0755;
+    set_attr.va_mode = step->mode;
     set_attr.va_uid  = 0;
     set_attr.va_gid  = 0;
 
-    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
-                         "SymlinkTest", 11, &set_attr,
-                         CHIMERA_VFS_ATTR_FH, 0, 0,
-                         chimera_seed_mkdir_cb, ctx);
-} /* chimera_seed_rootopen_cb */
+    compound = chimera_vfs_compound_alloc(ctx->thread,
+                                          chimera_vfs_get_server_cred());
+
+    chimera_vfs_compound_add_putfh(compound, ctx->root_fh, ctx->root_fh_len);
+
+    if (step->target) {
+        chimera_vfs_compound_add_create_path(compound,
+                                             CHIMERA_VFS_COMPOUND_CREATE_SYMLINK,
+                                             step->path, strlen(step->path),
+                                             step->target, strlen(step->target),
+                                             NULL, 0, 0);
+    } else if (S_ISDIR(step->mode)) {
+        chimera_vfs_compound_add_create_path(compound,
+                                             CHIMERA_VFS_COMPOUND_CREATE_DIR,
+                                             step->path, strlen(step->path),
+                                             NULL, 0,
+                                             &set_attr, 0,
+                                             1 /* intermediates */);
+    } else {
+        /* A regular file is created by opening it; the handle the sequence
+         * produces is nobody's, so compound_free releases it. */
+        chimera_vfs_compound_add_open_path(compound,
+                                           step->path, strlen(step->path),
+                                           CHIMERA_VFS_OPEN_CREATE,
+                                           &set_attr, 0);
+    }
+
+    chimera_vfs_compound_submit(compound, chimera_seed_complete, ctx);
+} /* chimera_seed_next */
 
 static void
 chimera_seed_mounted_cb(
@@ -2335,17 +2191,19 @@ chimera_seed_mounted_cb(
         return;
     }
 
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
-                        m->root_fh, m->root_fh_len,
-                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
-                        chimera_seed_rootopen_cb, ctx);
+    memcpy(ctx->root_fh, m->root_fh, m->root_fh_len);
+    ctx->root_fh_len = m->root_fh_len;
+
+    chimera_seed_next(ctx);
 } /* chimera_seed_mounted_cb */
 
-SYMBOL_EXPORT int
-chimera_server_seed_symlinks(
-    struct chimera_server *server,
-    const char            *module_name,
-    const char            *module_path)
+static int
+chimera_server_seed_run(
+    struct chimera_server          *server,
+    const char                     *module_name,
+    const char                     *module_path,
+    const struct chimera_seed_step *steps,
+    int                             nsteps)
 {
     struct evpl            *evpl;
     struct chimera_seed_ctx ctx;
@@ -2360,6 +2218,8 @@ chimera_server_seed_symlinks(
     ctx.vfs    = server->vfs;
     ctx.thread = chimera_vfs_thread_init(evpl, server->vfs);
     ctx.status = CHIMERA_VFS_OK;
+    ctx.steps  = steps;
+    ctx.nsteps = nsteps;
 
     chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
                       CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
@@ -2373,124 +2233,19 @@ chimera_server_seed_symlinks(
     evpl_destroy(evpl);
 
     return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
+} /* chimera_server_seed_run */
+
+SYMBOL_EXPORT int
+chimera_server_seed_symlinks(
+    struct chimera_server *server,
+    const char            *module_name,
+    const char            *module_path)
+{
+    return chimera_server_seed_run(server, module_name, module_path,
+                                   chimera_seed_symlink_steps,
+                                   (int) (sizeof(chimera_seed_symlink_steps) /
+                                          sizeof(chimera_seed_symlink_steps[0])));
 } /* chimera_server_seed_symlinks */
-
-/* ---- test-only MS-FSA fixture seeding -------------------------------------
- * The WPTS MS-FSA suite opens two fixtures it expects to pre-exist on the share:
- *   <root>/ExistingFolder    (a directory)
- *   <root>/ExistingFile.txt  (a regular file)
- * Seed them at startup (memfs shares one tree across mounts), gated by env
- * CHIMERA_SMB_SEED_FSA naming the backend module.  Best-effort; reuses the
- * symlink seed's transient-mount/evpl_continue drive loop. */
-
-static void
-chimera_seed_fsa_fileopen_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
-{
-    struct chimera_seed_ctx *ctx = private_data;
-
-    if (oh) {
-        chimera_vfs_release(ctx->thread, oh);
-    }
-    chimera_seed_finish(ctx, (error_code == CHIMERA_VFS_OK ||
-                              error_code == CHIMERA_VFS_EEXIST) ?
-                        CHIMERA_VFS_OK : error_code);
-} /* chimera_seed_fsa_fileopen_cb */
-
-static void
-chimera_seed_fsa_mkdir_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct chimera_seed_ctx *ctx = private_data;
-    struct chimera_vfs_attrs file_attr;
-
-    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_EEXIST) {
-        chimera_seed_finish(ctx, error_code);
-        return;
-    }
-
-    memset(&file_attr, 0, sizeof(file_attr));
-    file_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
-        CHIMERA_VFS_ATTR_GID;
-    file_attr.va_mode = S_IFREG | 0644;
-    file_attr.va_uid  = 0;
-    file_attr.va_gid  = 0;
-
-    chimera_vfs_open_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
-                        "ExistingFile.txt", 16,
-                        CHIMERA_VFS_OPEN_CREATE, &file_attr,
-                        CHIMERA_VFS_ATTR_FH, 0, 0,
-                        chimera_seed_fsa_fileopen_cb, ctx);
-} /* chimera_seed_fsa_mkdir_cb */
-
-static void
-chimera_seed_fsa_rootopen_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_seed_ctx *ctx = private_data;
-    struct chimera_vfs_attrs set_attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_seed_finish(ctx, error_code);
-        return;
-    }
-
-    ctx->root_oh = oh;
-
-    memset(&set_attr, 0, sizeof(set_attr));
-    set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
-        CHIMERA_VFS_ATTR_GID;
-    set_attr.va_mode = S_IFDIR | 0755;
-    set_attr.va_uid  = 0;
-    set_attr.va_gid  = 0;
-
-    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
-                         "ExistingFolder", 14, &set_attr,
-                         CHIMERA_VFS_ATTR_FH, 0, 0,
-                         chimera_seed_fsa_mkdir_cb, ctx);
-} /* chimera_seed_fsa_rootopen_cb */
-
-static void
-chimera_seed_fsa_mounted_cb(
-    struct chimera_vfs_thread *thread,
-    enum chimera_vfs_error     status,
-    void                      *private_data)
-{
-    struct chimera_seed_ctx  *ctx = private_data;
-    struct chimera_vfs_mount *m;
-
-    if (status != CHIMERA_VFS_OK) {
-        ctx->status = status;
-        ctx->done   = 1;
-        return;
-    }
-
-    m = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
-                                             CHIMERA_SEED_TMP_NAME,
-                                             strlen(CHIMERA_SEED_TMP_NAME));
-    if (!m) {
-        chimera_seed_finish(ctx, CHIMERA_VFS_EIO);
-        return;
-    }
-
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
-                        m->root_fh, m->root_fh_len,
-                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
-                        chimera_seed_fsa_rootopen_cb, ctx);
-} /* chimera_seed_fsa_mounted_cb */
 
 SYMBOL_EXPORT int
 chimera_server_seed_fsa(
@@ -2498,32 +2253,10 @@ chimera_server_seed_fsa(
     const char            *module_name,
     const char            *module_path)
 {
-    struct evpl            *evpl;
-    struct chimera_seed_ctx ctx;
-
-    if (!module_name) {
-        return -1;
-    }
-
-    memset(&ctx, 0, sizeof(ctx));
-
-    evpl       = evpl_create(NULL);
-    ctx.vfs    = server->vfs;
-    ctx.thread = chimera_vfs_thread_init(evpl, server->vfs);
-    ctx.status = CHIMERA_VFS_OK;
-
-    chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
-                      CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
-                      chimera_seed_fsa_mounted_cb, &ctx);
-
-    while (!ctx.done) {
-        evpl_continue(evpl);
-    }
-
-    chimera_vfs_thread_destroy(ctx.thread);
-    evpl_destroy(evpl);
-
-    return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
+    return chimera_server_seed_run(server, module_name, module_path,
+                                   chimera_seed_fsa_steps,
+                                   (int) (sizeof(chimera_seed_fsa_steps) /
+                                          sizeof(chimera_seed_fsa_steps[0])));
 } /* chimera_server_seed_fsa */
 
 static void
