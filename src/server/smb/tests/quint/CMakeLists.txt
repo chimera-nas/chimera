@@ -53,6 +53,18 @@ set_tests_properties(chimera/server/smb/mbt/rename_disconnect_probe_memfs PROPER
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 60)
 
+# Same object-store caching key across distinct protocol lease records.
+add_executable(smb2_lease_identity_probe smb2_lease_identity_probe.c)
+target_include_directories(smb2_lease_identity_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_lease_identity_probe chimera_server chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/lease_identity_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_lease_identity_probe>)
+set_tests_properties(chimera/server/smb/mbt/lease_identity_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_lease_identity_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 90)
+
 # Oplock/lease ground-truth probe (Increment 1): pins chimera's grant ->
 # break -> acknowledge behavior against MS-SMB2/MS-FSA, two connections
 # (holder + conflicting opener) on one in-process server.  Findings triaged
