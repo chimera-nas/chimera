@@ -332,6 +332,53 @@ edit_gate(
     }
 } /* edit_gate */
 
+/* A gate that completes a later I/O op's OWNER from the object the op it is
+ * consulted on resolved.  This is the shape a protocol keying the owner on an
+ * open handle uses when the OPEN is IN the run: io_owner and have_io_owner are
+ * arguments, so the half the caller could not know at build time is written by
+ * the gate that first can. */
+struct io_owner_gate_ctx {
+    uint32_t                   at;       /* the op that resolves the object */
+    uint32_t                   io_index; /* the READ or WRITE to complete   */
+    struct chimera_claim_actor base;     /* the half the caller knows       */
+    int                        filled;
+};
+
+static void
+io_owner_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct io_owner_gate_ctx             *g = private_data;
+    const struct chimera_vfs_compound_op *done;
+    struct chimera_vfs_compound_op       *io;
+
+    if (index != g->at || *status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    done = chimera_vfs_compound_op(compound, index);
+    io   = chimera_vfs_compound_op_edit(compound, g->io_index);
+    assert(io != NULL);
+    assert(done->out_handle != NULL);
+
+    /* The identity the whole scheme rests on: a handle's fh_hash is
+     * chimera_vfs_hash of its FILE HANDLE and nothing else, so it names the
+     * object rather than the open. */
+    assert(done->out_handle->fh_hash ==
+           chimera_vfs_hash(done->fh, (int) done->fh_len));
+
+    /* ASSIGNED from what the caller already had plus what the op just
+     * reported, never accumulated -- so a second execution computes the same
+     * owner rather than a different one. */
+    io->io_owner                = g->base;
+    io->io_owner.owner.owner_lo = done->out_handle->fh_hash;
+    io->have_io_owner           = 1;
+    g->filled++;
+} /* io_owner_gate */
+
 /* A second VFS thread whose only job is to release a claim, so the grant it
  * pumps to a parked LOCK arrives on a thread that is not the one that
  * submitted the sequence.  It records itself so the test can prove the
@@ -6465,25 +6512,28 @@ main(
     TEST_PASS("pre fires before admission, post after the grant, deny on a "
               "synchronous refusal");
 
-    /* ---- an io_owner derived from the handle the op ADDRESSES ----
+    /* ---- an io_owner the run's own gate completes ----
      * A write cache is held by an owner whose owner_lo is the object's
-     * fh_hash, which is how a protocol that keys on an open handle names
-     * itself (NFSv4: the stateid's handle).  Its own write must not recall it.
+     * fh_hash, which is how a protocol keying the owner on an open handle
+     * names itself (NFSv4: the stateid's handle).  Its own write must not
+     * recall it.
      *
-     * The caller can say so with the explicit io_owner only when it holds that
-     * handle already.  When the OPEN is in the same run the handle does not
-     * exist at build time, and the best a caller could write was an owner with
-     * owner_lo unset -- which is a different owner, and breaks the very cache
-     * the write is being done under.  op_set_io_owner_from_handle is the
-     * caller supplying the half it knows and the executor filling in the
-     * other half from whatever the op resolved. */
+     * The adders' io_owner is a value the caller already has, and when the
+     * OPEN is IN the run there is no such value: the handle does not exist
+     * when the sequence is written.  But io_owner and have_io_owner are
+     * ARGUMENTS, so the gate consulted on the OPEN -- the first moment the
+     * object exists -- writes them into the WRITE ahead of it.  No second
+     * mechanism: this is chimera_vfs_compound_op_edit doing what it does for
+     * every other argument a run computes for itself.
+     */
     {
         struct chimera_vfs_state         *state = ctx.vfs->vfs_state;
         struct chimera_vfs_attrs          sattr;
         struct chimera_vfs_open_handle   *oh;
         struct chimera_vfs_claim          cache;
         struct chimera_claim_owner        owner_w;
-        struct chimera_claim_actor        actor;
+        struct io_owner_gate_ctx          g;
+        struct chimera_claim_actor        stranger;
         struct chimera_vfs_claim_conflict conflict;
         struct chimera_vfs_file_state    *fs;
         struct break_rec                  rec;
@@ -6521,16 +6571,14 @@ main(
         owner_w.owner_lo   = oh->fh_hash;
 
         assert(evpl_iovec_alloc(ctx.evpl, 8, 0, 1, 0, &wiov) == 1);
-        memcpy(evpl_iovec_data(&wiov), "derived!", 8);
+        memcpy(evpl_iovec_data(&wiov), "bythegat", 8);
 
-        /* The actor as a caller can write it at build time: the proto and the
-         * client are its own, and owner_lo is the half it does not have. */
-        memset(&actor, 0, sizeof(actor));
-        actor.owner          = owner_w;
-        actor.owner.owner_lo = 0;
+        /* The half a caller CAN write at build time: its proto and its client,
+         * with owner_lo left for the gate. */
+        memset(&g, 0, sizeof(g));
+        g.base.owner          = owner_w;
+        g.base.owner.owner_lo = 0;
 
-        /* Derived: PUTFH; OPEN; WRITE(the OPEN's handle), attributed to the
-         * owner the executor completes from that handle.  Nothing recalls. */
         chimera_vfs_claim_init_oplock(&cache,
                                       CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
                                       &owner_w);
@@ -6550,21 +6598,37 @@ main(
                                               0, 0, NULL);
         chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_wr,
                                            (uint32_t) i_open);
-        chimera_vfs_compound_op_set_io_owner_from_handle(cp, (uint32_t) i_wr,
-                                                         &actor);
+        g.at       = (uint32_t) i_open;
+        g.io_index = (uint32_t) i_wr;
+        chimera_vfs_compound_set_gate(cp, io_owner_gate, &g);
+
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
         assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
         assert(chimera_vfs_compound_op(cp, i_wr)->status == CHIMERA_VFS_OK);
-        chimera_vfs_compound_free(cp);
+        assert(g.filled == 1);
 
         assert(rec.fired == 0);
         assert(cache.break_state == CHIMERA_CLAIM_BREAK_IDLE);
 
-        /* The same run with the same actor passed the only way a caller could
-         * pass it before -- owner_lo still 0, because there was nothing to put
-         * there -- is a stranger, and the holder loses its write cache. */
+        /* Submitted again, the gate computes the same owner rather than one
+         * built on what it wrote last time -- so the second run recalls no
+         * more than the first. */
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(g.filled == 2);
+        assert(rec.fired == 0);
+        assert(cache.break_state == CHIMERA_CLAIM_BREAK_IDLE);
+        chimera_vfs_compound_free(cp);
+
+        /* The same run with the owner the caller COULD name unaided -- the
+         * half it knows, owner_lo unset because there was nothing to put there
+         * -- is a stranger, and the holder loses its write cache. */
+        stranger = g.base;
+
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
         i_open = chimera_vfs_compound_add_open(cp, "ioown", 5,
@@ -6572,7 +6636,7 @@ main(
                                                CHIMERA_VFS_OPEN_WRITE_ONLY,
                                                0, NULL, 0, 0, 0);
         i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 0, &wiov, 1,
-                                              0, 0, &actor);
+                                              0, 0, &stranger);
         chimera_vfs_compound_op_use_handle(cp, (uint32_t) i_wr,
                                            (uint32_t) i_open);
         ctx.callbacks = 0;
@@ -6588,9 +6652,10 @@ main(
         chimera_vfs_claim_ack(&cache, CHIMERA_CLAIM_CR);
         chimera_vfs_claim_release(state, fs, &cache);
 
-        /* Derivation does not need use_handle: an op addressing the CURRENT
-         * object resolves a handle too, and fh_hash names the object rather
-         * than the open, so the same actor is completed the same way. */
+        /* And a caller that already KNOWS the file handle needs no gate at
+         * all: owner_lo is chimera_vfs_hash of it, computable at build.  This
+         * is the delegation-stateid shape, where the object is the one the run
+         * starts from. */
         chimera_vfs_claim_init_oplock(&cache,
                                       CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
                                       &owner_w);
@@ -6600,14 +6665,16 @@ main(
         assert(chimera_vfs_claim_try_acquire(state, fs, &cache, &conflict) ==
                CHIMERA_CLAIM_GRANTED);
 
+        stranger                = g.base;
+        stranger.owner.owner_lo = chimera_vfs_hash(oh->fh, (int) oh->fh_len);
+        assert(stranger.owner.owner_lo == oh->fh_hash);
+
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh,
                                            CHIMERA_VFS_OPEN_READ_ONLY |
                                            CHIMERA_VFS_OPEN_WRITE_ONLY);
         i_wr = chimera_vfs_compound_add_write(cp, NULL, 0, 8, 0, &wiov, 1,
-                                              0, 0, NULL);
-        chimera_vfs_compound_op_set_io_owner_from_handle(cp, (uint32_t) i_wr,
-                                                         &actor);
+                                              0, 0, &stranger);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -6623,8 +6690,8 @@ main(
         evpl_iovec_release(ctx.evpl, &wiov);
         chimera_vfs_release(ctx.vfs_thread, oh);
     }
-    TEST_PASS("a derived io_owner is completed from the handle the op "
-              "addresses, so a run's own OPEN does not recall its own cache");
+    TEST_PASS("a gate completes a later WRITE's io_owner from the OPEN that "
+              "produced the handle, so a run's own I/O keeps its own cache");
 
     /* ---- CLAIM_TEST with TEST_BACKEND, and the PATH open ----
      * memfs arbitrates no byte ranges, so the projection has nowhere to go
