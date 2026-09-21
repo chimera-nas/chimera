@@ -93,7 +93,7 @@ set_tests_properties(chimera/server/smb/mbt/replay_probe_memfs PROPERTIES
 # NTLMv2 credential validation -- which every other test crosses unprotected.
 add_executable(smb2_wire_probe smb2_wire_probe.c)
 target_include_directories(smb2_wire_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_wire_probe chimera_server chimera_metrics crypto)
+target_link_libraries(smb2_wire_probe chimera_server chimera_metrics OpenSSL::Crypto)
 
 add_test(NAME chimera/server/smb/mbt/wire_probe_memfs
     COMMAND $<TARGET_FILE:smb2_wire_probe>)
@@ -110,7 +110,7 @@ set_tests_properties(chimera/server/smb/mbt/wire_probe_memfs PROPERTIES
 # trip), never on the status alone.
 add_executable(smb2_fsctl_probe smb2_fsctl_probe.c)
 target_include_directories(smb2_fsctl_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_fsctl_probe chimera_server chimera_metrics crypto)
+target_link_libraries(smb2_fsctl_probe chimera_server chimera_metrics OpenSSL::Crypto)
 
 add_test(NAME chimera/server/smb/mbt/fsctl_probe_memfs
     COMMAND $<TARGET_FILE:smb2_fsctl_probe>)
@@ -127,7 +127,7 @@ set_tests_properties(chimera/server/smb/mbt/fsctl_probe_memfs PROPERTIES
 # size check and fails an agreement check.
 add_executable(smb2_info_probe smb2_info_probe.c)
 target_include_directories(smb2_info_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_info_probe chimera_server chimera_metrics crypto)
+target_link_libraries(smb2_info_probe chimera_server chimera_metrics OpenSSL::Crypto)
 
 add_test(NAME chimera/server/smb/mbt/info_probe_memfs
     COMMAND $<TARGET_FILE:smb2_info_probe>)
@@ -143,7 +143,7 @@ set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
 # storage that NFSv4 named attributes also project onto.
 add_executable(smb2_stream_probe smb2_stream_probe.c)
 target_include_directories(smb2_stream_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_stream_probe chimera_server chimera_metrics crypto)
+target_link_libraries(smb2_stream_probe chimera_server chimera_metrics OpenSSL::Crypto)
 
 add_test(NAME chimera/server/smb/mbt/stream_probe_memfs
     COMMAND $<TARGET_FILE:smb2_stream_probe>)
@@ -165,7 +165,7 @@ set_tests_properties(chimera/server/smb/mbt/stream_probe_memfs PROPERTIES
 add_executable(smb2_compress_probe smb2_compress_probe.c)
 target_include_directories(smb2_compress_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(smb2_compress_probe chimera_server chimera_smb
-    chimera_metrics crypto)
+    chimera_metrics OpenSSL::Crypto)
 
 add_test(NAME chimera/server/smb/mbt/compress_probe_memfs
     COMMAND $<TARGET_FILE:smb2_compress_probe>)

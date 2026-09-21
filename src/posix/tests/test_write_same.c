@@ -11,7 +11,7 @@
 
 static struct posix_test_env *g_env;
 
-static const char             PATTERN[] = "WXYZ"; /* 4-byte pattern */
+static const char             WRITE_SAME_PATTERN[] = "WXYZ"; /* 4-byte pattern */
 #define PATLEN     4
 #define RELOFF     8
 #define BLOCK_SIZE 512
@@ -37,7 +37,7 @@ expected_byte(
     uint32_t pos = rel % BLOCK_SIZE;
 
     if (pos >= RELOFF && pos < RELOFF + PATLEN) {
-        return (unsigned char) PATTERN[pos - RELOFF];
+        return (unsigned char) WRITE_SAME_PATTERN[pos - RELOFF];
     }
     return 0;
 } /* expected_byte */
@@ -76,7 +76,7 @@ probe_support(void)
         die("probe open", fd);
     }
 
-    n = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, PATTERN, PATLEN,
+    n = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, WRITE_SAME_PATTERN, PATLEN,
                                  RELOFF);
     chimera_posix_close(fd);
 
@@ -105,7 +105,7 @@ test_basic_pattern(void)
         die("open basic", fd);
     }
 
-    n = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, PATTERN, PATLEN,
+    n = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, WRITE_SAME_PATTERN, PATLEN,
                                  RELOFF);
     if (n != TOTAL) {
         die("write_same basic", n);
@@ -131,7 +131,7 @@ test_offset(void)
     }
 
     n = chimera_posix_write_same(fd, (chimera_off_t) adb_off, BLOCK_SIZE, BLOCK_CNT,
-                                 PATTERN, PATLEN, RELOFF);
+                                 WRITE_SAME_PATTERN, PATLEN, RELOFF);
     if (n != TOTAL) {
         die("write_same off", n);
     }
@@ -162,7 +162,7 @@ test_overwrite(void)
         die("pwrite junk", n);
     }
 
-    n = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, PATTERN, PATLEN,
+    n = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, WRITE_SAME_PATTERN, PATLEN,
                                  RELOFF);
     if (n != TOTAL) {
         die("write_same over", n);
@@ -232,7 +232,7 @@ test_unsupported(void)
     }
 
     errno = 0;
-    n     = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, PATTERN,
+    n     = chimera_posix_write_same(fd, 0, BLOCK_SIZE, BLOCK_CNT, WRITE_SAME_PATTERN,
                                      PATLEN, RELOFF);
     if (n != -1 || (errno != ENOTSUP && errno != EOPNOTSUPP)) {
         fprintf(stderr, "expected ENOTSUP/EOPNOTSUPP, got n=%zd errno=%s\n",

@@ -899,7 +899,7 @@ main(
 #ifdef _WIN32
     setvbuf(stdout, NULL, _IONBF, 0);
 #else  /* ifdef _WIN32 */
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
 #endif /* ifdef _WIN32 */
 
     umask(0);

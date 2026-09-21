@@ -20,11 +20,35 @@ main(void)
     assert(write(fd, "a\r\nb\n", 5) == 5);
     assert(!close(fd));
     {
-        FILE *input = fopen(file, "rb");
-        char  data[8];
+        FILE  *input = fopen(file, "rb");
+        char   data[8];
         assert(input);
         assert(fread(data, 1, sizeof(data), input) == 5);
         assert(!memcmp(data, "a\r\nb\n", 5));
+        rewind(input);
+        char  *line     = NULL;
+        size_t capacity = 0;
+        assert(chimera_test_getline(&line, &capacity, input) == 3);
+        assert(!strcmp(line, "a\r\n"));
+        assert(chimera_test_getline(&line, &capacity, input) == 2);
+        assert(!strcmp(line, "b\n"));
+        assert(chimera_test_getline(&line, &capacity, input) == -1);
+        free(line);
+        fclose(input);
+        input = fopen(file, "wb");
+        assert(input);
+        for (int i = 0; i < 8193; i++) {
+            assert(fputc('x', input) == 'x');
+        }
+        assert(!fclose(input));
+        input = fopen(file, "rb");
+        assert(input);
+        line     = NULL;
+        capacity = 0;
+        assert(chimera_test_getline(&line, &capacity, input) == 8193);
+        assert(strlen(line) == 8193 && line[8192] == 'x');
+        assert(chimera_test_getline(&line, &capacity, input) == -1);
+        free(line);
         fclose(input);
     }
 #ifndef _WIN32

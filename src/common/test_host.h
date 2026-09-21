@@ -197,3 +197,41 @@ chimera_test_absolute_path(const char *path)
     return realpath(path, NULL);
 #endif // ifdef _WIN32
 } // chimera_test_absolute_path
+
+/* getline-style input for the native JSON driver; no fixed trace-line limit. */
+static inline ssize_t
+chimera_test_getline(
+    char  **line,
+    size_t *capacity,
+    FILE   *input)
+{
+    size_t length = 0;
+    int    ch;
+
+    while ((ch = fgetc(input)) != EOF) {
+        if (!*line || length + 1 >= *capacity) {
+            size_t next = *line ? *capacity : 0;
+            if (next > (size_t) PTRDIFF_MAX / 2) {
+                errno = EOVERFLOW;
+                return -1;
+            }
+            next = next ? next * 2 : 256;
+            char  *grown = realloc(*line, next);
+            if (!grown) {
+                errno = ENOMEM;
+                return -1;
+            }
+            *line     = grown;
+            *capacity = next;
+        }
+        (*line)[length++] = (char) ch;
+        if (ch == '\n') {
+            break;
+        }
+    }
+    if (ferror(input) || !length) {
+        return -1;
+    }
+    (*line)[length] = 0;
+    return (ssize_t) length;
+} // chimera_test_getline

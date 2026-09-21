@@ -29,7 +29,6 @@
 #include "common/test_host.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,18 +155,6 @@ posix_module_tracks_holes(const char *module)
     return posix_module_is_passthrough(module) || strcmp(module, "cairn") == 0;
 } /* posix_module_tracks_holes */
 
-static int
-pt_rm_cb(
-    const char                 *path,
-    const chimera_posix_stat_t *st,
-    int                         type,
-    struct FTW                 *ftw)
-{
-    (void) st;
-    (void) ftw;
-    return (type == FTW_DP ? rmdir(path) : unlink(path));
-} /* pt_rm_cb */
-
 /* Build the SMB loopback's mount option string, appending the pinned dialect
  * when one was requested.  Shared by the initial mount and the newfs remount so
  * a recycled mount cannot silently drop back to the negotiated default. */
@@ -196,7 +183,7 @@ smb_mount_options(
 static int
 pt_remove_tree(const char *path)
 {
-    return nftw(path, pt_rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+    return chimera_test_remove_tree(path);
 } /* pt_remove_tree */
 
 /* Path of the current passthrough backing directory (g_pt_root/g_fsname). */
@@ -1768,7 +1755,7 @@ main(
             DRIVER_BLOCK_SIZE);
     fflush(proto_out);
 
-    while (getline(&line, &cap, stdin) != -1) {
+    while (chimera_test_getline(&line, &cap, stdin) != -1) {
         json_error_t jerr;
         json_t      *req = json_loads(line, 0, &jerr);
         json_t      *res;

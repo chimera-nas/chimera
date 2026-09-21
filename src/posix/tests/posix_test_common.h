@@ -938,8 +938,6 @@ posix_test_init(
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-    int         rc;
-
     (void) chimera_test_mkdir(session_root, 0755);
     (void) chimera_test_mkdir(env->session_dir, 0755);
 
@@ -950,7 +948,7 @@ posix_test_init(
      * already right. */
 #ifndef _WIN32
     if (geteuid() == 0) {
-        rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
+        int rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
         if (rc < 0) {
             fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
             exit(EXIT_FAILURE);

@@ -44,7 +44,18 @@ mbt_artifacts_name(void)
     if (name && *name) {
         return name;
     }
-#ifdef __APPLE__
+#ifdef _WIN32
+    char       *path = NULL;
+    if (_get_pgmptr(&path) != 0 || !path || !*path) {
+        return "chimera-mbt";
+    }
+    const char *base  = strrchr(path, '\\');
+    const char *slash = strrchr(path, '/');
+    if (slash && (!base || slash > base)) {
+        base = slash;
+    }
+    return base ? base + 1 : path;
+#elif defined(__APPLE__)
     return getprogname();
 #else  /* ifdef __APPLE__ */
     {
