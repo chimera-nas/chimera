@@ -30,6 +30,8 @@
 
 #include "s3_mbt_common.h"
 #include "common/mbt_watchdog.h"
+#include "server/s3/s3_internal.h"
+#include "server/s3/s3_etag.h"
 
 static int failures;
 
@@ -42,6 +44,35 @@ static int failures;
                 failures++;                             \
             }                                           \
         } while (0)
+
+/* Metadata produced by different backends need not initialize struct padding
+ * identically. Only the file handle, size and mtime values define the ETag. */
+static void
+probe_etag_metadata(void)
+{
+    struct chimera_vfs_attrs attr[2];
+    uint64_t                 hash[2][2];
+    int                      i;
+
+    memset(&attr[0], 0x11, sizeof(attr[0]));
+    memset(&attr[1], 0xdd, sizeof(attr[1]));
+    for (i = 0; i < 2; i++) {
+        attr[i].va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
+            CHIMERA_VFS_ATTR_MTIME;
+        attr[i].va_size          = 12345;
+        attr[i].va_mtime.tv_sec  = 1700000000;
+        attr[i].va_mtime.tv_nsec = 123456700;
+        attr[i].va_fh_len        = 16;
+        memset(attr[i].va_fh, 0x5a, attr[i].va_fh_len);
+        chimera_s3_compute_etag(hash[i], &attr[i]);
+    }
+    CHECK(memcmp(hash[0], hash[1], sizeof(hash[0])) == 0,
+          "ETag depends on padding or unrelated attributes");
+    attr[1].va_mtime.tv_nsec++;
+    chimera_s3_compute_etag(hash[1], &attr[1]);
+    CHECK(memcmp(hash[0], hash[1], sizeof(hash[0])) != 0,
+          "ETag ignored a nanosecond mtime change");
+} /* probe_etag_metadata */
 
 #define BS 8192
 
@@ -120,6 +151,7 @@ main(
     (void) argv;
 
     mbt_watchdog_arm(120);
+    probe_etag_metadata();
 
     s3_mbt_env_open(&env);
     s3_mbt_env_fs_setup(&env, "fs0");
