@@ -127,9 +127,11 @@ Inspect successful replay output for `harness allowances:` as well as failures.
 
 ## Verification of this review (2026-09-21)
 
-Validation on `quint-ci-enhance` uses the POSIX model at `b775722` and the
-merged stopwatch wall-time enhancement at `f98ac24` (through libevpl `336734a`).
-The merged stopwatch source tree is identical to the locally tested tree.
+Validation on `quint-ci-enhance` used the POSIX model at `b775722`, unchanged
+in merged specs commit `537633f`, and the merged stopwatch wall-time
+enhancement at `f98ac24` (now through libevpl `6a31ffd` and merged
+prometheus-c `09e27dc`). The merged dependency source trees match the tested
+trees; specs also includes generator portability and reference-harness fixes.
 
 * Linux Release: all 56 selected CTest checks passed. These cover all twelve
   POSIX backend cells, normal and strict FUSE, five POSIX strict twins, six
@@ -151,5 +153,9 @@ The merged stopwatch source tree is identical to the locally tested tree.
 * Model generation passed all three self-test suites and generated 746 traces.
   A freshly generated 90-trace reference corpus passed against Linux 6.8 ext4
   with its measured filesystem profile.
+* After repinning merged specs, all three model self-test suites passed again,
+  and two freshly generated traces matched the validated corpus exactly in
+  variables and states. The preceding Chimera revision also passed every
+  upstream CI check, including Quint coverage and Linux/macOS analysis.
 * The full tree passed `make syntax-check` with uncrustify 0.78.1, matching CI,
   and the standalone SDK include check passed.
