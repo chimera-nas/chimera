@@ -14,7 +14,7 @@
  * essence of NFSv4.1 cross-reboot exactly-once semantics.
  */
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
