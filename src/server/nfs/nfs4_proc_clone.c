@@ -5,7 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * CLONE (RFC 7862 15.13) reflinks a byte range from the SAVED_FH (source) into
@@ -50,14 +50,66 @@ chimera_nfs4_clone_finish(
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_clone_finish */
 
+/*
+ * CLONE is one run: the reflink, and -- when cl_count is 0 -- a stat of the
+ * source in front of it, because "to the end of the source file" is a length
+ * the request does not carry.  That is the gate's edit: it reads the size the
+ * stat reported and writes the length into the CLONE ahead of it, or runs past
+ * the CLONE entirely when the offset is already at or past EOF and there is
+ * nothing to clone.  Assigned from the caller's own offset plus what the stat
+ * reported, so a second execution computes the same length.
+ *
+ * Both objects are named by stateid, so both handles are the caller's and
+ * neither addresses the current object -- which is what the range ops take.
+ */
+#define NFS4_CLONE_OP_GETATTR 0
+#define NFS4_CLONE_OP_CLONE   1
+
+static void
+chimera_nfs4_clone_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct nfs_request                   *req  = private_data;
+    struct CLONE4args                    *args = &req->args_compound->argarray[req->index].opclone;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_compound_op       *edit;
+    uint64_t                              src_size;
+
+    if (index != NFS4_CLONE_OP_GETATTR || *status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    op   = chimera_vfs_compound_op(compound, index);
+    edit = chimera_vfs_compound_op_edit(compound, NFS4_CLONE_OP_CLONE);
+
+    if (!edit) {
+        return;
+    }
+
+    src_size = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ?
+        op->attr.va_size : 0;
+
+    if (src_size <= args->cl_src_offset) {
+        edit->skip = 1;
+    } else {
+        edit->length = src_size - args->cl_src_offset;
+    }
+} /* chimera_nfs4_clone_gate */
+
 static void
 chimera_nfs4_clone_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req = private_data;
+    struct nfs_request    *req = private_data;
+    enum chimera_vfs_error error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
 
     chimera_nfs4_clone_finish(req, error_code == CHIMERA_VFS_OK ?
                               NFS4_OK : chimera_nfs4_errno_to_nfsstat4(error_code));
@@ -66,12 +118,15 @@ chimera_nfs4_clone_complete(
 static void
 chimera_nfs4_clone_issue(
     struct nfs_request *req,
-    uint64_t            length)
+    uint64_t            length,
+    int                 want_size)
 {
     struct CLONE4args              *args = &req->args_compound->argarray[req->index].opclone;
     struct nfs4_clone_state_refs   *refs = req->nfs_state_ref;
     struct chimera_vfs_open_handle *src_handle;
     struct chimera_vfs_open_handle *dst_handle;
+    struct chimera_vfs_compound    *compound;
+    int                             idx;
 
     src_handle = nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
     dst_handle = nfs_state_io_handle(refs->dst_state, refs->dst_type, OPEN4_SHARE_ACCESS_WRITE);
@@ -84,41 +139,25 @@ chimera_nfs4_clone_issue(
         return;
     }
 
-    chimera_vfs_clone_range(req->thread->vfs_thread, &req->cred,
-                            src_handle, args->cl_src_offset,
-                            dst_handle, args->cl_dst_offset,
-                            length,
-                            0, 0,
-                            chimera_nfs4_clone_complete,
-                            req);
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+
+    if (want_size) {
+        /* Resolve the source size to bound a clone-to-EOF.  The stat addresses
+         * the source handle, not the current object. */
+        idx = chimera_vfs_compound_add_getattr(compound,
+                                               CHIMERA_VFS_ATTR_SIZE);
+        chimera_vfs_compound_op_set_handle(compound, (uint32_t) idx,
+                                           src_handle);
+        chimera_vfs_compound_set_gate(compound, chimera_nfs4_clone_gate, req);
+    }
+
+    chimera_vfs_compound_add_clone_range(compound,
+                                         src_handle, args->cl_src_offset,
+                                         dst_handle, args->cl_dst_offset,
+                                         length, 0, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_clone_complete, req);
 } /* chimera_nfs4_clone_issue */
-
-static void
-chimera_nfs4_clone_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request *req  = private_data;
-    struct CLONE4args  *args = &req->args_compound->argarray[req->index].opclone;
-    uint64_t            src_size;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs4_clone_finish(req, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-
-    src_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
-
-    /* cl_count == 0: clone from cl_src_offset to the end of the source.  If the
-     * offset is at or past EOF there is nothing to clone. */
-    if (src_size <= args->cl_src_offset) {
-        chimera_nfs4_clone_finish(req, NFS4_OK);
-        return;
-    }
-
-    chimera_nfs4_clone_issue(req, src_size - args->cl_src_offset);
-} /* chimera_nfs4_clone_getattr_complete */
 
 void
 chimera_nfs4_clone(
@@ -127,12 +166,11 @@ chimera_nfs4_clone(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct CLONE4args              *args  = &argop->opclone;
-    struct CLONE4res               *res   = &resop->opclone;
-    struct nfs_state_table         *table = &thread->shared->nfs4_state_table;
-    struct nfs4_clone_state_refs   *refs;
-    struct chimera_vfs_open_handle *src_handle;
-    nfsstat4                        status;
+    struct CLONE4args            *args  = &argop->opclone;
+    struct CLONE4res             *res   = &resop->opclone;
+    struct nfs_state_table       *table = &thread->shared->nfs4_state_table;
+    struct nfs4_clone_state_refs *refs;
+    nfsstat4                      status;
 
     req->nfs_state_ref = NULL;
 
@@ -171,16 +209,7 @@ chimera_nfs4_clone(
 
     req->nfs_state_ref = refs;
 
-    if (args->cl_count != 0) {
-        chimera_nfs4_clone_issue(req, args->cl_count);
-        return;
-    }
-
-    /* Resolve the source size to bound a clone-to-EOF. */
-    src_handle = nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
-    chimera_vfs_getattr(thread->vfs_thread, &req->cred,
-                        src_handle,
-                        CHIMERA_VFS_ATTR_SIZE,
-                        chimera_nfs4_clone_getattr_complete,
-                        req);
+    /* cl_count == 0 means "to the end of the source file", which the run has to
+     * measure for itself. */
+    chimera_nfs4_clone_issue(req, args->cl_count, args->cl_count == 0);
 } /* chimera_nfs4_clone */

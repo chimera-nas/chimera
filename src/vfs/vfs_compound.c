@@ -3518,6 +3518,21 @@ chimera_vfs_compound_read_callback(
         chimera_vfs_compound_store_attr(op, attr);
     }
 
+    /* The backend's descriptor array may live in an RPC reply that expires
+     * when this callback returns.  Retain references in the caller's stable
+     * array; descriptors carry address-sensitive tracing state. */
+    if (!op->dest_iov && iov != op->iov) {
+        if (niov > op->max_iov) {
+            evpl_iovecs_release(compound->thread->evpl, iov, niov);
+            chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EIO);
+            return;
+        }
+        for (int i = 0; i < niov; i++) {
+            evpl_iovec_clone(&op->iov[i], &iov[i]);
+        }
+        evpl_iovecs_release(compound->thread->evpl, iov, niov);
+        iov = op->iov;
+    }
     op->iov      = iov;
     op->niov     = niov;
     op->read_len = count;
