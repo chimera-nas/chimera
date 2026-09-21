@@ -11,6 +11,6 @@ target_compile_definitions(chimera_vfs_memkv PRIVATE
     XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
 
-target_link_libraries(chimera_vfs_memkv jansson)
+target_link_libraries(chimera_vfs_memkv evpl jansson)
 
 install(TARGETS chimera_vfs_memkv DESTINATION lib)

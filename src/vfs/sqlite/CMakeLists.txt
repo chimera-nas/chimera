@@ -8,6 +8,6 @@ add_library(chimera_vfs_sqlite ${CHIMERA_LIBRARY_TYPE}
 
 target_include_directories(chimera_vfs_sqlite PRIVATE ${SQLITE3_INCLUDE_DIR})
 
-target_link_libraries(chimera_vfs_sqlite jansson ${SQLITE3_LIBRARY})
+target_link_libraries(chimera_vfs_sqlite evpl jansson ${SQLITE3_LIBRARY})
 
 install(TARGETS chimera_vfs_sqlite DESTINATION lib)

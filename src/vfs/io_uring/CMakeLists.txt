@@ -6,6 +6,6 @@ add_library(chimera_vfs_io_uring ${CHIMERA_LIBRARY_TYPE}
     io_uring.c
 )
 
-target_link_libraries(chimera_vfs_io_uring uring jansson)
+target_link_libraries(chimera_vfs_io_uring evpl uring jansson)
 
 install(TARGETS chimera_vfs_io_uring DESTINATION lib)

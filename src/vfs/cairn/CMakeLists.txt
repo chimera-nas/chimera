@@ -19,7 +19,7 @@ add_library(chimera_vfs_cairn ${CHIMERA_LIBRARY_TYPE}
     cairn.c
 )
 
-target_link_libraries(chimera_vfs_cairn jansson rocksdb)
+target_link_libraries(chimera_vfs_cairn evpl jansson rocksdb)
 
 if (NOT HAVE_ROCKSDB_TXN_GET_PINNED)
     message(STATUS "RocksDB lacks rocksdb_transaction_get_pinned, using compat shim")

@@ -27,7 +27,7 @@ if (NOT DISABLE_TESTS)
     target_sources(chimera_vfs_diskfs PRIVATE diskfs_test.c)
 endif()
 
-target_link_libraries(chimera_vfs_diskfs jansson)
+target_link_libraries(chimera_vfs_diskfs evpl jansson)
 
 target_compile_definitions(chimera_vfs_diskfs PRIVATE
     XXH_INLINE_ALL
