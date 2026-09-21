@@ -443,6 +443,23 @@ nfs4_vfs_op_encodable(uint32_t argop)
  * COMPOUND ending in "... ; CLOSE" no longer has to stop the run in front of
  * the CLOSE: the ops before it stay one sequence.
  *
+ * WHAT A SLOT MAY READ is the limit, and it is narrower than "drives no VFS
+ * call".  A slot is applied while the fills are running, and the COMPOUND's
+ * current filehandle is settled only AFTER every fill -- deliberately, because
+ * a RESTOREFH's fill re-points req->fh as its own bookkeeping and for a
+ * RESTOREFH in the middle of a run that is not where the COMPOUND ends up.  So
+ * a slot may read a STATEID, which the state table answers whatever the cursor
+ * is doing, and may not read the current filehandle.
+ *
+ * That is what keeps IO_ADVISE out, and it is the only thing that does: it
+ * drives no VFS call either -- chimera exposes no fadvise, so the whole
+ * operation is a stateid check and an empty hint bitmap -- but its first answer
+ * is NFS4ERR_NOFILEHANDLE, read off req->fh.  Carried as a slot it answered
+ * NOFILEHANDLE for every "PUTFH; IO_ADVISE" in the corpus, because at apply
+ * time req->fh still held what the COMPOUND started with.  Making it work means
+ * making the current filehandle current during the fills, which is a change to
+ * what every other fill sees.
+ *
  * The cost is the same one every NFSv4-side check in this file pays: a slot's
  * decisions are made after every VFS op in the run has already executed.  So
  * a slot is treated exactly as LOCKT used to be -- nothing that mutates may
@@ -3753,10 +3770,10 @@ chimera_nfs4_compound_try_vfs(
                 }
 
                 /* The same two stateid rules READ and WRITE have, and for the
-                 * same reasons: a current stateid needs an io_owner the
-                 * sequence cannot derive (see the SETATTR case), and a special
-                 * or delegation stateid is authorized against the object the
-                 * sequence starts from. */
+                 * same reasons: a current stateid names an open whose
+                 * authorization the sequence cannot settle (see the SETATTR
+                 * case), and a special or delegation stateid is authorized
+                 * against the object the sequence starts from. */
                 if (chimera_nfs4_stateid_is_current(sid)) {
                     nenc = i;
                     stop = 1;
@@ -3785,7 +3802,8 @@ chimera_nfs4_compound_try_vfs(
                 }
 
                 /* See the SETATTR case: substituting the current stateid
-                 * needs an io_owner the sequence cannot derive. */
+                 * names an open whose OPENMODE and deny checks the sequence
+                 * cannot settle before it runs. */
                 if (chimera_nfs4_stateid_is_current(sid)) {
                     nenc = i;
                     stop = 1;
@@ -3845,23 +3863,46 @@ chimera_nfs4_compound_try_vfs(
                  * An OPEN in the same run produces one -- and now sits inside
                  * the run rather than ending it, so "PUTFH; OPEN; WRITE(current)"
                  * is a shape this path could be asked to carry.  It still
-                 * cannot.  The object is reachable: the op addresses the
-                 * handle the OPEN produced, which is what
-                 * chimera_vfs_compound_op_use_handle names and what the
-                 * truncate behind an OPEN already does.  What is NOT reachable
-                 * is who the I/O belongs to: an operation under an open
-                 * stateid is attributed to (client, that handle's fh_hash)
-                 * (nfs4_vfs_io_authorize), and the handle does not exist when
-                 * the sequence is built.  The executor takes io_owner as a
-                 * value the caller supplies (vfs_compound.c:2414, :2459) and
-                 * never derives owner_lo from a handle_from target, so there
-                 * is nothing to fill it with -- and a stateid operation that
-                 * arbitrates against its own client's reservation is denied,
-                 * and recalls the delegation it is being done under.
+                 * cannot, but no longer for the reason that used to be written
+                 * here.  Two of the three obstacles are gone: the OBJECT is
+                 * reachable through chimera_vfs_compound_op_use_handle, which
+                 * names the OPEN's own handle and is what the truncate behind
+                 * an OPEN already does; and the OWNER is reachable too, because
+                 * owner_lo is chimera_vfs_hash of the FILE HANDLE and a gate
+                 * consulted on the OPEN can read it off the handle that op
+                 * produced and write io_owner into the I/O ahead of it (the
+                 * route vfs_compound.h spells out on the WRITE adder).
                  *
-                 * So these stay refused, whole rather than half: the op-at-a-
-                 * time path runs them after the OPEN's fill has set the
-                 * current stateid, and reaches the right answer. */
+                 * What is NOT reachable is the AUTHORIZATION, and both halves
+                 * of it are state the request does not carry:
+                 *
+                 *   OPENMODE.  nfs4_vfs_io_authorize tests the I/O against
+                 *     open_state->share_access, and that is the UNION over
+                 *     every OPEN this open-owner has made on this file --
+                 *     nfs_open_state_coalesce ORs the new bits into the
+                 *     existing state.  Re-deriving it from this OPEN's own
+                 *     args->share_access would answer NFS4ERR_OPENMODE for a
+                 *     "PUTFH; OPEN(READ); WRITE(current)" that the op-at-a-time
+                 *     path serves, because the state the OPEN coalesced onto
+                 *     already carried WRITE.
+                 *
+                 *   THE DENY CHECK.  nfs_open_state_check_io_denied asks
+                 *     whether any OTHER open-owner of this client holds a deny
+                 *     covering this access on this object, and it excludes the
+                 *     requesting owner BY POINTER and keys on the object's file
+                 *     handle.  The open-owner is resolved inside
+                 *     chimera_nfs4_open_install_state, which runs when the
+                 *     results are FILLED, and for a named OPEN the file handle
+                 *     is what the OPEN itself produces -- so asking the
+                 *     question before the sequence starts means resolving both
+                 *     on this side, which is the name resolution carrying OPEN
+                 *     in the run removed.
+                 *
+                 * Both questions are also asked of state this run's own OPEN is
+                 * about to change, and the change lands in the fill.  So these
+                 * stay refused, whole rather than half: the op-at-a-time path
+                 * runs them after the OPEN's fill has installed the state and
+                 * set the current stateid, and reaches the right answer. */
                 if (chimera_nfs4_stateid_is_current(&sa->stateid)) {
                     nenc = i;
                     stop = 1;

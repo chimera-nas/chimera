@@ -244,16 +244,11 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
         chunk = refs->remaining;
     }
 
+    /* The handles copy_begin settled: the stateid's, or the one COPY opened
+     * for itself when the stateid was a special one and named no open. */
     src_handle    = refs->src_handle;
     dst_handle    = refs->dst_handle;
     refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
-
-    if (refs->src_own) {
-        src_handle = refs->src_own;
-    }
-    if (refs->dst_own) {
-        dst_handle = refs->dst_own;
-    }
 
     /* Attribute the read to the client that holds the source stateid, as
      * READ does, and the write to the one that holds the destination's.  Left
