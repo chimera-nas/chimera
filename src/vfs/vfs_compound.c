@@ -1591,44 +1591,6 @@ chimera_vfs_compound_op_of_type(
     return op;
 } /* chimera_vfs_compound_op_of_type */
 
-/*
- * Attribute an op's I/O to an owner whose owner_lo is the object's, not the
- * caller's -- see the declaration for why the caller cannot supply it.
- *
- * The actor is copied whole and owner_lo is filled in at step time, from the
- * handle the op turns out to address.  Nothing is resolved here: the handle
- * this op will act on may be one an op AHEAD of it has not run yet.
- */
-SYMBOL_EXPORT void
-chimera_vfs_compound_op_set_io_owner_from_handle(
-    struct chimera_vfs_compound      *compound,
-    uint32_t                          index,
-    const struct chimera_claim_actor *io_owner)
-{
-    struct chimera_vfs_compound_op *op;
-
-    op = chimera_vfs_compound_op_of_type(compound, index,
-                                         CHIMERA_VFS_COMPOUND_OP_READ,
-                                         CHIMERA_VFS_COMPOUND_OP_WRITE);
-
-    if (!op || !io_owner) {
-        return;
-    }
-
-    /* There is no owned read_into, so a read landing in the caller's own
-     * buffers cannot name an owner -- the same refusal the adder makes for the
-     * explicit form, made here for the derived one. */
-    if (op->dest_iov) {
-        compound->build_failed = 1;
-        return;
-    }
-
-    op->io_owner                = *io_owner;
-    op->io_owner.owner.owner_lo = 0;
-    op->have_io_owner           = 1;
-    op->io_owner_from_handle    = 1;
-} /* chimera_vfs_compound_op_set_io_owner_from_handle */
-
 /* The 16-byte directory lease key, copied; NULL clears it. */
 static void
 chimera_vfs_compound_op_set_lease_skip(
@@ -5221,16 +5183,6 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
         case CHIMERA_VFS_COMPOUND_OP_READ:
         case CHIMERA_VFS_COMPOUND_OP_WRITE:
         {
-            /* The actor this I/O is attributed to.  A DERIVED owner is the
-             * op's actor with owner_lo replaced by the fh_hash of whatever the
-             * op ended up addressing -- which is the earliest moment that
-             * value exists when the open producing it is IN this run.  It is a
-             * local because read_owned / write_owned copy the actor by value
-             * into the request; the op's own copy keeps the caller's half
-             * intact, so a re-run derives again rather than accumulating. */
-            struct chimera_claim_actor        derived;
-            const struct chimera_claim_actor *actor = NULL;
-
             /* An op addressing the current object establishes the object's
              * type before it is opened for data -- so a non-regular one is
              * refused here, and the data open is never attempted.  An op that
@@ -5244,16 +5196,6 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                     chimera_vfs_compound_io_type_callback,
                                     compound);
                 break;
-            }
-
-            if (op->have_io_owner) {
-                actor = &op->io_owner;
-
-                if (op->io_owner_from_handle) {
-                    derived                = op->io_owner;
-                    derived.owner.owner_lo = target ? target->fh_hash : 0;
-                    actor                  = &derived;
-                }
             }
 
             if (op->type == CHIMERA_VFS_COMPOUND_OP_READ) {
@@ -5270,12 +5212,12 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                           op->attr_mask,
                                           chimera_vfs_compound_read_callback,
                                           compound);
-                } else if (actor) {
+                } else if (op->have_io_owner) {
                     chimera_vfs_read_owned(compound->thread, compound->cred,
                                            target,
                                            op->offset, op->count,
                                            op->iov, op->max_iov,
-                                           op->attr_mask, actor,
+                                           op->attr_mask, &op->io_owner,
                                            chimera_vfs_compound_read_callback,
                                            compound);
                 } else {
@@ -5287,13 +5229,13 @@ chimera_vfs_compound_step(struct chimera_vfs_compound *compound)
                                      chimera_vfs_compound_read_callback,
                                      compound);
                 }
-            } else if (actor) {
+            } else if (op->have_io_owner) {
                 chimera_vfs_write_owned(compound->thread, compound->cred,
                                         target,
                                         op->offset, op->count, op->sync,
                                         op->pre_attr_mask, op->attr_mask,
                                         op->w_iov, op->w_niov,
-                                        actor,
+                                        &op->io_owner,
                                         chimera_vfs_compound_write_callback,
                                         compound);
             } else {
