@@ -7,113 +7,111 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
 
+/*
+ * How many iovecs one READ's answer may arrive in; the VFS-compound path
+ * reserves the same number.
+ */
+#define NFS4_READ_MAX_IOV 256
+
+/*
+ * PUTFH, OPEN_CURRENT, READ for a stateid that carries no handle, and the READ
+ * alone against the handle an open or lock stateid holds.  The READ is the last
+ * op either way, and its data iovecs are TAKEN from the run: they are the
+ * reply's payload and have to outlive the sequence that produced them.
+ */
 static void
 chimera_nfs4_read_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct READ4res    *res = &req->res_compound.resarray[req->index].opread;
+    struct nfs_request                   *req = private_data;
+    struct READ4res                      *res = &req->res_compound.resarray[req->index].opread;
+    const struct chimera_vfs_compound_op *rop;
+    struct evpl_iovec                    *iov  = NULL;
+    int                                   niov = 0;
+    enum chimera_vfs_error                error_code;
+    uint32_t                              idx;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    idx = chimera_vfs_compound_num_ops(compound) - 1;
+    rop = chimera_vfs_compound_op(compound, idx);
 
     if (error_code == CHIMERA_VFS_OK) {
+        chimera_vfs_compound_take_iov(compound, idx, &iov, &niov);
+
         res->status             = NFS4_OK;
-        res->resok4.eof         = eof;
-        res->resok4.data.length = count;
+        res->resok4.eof         = rop->eof_read;
+        res->resok4.data.length = rop->read_len;
         res->resok4.data.iov    = iov;
         res->resok4.data.niov   = niov;
     } else {
+        /* Nothing to release: a READ that did not run took no references, and
+         * one that ran and was then failed by a later op has its data freed
+         * with the sequence. */
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        evpl_iovecs_release(req->thread->evpl, iov, niov);
     }
+
+    chimera_vfs_compound_free(compound);
 
     if (req->nfs_state_ref) {
         nfs_state_table_release(&req->thread->shared->nfs4_state_table,
                                 req->nfs_state_ref, req->nfs_state_type,
                                 req->thread->vfs_thread);
         req->nfs_state_ref = NULL;
-    } else if (req->handle) {
-        /* Anonymous stateid: release the on-the-fly handle we opened. */
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, res->status);
-
 } /* chimera_nfs4_read_complete */
 
+/*
+ * The shape for a stateid with no handle of its own -- an anonymous or special
+ * one, a pNFS data-server read, or a delegation stateid.  The object is the
+ * current file handle and the sequence opens it, with the same REGULAR_ONLY
+ * data open the per-op path used, so a non-regular object is refused by the
+ * open rather than by the backend's read.
+ *
+ * `io_owner` says whose I/O it is when a delegation authorizes it: without it
+ * the claim layer arbitrates this client's read against this client's own
+ * delegation, denies it, and recalls the delegation the read is being done
+ * under.  owner_lo is chimera_vfs_hash of the FILE HANDLE and nothing else, so
+ * it is computable here, before anything is open.
+ */
 static void
-chimera_nfs4_read_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs4_read_by_fh(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct chimera_claim_actor *io_owner)
 {
-    struct nfs_request *req  = private_data;
-    struct READ4args   *args = &req->args_compound->argarray[req->index].opread;
-    struct READ4res    *res  = &req->res_compound.resarray[req->index].opread;
-    struct evpl_iovec  *iov;
+    struct READ4args            *args = &req->args_compound->argarray[req->index].opread;
+    struct chimera_vfs_compound *compound;
+    struct evpl_iovec           *iov;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    req->handle = handle;
-
-    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * NFS4_READ_MAX_IOV,
+                               req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
-    if (req->io_owner_from_deleg) {
-        /* A delegation-authorized read: present the delegation holder's own
-        * claim actor (same protocol/client/fh as the cache claim created at
-        * OPEN) so the VFS I/O path recognises the reader as the delegation
-        * holder and does not recall the client's own delegation.  Other
-        * (anonymous-stateid / pNFS-DS) on-the-fly reads keep the implicit
-        * claim so they still recall *other* clients' conflicting claims. */
-        struct chimera_claim_actor io_owner = {
-            .owner          = {
-                .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
-                .client_key = req->session->client_unified->client_id,
-                .owner_lo   = handle->fh_hash,
-                .owner_hi   = 0,
-            },
-        };
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
 
-        chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
-                               handle,
-                               args->offset,
-                               args->count,
-                               iov,
-                               256,
-                               0,
-                               &io_owner,
-                               chimera_nfs4_read_complete,
-                               req);
-        return;
-    }
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_READ_ONLY |
+                                          CHIMERA_VFS_OPEN_NOFOLLOW |
+                                          CHIMERA_VFS_OPEN_REGULAR_ONLY, 0);
+    chimera_vfs_compound_add_read(compound, NULL,
+                                  args->offset, args->count,
+                                  iov, NFS4_READ_MAX_IOV,
+                                  0, io_owner, NULL, 0);
 
-    chimera_vfs_read(req->thread->vfs_thread, &req->cred,
-                     handle,
-                     args->offset,
-                     args->count,
-                     iov,
-                     256,
-                     0,
-                     chimera_nfs4_read_complete,
-                     req);
-} /* chimera_nfs4_read_open_callback */
+    chimera_vfs_compound_submit(compound, chimera_nfs4_read_complete, req);
+} /* chimera_nfs4_read_by_fh */
 
 void
 chimera_nfs4_read(
@@ -187,15 +185,7 @@ chimera_nfs4_read(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh,
-                            req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED |
-                            CHIMERA_VFS_OPEN_READ_ONLY |
-                            CHIMERA_VFS_OPEN_NOFOLLOW |
-                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
-                            chimera_nfs4_read_open_callback,
-                            req);
+        chimera_nfs4_read_by_fh(thread, req, NULL);
         return;
     }
 
@@ -234,15 +224,21 @@ chimera_nfs4_read(
          * client's own delegation. */
         req->io_owner_from_deleg = (req->session &&
                                     req->session->client_unified);
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh,
-                            req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED |
-                            CHIMERA_VFS_OPEN_READ_ONLY |
-                            CHIMERA_VFS_OPEN_NOFOLLOW |
-                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
-                            chimera_nfs4_read_open_callback,
-                            req);
+
+        if (req->io_owner_from_deleg) {
+            struct chimera_claim_actor io_owner = {
+                .owner          = {
+                    .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                    .client_key = req->session->client_unified->client_id,
+                    .owner_lo   = chimera_vfs_hash(req->fh,               req->fhlen),
+                    .owner_hi   = 0,
+                },
+            };
+
+            chimera_nfs4_read_by_fh(thread, req, &io_owner);
+        } else {
+            chimera_nfs4_read_by_fh(thread, req, NULL);
+        }
         return;
     }
 
@@ -302,7 +298,7 @@ chimera_nfs4_read(
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    struct chimera_claim_actor io_owner = {
+    struct chimera_claim_actor   io_owner = {
         .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
             .client_key = open_state->owner->client->client_id,
@@ -310,18 +306,20 @@ chimera_nfs4_read(
             .owner_hi   = 0,
         },
     };
-    struct evpl_iovec         *iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256,
-                                                          req->encoding->dbuf);
+    struct evpl_iovec           *iov = xdr_dbuf_alloc_space(sizeof(*iov) *
+                                                            NFS4_READ_MAX_IOV,
+                                                            req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
-    chimera_vfs_read_owned(thread->vfs_thread, &req->cred,
-                           state_handle,
-                           args->offset,
-                           args->count,
-                           iov,
-                           256,
-                           0,
-                           &io_owner,
-                           chimera_nfs4_read_complete,
-                           req);
+    /* The stateid names the object, so the run is the READ alone against the
+     * handle the state holds -- lent, and released with the state above. */
+    struct chimera_vfs_compound *compound =
+        chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_read(compound, state_handle,
+                                  args->offset, args->count,
+                                  iov, NFS4_READ_MAX_IOV,
+                                  0, &io_owner, NULL, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_read_complete, req);
 } /* chimera_nfs4_read */

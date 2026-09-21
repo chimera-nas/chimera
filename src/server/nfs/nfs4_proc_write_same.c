@@ -7,8 +7,7 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
@@ -18,32 +17,39 @@
  * WRITE_SAME (RFC 7862 15.13) writes an Application Data Block pattern -- a
  * small pattern replicated across a run of fixed-size blocks -- so the client
  * initializes a large region with a tiny request.  Chimera projects the
- * expansion into the backend (chimera_vfs_write_same); backends without
- * CAP_WRITE_SAME surface NFS4ERR_NOTSUPP.
+ * expansion into the backend; backends without CAP_WRITE_SAME surface
+ * NFS4ERR_NOTSUPP.
  *
  * Phase 1 does not stamp per-block numbers: an ADB requesting block-number
  * stamping (adb_reloff_blocknum != NFS4_UINT64_MAX) is rejected with
  * NFS4ERR_UNION_NOTSUPP (the unsupported arm of the operation).
+ *
+ * PUTFH, OPEN_CURRENT, WRITE_SAME for a stateid that carries no handle, and the
+ * WRITE_SAME alone against the handle an open or lock stateid holds.  The
+ * pattern is BORROWED by the run, as it was by the per-op call, and lives in
+ * the request's decoded arguments for as long as the run does.
  */
-
 static void
 chimera_nfs4_write_same_complete(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  count,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request    *req = private_data;
-    struct WRITE_SAME4res *res = &req->res_compound.resarray[req->index].opwrite_same;
+    struct nfs_request                   *req = private_data;
+    struct WRITE_SAME4res                *res = &req->res_compound.resarray[req->index].opwrite_same;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
         res->wsr_status                = NFS4_OK;
         res->resok4.num_wr_callback_id = 0;
         res->resok4.wr_callback_id     = NULL;
-        res->resok4.wr_count           = count;
-        res->resok4.wr_committed       = sync;
+        res->resok4.wr_count           = op->written;
+        res->resok4.wr_committed       = op->committed;
         memcpy(res->resok4.wr_writeverf,
                &req->thread->shared->nfs_verifier,
                sizeof(res->resok4.wr_writeverf));
@@ -51,14 +57,13 @@ chimera_nfs4_write_same_complete(
         res->wsr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
 
+    chimera_vfs_compound_free(compound);
+
     if (req->nfs_state_ref) {
         nfs_state_table_release(&req->thread->shared->nfs4_state_table,
                                 req->nfs_state_ref, req->nfs_state_type,
                                 req->thread->vfs_thread);
         req->nfs_state_ref = NULL;
-    } else if (req->handle) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, res->wsr_status);
@@ -69,40 +74,30 @@ chimera_nfs4_write_same_issue(
     struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle)
 {
-    struct WRITE_SAME4args *args = &req->args_compound->argarray[req->index].opwrite_same;
+    struct WRITE_SAME4args      *args = &req->args_compound->argarray[req->index].opwrite_same;
+    struct chimera_vfs_compound *compound;
 
-    chimera_vfs_write_same(req->thread->vfs_thread, &req->cred,
-                           handle,
-                           args->wsa_adb.adb_offset,
-                           (uint32_t) args->wsa_adb.adb_block_size,
-                           args->wsa_adb.adb_block_count,
-                           args->wsa_adb.adb_pattern.data,
-                           args->wsa_adb.adb_pattern.len,
-                           (uint32_t) args->wsa_adb.adb_reloff_pattern,
-                           args->wsa_stable,
-                           0, 0,
-                           chimera_nfs4_write_same_complete,
-                           req);
-} /* chimera_nfs4_write_same_issue */
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
 
-static void
-chimera_nfs4_write_same_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request    *req = private_data;
-    struct WRITE_SAME4res *res = &req->res_compound.resarray[req->index].opwrite_same;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->wsr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->wsr_status);
-        return;
+    if (!handle) {
+        chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED, 0);
     }
 
-    req->handle = handle;
-    chimera_nfs4_write_same_issue(req, handle);
-} /* chimera_nfs4_write_same_open_callback */
+    chimera_vfs_compound_add_write_same(compound, handle,
+                                        args->wsa_adb.adb_offset,
+                                        (uint32_t) args->wsa_adb.adb_block_size,
+                                        args->wsa_adb.adb_block_count,
+                                        args->wsa_adb.adb_pattern.data,
+                                        args->wsa_adb.adb_pattern.len,
+                                        (uint32_t) args->wsa_adb.adb_reloff_pattern,
+                                        args->wsa_stable,
+                                        0, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_write_same_complete,
+                                req);
+} /* chimera_nfs4_write_same_issue */
 
 void
 chimera_nfs4_write_same(
@@ -181,11 +176,7 @@ chimera_nfs4_write_same(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh, req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED,
-                            chimera_nfs4_write_same_open_callback,
-                            req);
+        chimera_nfs4_write_same_issue(req, NULL);
         return;
     }
 
@@ -217,11 +208,7 @@ chimera_nfs4_write_same(
             chimera_nfs4_compound_complete(req, res->wsr_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh, req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED,
-                            chimera_nfs4_write_same_open_callback,
-                            req);
+        chimera_nfs4_write_same_issue(req, NULL);
         return;
     }
 

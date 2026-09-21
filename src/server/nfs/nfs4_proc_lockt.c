@@ -13,13 +13,24 @@
 #include "nfs4_status.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 
+/*
+ * PUTFH, OPEN_CURRENT(meta), GETATTR, GETHANDLE.
+ *
+ * The probe itself is not a VFS operation and stays where it was: it reads the
+ * claim core's per-file state directly and inserts nothing.  What it needs from
+ * the run is the object's type and an open handle to key the file state on --
+ * which is why the last op is a GETHANDLE, transferring the handle the run
+ * opened so the probe can outlive the sequence.
+ */
+#define NFS4_LOCKT_OP_GETATTR   2
+#define NFS4_LOCKT_OP_GETHANDLE 3
+
 static void
 chimera_nfs4_lockt_probe(
-    enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
@@ -34,13 +45,6 @@ chimera_nfs4_lockt_probe(
     struct chimera_vfs_claim_conflict conflict;
     enum chimera_vfs_claim_result     result;
     uint64_t                          vfs_length;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(req->thread->vfs_thread, handle);
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
 
     /* RFC 7530 §16.11.4: byte-range locking is defined only for regular
      * files.  A directory target is NFS4ERR_ISDIR; any other non-regular
@@ -125,16 +129,38 @@ chimera_nfs4_lockt_probe(
 
 static void
 chimera_nfs4_lockt_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req  = private_data;
-    struct LOCKT4args  *args = &req->args_compound->argarray[req->index].oplockt;
-    struct LOCKT4res   *res  = &req->res_compound.resarray[req->index].oplockt;
+    struct nfs_request                   *req  = private_data;
+    struct LOCKT4args                    *args = &req->args_compound->argarray[req->index].oplockt;
+    struct LOCKT4res                     *res  = &req->res_compound.resarray[req->index].oplockt;
+    const struct chimera_vfs_compound_op *gop;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_free(compound);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    gop  = chimera_vfs_compound_op(compound, NFS4_LOCKT_OP_GETATTR);
+    attr = gop->attr;
+
+    /* The handle becomes the request's: the probe below keys the claim core's
+     * file state on it and runs after the sequence is over.  The ACL the stat
+     * may carry is the compound's and is not read by any of this. */
+    req->handle = chimera_vfs_compound_take_handle(compound,
+                                                   NFS4_LOCKT_OP_GETHANDLE);
+
+    chimera_vfs_compound_free(compound);
+
+    if (!req->handle) {
+        res->status = NFS4ERR_SERVERFAULT;
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
@@ -142,18 +168,14 @@ chimera_nfs4_lockt_open_complete(
     /* RFC 7530 §16.11.4: same length rules as LOCK */
     if (args->length == 0 ||
         (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
-        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
         res->status = NFS4ERR_INVAL;
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    /* Fetch the target's type before probing -- LOCKT is only valid on a
-     * regular file (see chimera_nfs4_lockt_probe). */
-    req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, handle,
-                        CHIMERA_VFS_ATTR_MASK_STAT,
-                        chimera_nfs4_lockt_probe, req);
+    chimera_nfs4_lockt_probe(&attr, req);
 } /* chimera_nfs4_lockt_open_complete */
 
 void
@@ -163,8 +185,9 @@ chimera_nfs4_lockt(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LOCKT4args *args = &argop->oplockt;
-    struct LOCKT4res  *res  = &resop->oplockt;
+    struct LOCKT4args           *args = &argop->oplockt;
+    struct LOCKT4res            *res  = &resop->oplockt;
+    struct chimera_vfs_compound *compound;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -205,13 +228,21 @@ chimera_nfs4_lockt(
         }
     }
 
-    /* LOCKT operates on CURRENT_FH - open it temporarily to validate. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED |
-                        CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_NOFOLLOW,
-                        chimera_nfs4_lockt_open_complete,
-                        req);
+    /* LOCKT operates on CURRENT_FH - open it temporarily to validate.  A PATH
+     * open, because nothing is read through the handle and a data open of a
+     * FIFO blocks. */
+    req->handle = NULL;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_NOFOLLOW, 0);
+    chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MASK_STAT);
+    chimera_vfs_compound_add_gethandle(compound);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_lockt_open_complete,
+                                req);
 } /* chimera_nfs4_lockt */

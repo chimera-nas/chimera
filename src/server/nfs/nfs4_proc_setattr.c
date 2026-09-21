@@ -9,29 +9,37 @@
 #include "nfs4_stateid.h"
 #include "nfs4_session.h"
 #include "nfs4_cb.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 
 static void
 chimera_nfs4_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct SETATTR4args              *args   = &req->args_compound->argarray[req->index].opsetattr;
-    struct SETATTR4res               *res    = &req->res_compound.resarray[req->index].opsetattr;
+    struct nfs_request                   *req    = private_data;
+    struct chimera_server_nfs_thread     *thread = req->thread;
+    struct SETATTR4args                  *args   = &req->args_compound->argarray[req->index].opsetattr;
+    struct SETATTR4res                   *res    = &req->res_compound.resarray[req->index].opsetattr;
+    const struct chimera_vfs_compound_op *sop;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code == CHIMERA_VFS_OK) {
+        /* The op's set_attr reports what was actually applied, which is what
+         * the reply's attrsset bitmap names. */
+        sop = chimera_vfs_compound_op(compound,
+                                      chimera_vfs_compound_num_ops(compound) - 1);
+
+        struct chimera_vfs_attrs applied = sop->set_attr;
+
         res->status = NFS4_OK;
 
         res->attrsset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), req->encoding->dbuf);
         chimera_nfs_abort_if(res->attrsset == NULL, "Failed to allocate space");
 
-        res->num_attrsset = chimera_nfs4_mask2attr(set_attr,
+        res->num_attrsset = chimera_nfs4_mask2attr(&applied,
                                                    args->obj_attributes.num_attrmask,
                                                    args->obj_attributes.attrmask,
                                                    res->attrsset);
@@ -40,33 +48,43 @@ chimera_nfs4_setattr_complete(
         res->num_attrsset = 0;
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
+    chimera_vfs_compound_free(compound);
+
+    /* The stateid's handle was LENT to the run: this reference is the dup
+     * taken below, and the sequence never owned it.  The path shape lends
+     * nothing and leaves this NULL, its open having gone with the run. */
+    if (req->handle) {
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+        req->handle = NULL;
+    }
 
     chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_setattr_complete */
 
-/* Unmarshall the requested attributes and apply them to `handle`.  fd_rights
- * selects descriptor semantics (chimera_vfs_fsetattr): a size change through
- * an open stateid is authorized by the OPEN, exactly as ftruncate(2) is by
- * its descriptor, and must not be re-gated against the file's current mode. */
+/* Unmarshall the requested attributes and apply them to `handle`.  A handle
+* NAMED by the caller carries descriptor semantics: a size change through an
+* open stateid is authorized by the OPEN, exactly as ftruncate(2) is by its
+* descriptor, and must not be re-gated against the file's current mode.  With
+* no handle the run PATH-opens the current object and the mode decides, which
+* is what truncate(2) means and what chimera_vfs_setattr did here before. */
 static void
 chimera_nfs4_setattr_apply(
     struct nfs_request             *req,
-    struct chimera_vfs_open_handle *handle,
-    int                             fd_rights)
+    struct chimera_vfs_open_handle *handle)
 {
-    struct SETATTR4args      *args = &req->args_compound->argarray[req->index].opsetattr;
-    struct SETATTR4res       *res  = &req->res_compound.resarray[req->index].opsetattr;
-    struct chimera_vfs_attrs *attr;
-    int                       rc;
+    struct SETATTR4args         *args = &req->args_compound->argarray[req->index].opsetattr;
+    struct SETATTR4res          *res  = &req->res_compound.resarray[req->index].opsetattr;
+    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_attrs    *attr;
+    int                          rc;
 
     attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
 
     req->handle = handle;
 
-    struct chimera_acl       *acl_buf      = NULL;
-    unsigned                  acl_buf_aces = 0;
+    struct chimera_acl          *acl_buf      = NULL;
+    unsigned                     acl_buf_aces = 0;
     if (args->obj_attributes.num_attrmask >= 1 &&
         (args->obj_attributes.attrmask[0] & (1 << FATTR4_ACL))) {
         acl_buf = xdr_dbuf_alloc_space(chimera_acl_size(CHIMERA_ACL_MAX_ACES),
@@ -84,50 +102,34 @@ chimera_nfs4_setattr_apply(
 
     if (rc != NFS4_OK) {
         res->status = rc;
-        chimera_vfs_release(req->thread->vfs_thread, handle);
+
+        /* Only the stateid shape lent a handle, and only it has one to put
+         * back; the path shape has opened nothing yet. */
+        if (handle) {
+            chimera_vfs_release(req->thread->vfs_thread, handle);
+            req->handle = NULL;
+        }
+
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    if (fd_rights) {
-        chimera_vfs_fsetattr(req->thread->vfs_thread,
-                             &req->cred,
-                             handle,
-                             attr,
-                             0,
-                             0,
-                             chimera_nfs4_setattr_complete,
-                             req);
-    } else {
-        chimera_vfs_setattr(req->thread->vfs_thread,
-                            &req->cred,
-                            handle,
-                            attr,
-                            0,
-                            0,
-                            chimera_nfs4_setattr_complete,
-                            req);
+    /* Both the struct and the ACL it points at live in the request's own bump
+     * allocator, which outlives the reply -- the set_attr contract, where the
+     * ACL is BORROWED and the caller keeps it alive for the life of the run. */
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+
+    if (!handle) {
+        chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_PATH, 0);
     }
+
+    chimera_vfs_compound_add_setattr(compound, handle, attr, 0, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_setattr_complete, req);
 } /* chimera_nfs4_setattr_apply */
-
-static void
-chimera_nfs4_setattr_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req = private_data;
-    struct SETATTR4res *res = &req->res_compound.resarray[req->index].opsetattr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        req->handle = handle;
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    chimera_nfs4_setattr_apply(req, handle, 0);
-} /* chimera_nfs4_setattr_open_callback */
 
 /* Apply the attributes -- through the open stateid's own handle when the
  * size-change validation stashed one (descriptor rights), otherwise via a
@@ -138,21 +140,7 @@ nfs4_setattr_proceed(void *arg)
 {
     struct nfs_request *req = arg;
 
-    if (req->handle) {
-        struct chimera_vfs_open_handle *handle = req->handle;
-
-        req->handle = NULL;
-        chimera_nfs4_setattr_apply(req, handle, 1);
-        return;
-    }
-
-    chimera_vfs_open_fh(req->thread->vfs_thread,
-                        &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs4_setattr_open_callback,
-                        req);
+    chimera_nfs4_setattr_apply(req, req->handle);
 } /* nfs4_setattr_proceed */
 
 void

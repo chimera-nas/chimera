@@ -7,7 +7,7 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "evpl/evpl.h"
 #include "common/evpl_iovec_cursor.h"
@@ -26,6 +26,11 @@
  * last byte returned).  Backends without CAP_READ_PLUS surface NFS4ERR_NOTSUPP,
  * and the client falls back to plain READ.
  */
+
+/* How many iovecs one data run may arrive in; the plain READ reserves the
+ * same number. */
+#define NFS4_READ_PLUS_MAX_IOV 256
+
 
 /* Release the acquired state ref or on-the-fly handle, then complete. */
 static void
@@ -51,222 +56,233 @@ chimera_nfs4_read_plus_finish(
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_read_plus_finish */
 
-/* Completion of the data read for a DATA segment: flatten the bytes into the
- * (copying) data4 opaque and emit one NFS4_CONTENT_DATA element. */
+/*
+ * READ_PLUS is TWO ops: the classification, and -- only when it says DATA -- the
+ * read of the bytes it described.  The gate is what makes that "only": it reads
+ * the classification as it finishes, skips the READ behind it on a hole or an
+ * empty run, and otherwise writes the run's length into the READ's count.  That
+ * is an ordinary gate edit under the ordinary rule -- assigned from the
+ * caller's own offset plus what the finished op reported, never accumulated --
+ * so a second execution computes the same read.
+ *
+ * The run's shape depends on how the object was reached: a stateid carries its
+ * own handle and the run is the two ops alone; a stateid that carries none
+ * opens the current object, behind the type gate a data open of a FIFO makes
+ * necessary.  The indices are therefore carried rather than fixed.
+ */
+struct nfs4_read_plus_ctx {
+    struct nfs_request *req;
+    int                 type_op;
+    int                 plus_op;
+    int                 read_op;
+};
+
 static void
-chimera_nfs4_read_plus_data_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_nfs4_read_plus_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct nfs_request       *req  = private_data;
-    struct READ_PLUS4args    *args = &req->args_compound->argarray[req->index].opread_plus;
-    struct READ_PLUS4res     *res  = &req->res_compound.resarray[req->index].opread_plus;
-    struct read_plus_content *content;
+    struct nfs4_read_plus_ctx            *ctx  = private_data;
+    struct nfs_request                   *req  = ctx->req;
+    struct READ_PLUS4args                *args = &req->args_compound->argarray[req->index].opread_plus;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_compound_op       *edit;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        evpl_iovecs_release(req->thread->evpl, iov, niov);
-        chimera_nfs4_read_plus_finish(req, chimera_nfs4_errno_to_nfsstat4(error_code));
+    if (*status != CHIMERA_VFS_OK) {
         return;
     }
 
-    res->rp_resok4.rpr_eof = eof;
+    if ((int) index == ctx->type_op) {
+        op = chimera_vfs_compound_op(compound, index);
 
-    if (count == 0) {
-        res->rp_resok4.num_rpr_contents = 0;
-        res->rp_resok4.rpr_contents     = NULL;
-        evpl_iovecs_release(req->thread->evpl, iov, niov);
-        chimera_nfs4_read_plus_finish(req, NFS4_OK);
+        if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            !S_ISREG(op->attr.va_mode)) {
+            *status = CHIMERA_VFS_EINVAL;
+        }
+
         return;
     }
 
-    content = xdr_dbuf_alloc_space(sizeof(*content), req->encoding->dbuf);
-    chimera_nfs_abort_if(content == NULL, "Failed to allocate space");
-
-    content->rpc_content       = NFS4_CONTENT_DATA;
-    content->rpc_data.d_offset = args->rpa_offset;
-
-    /* data4.d_data is a plain (copying) opaque, so flatten the read iovecs into
-     * a contiguous dbuf-backed buffer for the marshaller. */
-    chimera_nfs_abort_if(
-        xdr_dbuf_alloc_opaque(&content->rpc_data.d_data, count,
-                              req->encoding->dbuf) != 0,
-        "Failed to allocate space");
-    content->rpc_data.d_data.len = count;
-
-    struct evpl_iovec_cursor cursor;
-    evpl_iovec_cursor_init(&cursor, iov, niov);
-    evpl_iovec_cursor_copy(&cursor, content->rpc_data.d_data.data, count);
-
-    evpl_iovecs_release(req->thread->evpl, iov, niov);
-
-    res->rp_resok4.num_rpr_contents = 1;
-    res->rp_resok4.rpr_contents     = content;
-
-    chimera_nfs4_read_plus_finish(req, NFS4_OK);
-} /* chimera_nfs4_read_plus_data_complete */
-
-/* Completion of the backend segment classification.  For a DATA run, fetch the
- * bytes with a normal read; for a HOLE run, emit a hole descriptor; at EOF,
- * emit an empty content array. */
-static void
-chimera_nfs4_read_plus_classify_complete(
-    enum chimera_vfs_error error_code,
-    uint32_t               is_data,
-    uint64_t               length,
-    uint32_t               eof,
-    void                  *private_data)
-{
-    struct nfs_request       *req  = private_data;
-    struct READ_PLUS4args    *args = &req->args_compound->argarray[req->index].opread_plus;
-    struct READ_PLUS4res     *res  = &req->res_compound.resarray[req->index].opread_plus;
-    struct read_plus_content *content;
-    struct evpl_iovec        *iov;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs4_read_plus_finish(req, chimera_nfs4_errno_to_nfsstat4(error_code));
+    if ((int) index != ctx->plus_op) {
         return;
     }
 
-    res->rp_resok4.rpr_eof = eof;
+    op   = chimera_vfs_compound_op(compound, index);
+    edit = chimera_vfs_compound_op_edit(compound, (uint32_t) ctx->read_op);
 
-    if (is_data && length > 0) {
-        /* Fetch the data run via the normal read path (handles buffer and
-         * thread ownership); the response is built in the read completion. */
-        iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
-        chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
-
-        chimera_vfs_read(req->thread->vfs_thread, &req->cred,
-                         req->handle,
-                         args->rpa_offset,
-                         (uint32_t) length,
-                         iov, 256, 0,
-                         chimera_nfs4_read_plus_data_complete,
-                         req);
+    if (!edit) {
         return;
     }
 
-    if (!is_data && length > 0) {
-        content = xdr_dbuf_alloc_space(sizeof(*content), req->encoding->dbuf);
-        chimera_nfs_abort_if(content == NULL, "Failed to allocate space");
-
-        content->rpc_content        = NFS4_CONTENT_HOLE;
-        content->rpc_hole.di_offset = args->rpa_offset;
-        content->rpc_hole.di_length = length;
-
-        res->rp_resok4.num_rpr_contents = 1;
-        res->rp_resok4.rpr_contents     = content;
+    if (op->is_data && op->read_len > 0) {
+        edit->offset = args->rpa_offset;
+        edit->count  = op->read_len;
     } else {
-        /* At/past EOF or empty range: no content segments. */
-        res->rp_resok4.num_rpr_contents = 0;
-        res->rp_resok4.rpr_contents     = NULL;
+        /* A hole, or nothing left to describe: there are no bytes to fetch.
+         * The gate's skip -- not the caller's, which a gate cannot clear -- so
+         * the decision is remade on every execution. */
+        edit->skip = 1;
+    }
+} /* chimera_nfs4_read_plus_gate */
+
+static void
+chimera_nfs4_read_plus_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nfs4_read_plus_ctx            *ctx  = private_data;
+    struct nfs_request                   *req  = ctx->req;
+    struct READ_PLUS4args                *args = &req->args_compound->argarray[req->index].opread_plus;
+    struct READ_PLUS4res                 *res  = &req->res_compound.resarray[req->index].opread_plus;
+    const struct chimera_vfs_compound_op *pop, *rop, *top;
+    struct read_plus_content             *content;
+    struct evpl_iovec                    *iov  = NULL;
+    int                                   niov = 0;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    if (error_code != CHIMERA_VFS_OK) {
+        nfsstat4 status;
+
+        if (ctx->type_op >= 0 &&
+            (top = chimera_vfs_compound_op(compound, (uint32_t) ctx->type_op)) &&
+            top->status != CHIMERA_VFS_OK &&
+            (top->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            !S_ISREG(top->attr.va_mode)) {
+            status = S_ISDIR(top->attr.va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
+        } else {
+            status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        }
+
+        chimera_vfs_compound_free(compound);
+        chimera_nfs4_read_plus_finish(req, status);
+        return;
     }
 
-    chimera_nfs4_read_plus_finish(req, NFS4_OK);
-} /* chimera_nfs4_read_plus_classify_complete */
+    pop = chimera_vfs_compound_op(compound, (uint32_t) ctx->plus_op);
+    rop = chimera_vfs_compound_op(compound, (uint32_t) ctx->read_op);
 
+    res->rp_resok4.num_rpr_contents = 0;
+    res->rp_resok4.rpr_contents     = NULL;
+
+    if (rop->status == CHIMERA_VFS_OK) {
+        /* The READ ran, so the segment is DATA and its bytes are the run's.
+         * eof is the READ's, as the per-op path took it. */
+        res->rp_resok4.rpr_eof = rop->eof_read;
+
+        if (rop->read_len) {
+            content = xdr_dbuf_alloc_space(sizeof(*content),
+                                           req->encoding->dbuf);
+            chimera_nfs_abort_if(content == NULL, "Failed to allocate space");
+
+            content->rpc_content       = NFS4_CONTENT_DATA;
+            content->rpc_data.d_offset = args->rpa_offset;
+
+            /* data4.d_data is a plain (copying) opaque, so flatten the read
+             * iovecs into a contiguous dbuf-backed buffer for the
+             * marshaller. */
+            chimera_nfs_abort_if(
+                xdr_dbuf_alloc_opaque(&content->rpc_data.d_data, rop->read_len,
+                                      req->encoding->dbuf) != 0,
+                "Failed to allocate space");
+            content->rpc_data.d_data.len = rop->read_len;
+
+            chimera_vfs_compound_take_iov(compound, (uint32_t) ctx->read_op,
+                                          &iov, &niov);
+
+            struct evpl_iovec_cursor cursor;
+            evpl_iovec_cursor_init(&cursor, iov, niov);
+            evpl_iovec_cursor_copy(&cursor, content->rpc_data.d_data.data,
+                                   rop->read_len);
+
+            evpl_iovecs_release(req->thread->evpl, iov, niov);
+
+            res->rp_resok4.num_rpr_contents = 1;
+            res->rp_resok4.rpr_contents     = content;
+        }
+    } else {
+        res->rp_resok4.rpr_eof = pop->eof_read;
+
+        if (!pop->is_data && pop->read_len > 0) {
+            content = xdr_dbuf_alloc_space(sizeof(*content),
+                                           req->encoding->dbuf);
+            chimera_nfs_abort_if(content == NULL, "Failed to allocate space");
+
+            content->rpc_content        = NFS4_CONTENT_HOLE;
+            content->rpc_hole.di_offset = args->rpa_offset;
+            content->rpc_hole.di_length = pop->read_len;
+
+            res->rp_resok4.num_rpr_contents = 1;
+            res->rp_resok4.rpr_contents     = content;
+        }
+        /* Otherwise at/past EOF or an empty range: no content segments. */
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs4_read_plus_finish(req, NFS4_OK);
+} /* chimera_nfs4_read_plus_complete */
+
+/*
+ * `handle` is the stateid's, lent for the run; NULL means the object is the
+ * current file handle and the run opens it -- behind the type gate, because a
+ * data open of a FIFO blocks and RFC 7862 owes ISDIR/INVAL for a non-regular
+ * target.
+ */
 static void
 chimera_nfs4_read_plus_issue(
     struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle)
 {
-    struct READ_PLUS4args *args = &req->args_compound->argarray[req->index].opread_plus;
+    struct READ_PLUS4args       *args = &req->args_compound->argarray[req->index].opread_plus;
+    struct nfs4_read_plus_ctx   *ctx;
+    struct chimera_vfs_compound *compound;
+    struct evpl_iovec           *iov;
 
-    /* Stash the read target so the classify completion can fetch DATA bytes.
-     * For a state-based handle this is borrowed (nfs_state_ref owns release);
-     * for an on-the-fly open it is already req->handle. */
+    ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+
+    iov = xdr_dbuf_alloc_space(sizeof(*iov) * NFS4_READ_PLUS_MAX_IOV,
+                               req->encoding->dbuf);
+    chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
+
+    ctx->req     = req;
+    ctx->type_op = -1;
+
+    /* Borrowed from the state, which releases it; the finish knows not to. */
     req->handle = handle;
 
-    chimera_vfs_read_plus(req->thread->vfs_thread, &req->cred,
-                          handle,
-                          args->rpa_offset,
-                          args->rpa_count,
-                          chimera_nfs4_read_plus_classify_complete,
-                          req);
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+
+    if (!handle) {
+        chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_PATH |
+                                              CHIMERA_VFS_OPEN_NOFOLLOW, 0);
+        ctx->type_op = chimera_vfs_compound_add_getattr(
+            compound, CHIMERA_VFS_ATTR_MODE);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_READ_ONLY, 0);
+    }
+
+    ctx->plus_op = chimera_vfs_compound_add_read_plus(compound, handle,
+                                                      args->rpa_offset,
+                                                      args->rpa_count);
+    ctx->read_op = chimera_vfs_compound_add_read(compound, handle,
+                                                 args->rpa_offset,
+                                                 args->rpa_count,
+                                                 iov, NFS4_READ_PLUS_MAX_IOV,
+                                                 0, NULL, NULL, 0);
+
+    chimera_vfs_compound_set_gate(compound, chimera_nfs4_read_plus_gate, ctx);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_read_plus_complete, ctx);
 } /* chimera_nfs4_read_plus_issue */
-
-static void
-chimera_nfs4_read_plus_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request   *req = private_data;
-    struct READ_PLUS4res *res = &req->res_compound.resarray[req->index].opread_plus;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->rp_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->rp_status);
-        return;
-    }
-
-    req->handle = handle;
-    chimera_nfs4_read_plus_issue(req, handle);
-} /* chimera_nfs4_read_plus_open_callback */
-
-static void
-chimera_nfs4_read_plus_typecheck_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request   *req = private_data;
-    struct READ_PLUS4res *res = &req->res_compound.resarray[req->index].opread_plus;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->rp_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->rp_status);
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISREG(attr->va_mode)) {
-        res->rp_status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->rp_status);
-        return;
-    }
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    req->handle = NULL;
-
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
-                        chimera_nfs4_read_plus_open_callback,
-                        req);
-} /* chimera_nfs4_read_plus_typecheck_complete */
-
-static void
-chimera_nfs4_read_plus_typecheck_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request   *req = private_data;
-    struct READ_PLUS4res *res = &req->res_compound.resarray[req->index].opread_plus;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->rp_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->rp_status);
-        return;
-    }
-
-    req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MODE,
-                        chimera_nfs4_read_plus_typecheck_complete,
-                        req);
-} /* chimera_nfs4_read_plus_typecheck_open_callback */
 
 void
 chimera_nfs4_read_plus(
@@ -320,11 +336,7 @@ chimera_nfs4_read_plus(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh, req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_read_plus_typecheck_open_callback,
-                            req);
+        chimera_nfs4_read_plus_issue(req, NULL);
         return;
     }
 
@@ -357,11 +369,7 @@ chimera_nfs4_read_plus(
             chimera_nfs4_compound_complete(req, res->rp_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh, req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_read_plus_typecheck_open_callback,
-                            req);
+        chimera_nfs4_read_plus_issue(req, NULL);
         return;
     }
 
