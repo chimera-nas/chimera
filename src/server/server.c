@@ -124,7 +124,7 @@ struct chimera_server_config {
     int                                   external_portmap;
     char                                  portmap_hostname[256];
     int                                   soft_fail_bad_req;
-    rlim_t                                max_open_files;
+    uint64_t                              max_open_files;
     int                                   core_threads;
     int                                   sync_delegation;
     int                                   sync_delegation_threads;
@@ -791,7 +791,7 @@ chimera_server_config_set_max_open_files(
     struct chimera_server_config *config,
     int                           open_files)
 {
-    config->max_open_files = (rlim_t) open_files;
+    config->max_open_files = (uint64_t) open_files;
 } /* chimera_server_config_set_max_open_files */
 
 SYMBOL_EXPORT void
