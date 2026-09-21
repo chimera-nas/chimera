@@ -109,8 +109,13 @@ Build the replayer and run the ordinary cells:
 ```sh
 ninja -C build/Debug posix_mbt_replay
 ulimit -n 10240
-ctest --test-dir build/Debug -R 'chimera/posix/mbt/batch_' --output-on-failure -j 3
+EVPL_IO_URING_ENTRIES=1024 scripts/test_limits_wrapper.sh \
+  ctest --test-dir build/Debug -R 'chimera/posix/mbt/batch_' --output-on-failure -j 3
 ```
+
+This matches CI's io_uring ring size and raises the Linux memory-lock limit.
+Without those settings, parallel replays can fail in io_uring setup with
+`ENOMEM`. The file-descriptor limit also matters on macOS.
 
 A single trace can be replayed directly:
 
@@ -123,13 +128,15 @@ build/Debug/src/posix/tests/quint/posix_mbt_replay \
 For Linux passthrough cells, run with root privileges and point
 `CHIMERA_MBT_SCRATCH` at an ext4/XFS scratch directory supporting
 `name_to_handle_at`. A skipped passthrough cell is not conformance evidence.
+The focused POSIX syscall tests use `CHIMERA_TEST_ROOT` instead; point that
+variable at an ext4/XFS directory as well when running those regressions.
 Inspect successful replay output for `harness allowances:` as well as failures.
 
 ## Verification of this review (2026-09-21)
 
-Validation on `quint-ci-enhance` used the POSIX model at `b775722`, unchanged
+Initial validation on `quint-ci-enhance` used the POSIX model at `b775722`, unchanged
 in merged specs commit `537633f`, and the merged stopwatch wall-time
-enhancement at `f98ac24` (now through libevpl `6a31ffd` and merged
+enhancement at `f98ac24` (through libevpl `6a31ffd` and merged
 prometheus-c `09e27dc`). The merged dependency source trees match the tested
 trees; specs also includes generator portability and reference-harness fixes.
 
@@ -159,3 +166,21 @@ trees; specs also includes generator portability and reference-harness fixes.
   upstream CI check, including Quint coverage and Linux/macOS analysis.
 * The full tree passed `make syntax-check` with uncrustify 0.78.1, matching CI,
   and the standalone SDK include check passed.
+
+The dependency follow-up pins merged libevpl `b0a7f4c`, including its Windows,
+SPDK, and libfabric changes. Diskfs now opens and closes devices on a dedicated
+event-loop thread that remains alive until all worker queues and unmount I/O
+have finished. NFS diagnostic names cover the new transport enum values.
+
+With this pin, all 57 selected Linux checks and all 40 macOS checks passed,
+with no skips: the matrices above plus the diskfs mount/crash/recovery smoke
+test. The smoke test also passed in a macOS AddressSanitizer build. Targeted
+Clang analysis of the changed diskfs and NFS sources, formatting, the SDK
+include boundary, copyright checks, and REUSE lint passed. Linux runs used
+CI's 1024-entry libevpl rings, raised resource limits, and ext4 directories for
+both `CHIMERA_MBT_SCRATCH` and the focused tests' `CHIMERA_TEST_ROOT`.
+
+Libevpl's merged PR passed all 34 CI checks. Its four devcontainer variants
+(AMD64/ARM64, Debug/Release) each passed all 301 tests without retries, and all
+16 model replay coverage suites passed. The merged source tree is identical
+to that validated PR head.
