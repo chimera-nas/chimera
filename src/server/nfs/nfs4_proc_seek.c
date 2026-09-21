@@ -6,133 +6,86 @@
 #include "nfs4_status.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
+
+/*
+ * The special-stateid run: PUTFH, OPEN_CURRENT(meta), GETATTR(MODE),
+ * OPEN_CURRENT(data), SEEK.  A stateid SEEK is one op against the handle the
+ * state already holds, so the two shapes differ only in what precedes the SEEK,
+ * which is the last op in both.
+ */
+#define NFS4_SEEK_OP_TYPE 2
+
+/*
+ * The current filehandle of a special-stateid SEEK is not guaranteed to be a
+ * regular file: nothing has OPENed it, so no earlier op rejected the type.
+ * RFC 7862 §15.11.3 lists NFS4ERR_ISDIR for SEEK on a directory; without this
+ * the offset check below runs first and reports NFS4ERR_NXIO instead.
+ *
+ * The VFS error the gate sets is only a stop signal; the completion re-derives
+ * the NFSv4 status from the mode this op reported.
+ */
+static void
+chimera_nfs4_seek_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *top;
+
+    if (index != NFS4_SEEK_OP_TYPE || *status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    top = chimera_vfs_compound_op(compound, index);
+
+    if ((top->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(top->attr.va_mode)) {
+        *status = CHIMERA_VFS_EINVAL;
+    }
+} /* chimera_nfs4_seek_gate */
 
 static void
 chimera_nfs4_seek_complete(
-    enum chimera_vfs_error error_code,
-    int                    sr_eof,
-    uint64_t               sr_offset,
-    void                  *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct SEEK4res    *res = &req->res_compound.resarray[req->index].opseek;
+    struct nfs_request                   *req = private_data;
+    struct SEEK4res                      *res = &req->res_compound.resarray[req->index].opseek;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                error_code;
+    uint32_t                              nops;
+
+    error_code = chimera_vfs_compound_status(compound);
+    nops       = chimera_vfs_compound_num_ops(compound);
 
     if (error_code == CHIMERA_VFS_OK) {
+        op                    = chimera_vfs_compound_op(compound, nops - 1);
         res->sa_status        = NFS4_OK;
-        res->resok4.sr_eof    = sr_eof;
-        res->resok4.sr_offset = sr_offset;
+        res->resok4.sr_eof    = op->seek_eof;
+        res->resok4.sr_offset = op->seek_offset;
+    } else if (nops > 1 + NFS4_SEEK_OP_TYPE &&
+               (op = chimera_vfs_compound_op(compound, NFS4_SEEK_OP_TYPE)) &&
+               op->status != CHIMERA_VFS_OK &&
+               (op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+               !S_ISREG(op->attr.va_mode)) {
+        res->sa_status = chimera_nfs4_sparse_nonreg_status(op->attr.va_mode);
     } else {
         res->sa_status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
+
+    chimera_vfs_compound_free(compound);
 
     if (req->nfs_state_ref) {
         nfs_state_table_release(&req->thread->shared->nfs4_state_table,
                                 req->nfs_state_ref, req->nfs_state_type,
                                 req->thread->vfs_thread);
         req->nfs_state_ref = NULL;
-    } else if (req->handle) {
-        /* Special stateid: release the on-the-fly handle we opened. */
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, res->sa_status);
 } /* chimera_nfs4_seek_complete */
-
-static void
-chimera_nfs4_seek_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req  = private_data;
-    struct SEEK4args   *args = &req->args_compound->argarray[req->index].opseek;
-    struct SEEK4res    *res  = &req->res_compound.resarray[req->index].opseek;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->sa_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->sa_status);
-        return;
-    }
-
-    req->handle = handle;
-
-    chimera_vfs_seek(req->thread->vfs_thread, &req->cred,
-                     handle,
-                     args->sa_offset,
-                     args->sa_what,
-                     chimera_nfs4_seek_complete,
-                     req);
-} /* chimera_nfs4_seek_open_callback */
-
-static void
-chimera_nfs4_seek_typecheck_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request *req = private_data;
-    struct SEEK4res    *res = &req->res_compound.resarray[req->index].opseek;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->sa_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->sa_status);
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISREG(attr->va_mode)) {
-        res->sa_status = chimera_nfs4_sparse_nonreg_status(attr->va_mode);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->sa_status);
-        return;
-    }
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    req->handle = NULL;
-
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
-                        chimera_nfs4_seek_open_callback,
-                        req);
-} /* chimera_nfs4_seek_typecheck_complete */
-
-/*
- * The current filehandle of a special-stateid SEEK is not guaranteed to be
- * a regular file: nothing has OPENed it, so no earlier op rejected the type.
- * RFC 7862 §15.11.3 lists NFS4ERR_ISDIR for SEEK on a
- * directory; without this the offset check below runs first and reports
- * NFS4ERR_NXIO instead.
- */
-static void
-chimera_nfs4_seek_typecheck_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req = private_data;
-    struct SEEK4res    *res = &req->res_compound.resarray[req->index].opseek;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->sa_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->sa_status);
-        return;
-    }
-
-    req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MODE,
-                        chimera_nfs4_seek_typecheck_complete,
-                        req);
-} /* chimera_nfs4_seek_typecheck_open_callback */
 
 void
 chimera_nfs4_seek(
@@ -144,6 +97,7 @@ chimera_nfs4_seek(
     struct SEEK4args               *args  = &argop->opseek;
     struct SEEK4res                *res   = &resop->opseek;
     struct nfs_state_table         *table = &thread->shared->nfs4_state_table;
+    struct chimera_vfs_compound    *compound;
     void                           *state_void;
     uint8_t                         state_type;
     struct chimera_vfs_open_handle *state_handle;
@@ -194,13 +148,23 @@ chimera_nfs4_seek(
             return;
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh,
-                            req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                            CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_seek_typecheck_open_callback,
-                            req);
+        compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+        chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_PATH |
+                                              CHIMERA_VFS_OPEN_NOFOLLOW, 0);
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_READ_ONLY, 0);
+        chimera_vfs_compound_add_seek(compound, NULL, args->sa_offset,
+                                      args->sa_what);
+
+        chimera_vfs_compound_set_gate(compound, chimera_nfs4_seek_gate, req);
+
+        chimera_vfs_compound_submit(compound, chimera_nfs4_seek_complete, req);
         return;
     }
 
@@ -217,10 +181,13 @@ chimera_nfs4_seek(
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    chimera_vfs_seek(thread->vfs_thread, &req->cred,
-                     state_handle,
-                     args->sa_offset,
-                     args->sa_what,
-                     chimera_nfs4_seek_complete,
-                     req);
+    /* The stateid names the object, so the run is the SEEK alone against the
+     * handle the state holds -- lent, and released with the state below.  No
+     * type check: the OPEN that minted the stateid established the type. */
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_seek(compound, state_handle, args->sa_offset,
+                                  args->sa_what);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_seek_complete, req);
 } /* chimera_nfs4_seek */
