@@ -1509,12 +1509,12 @@ test_write_trigger_legacy_self_break(void)
     chimera_vfs_state_destroy(state);
 } /* test_write_trigger_legacy_self_break */
 
-/* Test 24: mid-break cascade deepening + one-epoch-per-break-event
- * (smb2.lease.breaking3 / v2_breaking3): a plain open starts an RWH -> RH
+/* Test 24: mid-break floor deepening + one-epoch-per-break-event:
+ * a plain open starts an RWH -> RH
  * break (one notification, one epoch bump); a write/truncate arriving
  * MID-BREAK deepens the floor to NONE silently (no notification, no epoch);
- * the acks then walk RH -> R -> NONE, one notification per step, all at the
- * SAME epoch; a same-key coalesce mid-break never upgrades; an ACKED-at-0
+ * acking RH then asks for NONE in one notification at the SAME epoch;
+ * a same-key coalesce mid-break never upgrades; an ACKED-at-0
  * lease re-arms on re-open with a fresh epoch. ---------------------------- */
 static void
 test_midbreak_deepen_one_epoch(void)
@@ -1576,7 +1576,7 @@ test_midbreak_deepen_one_epoch(void)
     chimera_vfs_claim_grant_release(state, grant, false);
 
     /* A truncating open / write arriving mid-break deepens the floor to NONE
-     * with NO new notification and NO epoch bump (breaking3's OVERWRITE). */
+     * with NO new notification and NO epoch bump. */
     {
         struct chimera_claim_actor writer = { 0 };
 
@@ -1588,21 +1588,17 @@ test_midbreak_deepen_one_epoch(void)
     CHECK(rec.fired == 1, "mid-break write sends no new notification");
     CHECK(grant->epoch == epoch0 + 1, "mid-break write bumps no epoch");
 
-    /* Ack RH: the deepened floor drives the cascade on, RH -> R, same
-     * epoch. */
+    /* Ack RH: break straight to the deepened floor, RH -> NONE, at the
+     * same epoch. There is no intermediate R notification to acknowledge. */
     chimera_vfs_claim_ack(&grant->claim, CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H);
-    CHECK(rec.fired == 2 && rec.last_needed_mode == CHIMERA_CLAIM_CR,
-          "ack drives RH -> R (cascade continues to the deepened floor)");
-    CHECK(grant->epoch == epoch0 + 1, "cascade step keeps the epoch");
-
-    /* Ack R: R -> NONE, same epoch. */
-    chimera_vfs_claim_ack(&grant->claim, CHIMERA_CLAIM_CR);
-    CHECK(rec.fired == 3 && rec.last_needed_mode == 0,
-          "ack drives R -> NONE");
-    CHECK(grant->epoch == epoch0 + 1, "final step keeps the epoch");
+    CHECK(rec.fired == 2 && rec.last_needed_mode == 0,
+          "ack drives RH -> NONE in one notification");
+    CHECK(grant->epoch == epoch0 + 1, "deepened break keeps the epoch");
 
     /* Final settle at NONE -> ACKED (inert). */
     chimera_vfs_claim_ack(&grant->claim, 0);
+    CHECK(rec.fired == 2, "final ack sends no further notification");
+    CHECK(grant->epoch == epoch0 + 1, "final ack keeps the epoch");
     CHECK(grant->claim.break_state == CHIMERA_CLAIM_BREAK_ACKED &&
           grant->claim.used == 0,
           "lease settles ACKED at NONE");
