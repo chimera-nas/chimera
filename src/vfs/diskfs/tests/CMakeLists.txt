@@ -42,3 +42,13 @@ set_tests_properties(chimera/vfs/diskfs/enospc_test PROPERTIES
 
 # The quint diskfs stress model + replay harness (generated corpus).
 add_subdirectory(quint)
+
+# Drive the production allocator without a journal worker, so pending-space
+# accounting and concurrent admission are deterministic rather than timing-dependent.
+add_executable(space_map_budget_test space_map_budget_test.c ../space_map.c)
+target_include_directories(space_map_budget_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(space_map_budget_test chimera_common)
+add_test(NAME chimera/vfs/diskfs/space_budget_test COMMAND space_map_budget_test)
+set_tests_properties(chimera/vfs/diskfs/space_budget_test PROPERTIES
+    LABELS "quint;diskfs_mbt" TIMEOUT 30)
