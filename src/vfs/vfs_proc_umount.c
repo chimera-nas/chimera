@@ -6,7 +6,7 @@
 #include "common/atomic.h"
 #include "common/thread.h"
 #include <string.h>
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "evpl/evpl_timer.h"
 #include "vfs_mount_table.h"

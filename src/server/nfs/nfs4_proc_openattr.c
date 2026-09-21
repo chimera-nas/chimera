@@ -6,7 +6,6 @@
 #include "nfs4_status.h"
 #include "nfs4_named_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 
 /*

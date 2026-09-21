@@ -9,7 +9,6 @@
 #include "smb_common/smb2.h"
 #include "smb_session.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 
 /*

@@ -4,7 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"

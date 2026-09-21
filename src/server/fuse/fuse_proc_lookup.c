@@ -6,7 +6,6 @@
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
-#include "vfs/vfs_procs.h"
 
 static void
 chimera_fuse_lookup_complete(

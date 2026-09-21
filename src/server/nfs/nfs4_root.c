@@ -17,7 +17,6 @@
 #include "nfs4_attr.h"
 #include "nfs4_status.h"
 #include "nfs4_root_cookie.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "common/logging.h"
 #include "common/macros.h"

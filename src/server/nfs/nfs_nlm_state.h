@@ -14,7 +14,6 @@
 #include "nfs4_xdr.h"
 #include "nlm4_xdr.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_cred.h"
 

@@ -9,7 +9,7 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_claim.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"

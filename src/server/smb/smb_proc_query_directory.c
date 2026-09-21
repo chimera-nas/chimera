@@ -7,7 +7,6 @@
 #include "smb_string.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_compound.h"
 #include "xxhash.h"

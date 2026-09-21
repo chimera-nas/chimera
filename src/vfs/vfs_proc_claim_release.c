@@ -2,8 +2,9 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs_internal.h"
+#include "vfs_claim.h"
 #include "common/macros.h"
 
 /* Backend lease release/downgrade.  For an AGGREGATE token under recall the

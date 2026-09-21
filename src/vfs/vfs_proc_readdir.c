@@ -4,7 +4,7 @@
 
 #include <string.h>
 #include <ctype.h>
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "vfs_mount_table.h"
 #include "common/misc.h"

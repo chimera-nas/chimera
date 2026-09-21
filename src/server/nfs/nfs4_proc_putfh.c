@@ -8,7 +8,6 @@
 #include "nfs4_session.h"
 #include "server/server.h"
 #include "nfs4_named_attr.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 
 /* A synthetic named-attribute-directory handle (OPENATTR result): validate that

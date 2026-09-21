@@ -17,7 +17,6 @@
 #include "common/format.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 #include "s3_multipart.h"

@@ -10,7 +10,6 @@
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
-#include "vfs/vfs_procs.h"
 
 
 /*

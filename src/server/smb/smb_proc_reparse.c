@@ -11,7 +11,6 @@
 #include "smb_string.h"
 #include "smb_common/smb2.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 
