@@ -24,36 +24,36 @@
 /* Lifecycle / sharded table (ported unchanged from the lease core)     */
 /* -------------------------------------------------------------------- */
 
-SYMBOL_EXPORT struct chimera_vfs_state*
+SYMBOL_EXPORT struct chimera_vfs_state *
 chimera_vfs_state_init(void)
 {
-    struct chimera_vfs_state*state;
-    int                      i;
+    struct chimera_vfs_state *state;
+    int                       i;
 
-    state = calloc(1,sizeof(*state));
+    state = calloc(1, sizeof(*state));
     if (!state) {
         return NULL;
     }
 
     for (i = 0; i < CHIMERA_VFS_STATE_NUM_SHARDS; i++) {
-        evpl_mutex_init(&state->shards[i].lock,NULL);
+        evpl_mutex_init(&state->shards[i].lock, NULL);
     }
 
     state->default_break_deadline_ms = CHIMERA_VFS_CLAIM_DEFAULT_BREAK_DEADLINE_MS;
     state->implicit_idle_ms          = CHIMERA_VFS_CLAIM_DEFAULT_IMPLICIT_IDLE_MS;
 
-    evpl_mutex_init(&state->service_lock,NULL);
-    evpl_mutex_init(&state->bl_dispatch_lock,NULL);
+    evpl_mutex_init(&state->service_lock, NULL);
+    evpl_mutex_init(&state->bl_dispatch_lock, NULL);
 
     return state;
 } /* chimera_vfs_state_init */
 
 SYMBOL_EXPORT void
-chimera_vfs_state_destroy(struct chimera_vfs_state*state)
+chimera_vfs_state_destroy(struct chimera_vfs_state *state)
 {
-    struct chimera_vfs_file_state*file,*next;
-    struct chimera_vfs_bl_work   *work;
-    int                           i;
+    struct chimera_vfs_file_state *file, *next;
+    struct chimera_vfs_bl_work    *work;
+    int                            i;
 
     if (!state) {
         return;
@@ -69,8 +69,8 @@ chimera_vfs_state_destroy(struct chimera_vfs_state*state)
     }
 
     for (i = 0; i < CHIMERA_VFS_STATE_NUM_SHARDS; i++) {
-        struct chimera_vfs_state_shard*shard = &state->shards[i];
-        uint32_t                       s;
+        struct chimera_vfs_state_shard *shard = &state->shards[i];
+        uint32_t                        s;
 
         for (s = 0; s < shard->nslots; s++) {
             file = shard->slots[s];
@@ -88,33 +88,33 @@ chimera_vfs_state_destroy(struct chimera_vfs_state*state)
     free(state);
 } /* chimera_vfs_state_destroy */
 
-static inline struct chimera_vfs_state_shard*
+static inline struct chimera_vfs_state_shard *
 chimera_vfs_state_shard_for(
-    struct chimera_vfs_state*state,
-    uint64_t                 fh_hash)
+    struct chimera_vfs_state *state,
+    uint64_t                  fh_hash)
 {
     return &state->shards[(fh_hash >> 32) & (CHIMERA_VFS_STATE_NUM_SHARDS - 1)];
 } /* chimera_vfs_state_shard_for */
 
-static inline struct chimera_vfs_file_state**
+static inline struct chimera_vfs_file_state **
 chimera_vfs_state_slot_for(
-    struct chimera_vfs_state_shard*shard,
-    uint64_t                       fh_hash)
+    struct chimera_vfs_state_shard *shard,
+    uint64_t                        fh_hash)
 {
     return &shard->slots[fh_hash & (shard->nslots - 1)];
 } /* chimera_vfs_state_slot_for */
 
 static void
-chimera_vfs_state_shard_grow(struct chimera_vfs_state_shard*shard)
+chimera_vfs_state_shard_grow(struct chimera_vfs_state_shard *shard)
 {
-    struct chimera_vfs_file_state**nslots_arr;
-    struct chimera_vfs_file_state *file,*next;
-    uint32_t                       nnew;
-    uint32_t                       s;
+    struct chimera_vfs_file_state **nslots_arr;
+    struct chimera_vfs_file_state  *file, *next;
+    uint32_t                        nnew;
+    uint32_t                        s;
 
     nnew = shard->nslots ? shard->nslots * 2 : CHIMERA_VFS_STATE_INITIAL_SLOTS;
 
-    nslots_arr = calloc(nnew,sizeof(*nslots_arr));
+    nslots_arr = calloc(nnew, sizeof(*nslots_arr));
     if (!nslots_arr) {
         return;
     }
@@ -136,37 +136,37 @@ chimera_vfs_state_shard_grow(struct chimera_vfs_state_shard*shard)
 
 static inline int
 chimera_vfs_file_state_match(
-    const struct chimera_vfs_file_state*file,
-    const uint8_t                      *fh,
-    uint8_t                             fh_len,
-    uint64_t                            fh_hash)
+    const struct chimera_vfs_file_state *file,
+    const uint8_t                       *fh,
+    uint8_t                              fh_len,
+    uint64_t                             fh_hash)
 {
     return file->fh_hash == fh_hash &&
            file->fh_len == fh_len &&
-           memcmp(file->fh,fh,fh_len) == 0;
+           memcmp(file->fh, fh, fh_len) == 0;
 } /* chimera_vfs_file_state_match */
 
-SYMBOL_EXPORT struct chimera_vfs_file_state*
+SYMBOL_EXPORT struct chimera_vfs_file_state *
 chimera_vfs_state_get(
-    struct chimera_vfs_state*state,
-    const uint8_t           *fh,
-    uint8_t                  fh_len,
-    uint64_t                 fh_hash,
-    bool                     create)
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash,
+    bool                      create)
 {
-    struct chimera_vfs_state_shard*shard;
-    struct chimera_vfs_file_state *file;
-    struct chimera_vfs_file_state**slot;
+    struct chimera_vfs_state_shard *shard;
+    struct chimera_vfs_file_state  *file;
+    struct chimera_vfs_file_state **slot;
 
-    shard = chimera_vfs_state_shard_for(state,fh_hash);
+    shard = chimera_vfs_state_shard_for(state, fh_hash);
 
     evpl_mutex_lock(&shard->lock);
 
     if (shard->nslots) {
-        for (file = *chimera_vfs_state_slot_for(shard,fh_hash);
+        for (file = *chimera_vfs_state_slot_for(shard, fh_hash);
              file;
              file = file->bucket_next) {
-            if (chimera_vfs_file_state_match(file,fh,fh_len,fh_hash)) {
+            if (chimera_vfs_file_state_match(file, fh, fh_len, fh_hash)) {
                 file->refcount++;
                 evpl_mutex_unlock(&shard->lock);
                 return file;
@@ -187,20 +187,20 @@ chimera_vfs_state_get(
         }
     }
 
-    file = calloc(1,sizeof(*file));
+    file = calloc(1, sizeof(*file));
     if (!file) {
         evpl_mutex_unlock(&shard->lock);
         return NULL;
     }
 
-    memcpy(file->fh,fh,fh_len);
+    memcpy(file->fh, fh, fh_len);
     file->fh_len   = fh_len;
     file->fh_hash  = fh_hash;
     file->refcount = 1;
     file->state    = state;
-    evpl_mutex_init(&file->lock,NULL);
+    evpl_mutex_init(&file->lock, NULL);
 
-    slot              = chimera_vfs_state_slot_for(shard,fh_hash);
+    slot              = chimera_vfs_state_slot_for(shard, fh_hash);
     file->bucket_next = *slot;
     *slot = file;
     shard->count++;
@@ -211,23 +211,23 @@ chimera_vfs_state_get(
 
 SYMBOL_EXPORT void
 chimera_vfs_state_put(
-    struct chimera_vfs_state     *state,
-    struct chimera_vfs_file_state*file)
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
 {
-    struct chimera_vfs_state_shard*shard;
-    struct chimera_vfs_file_state**link;
-    bool                           empty;
-    int                            k;
+    struct chimera_vfs_state_shard *shard;
+    struct chimera_vfs_file_state **link;
+    bool                            empty;
+    int                             k;
 
     if (!file) {
         return;
     }
 
-    shard = chimera_vfs_state_shard_for(state,file->fh_hash);
+    shard = chimera_vfs_state_shard_for(state, file->fh_hash);
 
     evpl_mutex_lock(&shard->lock);
 
-    chimera_vfs_abort_if(file->refcount == 0,"double put on vfs_state file");
+    chimera_vfs_abort_if(file->refcount == 0, "double put on vfs_state file");
 
     file->refcount--;
     if (file->refcount != 0) {
@@ -250,7 +250,7 @@ chimera_vfs_state_put(
         return;
     }
 
-    for (link = chimera_vfs_state_slot_for(shard,file->fh_hash);
+    for (link = chimera_vfs_state_slot_for(shard, file->fh_hash);
          *link;
          link = &(*link)->bucket_next) {
         if (*link == file) {
@@ -267,10 +267,10 @@ chimera_vfs_state_put(
 } /* chimera_vfs_state_put */
 
 SYMBOL_EXPORT void
-chimera_vfs_file_state_release(struct chimera_vfs_file_state*file)
+chimera_vfs_file_state_release(struct chimera_vfs_file_state *file)
 {
     if (file) {
-        chimera_vfs_state_put(file->state,file);
+        chimera_vfs_state_put(file->state, file);
     }
 } /* chimera_vfs_file_state_release */
 
@@ -280,11 +280,11 @@ chimera_vfs_file_state_release(struct chimera_vfs_file_state*file)
 
 SYMBOL_EXPORT bool
 chimera_vfs_state_has_other_share_holder(
-    struct chimera_vfs_file_state *file,
-    const struct chimera_vfs_claim*exclude)
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_claim *exclude)
 {
-    struct chimera_vfs_claim*cur;
-    bool                     found = false;
+    struct chimera_vfs_claim *cur;
+    bool                      found = false;
 
     if (!file) {
         return false;
@@ -307,7 +307,7 @@ chimera_vfs_state_has_other_share_holder(
 } /* chimera_vfs_state_has_other_share_holder */
 
 SYMBOL_EXPORT void
-chimera_vfs_state_set_delete_pending(struct chimera_vfs_file_state*file)
+chimera_vfs_state_set_delete_pending(struct chimera_vfs_file_state *file)
 {
     if (file) {
         evpl_mutex_lock(&file->lock);
@@ -317,7 +317,7 @@ chimera_vfs_state_set_delete_pending(struct chimera_vfs_file_state*file)
 } /* chimera_vfs_state_set_delete_pending */
 
 SYMBOL_EXPORT void
-chimera_vfs_state_clear_delete_pending(struct chimera_vfs_file_state*file)
+chimera_vfs_state_clear_delete_pending(struct chimera_vfs_file_state *file)
 {
     if (file) {
         evpl_mutex_lock(&file->lock);
@@ -327,7 +327,7 @@ chimera_vfs_state_clear_delete_pending(struct chimera_vfs_file_state*file)
 } /* chimera_vfs_state_clear_delete_pending */
 
 SYMBOL_EXPORT bool
-chimera_vfs_state_is_delete_pending(struct chimera_vfs_file_state*file)
+chimera_vfs_state_is_delete_pending(struct chimera_vfs_file_state *file)
 {
     bool pending;
 
@@ -341,7 +341,7 @@ chimera_vfs_state_is_delete_pending(struct chimera_vfs_file_state*file)
 } /* chimera_vfs_state_is_delete_pending */
 
 SYMBOL_EXPORT void
-chimera_vfs_state_stream_holder_inc(struct chimera_vfs_file_state*file)
+chimera_vfs_state_stream_holder_inc(struct chimera_vfs_file_state *file)
 {
     if (file) {
         evpl_mutex_lock(&file->lock);
@@ -351,7 +351,7 @@ chimera_vfs_state_stream_holder_inc(struct chimera_vfs_file_state*file)
 } /* chimera_vfs_state_stream_holder_inc */
 
 SYMBOL_EXPORT void
-chimera_vfs_state_stream_holder_dec(struct chimera_vfs_file_state*file)
+chimera_vfs_state_stream_holder_dec(struct chimera_vfs_file_state *file)
 {
     if (file) {
         evpl_mutex_lock(&file->lock);
@@ -363,7 +363,7 @@ chimera_vfs_state_stream_holder_dec(struct chimera_vfs_file_state*file)
 } /* chimera_vfs_state_stream_holder_dec */
 
 SYMBOL_EXPORT uint32_t
-chimera_vfs_state_stream_holders(struct chimera_vfs_file_state*file)
+chimera_vfs_state_stream_holders(struct chimera_vfs_file_state *file)
 {
     uint32_t n;
 
@@ -382,8 +382,8 @@ chimera_vfs_state_stream_holders(struct chimera_vfs_file_state*file)
 
 bool
 chimera_vfs_claim_same_holder(
-    const struct chimera_vfs_claim*a,
-    const struct chimera_vfs_claim*b)
+    const struct chimera_vfs_claim *a,
+    const struct chimera_vfs_claim *b)
 {
     if (a->op_handle && a->op_handle == b->op_handle) {
         return true;
@@ -401,33 +401,33 @@ chimera_vfs_claim_same_holder(
 
 bool
 chimera_vfs_claim_circle_exempt(
-    uint8_t                        circle,
-    const struct chimera_vfs_claim*holder,
-    const struct chimera_vfs_claim*probe)
+    uint8_t                         circle,
+    const struct chimera_vfs_claim *holder,
+    const struct chimera_vfs_claim *probe)
 {
     switch (circle) {
         case CHIMERA_CIRCLE_OWNER:
-            return chimera_claim_owner_equal(&holder->owner,&probe->owner) ||
-                   chimera_vfs_claim_same_holder(holder,probe);
+            return chimera_claim_owner_equal(&holder->owner, &probe->owner) ||
+                   chimera_vfs_claim_same_holder(holder, probe);
         case CHIMERA_CIRCLE_KEY:
             /* The KEY circle is "the same lease", which carries a client term:
              * two clients using one LeaseKey value hold two leases and must
              * not be exempt from each other (chimera_claim_owner_same_lease). */
-            return chimera_claim_owner_same_lease(&holder->owner,&probe->owner) ||
-                   chimera_vfs_claim_same_holder(holder,probe);
+            return chimera_claim_owner_same_lease(&holder->owner, &probe->owner) ||
+                   chimera_vfs_claim_same_holder(holder, probe);
         case CHIMERA_CIRCLE_CLIENT:
-            return chimera_claim_owner_same_client(&holder->owner,&probe->owner);
+            return chimera_claim_owner_same_client(&holder->owner, &probe->owner);
         case CHIMERA_CIRCLE_OWNER_OR_KEY:
-            return chimera_claim_owner_equal(&holder->owner,&probe->owner) ||
-                   chimera_claim_owner_same_lease(&holder->owner,&probe->owner) ||
-                   chimera_vfs_claim_same_holder(holder,probe);
+            return chimera_claim_owner_equal(&holder->owner, &probe->owner) ||
+                   chimera_claim_owner_same_lease(&holder->owner, &probe->owner) ||
+                   chimera_vfs_claim_same_holder(holder, probe);
         default:
             return false;
     } /* switch */
 } /* chimera_vfs_claim_circle_exempt */
 
 uint8_t
-chimera_vfs_claim_advertised(const struct chimera_vfs_claim*claim)
+chimera_vfs_claim_advertised(const struct chimera_vfs_claim *claim)
 {
     uint8_t adv;
 
@@ -442,7 +442,7 @@ chimera_vfs_claim_advertised(const struct chimera_vfs_claim*claim)
 } /* chimera_vfs_claim_advertised */
 
 bool
-chimera_vfs_claim_revocable(const struct chimera_vfs_claim*claim)
+chimera_vfs_claim_revocable(const struct chimera_vfs_claim *claim)
 {
     return claim->break_cb != NULL;
 } /* chimera_vfs_claim_revocable */
@@ -454,16 +454,16 @@ chimera_vfs_claim_range_overlap(
     uint64_t b_off,
     uint64_t b_len)
 {
-    return chimera_vfs_claim_range_overlap_i(a_off,a_len,b_off,b_len);
+    return chimera_vfs_claim_range_overlap_i(a_off, a_len, b_off, b_len);
 } /* chimera_vfs_claim_range_overlap */
 
 static inline bool
 chimera_vfs_claim_claims_overlap(
-    const struct chimera_vfs_claim*a,
-    const struct chimera_vfs_claim*b)
+    const struct chimera_vfs_claim *a,
+    const struct chimera_vfs_claim *b)
 {
-    uint64_t a_off = 0,a_len = UINT64_MAX;
-    uint64_t b_off = 0,b_len = UINT64_MAX;
+    uint64_t a_off = 0, a_len = UINT64_MAX;
+    uint64_t b_off = 0, b_len = UINT64_MAX;
 
     if (a->klass == CHIMERA_CLAIM_CLASS_RANGE) {
         a_off = a->offset;
@@ -473,23 +473,23 @@ chimera_vfs_claim_claims_overlap(
         b_off = b->offset;
         b_len = b->length;
     }
-    return chimera_vfs_claim_range_overlap(a_off,a_len,b_off,b_len);
+    return chimera_vfs_claim_range_overlap(a_off, a_len, b_off, b_len);
 } /* chimera_vfs_claim_claims_overlap */
 
 bool
-chimera_vfs_claim_deadline_passed(const struct chimera_vfs_claim*claim)
+chimera_vfs_claim_deadline_passed(const struct chimera_vfs_claim *claim)
 {
     return chimera_vfs_now_ticks() >= claim->break_deadline;
 } /* chimera_vfs_claim_deadline_passed */
 
 bool
 chimera_vfs_claim_holder_reclaimable(
-    const struct chimera_vfs_claim*holder,
-    const struct chimera_vfs_claim*probe)
+    const struct chimera_vfs_claim *holder,
+    const struct chimera_vfs_claim *probe)
 {
     return holder->is_alive_cb &&
            holder->owner.client_key != probe->owner.client_key &&
-           !holder->is_alive_cb(holder,holder->cb_private);
+           !holder->is_alive_cb(holder, holder->cb_private);
 } /* chimera_vfs_claim_holder_reclaimable */
 
 /* -------------------------------------------------------------------- */
@@ -498,14 +498,14 @@ chimera_vfs_claim_holder_reclaimable(
 
 static void
 chimera_vfs_claim_init_common(
-    struct chimera_vfs_claim        *claim,
-    enum chimera_claim_construct     construct,
-    enum chimera_claim_class         klass,
-    uint8_t                          used,
-    uint8_t                          denied,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    enum chimera_claim_construct      construct,
+    enum chimera_claim_class          klass,
+    uint8_t                           used,
+    uint8_t                           denied,
+    const struct chimera_claim_owner *owner)
 {
-    memset(claim,0,sizeof(*claim));
+    memset(claim, 0, sizeof(*claim));
     claim->construct  = construct;
     claim->klass      = klass;
     claim->used       = used;
@@ -517,11 +517,11 @@ chimera_vfs_claim_init_common(
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_foreach_smb_open(
-    struct chimera_vfs_file_state*file,
-    chimera_vfs_smb_open_cb_t     cb,
-    void                         *private_data)
+    struct chimera_vfs_file_state *file,
+    chimera_vfs_smb_open_cb_t      cb,
+    void                          *private_data)
 {
-    struct chimera_vfs_claim*cur;
+    struct chimera_vfs_claim *cur;
 
     if (!file) {
         return;
@@ -536,53 +536,53 @@ chimera_vfs_claim_foreach_smb_open(
         if (!cur->cb_private) {
             continue;
         }
-        cb(cur->cb_private,private_data);
+        cb(cur->cb_private, private_data);
     }
     evpl_mutex_unlock(&file->lock);
 } /* chimera_vfs_claim_foreach_smb_open */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_smb_open(
-    struct chimera_vfs_claim        *claim,
-    uint8_t                          access,
-    uint8_t                          deny,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    uint8_t                           access,
+    uint8_t                           deny,
+    const struct chimera_claim_owner *owner)
 {
     chimera_vfs_claim_init_common(claim,
                                   (access | deny) ? CHIMERA_CONSTRUCT_SMB_OPEN
                                                   : CHIMERA_CONSTRUCT_SMB_OPEN_INERT,
                                   CHIMERA_CLAIM_CLASS_ACCESS,
-                                  access,deny,owner);
+                                  access, deny, owner);
 } /* chimera_vfs_claim_init_smb_open */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_nfs4_open(
-    struct chimera_vfs_claim        *claim,
-    uint8_t                          access,
-    uint8_t                          deny,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    uint8_t                           access,
+    uint8_t                           deny,
+    const struct chimera_claim_owner *owner)
 {
-    chimera_vfs_claim_init_common(claim,CHIMERA_CONSTRUCT_NFS4_OPEN,
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_NFS4_OPEN,
                                   CHIMERA_CLAIM_CLASS_ACCESS,
-                                  access,deny,owner);
+                                  access, deny, owner);
 } /* chimera_vfs_claim_init_nfs4_open */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_rqls(
-    struct chimera_vfs_claim        *claim,
-    uint8_t                          used,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    uint8_t                           used,
+    const struct chimera_claim_owner *owner)
 {
-    chimera_vfs_claim_init_common(claim,CHIMERA_CONSTRUCT_RQLS,
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_RQLS,
                                   CHIMERA_CLAIM_CLASS_CACHE,
-                                  used,0,owner);
+                                  used, 0, owner);
 } /* chimera_vfs_claim_init_rqls */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_oplock(
-    struct chimera_vfs_claim        *claim,
-    uint8_t                          used,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    uint8_t                           used,
+    const struct chimera_claim_owner *owner)
 {
     enum chimera_claim_construct c;
 
@@ -593,27 +593,27 @@ chimera_vfs_claim_init_oplock(
     } else {
         c = CHIMERA_CONSTRUCT_OPLOCK_II;
     }
-    chimera_vfs_claim_init_common(claim,c,CHIMERA_CLAIM_CLASS_CACHE,
-                                  used,0,owner);
+    chimera_vfs_claim_init_common(claim, c, CHIMERA_CLAIM_CLASS_CACHE,
+                                  used, 0, owner);
 } /* chimera_vfs_claim_init_oplock */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_dir_lease(
-    struct chimera_vfs_claim        *claim,
-    uint8_t                          used,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    uint8_t                           used,
+    const struct chimera_claim_owner *owner)
 {
-    chimera_vfs_claim_init_common(claim,CHIMERA_CONSTRUCT_DIR_LEASE,
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_DIR_LEASE,
                                   CHIMERA_CLAIM_CLASS_CACHE,
                                   used & (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H),
-                                  0,owner);
+                                  0, owner);
 } /* chimera_vfs_claim_init_dir_lease */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_delegation(
-    struct chimera_vfs_claim        *claim,
-    bool                             write,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    bool                              write,
+    const struct chimera_claim_owner *owner)
 {
     /* Delegations perform real I/O under their stateids, so they carry the
      * data bits too -- which is what makes a deny-read open conflict with a
@@ -627,13 +627,13 @@ chimera_vfs_claim_init_delegation(
                                   write ? CHIMERA_CONSTRUCT_DELEG_W
                                         : CHIMERA_CONSTRUCT_DELEG_R,
                                   CHIMERA_CLAIM_CLASS_CACHE,
-                                  used,0,owner);
+                                  used, 0, owner);
 } /* chimera_vfs_claim_init_delegation */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_fuse_grant(
-    struct chimera_vfs_claim        *claim,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    const struct chimera_claim_owner *owner)
 {
     /* A FUSE grant is a revocable read-cache claim held on the kernel's
      * behalf (one per mount+file; owner.client_key = mount identity).  It
@@ -642,19 +642,19 @@ chimera_vfs_claim_init_fuse_grant(
      * CLIENT circle self-exempts the mount's own opens and locks, and --
      * unlike an NFSv4 delegation -- the sweep may force-revoke it at the
      * break deadline (the liveness backstop if a mount's notifier wedges). */
-    chimera_vfs_claim_init_common(claim,CHIMERA_CONSTRUCT_FUSE_GRANT,
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_FUSE_GRANT,
                                   CHIMERA_CLAIM_CLASS_CACHE,
-                                  CHIMERA_CLAIM_CR,0,owner);
+                                  CHIMERA_CLAIM_CR, 0, owner);
 } /* chimera_vfs_claim_init_fuse_grant */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_range(
-    struct chimera_vfs_claim        *claim,
-    bool                             exclusive,
-    bool                             smb,
-    uint64_t                         offset,
-    uint64_t                         length,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    bool                              exclusive,
+    bool                              smb,
+    uint64_t                          offset,
+    uint64_t                          length,
+    const struct chimera_claim_owner *owner)
 {
     uint8_t used = exclusive
         ? (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW)
@@ -664,20 +664,20 @@ chimera_vfs_claim_init_range(
                                   smb ? CHIMERA_CONSTRUCT_LOCK_SMB
                                       : CHIMERA_CONSTRUCT_LOCK_ADVISORY,
                                   CHIMERA_CLAIM_CLASS_RANGE,
-                                  used,0,owner);
+                                  used, 0, owner);
     claim->offset = offset;
     claim->length = length;
 } /* chimera_vfs_claim_init_range */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_init_deny_probe(
-    struct chimera_vfs_claim        *claim,
-    uint8_t                          deny,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_claim         *claim,
+    uint8_t                           deny,
+    const struct chimera_claim_owner *owner)
 {
-    chimera_vfs_claim_init_common(claim,CHIMERA_CONSTRUCT_DENY_PROBE,
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_DENY_PROBE,
                                   CHIMERA_CLAIM_CLASS_ACCESS,
-                                  0,deny,owner);
+                                  0, deny, owner);
 } /* chimera_vfs_claim_init_deny_probe */
 
 /* -------------------------------------------------------------------- */
@@ -686,8 +686,8 @@ chimera_vfs_claim_init_deny_probe(
 
 int
 chimera_vfs_claim_deny_rows(
-    const struct chimera_vfs_claim*claim,
-    struct chimera_claim_deny_row  rows[CHIMERA_CLAIM_MAX_DENY_ROWS])
+    const struct chimera_vfs_claim *claim,
+    struct chimera_claim_deny_row   rows[CHIMERA_CLAIM_MAX_DENY_ROWS])
 {
     uint8_t adv = chimera_vfs_claim_advertised(claim);
     uint8_t raw = (claim->break_state == CHIMERA_CLAIM_BREAK_REVOKED)
@@ -877,12 +877,12 @@ chimera_vfs_claim_deny_rows(
  * never displaces standing claims). */
 static uint8_t
 chimera_vfs_claim_deny_against(
-    const struct chimera_vfs_claim*hc,
-    const struct chimera_vfs_claim*pc,
-    bool                           for_displace)
+    const struct chimera_vfs_claim *hc,
+    const struct chimera_vfs_claim *pc,
+    bool                            for_displace)
 {
     struct chimera_claim_deny_row rows[CHIMERA_CLAIM_MAX_DENY_ROWS];
-    int                           n    = chimera_vfs_claim_deny_rows(hc,rows);
+    int                           n    = chimera_vfs_claim_deny_rows(hc, rows);
     uint8_t                       mask = 0;
     int                           i;
 
@@ -893,7 +893,7 @@ chimera_vfs_claim_deny_against(
         if (!(rows[i].targets & (1u << pc->klass))) {
             continue;
         }
-        if (chimera_vfs_claim_circle_exempt(rows[i].circle,hc,pc)) {
+        if (chimera_vfs_claim_circle_exempt(rows[i].circle, hc, pc)) {
             continue;
         }
         mask |= rows[i].mask;
@@ -907,32 +907,32 @@ chimera_vfs_claim_deny_against(
  * arrives under — RFC 8881 §10.2). */
 static bool
 chimera_vfs_claim_conflicts(
-    const struct chimera_vfs_claim*hc,
-    const struct chimera_vfs_claim*pc)
+    const struct chimera_vfs_claim *hc,
+    const struct chimera_vfs_claim *pc)
 {
-    uint8_t blocked,displace;
+    uint8_t blocked, displace;
     uint8_t hc_adv;
 
     if (hc == pc) {
         return false;
     }
-    if (!chimera_vfs_claim_claims_overlap(hc,pc)) {
+    if (!chimera_vfs_claim_claims_overlap(hc, pc)) {
         return false;
     }
 
     /* blocked: probe uses a bit the holder denies.  Rows evaluated at the
      * holder's advertised mode except raw-scored lock rows (already encoded
      * in the row derivation: rows exist iff adv/raw retains the bits). */
-    blocked = pc->used & chimera_vfs_claim_deny_against(hc,pc,false);
+    blocked = pc->used & chimera_vfs_claim_deny_against(hc, pc, false);
 
     /* displace: the holder's advertised use hits the probe's deny rows. */
     hc_adv   = chimera_vfs_claim_advertised(hc);
-    displace = hc_adv & chimera_vfs_claim_deny_against(pc,hc,true);
+    displace = hc_adv & chimera_vfs_claim_deny_against(pc, hc, true);
 
     if (displace &&
         (hc->construct == CHIMERA_CONSTRUCT_DELEG_R ||
          hc->construct == CHIMERA_CONSTRUCT_DELEG_W) &&
-        chimera_claim_owner_same_client(&hc->owner,&pc->owner)) {
+        chimera_claim_owner_same_client(&hc->owner, &pc->owner)) {
         displace = 0;
     }
 
@@ -944,14 +944,14 @@ chimera_vfs_claim_conflicts(
  * holder may close and dissolve the conflict).  Never escapes onto the
  * PROBE's own coalition (the self-park hang guard).  Also covers the
  * same-client directory-lease arm.  Caller holds file->lock. */
-static struct chimera_vfs_claim*
+static struct chimera_vfs_claim *
 chimera_vfs_claim_batch_escape(
-    struct chimera_vfs_file_state *file,
-    const struct chimera_vfs_claim*blocker,
-    const struct chimera_vfs_claim*probe)
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_claim *blocker,
+    const struct chimera_vfs_claim *probe)
 {
-    struct chimera_vfs_claim*cand = NULL;
-    struct chimera_vfs_claim*cur;
+    struct chimera_vfs_claim *cand = NULL;
+    struct chimera_vfs_claim *cur;
 
     if (blocker->klass != CHIMERA_CLAIM_CLASS_ACCESS) {
         return NULL;
@@ -963,7 +963,7 @@ chimera_vfs_claim_batch_escape(
             chimera_vfs_claim_revocable(cand) &&
             (cand->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
              cand->break_state == CHIMERA_CLAIM_BREAK_BREAKING) &&
-            !chimera_claim_owner_same_lease(&cand->owner,&probe->owner)) {
+            !chimera_claim_owner_same_lease(&cand->owner, &probe->owner)) {
             return cand;
         }
     }
@@ -974,13 +974,13 @@ chimera_vfs_claim_batch_escape(
         if (cur->construct != CHIMERA_CONSTRUCT_DIR_LEASE) {
             continue;
         }
-        if (!chimera_claim_owner_same_client(&cur->owner,&blocker->owner)) {
+        if (!chimera_claim_owner_same_client(&cur->owner, &blocker->owner)) {
             continue;
         }
         if (!(cur->used & CHIMERA_CLAIM_H) || !chimera_vfs_claim_revocable(cur)) {
             continue;
         }
-        if (chimera_claim_owner_same_lease(&cur->owner,&probe->owner)) {
+        if (chimera_claim_owner_same_lease(&cur->owner, &probe->owner)) {
             continue;
         }
         if (cur->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
@@ -1020,14 +1020,14 @@ chimera_vfs_claim_batch_escape(
  * registration is not a real opener; a parked (disconnected durable)
  * holder is courtesy-held and caps nobody (keep-disconnected-rh-*).
  * Caller holds file->lock.  Returns the blocking ACCESS claim, or NULL. */
-static struct chimera_vfs_claim*
+static struct chimera_vfs_claim *
 chimera_vfs_claim_sole_opener_blocker_locked(
-    struct chimera_vfs_file_state *file,
-    const struct chimera_vfs_claim*probe)
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_claim *probe)
 {
-    struct chimera_vfs_claim*cur;
-    bool                     probe_is_rqls;
-    uint8_t                  sole_mask;
+    struct chimera_vfs_claim *cur;
+    bool                      probe_is_rqls;
+    uint8_t                   sole_mask;
 
     if (probe->klass != CHIMERA_CLAIM_CLASS_CACHE ||
         probe->owner.proto != CHIMERA_CLAIM_PROTO_SMB2) {
@@ -1093,14 +1093,14 @@ chimera_vfs_claim_sole_opener_blocker_locked(
 
 enum chimera_vfs_claim_result
 chimera_vfs_claim_admit_locked(
-    struct chimera_vfs_file_state *file,
-    const struct chimera_vfs_claim*probe,
-    struct chimera_vfs_claim     **conflict_claim)
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_claim *probe,
+    struct chimera_vfs_claim      **conflict_claim)
 {
-    struct chimera_vfs_claim*cur;
-    struct chimera_vfs_claim*idle_break    = NULL;
-    struct chimera_vfs_claim*expired_break = NULL;
-    struct chimera_vfs_claim*waiting_on    = NULL;
+    struct chimera_vfs_claim *cur;
+    struct chimera_vfs_claim *idle_break    = NULL;
+    struct chimera_vfs_claim *expired_break = NULL;
+    struct chimera_vfs_claim *waiting_on    = NULL;
     int k;
 
     if (conflict_claim) {
@@ -1115,7 +1115,7 @@ chimera_vfs_claim_admit_locked(
 
     for (k = 0; k < CHIMERA_CLAIM_CLASS_COUNT; k++) {
         for (cur = file->claims[k]; cur; cur = cur->next) {
-            if (!chimera_vfs_claim_conflicts(cur,probe)) {
+            if (!chimera_vfs_claim_conflicts(cur, probe)) {
                 continue;
             }
 
@@ -1141,8 +1141,8 @@ chimera_vfs_claim_admit_locked(
             /* Hard (binding) conflict.  ACCESS conflicts may escape onto
              * the blocker's revocable H cache (R8). */
             {
-                struct chimera_vfs_claim*escape =
-                    chimera_vfs_claim_batch_escape(file,cur,probe);
+                struct chimera_vfs_claim *escape =
+                    chimera_vfs_claim_batch_escape(file, cur, probe);
 
                 if (escape) {
                     if (escape->break_state == CHIMERA_CLAIM_BREAK_IDLE) {
@@ -1173,8 +1173,8 @@ chimera_vfs_claim_admit_locked(
      * hard-caps the exclusive/batch (or lease-H) grant -- the requester
      * must step its mode down, never wait the opener out. */
     {
-        struct chimera_vfs_claim*blocker =
-            chimera_vfs_claim_sole_opener_blocker_locked(file,probe);
+        struct chimera_vfs_claim *blocker =
+            chimera_vfs_claim_sole_opener_blocker_locked(file, probe);
 
         if (blocker) {
             if (conflict_claim) {
@@ -1197,10 +1197,10 @@ chimera_vfs_claim_admit_locked(
 
 void
 chimera_vfs_claim_conflict_fill(
-    const struct chimera_vfs_claim   *claim,
-    struct chimera_vfs_claim_conflict*out)
+    const struct chimera_vfs_claim    *claim,
+    struct chimera_vfs_claim_conflict *out)
 {
-    memset(out,0,sizeof(*out));
+    memset(out, 0, sizeof(*out));
     out->owner     = claim->owner;
     out->construct = claim->construct;
     out->used      = claim->used;
@@ -1222,8 +1222,8 @@ chimera_vfs_claim_conflict_fill(
 
 uint8_t
 chimera_vfs_claim_contended_floor(
-    const struct chimera_vfs_claim*probe,
-    const struct chimera_vfs_claim*holder)
+    const struct chimera_vfs_claim *probe,
+    const struct chimera_vfs_claim *holder)
 {
     uint8_t a    = probe->used;
     uint8_t keep = holder->used;
@@ -1283,10 +1283,10 @@ chimera_vfs_claim_contended_floor(
 
 void
 chimera_vfs_claim_link_locked(
-    struct chimera_vfs_file_state*file,
-    struct chimera_vfs_claim     *claim)
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
 {
-    struct chimera_vfs_claim**head = &file->claims[claim->klass];
+    struct chimera_vfs_claim **head = &file->claims[claim->klass];
 
     claim->file = file;
     claim->prev = NULL;
@@ -1299,10 +1299,10 @@ chimera_vfs_claim_link_locked(
 
 void
 chimera_vfs_claim_unlink_locked(
-    struct chimera_vfs_file_state*file,
-    struct chimera_vfs_claim     *claim)
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
 {
-    struct chimera_vfs_claim**head = &file->claims[claim->klass];
+    struct chimera_vfs_claim **head = &file->claims[claim->klass];
 
     if (claim->prev) {
         claim->prev->next = claim->next;
@@ -1323,16 +1323,16 @@ chimera_vfs_claim_unlink_locked(
 
 SYMBOL_EXPORT enum chimera_vfs_claim_result
 chimera_vfs_claim_try_acquire(
-    struct chimera_vfs_state         *state,
-    struct chimera_vfs_file_state    *file,
-    struct chimera_vfs_claim         *claim,
-    struct chimera_vfs_claim_conflict*conflict_out)
+    struct chimera_vfs_state          *state,
+    struct chimera_vfs_file_state     *file,
+    struct chimera_vfs_claim          *claim,
+    struct chimera_vfs_claim_conflict *conflict_out)
 {
     enum chimera_vfs_claim_result result;
     struct chimera_vfs_claim     *conflict;
 
     if (conflict_out) {
-        memset(conflict_out,0,sizeof(*conflict_out));
+        memset(conflict_out, 0, sizeof(*conflict_out));
     }
 
     /* Outer loop: re-probe after courtesy-reclaiming dead holders. */
@@ -1343,10 +1343,10 @@ chimera_vfs_claim_try_acquire(
         conflict = NULL;
 
         evpl_mutex_lock(&file->lock);
-        result = chimera_vfs_claim_admit_locked(file,claim,&conflict);
+        result = chimera_vfs_claim_admit_locked(file, claim, &conflict);
 
         if (result == CHIMERA_CLAIM_GRANTED) {
-            chimera_vfs_claim_link_locked(file,claim);
+            chimera_vfs_claim_link_locked(file, claim);
             evpl_mutex_unlock(&file->lock);
             /* A byte-range lock displaces pure-read caches through the
              * RANGE_LOCK trigger (2.1.5.18); W/H caches were handled at
@@ -1357,24 +1357,24 @@ chimera_vfs_claim_try_acquire(
                     .op_handle = claim->op_handle,
                 };
                 chimera_vfs_claim_trigger_fire(
-                    state,file,CHIMERA_TRIGGER_RANGE_LOCK,&actor,
+                    state, file, CHIMERA_TRIGGER_RANGE_LOCK, &actor,
                     (claim->used & CHIMERA_CLAIM_LW) ? 1 : 0);
             }
             /* Single entrance: every admission funnels the backend cover
              * re-evaluation (cheap no-op absent a CAP_LEASE module). */
-            chimera_vfs_claim_backend_reeval(state,file);
+            chimera_vfs_claim_backend_reeval(state, file);
             return CHIMERA_CLAIM_GRANTED;
         }
 
         /* Fill the by-value conflict record under the lock -- no caller
          * pin/unref protocol survives the by-value migration. */
         if (conflict && conflict_out) {
-            chimera_vfs_claim_conflict_fill(conflict,conflict_out);
+            chimera_vfs_claim_conflict_fill(conflict, conflict_out);
         }
 
         if (result == CHIMERA_CLAIM_DENIED) {
             chimera_vfs_claim_revoked_cb_t revoked_cb = NULL;
-            void*cb_private                           = NULL;
+            void *cb_private                          = NULL;
             bool reclaimed                            = false;
 
             /* Reclaim a courtesy holder while the lock is still held.
@@ -1386,9 +1386,9 @@ chimera_vfs_claim_try_acquire(
              * outright in lock_state_cleanup -- and the revoke then reads
              * freed memory. */
             if (conflict &&
-                chimera_vfs_claim_holder_reclaimable(conflict,claim)) {
-                chimera_vfs_claim_revoke_locked(file,conflict,
-                                                &revoked_cb,&cb_private);
+                chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
+                chimera_vfs_claim_revoke_locked(file, conflict,
+                                                &revoked_cb, &cb_private);
                 reclaimed = true;
             }
             evpl_mutex_unlock(&file->lock);
@@ -1397,15 +1397,15 @@ chimera_vfs_claim_try_acquire(
                 /* Past the unlock the claim may already be freed, so it is
                  * not passed on; every revoked callback works from its
                  * cb_private (see chimera_vfs_claim_revoke_locked). */
-                revoked_cb(NULL,cb_private);
+                revoked_cb(NULL, cb_private);
             }
 
             if (reclaimed) {
                 /* The pumps chimera_vfs_claim_revoke() would have run. */
                 if (file->state) {
-                    chimera_vfs_claim_pump_pending(file->state,file);
-                    chimera_vfs_claim_pump_io(file->state,file);
-                    chimera_vfs_claim_backend_reeval(file->state,file);
+                    chimera_vfs_claim_pump_pending(file->state, file);
+                    chimera_vfs_claim_pump_io(file->state, file);
+                    chimera_vfs_claim_backend_reeval(file->state, file);
                 }
                 continue;
             }
@@ -1417,9 +1417,9 @@ chimera_vfs_claim_try_acquire(
          * (R50), revoking dead/expired ones, then re-probe until no IDLE
          * conflict remains. */
         while (conflict) {
-            struct chimera_vfs_claim_grant*iter_pin = NULL;
+            struct chimera_vfs_claim_grant *iter_pin = NULL;
             chimera_vfs_claim_revoked_cb_t revoked_cb = NULL;
-            void*cb_private                           = NULL;
+            void *cb_private                          = NULL;
             bool revoked_now                          = false;
             bool do_break                             = false;
             bool do_wait                              = false;
@@ -1448,9 +1448,9 @@ chimera_vfs_claim_try_acquire(
             evpl_mutex_lock(&file->lock);
             iter_pin = chimera_vfs_claim_pin_grant(conflict);
 
-            if (chimera_vfs_claim_holder_reclaimable(conflict,claim)) {
-                chimera_vfs_claim_revoke_locked(file,conflict,
-                                                &revoked_cb,&cb_private);
+            if (chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
+                chimera_vfs_claim_revoke_locked(file, conflict,
+                                                &revoked_cb, &cb_private);
                 revoked_any = true;
                 revoked_now = true;
             } else if (conflict->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
@@ -1458,11 +1458,11 @@ chimera_vfs_claim_try_acquire(
                 deadline_ms =
                     (conflict->owner.proto == CHIMERA_CLAIM_PROTO_NFSV4)
                     ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
-                floor    = chimera_vfs_claim_contended_floor(claim,conflict);
+                floor    = chimera_vfs_claim_contended_floor(claim, conflict);
                 do_break = true;
             } else if (chimera_vfs_claim_deadline_passed(conflict)) {
-                chimera_vfs_claim_revoke_locked(file,conflict,
-                                                &revoked_cb,&cb_private);
+                chimera_vfs_claim_revoke_locked(file, conflict,
+                                                &revoked_cb, &cb_private);
                 revoked_any = true;
                 revoked_now = true;
             } else {
@@ -1474,36 +1474,36 @@ chimera_vfs_claim_try_acquire(
                 if (revoked_cb) {
                     /* The claim may already be freed; see
                      * chimera_vfs_claim_revoke_locked. */
-                    revoked_cb(NULL,cb_private);
+                    revoked_cb(NULL, cb_private);
                 }
                 if (file->state) {
-                    chimera_vfs_claim_pump_pending(file->state,file);
-                    chimera_vfs_claim_pump_io(file->state,file);
-                    chimera_vfs_claim_backend_reeval(file->state,file);
+                    chimera_vfs_claim_pump_pending(file->state, file);
+                    chimera_vfs_claim_pump_io(file->state, file);
+                    chimera_vfs_claim_backend_reeval(file->state, file);
                 }
             } else if (do_break) {
                 /* A break reduces the holder to its contended floor in one
                  * notification (see begin_break); the one_shot argument is
                  * retained for signature stability but no longer alters that. */
                 chimera_vfs_claim_begin_break_ex(
-                    state,conflict,floor,deadline_ms,false);
+                    state, conflict, floor, deadline_ms, false);
                 began_live_break = true;
             } else if (do_wait) {
                 /* Mid-break, deadline pending: the caller waits. */
                 if (iter_pin) {
-                    chimera_vfs_claim_grant_release(state,iter_pin,false);
+                    chimera_vfs_claim_grant_release(state, iter_pin, false);
                 }
                 began_live_break = true;
                 break;
             }
 
             if (iter_pin) {
-                chimera_vfs_claim_grant_release(state,iter_pin,false);
+                chimera_vfs_claim_grant_release(state, iter_pin, false);
             }
 
             conflict = NULL;
             evpl_mutex_lock(&file->lock);
-            if (chimera_vfs_claim_admit_locked(file,claim,&conflict) !=
+            if (chimera_vfs_claim_admit_locked(file, claim, &conflict) !=
                 CHIMERA_CLAIM_BREAKING) {
                 conflict = NULL;
             }
@@ -1517,7 +1517,7 @@ chimera_vfs_claim_try_acquire(
              * parking (brl1/brl3).  Caching acquirers never shortcut. */
             if (claim->klass == CHIMERA_CLAIM_CLASS_RANGE) {
                 evpl_mutex_lock(&file->lock);
-                result = chimera_vfs_claim_admit_locked(file,claim,&conflict);
+                result = chimera_vfs_claim_admit_locked(file, claim, &conflict);
                 evpl_mutex_unlock(&file->lock);
                 if (result == CHIMERA_CLAIM_GRANTED) {
                     continue;
@@ -1540,8 +1540,8 @@ chimera_vfs_claim_try_acquire(
 
 static inline void
 chimera_vfs_pending_enqueue_locked(
-    struct chimera_vfs_file_state     *file,
-    struct chimera_vfs_pending_acquire*ticket)
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_pending_acquire *ticket)
 {
     ticket->file   = file;
     ticket->queued = true;
@@ -1558,8 +1558,8 @@ chimera_vfs_pending_enqueue_locked(
 
 static inline void
 chimera_vfs_pending_dequeue_locked(
-    struct chimera_vfs_file_state     *file,
-    struct chimera_vfs_pending_acquire*ticket)
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_pending_acquire *ticket)
 {
     if (ticket->prev) {
         ticket->prev->next = ticket->next;
@@ -1580,12 +1580,12 @@ chimera_vfs_pending_dequeue_locked(
 
 void
 chimera_vfs_claim_pump_pending(
-    struct chimera_vfs_state     *state,
-    struct chimera_vfs_file_state*file)
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
 {
-    struct chimera_vfs_pending_acquire*head,*t,*next;
-    enum chimera_vfs_claim_result      result;
-    struct chimera_vfs_claim_conflict  conflict;
+    struct chimera_vfs_pending_acquire *head, *t, *next;
+    enum chimera_vfs_claim_result       result;
+    struct chimera_vfs_claim_conflict   conflict;
 
     evpl_mutex_lock(&file->lock);
     head               = file->pending_head;
@@ -1601,11 +1601,11 @@ chimera_vfs_claim_pump_pending(
         t->prev = NULL;
         t->next = NULL;
 
-        result = chimera_vfs_claim_try_acquire(state,file,t->claim,&conflict);
+        result = chimera_vfs_claim_try_acquire(state, file, t->claim, &conflict);
 
         if (result == CHIMERA_CLAIM_BREAKING) {
             evpl_mutex_lock(&file->lock);
-            chimera_vfs_pending_enqueue_locked(file,t);
+            chimera_vfs_pending_enqueue_locked(file, t);
             evpl_mutex_unlock(&file->lock);
             continue;
         }
@@ -1614,7 +1614,7 @@ chimera_vfs_claim_pump_pending(
          * blocking lock / NLM block: never bounce DENIED to a waiter). */
         if (result == CHIMERA_CLAIM_DENIED && t->wait_hard) {
             evpl_mutex_lock(&file->lock);
-            chimera_vfs_pending_enqueue_locked(file,t);
+            chimera_vfs_pending_enqueue_locked(file, t);
             evpl_mutex_unlock(&file->lock);
             continue;
         }
@@ -1637,7 +1637,7 @@ chimera_vfs_claim_pump_pending(
             !file->bl_range_disabled &&
             t->claim->owner.proto == CHIMERA_CLAIM_PROTO_POSIX &&
             chimera_vfs_claim_backend_range_capable(state)) {
-            chimera_vfs_claim_backend_defer_ticket(state,t);
+            chimera_vfs_claim_backend_defer_ticket(state, t);
             continue;
         }
 
@@ -1650,16 +1650,16 @@ chimera_vfs_claim_pump_pending(
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_acquire(
-    struct chimera_vfs_thread         *thread,
-    struct chimera_vfs_state          *state,
-    struct chimera_vfs_file_state     *file,
-    struct chimera_vfs_claim          *claim,
-    struct chimera_vfs_pending_acquire*ticket,
-    bool                               wait,
-    bool                               wait_hard,
-    chimera_vfs_claim_acquire_cb_t     cb,
-    chimera_vfs_claim_blocked_cb_t     blocked_cb,
-    void                              *private_data)
+    struct chimera_vfs_thread          *thread,
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_claim           *claim,
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                                wait,
+    bool                                wait_hard,
+    chimera_vfs_claim_acquire_cb_t      cb,
+    chimera_vfs_claim_blocked_cb_t      blocked_cb,
+    void                               *private_data)
 {
     enum chimera_vfs_claim_result     result;
     struct chimera_vfs_claim_conflict conflict;
@@ -1674,12 +1674,12 @@ chimera_vfs_claim_acquire(
     ticket->prev         = NULL;
     ticket->next         = NULL;
 
-    result = chimera_vfs_claim_try_acquire(state,file,claim,&conflict);
+    result = chimera_vfs_claim_try_acquire(state, file, claim, &conflict);
 
     if ((result == CHIMERA_CLAIM_BREAKING && wait) ||
         (result == CHIMERA_CLAIM_DENIED && wait_hard)) {
         evpl_mutex_lock(&file->lock);
-        chimera_vfs_pending_enqueue_locked(file,ticket);
+        chimera_vfs_pending_enqueue_locked(file, ticket);
         evpl_mutex_unlock(&file->lock);
         /* Fired after the enqueue but before return, so the deferred
          * result callback can never overtake it (NLM4_BLOCKED). */
@@ -1703,8 +1703,8 @@ chimera_vfs_claim_acquire(
      * only threadless teardown releases ride the queued lane. */
     if (result == CHIMERA_CLAIM_GRANTED &&
         claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
-        chimera_vfs_claim_backend_range_projects(state,file,thread,claim)) {
-        chimera_vfs_claim_backend_project_range(thread,state,ticket,false);
+        chimera_vfs_claim_backend_range_projects(state, file, thread, claim)) {
+        chimera_vfs_claim_backend_project_range(thread, state, ticket, false);
         return;
     }
 
@@ -1719,26 +1719,26 @@ chimera_vfs_claim_acquire(
  * unused and this is plain release. */
 SYMBOL_EXPORT void
 chimera_vfs_claim_release_ranged(
-    struct chimera_vfs_thread    *thread,
-    struct chimera_vfs_state     *state,
-    struct chimera_vfs_file_state*file,
-    struct chimera_vfs_claim     *claim)
+    struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
 {
     (void) thread;
-    chimera_vfs_claim_release(state,file,claim);
+    chimera_vfs_claim_release(state, file, claim);
 } /* chimera_vfs_claim_release_ranged */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_release(
-    struct chimera_vfs_state     *state,
-    struct chimera_vfs_file_state*file,
-    struct chimera_vfs_claim     *claim)
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
 {
     uint64_t token;
 
     evpl_mutex_lock(&file->lock);
     if (claim->file == file) {
-        chimera_vfs_claim_unlink_locked(file,claim);
+        chimera_vfs_claim_unlink_locked(file, claim);
     }
     token                = claim->backend_token;
     claim->backend_token = 0;
@@ -1746,21 +1746,21 @@ chimera_vfs_claim_release(
         /* Enqueued UNDER file->lock: any admit that sees these bytes free
          * happens-after this entry exists, so the inline-confirm drain
          * always finds it (release-then-relock ordering, all paths). */
-        chimera_vfs_claim_backend_release_token(state,file,token);
+        chimera_vfs_claim_backend_release_token(state, file, token);
     }
     evpl_mutex_unlock(&file->lock);
 
-    chimera_vfs_claim_pump_pending(state,file);
-    chimera_vfs_claim_pump_io(state,file);
-    chimera_vfs_claim_backend_reeval(state,file);
+    chimera_vfs_claim_pump_pending(state, file);
+    chimera_vfs_claim_pump_io(state, file);
+    chimera_vfs_claim_backend_reeval(state, file);
 } /* chimera_vfs_claim_release */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_shrink(
-    struct chimera_vfs_file_state*file,
-    struct chimera_vfs_claim     *claim,
-    uint8_t                       new_used,
-    uint8_t                       new_denied)
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim,
+    uint8_t                        new_used,
+    uint8_t                        new_denied)
 {
     evpl_mutex_lock(&file->lock);
     claim->used       = new_used;
@@ -1769,25 +1769,25 @@ chimera_vfs_claim_shrink(
     evpl_mutex_unlock(&file->lock);
 
     if (file->state) {
-        chimera_vfs_claim_pump_pending(file->state,file);
-        chimera_vfs_claim_pump_io(file->state,file);
-        chimera_vfs_claim_backend_reeval(file->state,file);
+        chimera_vfs_claim_pump_pending(file->state, file);
+        chimera_vfs_claim_pump_io(file->state, file);
+        chimera_vfs_claim_backend_reeval(file->state, file);
     }
 } /* chimera_vfs_claim_shrink */
 
 SYMBOL_EXPORT enum chimera_vfs_claim_result
 chimera_vfs_claim_test(
-    struct chimera_vfs_file_state    *file,
-    const struct chimera_vfs_claim   *probe,
-    struct chimera_vfs_claim_conflict*conflict_out)
+    struct chimera_vfs_file_state     *file,
+    const struct chimera_vfs_claim    *probe,
+    struct chimera_vfs_claim_conflict *conflict_out)
 {
     enum chimera_vfs_claim_result result;
     struct chimera_vfs_claim     *conflict = NULL;
 
     evpl_mutex_lock(&file->lock);
-    result = chimera_vfs_claim_admit_locked(file,probe,&conflict);
+    result = chimera_vfs_claim_admit_locked(file, probe, &conflict);
     if (conflict && conflict_out) {
-        chimera_vfs_claim_conflict_fill(conflict,conflict_out);
+        chimera_vfs_claim_conflict_fill(conflict, conflict_out);
     }
     evpl_mutex_unlock(&file->lock);
     return result;
@@ -1795,21 +1795,21 @@ chimera_vfs_claim_test(
 
 SYMBOL_EXPORT bool
 chimera_vfs_claim_range_owner_holds(
-    struct chimera_vfs_file_state   *file,
-    const struct chimera_claim_owner*owner,
-    const struct chimera_vfs_claim  *except,
-    uint64_t                         offset,
-    uint64_t                         length)
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length)
 {
-    struct chimera_vfs_claim*cur;
-    bool                     held = false;
+    struct chimera_vfs_claim *cur;
+    bool                      held = false;
 
     evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_RANGE]; cur; cur = cur->next) {
         if (cur == except ||
-            !chimera_claim_owner_equal(&cur->owner,owner) ||
-            !chimera_vfs_claim_range_overlap(cur->offset,cur->length,
-                                             offset,length)) {
+            !chimera_claim_owner_equal(&cur->owner, owner) ||
+            !chimera_vfs_claim_range_overlap(cur->offset, cur->length,
+                                             offset, length)) {
             continue;
         }
         held = true;
@@ -1822,11 +1822,11 @@ chimera_vfs_claim_range_owner_holds(
 
 SYMBOL_EXPORT bool
 chimera_vfs_claim_cancel(
-    struct chimera_vfs_state          *state,
-    struct chimera_vfs_pending_acquire*ticket)
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_pending_acquire *ticket)
 {
-    struct chimera_vfs_file_state*file = ticket->file;
-    bool                          was_queued;
+    struct chimera_vfs_file_state *file = ticket->file;
+    bool                           was_queued;
 
     if (!file) {
         return false;
@@ -1835,7 +1835,7 @@ chimera_vfs_claim_cancel(
     evpl_mutex_lock(&file->lock);
     was_queued = ticket->queued;
     if (was_queued) {
-        chimera_vfs_pending_dequeue_locked(file,ticket);
+        chimera_vfs_pending_dequeue_locked(file, ticket);
     }
     evpl_mutex_unlock(&file->lock);
 
@@ -1851,8 +1851,8 @@ chimera_vfs_claim_cancel(
      * local insert, releasing the range for other waiters.  ticket_cancel
      * never blocks: when it cannot claim the ticket the callback has
      * already been invoked, and false hands ownership to that callback. */
-    if (state && chimera_vfs_claim_backend_ticket_cancel(state,ticket)) {
-        chimera_vfs_claim_release(state,file,ticket->claim);
+    if (state && chimera_vfs_claim_backend_ticket_cancel(state, ticket)) {
+        chimera_vfs_claim_release(state, file, ticket->claim);
         return true;
     }
 
@@ -1865,25 +1865,25 @@ chimera_vfs_claim_cancel(
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_range_replace(
-    struct chimera_vfs_state        *state,
-    struct chimera_vfs_file_state   *file,
-    const struct chimera_claim_owner*owner,
-    const struct chimera_vfs_claim  *except,
-    uint64_t                         offset,
-    uint64_t                         length,
-    uint8_t                          new_mask,
-    struct chimera_vfs_claim        *spare[2],
-    int                             *spare_used,
-    void(                           *released_cb )(
-        struct chimera_vfs_claim*claim,
-        void                    *arg),
-    void                            *released_arg)
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length,
+    uint8_t                           new_mask,
+    struct chimera_vfs_claim         *spare[2],
+    int                              *spare_used,
+    void (                           *released_cb )(
+        struct chimera_vfs_claim *claim,
+        void                     *arg),
+    void                             *released_arg)
 {
-    struct chimera_vfs_claim*cur,*next;
-    struct chimera_vfs_claim*released[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
-    int                      n_released = 0;
-    int                      n_spare    = 0;
-    int                      i;
+    struct chimera_vfs_claim *cur, *next;
+    struct chimera_vfs_claim *released[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    int                       n_released = 0;
+    int                       n_spare    = 0;
+    int                       i;
 
     /* v1 supports the carve (unlock/split) only; inserting the replacement
      * extent is the caller's subsequent acquire.  new_mask is reserved. */
@@ -1898,11 +1898,11 @@ chimera_vfs_claim_range_replace(
         if (cur == except) {
             continue;
         }
-        if (!chimera_claim_owner_equal(&cur->owner,owner)) {
+        if (!chimera_claim_owner_equal(&cur->owner, owner)) {
             continue;
         }
-        if (!chimera_vfs_claim_range_overlap(cur->offset,cur->length,
-                                             offset,length)) {
+        if (!chimera_vfs_claim_range_overlap(cur->offset, cur->length,
+                                             offset, length)) {
             continue;
         }
 
@@ -1933,7 +1933,7 @@ chimera_vfs_claim_range_replace(
              * re-locked; projecting it needs a vfs thread here, which the
              * carve path does not have. */
             if (has_left && n_spare < 2 && spare && spare[n_spare]) {
-                struct chimera_vfs_claim*left = spare[n_spare++];
+                struct chimera_vfs_claim *left = spare[n_spare++];
 
                 *left               = *cur;
                 left->offset        = cur_off;
@@ -1941,10 +1941,10 @@ chimera_vfs_claim_range_replace(
                 left->backend_token = 0;
                 left->prev          = NULL;
                 left->next          = NULL;
-                chimera_vfs_claim_link_locked(file,left);
+                chimera_vfs_claim_link_locked(file, left);
             }
             if (has_right && n_spare < 2 && spare && spare[n_spare]) {
-                struct chimera_vfs_claim*right = spare[n_spare++];
+                struct chimera_vfs_claim *right = spare[n_spare++];
 
                 *right        = *cur;
                 right->offset = carve_end;
@@ -1953,11 +1953,11 @@ chimera_vfs_claim_range_replace(
                 right->backend_token = 0;
                 right->prev          = NULL;
                 right->next          = NULL;
-                chimera_vfs_claim_link_locked(file,right);
+                chimera_vfs_claim_link_locked(file, right);
             }
         }
 
-        chimera_vfs_claim_unlink_locked(file,cur);
+        chimera_vfs_claim_unlink_locked(file, cur);
         if (n_released < CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH) {
             released[n_released++] = cur;
         }
@@ -1968,7 +1968,7 @@ chimera_vfs_claim_range_replace(
     for (i = 0; i < n_released; i++) {
         if (released[i]->backend_token) {
             chimera_vfs_claim_backend_release_token(
-                state,file,released[i]->backend_token);
+                state, file, released[i]->backend_token);
             released[i]->backend_token = 0;
         }
     }
@@ -1979,25 +1979,25 @@ chimera_vfs_claim_range_replace(
 
     for (i = 0; i < n_released; i++) {
         if (released_cb) {
-            released_cb(released[i],released_arg);
+            released_cb(released[i], released_arg);
         }
     }
 
-    chimera_vfs_claim_pump_pending(state,file);
-    chimera_vfs_claim_pump_io(state,file);
-    chimera_vfs_claim_backend_reeval(state,file);
+    chimera_vfs_claim_pump_pending(state, file);
+    chimera_vfs_claim_pump_io(state, file);
+    chimera_vfs_claim_backend_reeval(state, file);
 } /* chimera_vfs_claim_range_replace */
 
 /* -------------------------------------------------------------------- */
 /* Cache grants                                                         */
 /* -------------------------------------------------------------------- */
 
-static struct chimera_vfs_claim_grant*
+static struct chimera_vfs_claim_grant *
 chimera_vfs_claim_grant_find_locked(
-    struct chimera_vfs_file_state   *file,
-    const struct chimera_claim_owner*owner)
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner)
 {
-    struct chimera_vfs_claim_grant*g;
+    struct chimera_vfs_claim_grant *g;
 
     /*
      * A lease is identified by (ClientGuid, LeaseKey) -- MS-SMB2 3.3.5.9.8
@@ -2016,24 +2016,24 @@ chimera_vfs_claim_grant_find_locked(
      * not already matched, so it is gone rather than merely narrowed.
      */
     for (g = file->grants; g; g = g->grant_next) {
-        if (chimera_claim_owner_equal(&g->claim.owner,owner)) {
+        if (chimera_claim_owner_equal(&g->claim.owner, owner)) {
             return g;
         }
     }
     return NULL;
 } /* chimera_vfs_claim_grant_find_locked */
 
-SYMBOL_EXPORT struct chimera_vfs_claim_grant*
+SYMBOL_EXPORT struct chimera_vfs_claim_grant *
 chimera_vfs_claim_grant_coalesce(
-    struct chimera_vfs_file_state   *file,
-    const struct chimera_claim_owner*owner,
-    uint8_t                          want,
-    int                              upgrade_ok)
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    uint8_t                           want,
+    int                               upgrade_ok)
 {
-    struct chimera_vfs_claim_grant*grant;
+    struct chimera_vfs_claim_grant *grant;
 
     evpl_mutex_lock(&file->lock);
-    grant = chimera_vfs_claim_grant_find_locked(file,owner);
+    grant = chimera_vfs_claim_grant_find_locked(file, owner);
     if (grant) {
         grant->refcount++;
 
@@ -2044,13 +2044,13 @@ chimera_vfs_claim_grant_coalesce(
             grant->claim.break_state == CHIMERA_CLAIM_BREAK_ACKED &&
             grant->claim.used == 0 &&
             want != 0) {
-            struct chimera_vfs_claim probe    = grant->claim;
-            struct chimera_vfs_claim*conflict = NULL;
+            struct chimera_vfs_claim  probe    = grant->claim;
+            struct chimera_vfs_claim *conflict = NULL;
 
             probe.used        = want;
             probe.advertised  = want;
             probe.break_state = CHIMERA_CLAIM_BREAK_IDLE;
-            if (chimera_vfs_claim_admit_locked(file,&probe,&conflict) ==
+            if (chimera_vfs_claim_admit_locked(file, &probe, &conflict) ==
                 CHIMERA_CLAIM_GRANTED) {
                 grant->claim.used              = want;
                 grant->claim.advertised        = want;
@@ -2074,13 +2074,13 @@ chimera_vfs_claim_grant_coalesce(
             uint8_t cur = grant->claim.used;
 
             if (want != cur && (want & cur) == cur) {
-                struct chimera_vfs_claim probe    = grant->claim;
-                struct chimera_vfs_claim*conflict = NULL;
+                struct chimera_vfs_claim  probe    = grant->claim;
+                struct chimera_vfs_claim *conflict = NULL;
 
                 probe.used        = want;
                 probe.advertised  = want;
                 probe.break_state = CHIMERA_CLAIM_BREAK_IDLE;
-                if (chimera_vfs_claim_admit_locked(file,&probe,&conflict) ==
+                if (chimera_vfs_claim_admit_locked(file, &probe, &conflict) ==
                     CHIMERA_CLAIM_GRANTED) {
                     grant->claim.used        = want;
                     grant->claim.advertised  = want;
@@ -2096,9 +2096,9 @@ chimera_vfs_claim_grant_coalesce(
 
 SYMBOL_EXPORT uint8_t
 chimera_vfs_claim_grant_try_upgrade(
-    struct chimera_vfs_file_state *file,
-    struct chimera_vfs_claim_grant*grant,
-    uint8_t                        want_used)
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim_grant *grant,
+    uint8_t                         want_used)
 {
     uint8_t granted;
 
@@ -2114,12 +2114,12 @@ chimera_vfs_claim_grant_try_upgrade(
         (want_used & granted) == granted &&
         file->claims[CHIMERA_CLAIM_CLASS_CACHE] == &grant->claim &&
         grant->claim.next == NULL) {
-        struct chimera_vfs_claim probe    = grant->claim;
-        struct chimera_vfs_claim*conflict = NULL;
+        struct chimera_vfs_claim  probe    = grant->claim;
+        struct chimera_vfs_claim *conflict = NULL;
 
         probe.used       = want_used;
         probe.advertised = want_used;
-        if (chimera_vfs_claim_admit_locked(file,&probe,&conflict) ==
+        if (chimera_vfs_claim_admit_locked(file, &probe, &conflict) ==
             CHIMERA_CLAIM_GRANTED) {
             grant->claim.used       = want_used;
             grant->claim.advertised = want_used;
@@ -2134,19 +2134,19 @@ chimera_vfs_claim_grant_try_upgrade(
 
 SYMBOL_EXPORT uint8_t
 chimera_vfs_claim_grant_cap_mode(
-    struct chimera_vfs_file_state *file,
-    const struct chimera_vfs_claim*template_claim,
-    bool                           strict)
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_claim *template_claim,
+    bool                            strict)
 {
-    struct chimera_vfs_claim probe    = *template_claim;
-    struct chimera_vfs_claim*conflict = NULL;
-    uint8_t                  mode     = template_claim->used;
+    struct chimera_vfs_claim  probe    = *template_claim;
+    struct chimera_vfs_claim *conflict = NULL;
+    uint8_t                   mode     = template_claim->used;
 
     evpl_mutex_lock(&file->lock);
     for ( ; ; ) {
         probe.used       = mode;
         probe.advertised = mode;
-        if (chimera_vfs_claim_admit_locked(file,&probe,&conflict) ==
+        if (chimera_vfs_claim_admit_locked(file, &probe, &conflict) ==
             CHIMERA_CLAIM_GRANTED) {
             break;
         }
@@ -2179,8 +2179,8 @@ chimera_vfs_claim_grant_acquire(
     struct chimera_vfs_claim_grant    **grant_out,
     struct chimera_vfs_claim_conflict  *conflict_out)
 {
-    struct chimera_vfs_claim_grant*grant,*existing;
-    enum chimera_vfs_claim_result  result;
+    struct chimera_vfs_claim_grant *grant, *existing;
+    enum chimera_vfs_claim_result   result;
 
     (void) flavor;
 
@@ -2189,17 +2189,17 @@ chimera_vfs_claim_grant_acquire(
         *member_seeded = false;
     }
     if (conflict_out) {
-        memset(conflict_out,0,sizeof(*conflict_out));
+        memset(conflict_out, 0, sizeof(*conflict_out));
     }
 
-    grant = chimera_vfs_claim_grant_coalesce(file,&template_claim->owner,
-                                             template_claim->used,upgrade_ok);
+    grant = chimera_vfs_claim_grant_coalesce(file, &template_claim->owner,
+                                             template_claim->used, upgrade_ok);
     if (grant) {
         *grant_out = grant;
         return CHIMERA_CLAIM_GRANTED;
     }
 
-    grant = calloc(1,sizeof(*grant));
+    grant = calloc(1, sizeof(*grant));
     if (!grant) {
         return CHIMERA_CLAIM_DENIED;
     }
@@ -2215,7 +2215,7 @@ chimera_vfs_claim_grant_acquire(
      * pre-registered-member discipline). */
     grant->members = member_seed;
 
-    result = chimera_vfs_claim_try_acquire(state,file,&grant->claim,
+    result = chimera_vfs_claim_try_acquire(state, file, &grant->claim,
                                            conflict_out);
     if (result != CHIMERA_CLAIM_GRANTED) {
         free(grant);
@@ -2224,10 +2224,10 @@ chimera_vfs_claim_grant_acquire(
 
     /* Collapse a racing same-owner first-acquire onto the linked grant. */
     evpl_mutex_lock(&file->lock);
-    existing = chimera_vfs_claim_grant_find_locked(file,&template_claim->owner);
+    existing = chimera_vfs_claim_grant_find_locked(file, &template_claim->owner);
     if (existing) {
         existing->refcount++;
-        chimera_vfs_claim_unlink_locked(file,&grant->claim);
+        chimera_vfs_claim_unlink_locked(file, &grant->claim);
         evpl_mutex_unlock(&file->lock);
         free(grant);
         *grant_out = existing;
@@ -2246,13 +2246,13 @@ chimera_vfs_claim_grant_acquire(
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_grant_release(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_claim_grant*grant,
-    bool                           pump)
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_claim_grant *grant,
+    bool                            pump)
 {
-    struct chimera_vfs_file_state  *file = grant->file;
-    struct chimera_vfs_claim_grant**pp;
-    bool                            last;
+    struct chimera_vfs_file_state   *file = grant->file;
+    struct chimera_vfs_claim_grant **pp;
+    bool                             last;
 
     evpl_mutex_lock(&file->lock);
 
@@ -2269,7 +2269,7 @@ chimera_vfs_claim_grant_release(
             }
         }
         if (grant->claim.file == file) {
-            chimera_vfs_claim_unlink_locked(file,&grant->claim);
+            chimera_vfs_claim_unlink_locked(file, &grant->claim);
         }
     }
 
@@ -2277,18 +2277,18 @@ chimera_vfs_claim_grant_release(
 
     if (last) {
         if (pump) {
-            chimera_vfs_claim_pump_pending(state,file);
-            chimera_vfs_claim_pump_io(state,file);
+            chimera_vfs_claim_pump_pending(state, file);
+            chimera_vfs_claim_pump_io(state, file);
         }
-        chimera_vfs_claim_backend_reeval(state,file);
+        chimera_vfs_claim_backend_reeval(state, file);
         free(grant);
     }
 } /* chimera_vfs_claim_grant_release */
 
-struct chimera_vfs_claim_grant*
-chimera_vfs_claim_pin_grant(struct chimera_vfs_claim*claim)
+struct chimera_vfs_claim_grant *
+chimera_vfs_claim_pin_grant(struct chimera_vfs_claim *claim)
 {
-    struct chimera_vfs_claim_grant*grant = NULL;
+    struct chimera_vfs_claim_grant *grant = NULL;
 
     if (claim->grant) {
         grant = claim->grant;
@@ -2300,11 +2300,11 @@ chimera_vfs_claim_pin_grant(struct chimera_vfs_claim*claim)
 
 SYMBOL_EXPORT bool
 chimera_vfs_claim_client_holds_handle_cache(
-    struct chimera_vfs_file_state*file,
-    uint64_t                      client_key)
+    struct chimera_vfs_file_state *file,
+    uint64_t                       client_key)
 {
-    const struct chimera_vfs_claim*cur;
-    bool                           held = false;
+    const struct chimera_vfs_claim *cur;
+    bool                            held = false;
 
     evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
@@ -2322,11 +2322,11 @@ chimera_vfs_claim_client_holds_handle_cache(
 
 SYMBOL_EXPORT bool
 chimera_vfs_claim_client_holds_cache(
-    struct chimera_vfs_file_state*file,
-    uint64_t                      client_key)
+    struct chimera_vfs_file_state *file,
+    uint64_t                       client_key)
 {
-    const struct chimera_vfs_claim*cur;
-    bool                           held = false;
+    const struct chimera_vfs_claim *cur;
+    bool                            held = false;
 
     evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
@@ -2347,13 +2347,13 @@ chimera_vfs_claim_client_holds_cache(
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_scan(
-    struct chimera_vfs_file_state        *file,
-    const struct chimera_vfs_claim_filter*filter,
-    chimera_vfs_claim_visit_cb_t          visit_cb,
-    void                                 *arg)
+    struct chimera_vfs_file_state         *file,
+    const struct chimera_vfs_claim_filter *filter,
+    chimera_vfs_claim_visit_cb_t           visit_cb,
+    void                                  *arg)
 {
-    const struct chimera_vfs_claim*cur;
-    int                            k;
+    const struct chimera_vfs_claim *cur;
+    int                             k;
 
     evpl_mutex_lock(&file->lock);
     for (k = 0; k < CHIMERA_CLAIM_CLASS_COUNT; k++) {
@@ -2379,7 +2379,7 @@ chimera_vfs_claim_scan(
                 cur->construct == CHIMERA_CONSTRUCT_SMB_OPEN_INERT) {
                 continue;
             }
-            visit_cb(cur,arg);
+            visit_cb(cur, arg);
         }
     }
     evpl_mutex_unlock(&file->lock);

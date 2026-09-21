@@ -56,48 +56,48 @@
 
 // fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
 #if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
         #define HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW 1
     #endif /* if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) */
 #endif /* if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION) */
 
 static void
 chimera_io_uring_dispatch(
-    struct chimera_vfs_request*request,
-    void                      *private_data);
+    struct chimera_vfs_request *request,
+    void                       *private_data);
 
 #ifndef container_of
-#define container_of(ptr,type,member) ({            \
-        typeof(((type*) 0)->member) * __mptr = (ptr); \
-        (type*) ((char*) __mptr - offsetof(type,member)); })
+#define container_of(ptr, type, member) ({            \
+        typeof(((type *) 0)->member) * __mptr = (ptr); \
+        (type *) ((char *) __mptr - offsetof(type, member)); })
 #endif // ifndef container_of
 
-#define chimera_io_uring_debug(...)   chimera_debug("io_uring", \
-                                                    __FILE__, \
-                                                    __LINE__, \
-                                                    __VA_ARGS__)
-#define chimera_io_uring_info(...)    chimera_info("io_uring", \
-                                                   __FILE__, \
-                                                   __LINE__, \
-                                                   __VA_ARGS__)
-#define chimera_io_uring_error(...)   chimera_error("io_uring", \
-                                                    __FILE__, \
-                                                    __LINE__, \
-                                                    __VA_ARGS__)
-#define chimera_io_uring_fatal(...)   chimera_fatal("io_uring", \
-                                                    __FILE__, \
-                                                    __LINE__, \
-                                                    __VA_ARGS__)
-#define chimera_io_uring_abort(...)   chimera_abort("io_uring", \
-                                                    __FILE__, \
-                                                    __LINE__, \
-                                                    __VA_ARGS__)
+#define chimera_io_uring_debug(...)     chimera_debug("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_io_uring_info(...)      chimera_info("io_uring", \
+                                                     __FILE__, \
+                                                     __LINE__, \
+                                                     __VA_ARGS__)
+#define chimera_io_uring_error(...)     chimera_error("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_io_uring_fatal(...)     chimera_fatal("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
+#define chimera_io_uring_abort(...)     chimera_abort("io_uring", \
+                                                      __FILE__, \
+                                                      __LINE__, \
+                                                      __VA_ARGS__)
 
-#define chimera_io_uring_fatal_if(cond,...) \
-        chimera_fatal_if(cond,"io_uring",__FILE__,__LINE__,__VA_ARGS__)
+#define chimera_io_uring_fatal_if(cond, ...) \
+        chimera_fatal_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
 
-#define chimera_io_uring_abort_if(cond,...) \
-        chimera_abort_if(cond,"io_uring",__FILE__,__LINE__,__VA_ARGS__)
+#define chimera_io_uring_abort_if(cond, ...) \
+        chimera_abort_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
 
 #define CHIMERA_IO_URING_STATX_MASK CHIMERA_LINUX_STATX_MASK
 
@@ -137,14 +137,14 @@ chimera_io_uring_dispatch(
 #define CHIMERA_IO_URING_LOCK_SETW  F_SETLKW
 #endif /* ifdef F_OFD_SETLK */
 
-struct chimera_io_uring_range_file{
-    uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                           fh_len;
-    uint64_t                           fh_hash;
-    struct chimera_claim_owner         owner;
-    int                                fd;
-    uint32_t                           refcnt;
-    struct chimera_io_uring_range_file*next;
+struct chimera_io_uring_range_file {
+    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            fh_len;
+    uint64_t                            fh_hash;
+    struct chimera_claim_owner          owner;
+    int                                 fd;
+    uint32_t                            refcnt;
+    struct chimera_io_uring_range_file *next;
 };
 
 /* One granted range record, named by the token the core hands back to us on
@@ -152,28 +152,28 @@ struct chimera_io_uring_range_file{
  * unlock reproduces exactly the bytes that were locked; length 0 means to-EOF
  * in the fcntl spelling.  projected == 0 marks a record the host cannot
  * express, which the release must not try to undo. */
-struct chimera_io_uring_range{
-    uint64_t                           token;
-    struct chimera_io_uring_range_file*file;
-    uint64_t                           offset;
-    uint64_t                           length;
-    uint8_t                            projected;
-    struct chimera_io_uring_range     *next;
+struct chimera_io_uring_range {
+    uint64_t                            token;
+    struct chimera_io_uring_range_file *file;
+    uint64_t                            offset;
+    uint64_t                            length;
+    uint8_t                             projected;
+    struct chimera_io_uring_range      *next;
 };
 
-struct chimera_io_uring_shared{
-    struct io_uring                    ring;
-    int                                readdir_verifier;
+struct chimera_io_uring_shared {
+    struct io_uring                     ring;
+    int                                 readdir_verifier;
 
-    evpl_mutex_t                       range_lock;
-    struct chimera_io_uring_range_file*range_files;
-    struct chimera_io_uring_range     *ranges;
-    uint64_t                           range_next_token;
+    evpl_mutex_t                        range_lock;
+    struct chimera_io_uring_range_file *range_files;
+    struct chimera_io_uring_range      *ranges;
+    uint64_t                            range_next_token;
 
     /* Mount roots handed out as mount_private, so destroy can free the ones
      * no UMOUNT reclaimed.  See chimera_linux_mount_root. */
-    evpl_mutex_t                       mount_lock;
-    struct chimera_linux_mount_root   *mount_roots;
+    evpl_mutex_t                        mount_lock;
+    struct chimera_linux_mount_root    *mount_roots;
 };
 
 /*
@@ -188,14 +188,14 @@ struct chimera_io_uring_shared{
  */
 #define CHIMERA_IO_URING_MAX_PERSONALITIES 64
 
-struct chimera_io_uring_personality{
+struct chimera_io_uring_personality {
     uint64_t cred_hash;
     uint64_t lru;
     int      id;
     int      valid;
 };
 
-struct chimera_io_uring_thread{
+struct chimera_io_uring_thread {
     struct evpl                        *evpl;
     struct chimera_io_uring_shared     *shared;
     struct evpl_doorbell                doorbell;
@@ -221,12 +221,12 @@ struct chimera_io_uring_thread{
  */
 static int
 chimera_io_uring_get_personality(
-    struct chimera_io_uring_thread*thread,
-    const struct chimera_vfs_cred *cred)
+    struct chimera_io_uring_thread *thread,
+    const struct chimera_vfs_cred  *cred)
 {
-    const struct chimera_vfs_cred*sc = chimera_vfs_get_server_cred();
-    uint64_t                      hash;
-    int                           i,slot,free_slot = -1,lru_slot = 0,id,rc;
+    const struct chimera_vfs_cred *sc = chimera_vfs_get_server_cred();
+    uint64_t                       hash;
+    int                            i, slot, free_slot = -1, lru_slot = 0, id, rc;
 
     if (!thread->personality_supported ||
         cred->flavor != CHIMERA_VFS_AUTH_UNIX ||
@@ -253,7 +253,7 @@ chimera_io_uring_get_personality(
     }
 
     /* Miss: register a personality capturing this identity. */
-    rc = chimera_setup_credential(cred,NULL);
+    rc = chimera_setup_credential(cred, NULL);
     if (rc != 0) {
         return -1;
     }
@@ -276,36 +276,36 @@ chimera_io_uring_get_personality(
     return id;
 } /* chimera_io_uring_get_personality */
 
-static void*
+static void *
 chimera_io_uring_init(
-    const char               *cfgdata,
-    struct prometheus_metrics*metrics)
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
 {
     (void) metrics;
-    struct chimera_io_uring_shared*shared;
-    struct io_uring_params         params = { 0 };
-    int                            rc;
+    struct chimera_io_uring_shared *shared;
+    struct io_uring_params          params = { 0 };
+    int                             rc;
 
-    shared = calloc(1,sizeof(*shared));
+    shared = calloc(1, sizeof(*shared));
 
     // Initialize the shared ring with default parameters
-    rc = io_uring_queue_init_params(256,&shared->ring,&params);
+    rc = io_uring_queue_init_params(256, &shared->ring, &params);
 
     if (rc < 0) {
-        chimera_io_uring_error("Failed to create shared io_uring queue, io_uring disabled: %s",strerror(-rc));
+        chimera_io_uring_error("Failed to create shared io_uring queue, io_uring disabled: %s", strerror(-rc));
         free(shared);
         return NULL;
     }
 
-    evpl_mutex_init(&shared->range_lock,NULL);
-    evpl_mutex_init(&shared->mount_lock,NULL);
+    evpl_mutex_init(&shared->range_lock, NULL);
+    evpl_mutex_init(&shared->mount_lock, NULL);
 
     if (cfgdata && cfgdata[0] != '\0') {
         json_error_t json_error;
-        json_t      *cfg = json_loads(cfgdata,0,&json_error);
+        json_t      *cfg = json_loads(cfgdata, 0, &json_error);
 
         if (cfg) {
-            json_t*verf = json_object_get(cfg,"readdir_verifier");
+            json_t *verf = json_object_get(cfg, "readdir_verifier");
 
             if (json_is_boolean(verf)) {
                 shared->readdir_verifier = json_boolean_value(verf);
@@ -319,25 +319,25 @@ chimera_io_uring_init(
 } /* io_uring_init */ /* io_uring_init */
 
 static void
-chimera_io_uring_destroy(void*private_data)
+chimera_io_uring_destroy(void *private_data)
 {
-    struct chimera_io_uring_shared    *shared = private_data;
-    struct chimera_io_uring_range_file*file;
-    struct chimera_io_uring_range     *range;
-    struct chimera_linux_mount_root   *root;
+    struct chimera_io_uring_shared     *shared = private_data;
+    struct chimera_io_uring_range_file *file;
+    struct chimera_io_uring_range      *range;
+    struct chimera_linux_mount_root    *root;
 
     while ((root = shared->mount_roots)) {
-        LL_DELETE(shared->mount_roots,root);
+        LL_DELETE(shared->mount_roots, root);
         free(root);
     }
 
     while ((range = shared->ranges)) {
-        LL_DELETE(shared->ranges,range);
+        LL_DELETE(shared->ranges, range);
         free(range);
     }
 
     while ((file = shared->range_files)) {
-        LL_DELETE(shared->range_files,file);
+        LL_DELETE(shared->range_files, file);
         close(file->fd);
         free(file);
     }
@@ -348,22 +348,22 @@ chimera_io_uring_destroy(void*private_data)
     free(shared);
 } /* io_uring_destroy */
 
-static inline struct io_uring_sqe*
+static inline struct io_uring_sqe *
 chimera_io_uring_get_sqe(
-    struct chimera_io_uring_thread*thread,
-    struct chimera_vfs_request    *request,
-    int                            slot,
-    int                            linked)
+    struct chimera_io_uring_thread *thread,
+    struct chimera_vfs_request     *request,
+    int                             slot,
+    int                             linked)
 {
-    struct chimera_vfs_request_handle*handle;
-    struct io_uring_sqe              *sge;
+    struct chimera_vfs_request_handle *handle;
+    struct io_uring_sqe               *sge;
 
     sge = io_uring_get_sqe(&thread->ring);
 
-    chimera_io_uring_abort_if(!sge,"io_uring_get_sqe");
+    chimera_io_uring_abort_if(!sge, "io_uring_get_sqe");
 
     if (linked) {
-        io_uring_sqe_set_flags(sge,IOSQE_IO_HARDLINK);
+        io_uring_sqe_set_flags(sge, IOSQE_IO_HARDLINK);
     }
 
     handle = &request->handle[slot];
@@ -379,8 +379,8 @@ chimera_io_uring_get_sqe(
 
 static int
 chimera_io_uring_set_open_attrs(
-    int                      fd,
-    struct chimera_vfs_attrs*attr)
+    int                       fd,
+    struct chimera_vfs_attrs *attr)
 {
     uint64_t set_mask = attr->va_set_mask;
 
@@ -394,7 +394,7 @@ chimera_io_uring_set_open_attrs(
         uid_t uid = (set_mask & CHIMERA_VFS_ATTR_UID) ? (uid_t) attr->va_uid : (uid_t) -1;
         gid_t gid = (set_mask & CHIMERA_VFS_ATTR_GID) ? (gid_t) attr->va_gid : (gid_t) -1;
 
-        if (fchown(fd,uid,gid) < 0) {
+        if (fchown(fd, uid, gid) < 0) {
             return errno;
         }
     }
@@ -405,13 +405,13 @@ chimera_io_uring_set_open_attrs(
      * bits the client asked for; the client has already applied the caller's
      * own umask, so the backend must honor the mode verbatim. */
     if (set_mask & CHIMERA_VFS_ATTR_MODE) {
-        if (fchmod(fd,attr->va_mode & 07777) < 0) {
+        if (fchmod(fd, attr->va_mode & 07777) < 0) {
             return errno;
         }
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
-        if (ftruncate(fd,attr->va_size) < 0) {
+        if (ftruncate(fd, attr->va_size) < 0) {
             return errno;
         }
     }
@@ -448,7 +448,7 @@ chimera_io_uring_set_open_attrs(
             times[1].tv_nsec = UTIME_OMIT;
         }
 
-        if (have_any && futimens(fd,times) < 0) {
+        if (have_any && futimens(fd, times) < 0) {
             return errno;
         }
     }
@@ -465,40 +465,40 @@ chimera_io_uring_set_open_attrs(
  * because it found the object rather than making it. */
 static void
 chimera_io_uring_open_at_finish(
-    struct chimera_io_uring_thread*thread,
-    struct chimera_vfs_request    *request,
-    int                            fd,
-    int                            created,
-    int                            skip_attrs)
+    struct chimera_io_uring_thread *thread,
+    struct chimera_vfs_request     *request,
+    int                             fd,
+    int                             created,
+    int                             skip_attrs)
 {
-    struct io_uring_sqe*sqe;
-    struct statx       *dir_stx,*stx;
-    const char         *name;
-    int                 parent_fd,rc;
+    struct io_uring_sqe *sqe;
+    struct statx        *dir_stx, *stx;
+    const char          *name;
+    int                  parent_fd, rc;
 
     request->status                = CHIMERA_VFS_OK;
     request->open_at.r_vfs_private = fd;
     request->open_at.r_created     = created;
 
-    dir_stx = (struct statx*) request->plugin_data;
-    stx     = (struct statx*) (dir_stx + 1);
-    name    = (char*) (stx + 1);
+    dir_stx = (struct statx *) request->plugin_data;
+    stx     = (struct statx *) (dir_stx + 1);
+    name    = (char *) (stx + 1);
 
     parent_fd = request->open_at.handle->vfs_private;
 
     rc = skip_attrs ? 0 :
-        chimera_io_uring_set_open_attrs(fd,request->open_at.set_attr);
+        chimera_io_uring_set_open_attrs(fd, request->open_at.set_attr);
     if (rc != 0) {
         request->status = chimera_linux_errno_to_status(rc);
         return;
     }
 
-    sqe = chimera_io_uring_get_sqe(thread,request,1,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
-        io_uring_prep_statx(sqe,fd,"",
+        io_uring_prep_statx(sqe, fd, "",
                             AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
-                            CHIMERA_IO_URING_STATX_MASK,stx);
+                            CHIMERA_IO_URING_STATX_MASK, stx);
     } else {
         /* Stat the child by name with AT_SYMLINK_NOFOLLOW so a symlink leaf
          * reports its own S_IFLNK attrs even though the openat() above followed
@@ -508,50 +508,50 @@ chimera_io_uring_open_at_finish(
          * than silently following it.  The linux backend does the same via
          * fstatat(..., AT_SYMLINK_NOFOLLOW).  For a regular file or an
          * already-resolved leaf this flag is a no-op. */
-        io_uring_prep_statx(sqe,parent_fd,name,
+        io_uring_prep_statx(sqe, parent_fd, name,
                             AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
-                            CHIMERA_IO_URING_STATX_MASK,stx);
+                            CHIMERA_IO_URING_STATX_MASK, stx);
     }
 
-    sqe = chimera_io_uring_get_sqe(thread,request,2,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-    io_uring_prep_statx(sqe,parent_fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                        CHIMERA_IO_URING_STATX_MASK,dir_stx);
+    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_open_at_finish */
 
 static int chimera_io_uring_open_at_flags(
-    struct chimera_vfs_request*request);
+    struct chimera_vfs_request *request);
 
 static void
 chimera_io_uring_reap(
-    struct evpl                   *evpl,
-    struct chimera_io_uring_thread*thread)
+    struct evpl                    *evpl,
+    struct chimera_io_uring_thread *thread)
 {
-    struct io_uring_cqe              *cqe;
-    int                               parent_fd;
-    struct chimera_vfs_request       *request;
-    struct chimera_vfs_request_handle*handle;
-    struct statx                     *dir_stx,*stx;
-    const char                       *name;
-    struct io_uring_sqe              *sqe;
-    void                             *scratch;
+    struct io_uring_cqe               *cqe;
+    int                                parent_fd;
+    struct chimera_vfs_request        *request;
+    struct chimera_vfs_request_handle *handle;
+    struct statx                      *dir_stx, *stx;
+    const char                        *name;
+    struct io_uring_sqe               *sqe;
+    void                              *scratch;
 
-    while (io_uring_peek_cqe(&thread->ring,&cqe) == 0) {
+    while (io_uring_peek_cqe(&thread->ring, &cqe) == 0) {
 
-        handle = (struct chimera_vfs_request_handle*) cqe->user_data;
+        handle = (struct chimera_vfs_request_handle *) cqe->user_data;
 
-        request = container_of(handle,struct chimera_vfs_request,handle[handle->slot]);
+        request = container_of(handle, struct chimera_vfs_request, handle[handle->slot]);
 
         switch (request->opcode) {
             case CHIMERA_VFS_OP_LOOKUP_AT:
                 if (cqe->res >= 0) {
                     request->status = CHIMERA_VFS_OK;
 
-                    stx = (struct statx*) request->plugin_data;
+                    stx = (struct statx *) request->plugin_data;
 
-                    name = (char*) (stx + 1);
+                    name = (char *) (stx + 1);
 
                     parent_fd = request->lookup_at.handle->vfs_private;
 
@@ -580,7 +580,7 @@ chimera_io_uring_reap(
                 break;
             case CHIMERA_VFS_OP_GETATTR:
                 if (cqe->res == 0) {
-                    struct statx*stx = (struct statx*) request->plugin_data;
+                    struct statx *stx = (struct statx *) request->plugin_data;
                     request->status = CHIMERA_VFS_OK;
                     chimera_linux_map_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
                                                   &request->getattr.r_attr,
@@ -614,11 +614,11 @@ chimera_io_uring_reap(
                     if (nonexcl_create && cqe->res == -EEXIST) {
                         /* The O_EXCL create-probe found an existing file. */
                         uint32_t rmode;
-                        int      rflags,rpers;
+                        int      rflags, rpers;
 
-                        dir_stx   = (struct statx*) request->plugin_data;
-                        stx       = (struct statx*) (dir_stx + 1);
-                        name      = (char*) (stx + 1);
+                        dir_stx   = (struct statx *) request->plugin_data;
+                        stx       = (struct statx *) (dir_stx + 1);
+                        name      = (char *) (stx + 1);
                         parent_fd = request->open_at.handle->vfs_private;
 
                         if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) {
@@ -631,11 +631,11 @@ chimera_io_uring_reap(
                              * socket/fifo/... -> EEXIST) and upgrading the
                              * descriptor to a usable one otherwise.  linux.c can
                              * fstatat before opening and so opens once. */
-                            sqe = chimera_io_uring_get_sqe(thread,request,3,0);
-                            io_uring_prep_openat(sqe,parent_fd,name,
-                                                 O_PATH | O_NOFOLLOW,0);
+                            sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                            io_uring_prep_openat(sqe, parent_fd, name,
+                                                 O_PATH | O_NOFOLLOW, 0);
                         } else if (chimera_linux_leaf_is_symlink(
-                                       parent_fd,name,
+                                       parent_fd, name,
                                        request->open_at.flags)) {
                             /* A symbolic link this open follows: hand the
                              * link back rather than letting the host kernel
@@ -645,9 +645,9 @@ chimera_io_uring_reap(
                              * chimera_linux_leaf_is_symlink(); the statx
                              * below already reports the link's own attrs, so
                              * the engine takes it from here. */
-                            sqe = chimera_io_uring_get_sqe(thread,request,3,0);
-                            io_uring_prep_openat(sqe,parent_fd,name,
-                                                 O_PATH | O_NOFOLLOW,0);
+                            sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                            io_uring_prep_openat(sqe, parent_fd, name,
+                                                 O_PATH | O_NOFOLLOW, 0);
                         } else {
                             /* Re-open without O_CREAT|O_EXCL (the base flags
                              * still carry O_TRUNC for OVERWRITE_IF/SUPERSEDE).
@@ -663,23 +663,23 @@ chimera_io_uring_reap(
                                 ~(O_CREAT | O_EXCL);
                             rmode = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
                                      ? request->open_at.set_attr->va_mode : 0644;
-                            rpers = chimera_io_uring_get_personality(thread,request->cred);
+                            rpers = chimera_io_uring_get_personality(thread, request->cred);
 
-                            sqe = chimera_io_uring_get_sqe(thread,request,3,0);
-                            io_uring_prep_openat(sqe,parent_fd,name,rflags,rmode);
+                            sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                            io_uring_prep_openat(sqe, parent_fd, name, rflags, rmode);
                             if (rpers > 0) {
                                 sqe->personality = rpers;
                             }
                         }
 
-                        evpl_defer(thread->evpl,&thread->deferral);
+                        evpl_defer(thread->evpl, &thread->deferral);
 
                     } else if (cqe->res >= 0) {
                         /* A successful open with O_CREAT set created the file:
                          * for a non-exclusive create the O_EXCL probe succeeded,
                          * for an exclusive create the create itself succeeded. */
                         chimera_io_uring_open_at_finish(
-                            thread,request,cqe->res,
+                            thread, request, cqe->res,
                             (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) ? 1 : 0,
                             0);
                     } else {
@@ -693,7 +693,7 @@ chimera_io_uring_reap(
                      * the caller may not own). */
                     if (cqe->res >= 0) {
                         chimera_io_uring_open_at_finish(
-                            thread,request,cqe->res,0,1);
+                            thread, request, cqe->res, 0, 1);
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
@@ -701,8 +701,8 @@ chimera_io_uring_reap(
                     if (cqe->res == 0) {
                         int fhrc;
 
-                        dir_stx = (struct statx*) request->plugin_data;
-                        stx     = (struct statx*) (dir_stx + 1);
+                        dir_stx = (struct statx *) request->plugin_data;
+                        stx     = (struct statx *) (dir_stx + 1);
 
                         if ((request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) &&
                             !S_ISREG(stx->stx_mode)) {
@@ -734,16 +734,16 @@ chimera_io_uring_reap(
                              * require access on what it finds, and the engine's
                              * own DAC check refuses the I/O that follows. */
                             char procpath[64];
-                            int  upgraded,uflags;
+                            int  upgraded, uflags;
 
                             uflags = chimera_io_uring_open_at_flags(request) &
                                 ~(O_CREAT | O_EXCL | O_TRUNC);
 
-                            snprintf(procpath,sizeof(procpath),
+                            snprintf(procpath, sizeof(procpath),
                                      "/proc/self/fd/%d",
                                      (int) request->open_at.r_vfs_private);
 
-                            upgraded = open(procpath,uflags);
+                            upgraded = open(procpath, uflags);
 
                             if (upgraded >= 0) {
                                 close(request->open_at.r_vfs_private);
@@ -781,7 +781,7 @@ chimera_io_uring_reap(
 
                 } else if (handle->slot == 2) {
                     if (cqe->res == 0) {
-                        dir_stx   = (struct statx*) request->plugin_data;
+                        dir_stx   = (struct statx *) request->plugin_data;
                         parent_fd = request->open_at.handle->vfs_private;
                         chimera_linux_map_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
                                                       &request->open_at.r_dir_post_attr,
@@ -802,15 +802,15 @@ chimera_io_uring_reap(
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
 
-                    scratch = (char*) request->plugin_data;
+                    scratch = (char *) request->plugin_data;
 
-                    dir_stx  = (struct statx*) scratch;
+                    dir_stx  = (struct statx *) scratch;
                     scratch += sizeof(*dir_stx);
 
-                    stx      = (struct statx*) scratch;
+                    stx      = (struct statx *) scratch;
                     scratch += sizeof(*stx);
 
-                    TERM_STR(fullname,request->mkdir_at.name,request->mkdir_at.name_len,scratch);
+                    TERM_STR(fullname, request->mkdir_at.name, request->mkdir_at.name_len, scratch);
 
                     parent_fd = request->mkdir_at.handle->vfs_private;
 
@@ -832,7 +832,7 @@ chimera_io_uring_reap(
                      * chimera_linux_set_attrs. */
                     if (request->status == CHIMERA_VFS_OK &&
                         (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-                        if (fchmodat(parent_fd,fullname,
+                        if (fchmodat(parent_fd, fullname,
                                      request->mkdir_at.set_attr->va_mode & 07777,
                                      0) < 0) {
                             request->status = chimera_linux_errno_to_status(errno);
@@ -846,28 +846,28 @@ chimera_io_uring_reap(
                                 ? (uid_t) request->mkdir_at.set_attr->va_uid : (uid_t) -1;
                             gid_t gid = (mask & CHIMERA_VFS_ATTR_GID)
                                 ? (gid_t) request->mkdir_at.set_attr->va_gid : (gid_t) -1;
-                            if (fchownat(parent_fd,fullname,uid,gid,0) < 0) {
+                            if (fchownat(parent_fd, fullname, uid, gid, 0) < 0) {
                                 request->status = chimera_linux_errno_to_status(errno);
                             }
                         }
                     }
 
-                    sqe = chimera_io_uring_get_sqe(thread,request,1,0);
+                    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
 
-                    io_uring_prep_statx(sqe,parent_fd,fullname,AT_STATX_SYNC_AS_STAT,
-                                        CHIMERA_IO_URING_STATX_MASK,stx);
+                    io_uring_prep_statx(sqe, parent_fd, fullname, AT_STATX_SYNC_AS_STAT,
+                                        CHIMERA_IO_URING_STATX_MASK, stx);
 
-                    sqe = chimera_io_uring_get_sqe(thread,request,2,0);
+                    sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
 
-                    io_uring_prep_statx(sqe,parent_fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                                        CHIMERA_IO_URING_STATX_MASK,dir_stx);
+                    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                        CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
-                    evpl_defer(thread->evpl,&thread->deferral);
+                    evpl_defer(thread->evpl, &thread->deferral);
                 } else if (handle->slot == 1) {
                     if (cqe->res == 0) {
-                        dir_stx   = (struct statx*) request->plugin_data;
-                        stx       = (struct statx*) (dir_stx + 1);
-                        name      = (char*) (stx + 1);
+                        dir_stx   = (struct statx *) request->plugin_data;
+                        stx       = (struct statx *) (dir_stx + 1);
+                        name      = (char *) (stx + 1);
                         parent_fd = request->mkdir_at.handle->vfs_private;
 
                         chimera_linux_map_child_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
@@ -879,8 +879,8 @@ chimera_io_uring_reap(
                     }
                 } else if (handle->slot == 2) {
                     if (cqe->res == 0) {
-                        dir_stx = (struct statx*) request->plugin_data;
-                        chimera_linux_statx_to_attr(&request->mkdir_at.r_dir_post_attr,dir_stx);
+                        dir_stx = (struct statx *) request->plugin_data;
+                        chimera_linux_statx_to_attr(&request->mkdir_at.r_dir_post_attr, dir_stx);
                     }
                 }
                 break;
@@ -901,7 +901,7 @@ chimera_io_uring_reap(
                         struct stat rst;
 
                         request->status = CHIMERA_VFS_EINVAL;
-                        if (fstat(rfd,&rst) == 0) {
+                        if (fstat(rfd, &rst) == 0) {
                             if (S_ISREG(rst.st_mode) &&
                                 request->read.offset >= (uint64_t) rst.st_size) {
                                 /* At/after-EOF EINVAL becomes a clean
@@ -923,10 +923,10 @@ chimera_io_uring_reap(
                     }
                 } else {
                     if (cqe->res == 0) {
-                        stx = (struct statx*) request->plugin_data;
+                        stx = (struct statx *) request->plugin_data;
 
                         if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-                            chimera_linux_statx_to_attr(&request->read.r_attr,stx);
+                            chimera_linux_statx_to_attr(&request->read.r_attr, stx);
                         }
 
                         /* r_eof is NOT computed here.  It needs r_length,
@@ -953,12 +953,12 @@ chimera_io_uring_reap(
                         int         wfd = (int) request->write.handle->vfs_private;
                         struct stat wst;
 
-                        if (fstat(wfd,&wst) == 0) {
+                        if (fstat(wfd, &wst) == 0) {
                             uint32_t new_mode = chimera_vfs_killpriv_mode(
-                                request->cred,wst.st_mode);
+                                request->cred, wst.st_mode);
 
                             if (new_mode != (uint32_t) wst.st_mode) {
-                                (void) fchmod(wfd,new_mode & 07777);
+                                (void) fchmod(wfd, new_mode & 07777);
                             }
                         }
                     }
@@ -1001,7 +1001,7 @@ chimera_io_uring_reap(
             request->opcode == CHIMERA_VFS_OP_READ &&
             request->status == CHIMERA_VFS_OK &&
             request->read.length > 0) {
-            struct statx*read_stx = (struct statx*) request->plugin_data;
+            struct statx *read_stx = (struct statx *) request->plugin_data;
 
             if (read_stx->stx_mask & STATX_SIZE) {
                 request->read.r_eof =
@@ -1019,14 +1019,14 @@ chimera_io_uring_reap(
             request->complete(request);
         }
 
-        io_uring_cqe_seen(&thread->ring,cqe);
+        io_uring_cqe_seen(&thread->ring, cqe);
 
     } /* while peek_cqe */
 
     while (thread->pending_requests && thread->inflight < thread->max_inflight) {
         request = thread->pending_requests;
-        DL_DELETE(thread->pending_requests,request);
-        chimera_io_uring_dispatch(request,thread);
+        DL_DELETE(thread->pending_requests, request);
+        chimera_io_uring_dispatch(request, thread);
     }
 } /* chimera_io_uring_reap */
 
@@ -1036,13 +1036,13 @@ chimera_io_uring_reap(
  */
 static void
 chimera_io_uring_complete(
-    struct evpl         *evpl,
-    struct evpl_doorbell*doorbell)
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
 {
-    struct chimera_io_uring_thread*thread =
-        container_of(doorbell,struct chimera_io_uring_thread,doorbell);
+    struct chimera_io_uring_thread *thread =
+        container_of(doorbell, struct chimera_io_uring_thread, doorbell);
 
-    chimera_io_uring_reap(evpl,thread);
+    chimera_io_uring_reap(evpl, thread);
 } /* chimera_io_uring_complete */
 
 /*
@@ -1054,58 +1054,58 @@ chimera_io_uring_complete(
  */
 static void
 chimera_io_uring_poll(
-    struct evpl*evpl,
-    void       *private_data)
+    struct evpl *evpl,
+    void        *private_data)
 {
-    chimera_io_uring_reap(evpl,private_data);
+    chimera_io_uring_reap(evpl, private_data);
 } /* chimera_io_uring_poll */
 
 static void
 chimera_io_uring_poll_enter(
-    struct evpl*evpl,
-    void       *private_data)
+    struct evpl *evpl,
+    void        *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
+    struct chimera_io_uring_thread *thread = private_data;
 
     io_uring_unregister_eventfd(&thread->ring);
-    chimera_io_uring_reap(evpl,thread);
+    chimera_io_uring_reap(evpl, thread);
 } /* chimera_io_uring_poll_enter */
 
 static void
 chimera_io_uring_poll_exit(
-    struct evpl*evpl,
-    void       *private_data)
+    struct evpl *evpl,
+    void        *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
+    struct chimera_io_uring_thread *thread = private_data;
 
-    io_uring_register_eventfd(&thread->ring,evpl_doorbell_fd(&thread->doorbell));
-    chimera_io_uring_reap(evpl,thread);
+    io_uring_register_eventfd(&thread->ring, evpl_doorbell_fd(&thread->doorbell));
+    chimera_io_uring_reap(evpl, thread);
 } /* chimera_io_uring_poll_exit */
 
 static void
 chimera_io_uring_flush(
-    struct evpl*evpl,
-    void       *private_data)
+    struct evpl *evpl,
+    void        *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            rc;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             rc;
 
     rc = io_uring_submit(&thread->ring);
 
-    chimera_io_uring_abort_if(rc < 0,"io_uring_submit");
+    chimera_io_uring_abort_if(rc < 0, "io_uring_submit");
 } /* chimera_io_uring_flush */
 
-static void*
+static void *
 chimera_io_uring_thread_init(
-    struct evpl*evpl,
-    void       *private_data)
+    struct evpl *evpl,
+    void        *private_data)
 {
-    struct chimera_io_uring_shared*shared = private_data;
-    struct chimera_io_uring_thread*thread;
-    int                            rc;
-    struct io_uring_params         params = { 0 };
+    struct chimera_io_uring_shared *shared = private_data;
+    struct chimera_io_uring_thread *thread;
+    int                             rc;
+    struct io_uring_params          params = { 0 };
 
-    thread = calloc(1,sizeof(*thread));
+    thread = calloc(1, sizeof(*thread));
 
     thread->evpl             = evpl;
     thread->shared           = shared;
@@ -1132,15 +1132,15 @@ chimera_io_uring_thread_init(
     thread->max_inflight = 1024;
 
     // Initialize io_uring with params
-    rc = io_uring_queue_init_params(4 * thread->max_inflight,&thread->ring,&params);
+    rc = io_uring_queue_init_params(4 * thread->max_inflight, &thread->ring, &params);
 
-    chimera_io_uring_abort_if(rc < 0,"Failed to create io_uring queue: %s",strerror(-rc));
+    chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
 
-    evpl_add_doorbell(evpl,&thread->doorbell,chimera_io_uring_complete);
+    evpl_add_doorbell(evpl, &thread->doorbell, chimera_io_uring_complete);
 
-    rc = io_uring_register_eventfd(&thread->ring,evpl_doorbell_fd(&thread->doorbell));
+    rc = io_uring_register_eventfd(&thread->ring, evpl_doorbell_fd(&thread->doorbell));
 
-    chimera_io_uring_abort_if(rc < 0,"Failed to register eventfd");
+    chimera_io_uring_abort_if(rc < 0, "Failed to register eventfd");
 
     /* Probe registered-personality support (kernel >= 5.18): register the
      * server's own creds, and if that succeeds personalities are available --
@@ -1149,7 +1149,7 @@ chimera_io_uring_thread_init(
     rc = io_uring_register_personality(&thread->ring);
     if (rc >= 0) {
         thread->personality_supported = 1;
-        io_uring_unregister_personality(&thread->ring,rc);
+        io_uring_unregister_personality(&thread->ring, rc);
     }
 
     evpl_deferral_init(&thread->deferral,
@@ -1166,10 +1166,10 @@ chimera_io_uring_thread_init(
 } /* io_uring_thread_init */ /* io_uring_thread_init */
 
 static void
-chimera_io_uring_thread_destroy(void*private_data)
+chimera_io_uring_thread_destroy(void *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            i;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             i;
 
     linux_mount_table_destroy(&thread->mount_table);
 
@@ -1180,50 +1180,50 @@ chimera_io_uring_thread_destroy(void*private_data)
         }
     }
 
-    evpl_remove_poll(thread->evpl,thread->poll);
+    evpl_remove_poll(thread->evpl, thread->poll);
     io_uring_queue_exit(&thread->ring);
-    evpl_remove_doorbell(thread->evpl,&thread->doorbell);
+    evpl_remove_doorbell(thread->evpl, &thread->doorbell);
 
     free(thread);
 } /* io_uring_thread_destroy */
 
 static void
 chimera_io_uring_getattr(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd;
-    struct io_uring_sqe           *sqe;
-    struct statx                  *stx;
-    char                          *scratch = (char*) request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd;
+    struct io_uring_sqe            *sqe;
+    struct statx                   *stx;
+    char                           *scratch = (char *) request->plugin_data;
 
     fd = (int) request->getattr.handle->vfs_private;
 
-    sqe = chimera_io_uring_get_sqe(thread,request,0,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    stx = (struct statx*) scratch;
+    stx = (struct statx *) scratch;
 
-    io_uring_prep_statx(sqe,fd,"",
+    io_uring_prep_statx(sqe, fd, "",
                         AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
-                        CHIMERA_IO_URING_STATX_MASK,stx);
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_getattr */
 
 static void
 chimera_io_uring_setattr(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,rc;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc;
 
     --thread->inflight;
 
     fd = request->setattr.handle->vfs_private;
 
-    rc = chimera_setup_credential(request->cred,request->setattr.set_attr);
+    rc = chimera_setup_credential(request->cred, request->setattr.set_attr);
     if (rc != 0) {
         request->status = chimera_linux_errno_to_status(rc);
         request->complete(request);
@@ -1233,15 +1233,15 @@ chimera_io_uring_setattr(
     if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
 #ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW
         // Use fchmodat with AT_SYMLINK_NOFOLLOW on kernels >= 6.6
-        rc = fchmodat(fd,"",request->setattr.set_attr->va_mode,
+        rc = fchmodat(fd, "", request->setattr.set_attr->va_mode,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 #else  /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
         // Fall back to chmod via /proc/self/fd on older kernels
         // (fchmod doesn't work on O_PATH file descriptors)
         {
             char procpath[64];
-            snprintf(procpath,sizeof(procpath),"/proc/self/fd/%d",fd);
-            rc = chmod(procpath,request->setattr.set_attr->va_mode);
+            snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+            rc = chmod(procpath, request->setattr.set_attr->va_mode);
         }
 #endif /* ifdef HAVE_FCHMODAT_AT_SYMLINK_NOFOLLOW */
 
@@ -1262,7 +1262,7 @@ chimera_io_uring_setattr(
     if ((request->setattr.set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) ==
         (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
         /* Both UID and GID are being set */
-        rc = fchownat(fd,"",request->setattr.set_attr->va_uid,request->setattr.set_attr->va_gid,
+        rc = fchownat(fd, "", request->setattr.set_attr->va_uid, request->setattr.set_attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
@@ -1280,7 +1280,7 @@ chimera_io_uring_setattr(
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
     } else if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) {
         /* Only UID is being set */
-        rc = fchownat(fd,"",request->setattr.set_attr->va_uid,-1,
+        rc = fchownat(fd, "", request->setattr.set_attr->va_uid, -1,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
@@ -1297,7 +1297,7 @@ chimera_io_uring_setattr(
         request->setattr.set_attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
     } else if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) {
         /* Only GID is being set */
-        rc = fchownat(fd,"",-1,request->setattr.set_attr->va_gid,
+        rc = fchownat(fd, "", -1, request->setattr.set_attr->va_gid,
                       AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
         if (rc) {
@@ -1332,7 +1332,7 @@ chimera_io_uring_setattr(
         // refuses ftruncate with EBADF; those are the stateless path-based
         // callers, where re-checking DAC via a path truncate through
         // /proc/self/fd is exactly right.
-        rc = ftruncate(fd,request->setattr.set_attr->va_size);
+        rc = ftruncate(fd, request->setattr.set_attr->va_size);
 
         /* EBADF: an O_PATH descriptor.  EINVAL: a descriptor not open for
          * writing -- an NFS4 OPEN with read access carries its UNCHECKED
@@ -1341,8 +1341,8 @@ chimera_io_uring_setattr(
          * SETATTR's rule. */
         if (rc && (errno == EBADF || errno == EINVAL)) {
             char procpath[64];
-            snprintf(procpath,sizeof(procpath),"/proc/self/fd/%d",fd);
-            rc = truncate(procpath,request->setattr.set_attr->va_size);
+            snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+            rc = truncate(procpath, request->setattr.set_attr->va_size);
         }
 
         if (rc) {
@@ -1396,7 +1396,7 @@ chimera_io_uring_setattr(
         }
 
         if (have_any) {
-            rc = utimensat(fd,"",times,AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+            rc = utimensat(fd, "", times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
             if (rc && errno == EPERM &&
                 chimera_linux_times_now_omit(request->setattr.set_attr)) {
@@ -1406,9 +1406,9 @@ chimera_io_uring_setattr(
                  * Settle it by write access, as the engine backends do: a
                  * writer gets the change applied with privilege restored, a
                  * non-writer the EACCES POSIX prescribes. */
-                if (chimera_linux_cred_write_ok(fd,request->cred)) {
+                if (chimera_linux_cred_write_ok(fd, request->cred)) {
                     chimera_restore_privilege(request->cred);
-                    rc = utimensat(fd,"",times,
+                    rc = utimensat(fd, "", times,
                                    AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
                     if (rc) {
                         request->status =
@@ -1445,18 +1445,18 @@ chimera_io_uring_setattr(
 
 static void
 chimera_io_uring_mount(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    int  mount_fd,rc;
-    char*scratch = (char*) request->plugin_data;
+    int   mount_fd, rc;
+    char *scratch = (char *) request->plugin_data;
 
     TERM_STR(fullpath,
              request->mount.path,
              request->mount.pathlen,
              scratch);
 
-    mount_fd = open(fullpath,O_DIRECTORY | O_RDONLY | O_NOFOLLOW);
+    mount_fd = open(fullpath, O_DIRECTORY | O_RDONLY | O_NOFOLLOW);
 
     if (mount_fd < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -1486,19 +1486,19 @@ chimera_io_uring_mount(
     /* Remember the backing directory's identity so lookups can clamp ".." at
      * the mount root (see linux_lookup_escapes_root). */
     {
-        struct chimera_linux_mount_root*root;
-        struct stat                     st;
+        struct chimera_linux_mount_root *root;
+        struct stat                      st;
 
-        if (fstat(mount_fd,&st) == 0 &&
-            (root = calloc(1,sizeof(*root))) != NULL) {
-            struct chimera_io_uring_thread*thread = private_data;
+        if (fstat(mount_fd, &st) == 0 &&
+            (root = calloc(1, sizeof(*root))) != NULL) {
+            struct chimera_io_uring_thread *thread = private_data;
 
             root->dev                      = st.st_dev;
             root->ino                      = st.st_ino;
             request->mount.r_mount_private = root;
 
             evpl_mutex_lock(&thread->shared->mount_lock);
-            LL_PREPEND(thread->shared->mount_roots,root);
+            LL_PREPEND(thread->shared->mount_roots, root);
             evpl_mutex_unlock(&thread->shared->mount_lock);
         }
     }
@@ -1512,15 +1512,15 @@ chimera_io_uring_mount(
 
 static void
 chimera_io_uring_umount(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    struct chimera_linux_mount_root*root   = request->umount.mount_private;
+    struct chimera_io_uring_thread  *thread = private_data;
+    struct chimera_linux_mount_root *root   = request->umount.mount_private;
 
     if (root) {
         evpl_mutex_lock(&thread->shared->mount_lock);
-        LL_DELETE(thread->shared->mount_roots,root);
+        LL_DELETE(thread->shared->mount_roots, root);
         evpl_mutex_unlock(&thread->shared->mount_lock);
         free(root);
     }
@@ -1530,49 +1530,49 @@ chimera_io_uring_umount(
 
 static void
 chimera_io_uring_lookup_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    struct io_uring_sqe           *sqe;
-    int                            parent_fd;
-    char                          *scratch = (char*) request->plugin_data;
-    struct statx                  *stx;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct io_uring_sqe            *sqe;
+    int                             parent_fd;
+    char                           *scratch = (char *) request->plugin_data;
+    struct statx                   *stx;
 
     parent_fd = (int) request->lookup_at.handle->vfs_private;
 
-    stx = (struct statx*) scratch;
+    stx = (struct statx *) scratch;
 
     scratch += sizeof(*stx);
 
-    TERM_STR(fullname,request->lookup_at.component,request->lookup_at.component_len,scratch);
+    TERM_STR(fullname, request->lookup_at.component, request->lookup_at.component_len, scratch);
 
     /* ".." at the mount root resolves to the root itself. */
-    if (linux_lookup_escapes_root(request->mount_private,parent_fd,
+    if (linux_lookup_escapes_root(request->mount_private, parent_fd,
                                   fullname)) {
         fullname[0] = '.';
         fullname[1] = '\0';
     }
 
-    sqe = chimera_io_uring_get_sqe(thread,request,0,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_statx(sqe,parent_fd,fullname,AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
-                        CHIMERA_IO_URING_STATX_MASK,stx);
+    io_uring_prep_statx(sqe, parent_fd, fullname, AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_lookup */
 
 static void
 chimera_io_uring_readdir(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,dup_fd,rc;
-    DIR                           *dir;
-    struct dirent                 *dirent;
-    struct chimera_vfs_attrs       vattr;
-    int                            eof = 1;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, dup_fd, rc;
+    DIR                            *dir;
+    struct dirent                  *dirent;
+    struct chimera_vfs_attrs        vattr;
+    int                             eof = 1;
 
     --thread->inflight;
 
@@ -1591,7 +1591,7 @@ chimera_io_uring_readdir(
     if (thread->readdir_verifier) {
         struct stat st;
 
-        rc = fstat(fd,&st);
+        rc = fstat(fd, &st);
 
         if (rc == 0) {
             uint64_t mtime_verf = chimera_linux_mtime_to_verifier(&st);
@@ -1607,7 +1607,7 @@ chimera_io_uring_readdir(
         }
     }
 
-    dup_fd = openat(fd,".",O_RDONLY | O_DIRECTORY);
+    dup_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
 
     if (dup_fd < 0) {
         struct stat dead_st;
@@ -1626,7 +1626,7 @@ chimera_io_uring_readdir(
          * and an unlinked-but-open file is still a resolvable (pinned)
          * handle, not a stale one -- converting its type error to ESTALE
          * mis-answered READDIR of a removed file's handle. */
-        if (fstat(fd,&dead_st) == 0 && S_ISDIR(dead_st.st_mode) &&
+        if (fstat(fd, &dead_st) == 0 && S_ISDIR(dead_st.st_mode) &&
             dead_st.st_nlink == 0) {
             open_errno = ESTALE;
         }
@@ -1649,7 +1649,7 @@ chimera_io_uring_readdir(
     }
 
     if (request->readdir.cookie) {
-        seekdir(dir,request->readdir.cookie);
+        seekdir(dir, request->readdir.cookie);
     }
 
     vattr.va_req_mask = request->readdir.attr_mask;
@@ -1696,13 +1696,13 @@ chimera_io_uring_readdir(
 
 static void
 chimera_io_uring_open_fh(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    struct stat                    st;
-    int                            flags = 0;
-    int                            fd;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct stat                     st;
+    int                             flags = 0;
+    int                             fd;
 
     --thread->inflight;
 
@@ -1728,7 +1728,7 @@ chimera_io_uring_open_fh(
             return;
         }
 
-        if (fstat(probe_fd,&st) != 0) {
+        if (fstat(probe_fd, &st) != 0) {
             request->status = chimera_linux_errno_to_status(errno);
             close(probe_fd);
             request->complete(request);
@@ -1790,7 +1790,7 @@ chimera_io_uring_open_fh(
             struct stat st;
 
             if (probe_fd >= 0) {
-                if (fstat(probe_fd,&st) == 0 && S_ISLNK(st.st_mode)) {
+                if (fstat(probe_fd, &st) == 0 && S_ISLNK(st.st_mode)) {
                     request->status = CHIMERA_VFS_ESYMLINK;
                 } else {
                     request->status = CHIMERA_VFS_ENOTDIR;
@@ -1816,7 +1816,7 @@ chimera_io_uring_open_fh(
  * the open_at submission and its EEXIST re-open both rely on it producing the
  * same result, so the re-open need not stash any state. */
 static int
-chimera_io_uring_open_at_flags(struct chimera_vfs_request*request)
+chimera_io_uring_open_at_flags(struct chimera_vfs_request *request)
 {
     int flags = 0;
 
@@ -1865,19 +1865,19 @@ chimera_io_uring_open_at_flags(struct chimera_vfs_request*request)
 
 static void
 chimera_io_uring_open_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            parent_fd;
-    int                            flags,rc,personality;
-    uint32_t                       mode;
-    char                          *scratch = (char*) request->plugin_data;
-    struct io_uring_sqe           *sqe;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             parent_fd;
+    int                             flags, rc, personality;
+    uint32_t                        mode;
+    char                           *scratch = (char *) request->plugin_data;
+    struct io_uring_sqe            *sqe;
 
     scratch += 2 * sizeof(struct statx);
 
-    TERM_STR(fullname,request->open_at.name,request->open_at.namelen,scratch);
+    TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
     parent_fd = request->open_at.handle->vfs_private;
 
@@ -1896,9 +1896,9 @@ chimera_io_uring_open_at(
      * is applied per-op in the kernel; only fall back to impersonating this
      * thread (server creds, AUTH_ATTR injection, or kernels without
      * personalities) when no personality is used. */
-    personality = chimera_io_uring_get_personality(thread,request->cred);
+    personality = chimera_io_uring_get_personality(thread, request->cred);
     if (personality <= 0) {
-        rc = chimera_setup_credential(request->cred,request->open_at.set_attr);
+        rc = chimera_setup_credential(request->cred, request->open_at.set_attr);
         if (rc != 0) {
             --thread->inflight;
             request->status = chimera_linux_errno_to_status(rc);
@@ -1921,7 +1921,7 @@ chimera_io_uring_open_at(
                             &request->open_at.r_dir_pre_attr,
                             parent_fd);
 
-    sqe = chimera_io_uring_get_sqe(thread,request,0,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode = request->open_at.set_attr->va_mode;
@@ -1939,53 +1939,53 @@ chimera_io_uring_open_at(
         mode = 0644;
     }
 
-    io_uring_prep_openat(sqe,parent_fd,fullname,flags,mode);
+    io_uring_prep_openat(sqe, parent_fd, fullname, flags, mode);
 
     /* prep_openat zeroes sqe->personality, so set it after. */
     if (personality > 0) {
         sqe->personality = personality;
     }
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* io_uring_open_at */
 
 static void
 chimera_io_uring_close(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    struct io_uring_sqe           *sqe;
-    int                            fd = request->close.vfs_private;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct io_uring_sqe            *sqe;
+    int                             fd = request->close.vfs_private;
 
-    sqe = chimera_io_uring_get_sqe(thread,request,0,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_close(sqe,fd);
+    io_uring_prep_close(sqe, fd);
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_close */
 
 static void
 chimera_io_uring_mkdir_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,rc,personality;
-    uint32_t                       mode;
-    char                          *scratch  = (char*) request->plugin_data;
-    struct chimera_vfs_attrs      *set_attr = request->mkdir_at.set_attr;
-    struct io_uring_sqe           *sqe;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc, personality;
+    uint32_t                        mode;
+    char                           *scratch  = (char *) request->plugin_data;
+    struct chimera_vfs_attrs       *set_attr = request->mkdir_at.set_attr;
+    struct io_uring_sqe            *sqe;
 
     scratch += sizeof(struct statx) * 2;
 
-    TERM_STR(fullname,request->mkdir_at.name,request->mkdir_at.name_len,scratch);
+    TERM_STR(fullname, request->mkdir_at.name, request->mkdir_at.name_len, scratch);
 
     fd = request->mkdir_at.handle->vfs_private;
 
-    personality = chimera_io_uring_get_personality(thread,request->cred);
+    personality = chimera_io_uring_get_personality(thread, request->cred);
     if (personality <= 0) {
-        rc = chimera_setup_credential(request->cred,set_attr);
+        rc = chimera_setup_credential(request->cred, set_attr);
         if (rc != 0) {
             --thread->inflight;
             request->status = chimera_linux_errno_to_status(rc);
@@ -1994,7 +1994,7 @@ chimera_io_uring_mkdir_at(
         }
     }
 
-    sqe = chimera_io_uring_get_sqe(thread,request,0,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode = set_attr->va_mode;
@@ -2006,30 +2006,30 @@ chimera_io_uring_mkdir_at(
                             &request->mkdir_at.r_dir_pre_attr,
                             fd);
 
-    io_uring_prep_mkdirat(sqe,fd,fullname,mode);
+    io_uring_prep_mkdirat(sqe, fd, fullname, mode);
 
     /* prep_mkdirat zeroes sqe->personality, so set it after. */
     if (personality > 0) {
         sqe->personality = personality;
     }
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_mkdir_at */
 
 static void
 chimera_io_uring_mknod_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,rc;
-    char                          *scratch = (char*) request->plugin_data;
-    uint32_t                       mode;
-    dev_t                          dev = 0;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
+    uint32_t                        mode;
+    dev_t                           dev = 0;
 
     --thread->inflight;
 
-    TERM_STR(fullname,request->mknod_at.name,request->mknod_at.name_len,scratch);
+    TERM_STR(fullname, request->mknod_at.name, request->mknod_at.name_len, scratch);
 
     fd = request->mknod_at.handle->vfs_private;
 
@@ -2051,14 +2051,14 @@ chimera_io_uring_mknod_at(
                             &request->mknod_at.r_dir_pre_attr,
                             fd);
 
-    rc = chimera_setup_credential(request->cred,request->mknod_at.set_attr);
+    rc = chimera_setup_credential(request->cred, request->mknod_at.set_attr);
     if (rc != 0) {
         request->status = chimera_linux_errno_to_status(rc);
         request->complete(request);
         return;
     }
 
-    rc = mknodat(fd,fullname,mode,dev);
+    rc = mknodat(fd, fullname, mode, dev);
 
     int mknodat_errno = errno;
 
@@ -2092,7 +2092,7 @@ chimera_io_uring_mknod_at(
                 ? (uid_t) request->mknod_at.set_attr->va_uid : (uid_t) -1;
             gid_t gid = (mask & CHIMERA_VFS_ATTR_GID)
                 ? (gid_t) request->mknod_at.set_attr->va_gid : (gid_t) -1;
-            if (fchownat(fd,fullname,uid,gid,AT_SYMLINK_NOFOLLOW) < 0) {
+            if (fchownat(fd, fullname, uid, gid, AT_SYMLINK_NOFOLLOW) < 0) {
                 chimera_restore_privilege(request->cred);
                 request->status = chimera_linux_errno_to_status(errno);
                 request->complete(request);
@@ -2114,16 +2114,16 @@ chimera_io_uring_mknod_at(
 
 static void
 chimera_io_uring_remove_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,rc;
-    char                          *scratch = (char*) request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
     --thread->inflight;
 
-    TERM_STR(fullname,request->remove_at.name,request->remove_at.namelen,scratch);
+    TERM_STR(fullname, request->remove_at.name, request->remove_at.namelen, scratch);
 
     fd = request->remove_at.handle->vfs_private;
 
@@ -2136,7 +2136,7 @@ chimera_io_uring_remove_at(
                                   fd,
                                   fullname);
 
-    rc = chimera_setup_credential(request->cred,NULL);
+    rc = chimera_setup_credential(request->cred, NULL);
     if (rc != 0) {
         request->status = chimera_linux_errno_to_status(rc);
         request->complete(request);
@@ -2152,13 +2152,13 @@ chimera_io_uring_remove_at(
                             fd);
 
     if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
-        rc = unlinkat(fd,fullname,AT_REMOVEDIR);
+        rc = unlinkat(fd, fullname, AT_REMOVEDIR);
     } else if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) {
-        rc = unlinkat(fd,fullname,0);
+        rc = unlinkat(fd, fullname, 0);
     } else {
-        rc = unlinkat(fd,fullname,0);
+        rc = unlinkat(fd, fullname, 0);
         if (rc == -1 && errno == EISDIR) {
-            rc = unlinkat(fd,fullname,AT_REMOVEDIR);
+            rc = unlinkat(fd, fullname, AT_REMOVEDIR);
         }
     }
 
@@ -2180,31 +2180,31 @@ chimera_io_uring_remove_at(
 
 static void
 chimera_io_uring_read(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    struct io_uring_sqe           *sqe;
-    int                            fd,i;
-    ssize_t                        left = request->read.length;
-    struct iovec                  *iov;
-    struct statx                  *stx;
-    void                          *scratch = request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct io_uring_sqe            *sqe;
+    int                             fd, i;
+    ssize_t                         left = request->read.length;
+    struct iovec                   *iov;
+    struct statx                   *stx;
+    void                           *scratch = request->plugin_data;
 
     /* Handle 0-byte reads specially - readv with uninitialized iov causes EFAULT */
     if (request->read.length == 0) {
         fd  = (int) request->read.handle->vfs_private;
-        stx = (struct statx*) scratch;
+        stx = (struct statx *) scratch;
         /* Pre-fill result fields since we won't submit readv */
         request->status        = CHIMERA_VFS_OK;
         request->read.r_niov   = 0;
         request->read.r_length = 0;
         request->read.r_eof    = 0;
         if (request->read.r_attr.va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-            sqe = chimera_io_uring_get_sqe(thread,request,1,0);
-            io_uring_prep_statx(sqe,fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                                CHIMERA_IO_URING_STATX_MASK,stx);
-            evpl_defer(thread->evpl,&thread->deferral);
+            sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+            io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                                CHIMERA_IO_URING_STATX_MASK, stx);
+            evpl_defer(thread->evpl, &thread->deferral);
         } else {
             /* No attrs requested and no readv to submit: complete inline. */
             --thread->inflight;
@@ -2213,7 +2213,7 @@ chimera_io_uring_read(
         return;
     }
 
-    sqe = chimera_io_uring_get_sqe(thread,request,0,0);
+    sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     /* The VFS core allocated the read buffers on the connection thread
      * (io_uring does not advertise CAP_READ_PROVIDES_BUFFERS) and placed them
@@ -2225,10 +2225,10 @@ chimera_io_uring_read(
     chimera_io_uring_abort_if(request->read.buffers_provided == 0,
                               "io_uring read dispatched without VFS-provided buffers");
 
-    stx      = (struct statx*) scratch;
+    stx      = (struct statx *) scratch;
     scratch += sizeof(*stx);
 
-    iov = (struct iovec*) scratch;
+    iov = (struct iovec *) scratch;
 
     for (i = 0; left && i < request->read.buffers_provided; i++) {
 
@@ -2236,7 +2236,7 @@ chimera_io_uring_read(
         iov[i].iov_len  = request->read.iov[i].length;
 
         if (i == 0) {
-            iov[i].iov_base = (char*) iov[i].iov_base + request->read.aligned_prefix;
+            iov[i].iov_base = (char *) iov[i].iov_base + request->read.aligned_prefix;
             iov[i].iov_len -= request->read.aligned_prefix;
         }
 
@@ -2249,7 +2249,7 @@ chimera_io_uring_read(
 
     fd = (int) request->read.handle->vfs_private;
 
-    io_uring_prep_readv(sqe,fd,iov,i,request->read.offset);
+    io_uring_prep_readv(sqe, fd, iov, i, request->read.offset);
 
     /* Cleared so the completion side can tell a filled-in statx from an
      * untouched one: the kernel sets stx_mask to the fields it returned, and
@@ -2258,31 +2258,31 @@ chimera_io_uring_read(
      * (and size) into that test. */
     stx->stx_mask = 0;
 
-    sqe = chimera_io_uring_get_sqe(thread,request,1,0);
-    io_uring_prep_statx(sqe,fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                        CHIMERA_IO_URING_STATX_MASK,stx);
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, stx);
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 } /* chimera_io_uring_read */
 
 static void
 chimera_io_uring_write(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    struct io_uring_sqe           *sge;
-    int                            fd,i,niov = 0;
-    uint32_t                       left,chunk;
-    struct iovec                  *iov;
-    int                            flags   = 0;
-    void                          *scratch = request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    struct io_uring_sqe            *sge;
+    int                             fd, i, niov = 0;
+    uint32_t                        left, chunk;
+    struct iovec                   *iov;
+    int                             flags   = 0;
+    void                           *scratch = request->plugin_data;
 
-    sge = chimera_io_uring_get_sqe(thread,request,0,0);
+    sge = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     request->write.r_sync = request->write.sync;
 
-    iov = (struct iovec*) scratch;
+    iov = (struct iovec *) scratch;
 
     left = request->write.length;
     for (i = 0; left && i < request->write.niov; i++) {
@@ -2310,39 +2310,39 @@ chimera_io_uring_write(
         flags = RWF_SYNC;
     }
 
-    io_uring_prep_writev2(sge,fd,iov,niov,request->write.offset,flags);
+    io_uring_prep_writev2(sge, fd, iov, niov, request->write.offset, flags);
 
     /* Don't return post-write stat info - the linked statx may see stale
      * metadata before the write's effects are fully visible. Let the VFS
      * make an explicit getattr call when needed. */
     request->write.r_post_attr.va_set_mask = 0;
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 
 } /* chimera_io_uring_write */ /* chimera_io_uring_write */
 
 static void
 chimera_io_uring_commit(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
+    struct chimera_io_uring_thread *thread = private_data;
 
-    int                            fd = (int) request->commit.handle->vfs_private;
-    struct io_uring_sqe           *sge;
+    int                             fd = (int) request->commit.handle->vfs_private;
+    struct io_uring_sqe            *sge;
 
-    sge = chimera_io_uring_get_sqe(thread,request,0,0);
+    sge = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
-    io_uring_prep_fsync(sge,fd,0);
+    io_uring_prep_fsync(sge, fd, 0);
 
-    evpl_defer(thread->evpl,&thread->deferral);
+    evpl_defer(thread->evpl, &thread->deferral);
 
 } /* chimera_io_uring_commit */
 
 static void
 chimera_io_uring_allocate(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
     int fd   = (int) request->allocate.handle->vfs_private;
     int mode = 0;
@@ -2352,7 +2352,7 @@ chimera_io_uring_allocate(
         mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
     }
 
-    rc = fallocate(fd,mode,request->allocate.offset,request->allocate.length);
+    rc = fallocate(fd, mode, request->allocate.offset, request->allocate.length);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -2360,7 +2360,7 @@ chimera_io_uring_allocate(
         return;
     }
 
-    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,&request->allocate.r_post_attr,fd);
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING, &request->allocate.r_post_attr, fd);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2369,15 +2369,15 @@ chimera_io_uring_allocate(
 
 static void
 chimera_io_uring_copy_range(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            src_fd,dst_fd;
-    loff_t                         src_off,dst_off;
-    uint64_t                       remaining;
-    uint64_t                       copied = 0;
-    ssize_t                        rc;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             src_fd, dst_fd;
+    loff_t                          src_off, dst_off;
+    uint64_t                        remaining;
+    uint64_t                        copied = 0;
+    ssize_t                         rc;
 
     --thread->inflight;
 
@@ -2402,7 +2402,7 @@ chimera_io_uring_copy_range(
     {
         struct stat src_st;
 
-        if (fstat(src_fd,&src_st) == 0) {
+        if (fstat(src_fd, &src_st) == 0) {
             uint64_t avail = (src_st.st_size > src_off) ?
                 (uint64_t) (src_st.st_size - src_off) : 0;
 
@@ -2413,7 +2413,7 @@ chimera_io_uring_copy_range(
     }
 
     while (remaining > 0) {
-        rc = copy_file_range(src_fd,&src_off,dst_fd,&dst_off,remaining,0);
+        rc = copy_file_range(src_fd, &src_off, dst_fd, &dst_off, remaining, 0);
 
         if (rc < 0) {
             if (errno == EINTR) {
@@ -2433,7 +2433,7 @@ chimera_io_uring_copy_range(
     }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                            &request->copy_range.r_post_attr,dst_fd);
+                            &request->copy_range.r_post_attr, dst_fd);
 
     request->copy_range.r_length = copied;
     request->status              = CHIMERA_VFS_OK;
@@ -2442,13 +2442,13 @@ chimera_io_uring_copy_range(
 
 static void
 chimera_io_uring_clone_range(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            src_fd,dst_fd;
-    struct file_clone_range        args;
-    int                            rc;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             src_fd, dst_fd;
+    struct file_clone_range         args;
+    int                             rc;
 
     --thread->inflight;
 
@@ -2467,7 +2467,7 @@ chimera_io_uring_clone_range(
     args.src_length  = request->clone_range.length;
     args.dest_offset = request->clone_range.dst_offset;
 
-    rc = ioctl(dst_fd,FICLONERANGE,&args);
+    rc = ioctl(dst_fd, FICLONERANGE, &args);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -2476,7 +2476,7 @@ chimera_io_uring_clone_range(
     }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                            &request->clone_range.r_post_attr,dst_fd);
+                            &request->clone_range.r_post_attr, dst_fd);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2484,8 +2484,8 @@ chimera_io_uring_clone_range(
 
 static void
 chimera_io_uring_seek(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
     int   fd = (int) request->seek.handle->vfs_private;
     int   whence;
@@ -2497,7 +2497,7 @@ chimera_io_uring_seek(
         whence = SEEK_HOLE;
     }
 
-    result = lseek(fd,request->seek.offset,whence);
+    result = lseek(fd, request->seek.offset, whence);
 
     if (result < 0) {
         /* No matching data/hole at or after the offset (the offset is at or
@@ -2518,7 +2518,7 @@ chimera_io_uring_seek(
      * before EOF, so its eof stays false. */
     if (whence == SEEK_HOLE) {
         struct stat st;
-        if (fstat(fd,&st) == 0 && (uint64_t) result >= (uint64_t) st.st_size) {
+        if (fstat(fd, &st) == 0 && (uint64_t) result >= (uint64_t) st.st_size) {
             request->seek.r_eof = 1;
         }
     }
@@ -2530,13 +2530,13 @@ chimera_io_uring_seek(
 
 static void
 chimera_io_uring_symlink_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,rc;
-    char                          *scratch  = (char*) request->plugin_data;
-    struct chimera_vfs_attrs      *set_attr = request->symlink_at.set_attr;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc;
+    char                           *scratch  = (char *) request->plugin_data;
+    struct chimera_vfs_attrs       *set_attr = request->symlink_at.set_attr;
 
     --thread->inflight;
 
@@ -2547,15 +2547,15 @@ chimera_io_uring_symlink_at(
         return;
     }
 
-    TERM_STR(fullname,request->symlink_at.name,request->symlink_at.namelen,scratch);
-    TERM_STR(target,request->symlink_at.target,request->symlink_at.targetlen,scratch);
+    TERM_STR(fullname, request->symlink_at.name, request->symlink_at.namelen, scratch);
+    TERM_STR(target, request->symlink_at.target, request->symlink_at.targetlen, scratch);
 
     fd = request->symlink_at.handle->vfs_private;
 
     /* symlinks do not support chmod, remove mode from attr set mask */
     set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
 
-    rc = chimera_setup_credential(request->cred,set_attr);
+    rc = chimera_setup_credential(request->cred, set_attr);
     if (rc != 0) {
         request->status = chimera_linux_errno_to_status(rc);
         request->complete(request);
@@ -2566,7 +2566,7 @@ chimera_io_uring_symlink_at(
                             &request->symlink_at.r_dir_pre_attr,
                             fd);
 
-    rc = symlinkat(target,fd,fullname);
+    rc = symlinkat(target, fd, fullname);
 
     if (rc < 0) {
         chimera_restore_privilege(request->cred);
@@ -2579,7 +2579,7 @@ chimera_io_uring_symlink_at(
     if (set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
         uid_t uid = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ? (uid_t) set_attr->va_uid : (uid_t) -1;
         gid_t gid = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) ? (gid_t) set_attr->va_gid : (gid_t) -1;
-        rc = fchownat(fd,fullname,uid,gid,AT_SYMLINK_NOFOLLOW);
+        rc = fchownat(fd, fullname, uid, gid, AT_SYMLINK_NOFOLLOW);
         if (rc < 0) {
             chimera_restore_privilege(request->cred);
             request->status = chimera_linux_errno_to_status(errno);
@@ -2605,18 +2605,18 @@ chimera_io_uring_symlink_at(
 
 static void
 chimera_io_uring_readlink(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,rc;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, rc;
 
     --thread->inflight;
 
 
     fd = request->readlink.handle->vfs_private;
 
-    rc = readlinkat(fd,"",request->readlink.r_target,
+    rc = readlinkat(fd, "", request->readlink.r_target,
                     request->readlink.target_maxlength);
 
     if (rc < 0) {
@@ -2626,7 +2626,7 @@ chimera_io_uring_readlink(
         if (errno == ENOENT) {
             struct stat st;
 
-            if (fstat(fd,&st) == 0 && !S_ISLNK(st.st_mode)) {
+            if (fstat(fd, &st) == 0 && !S_ISLNK(st.st_mode)) {
                 errno = EINVAL;
             }
         }
@@ -2637,7 +2637,7 @@ chimera_io_uring_readlink(
 
     request->readlink.r_target_length = rc;
 
-    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,&request->readlink.r_attr,fd);
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING, &request->readlink.r_attr, fd);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2645,18 +2645,18 @@ chimera_io_uring_readlink(
 
 static void
 chimera_io_uring_rename_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            old_fd,new_fd,rc;
-    char                          *scratch = (char*) request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             old_fd, new_fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
     --thread->inflight;
 
 
-    TERM_STR(fullname,request->rename_at.name,request->rename_at.namelen,scratch);
-    TERM_STR(full_newname,request->rename_at.new_name,request->rename_at.new_namelen,scratch);
+    TERM_STR(fullname, request->rename_at.name, request->rename_at.namelen, scratch);
+    TERM_STR(full_newname, request->rename_at.new_name, request->rename_at.new_namelen, scratch);
 
     old_fd = linux_open_by_handle(&thread->mount_table,
                                   request->fh,
@@ -2681,7 +2681,7 @@ chimera_io_uring_rename_at(
         return;
     }
 
-    rc = chimera_setup_credential(request->cred,NULL);
+    rc = chimera_setup_credential(request->cred, NULL);
     if (rc != 0) {
         close(old_fd);
         close(new_fd);
@@ -2697,7 +2697,7 @@ chimera_io_uring_rename_at(
                             &request->rename_at.r_todir_pre_attr,
                             new_fd);
 
-    rc = renameat(old_fd,fullname,new_fd,full_newname);
+    rc = renameat(old_fd, fullname, new_fd, full_newname);
 
     int renameat_errno = errno;
 
@@ -2715,10 +2715,10 @@ chimera_io_uring_rename_at(
          * pairing, answering ENOTEMPTY where rename(2) specifies EISDIR for
          * a non-directory moved onto a directory.  Re-derive the type pair
          * (as root: DAC was settled above) and correct that corner. */
-        struct stat ost,nst;
+        struct stat ost, nst;
 
-        if (fstatat(old_fd,fullname,&ost,AT_SYMLINK_NOFOLLOW) == 0 &&
-            fstatat(new_fd,full_newname,&nst,AT_SYMLINK_NOFOLLOW) == 0 &&
+        if (fstatat(old_fd, fullname, &ost, AT_SYMLINK_NOFOLLOW) == 0 &&
+            fstatat(new_fd, full_newname, &nst, AT_SYMLINK_NOFOLLOW) == 0 &&
             !S_ISDIR(ost.st_mode) && S_ISDIR(nst.st_mode)) {
             renameat_errno = EISDIR;
         }
@@ -2737,16 +2737,16 @@ chimera_io_uring_rename_at(
 
 static void
 chimera_io_uring_link_at(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd,dir_fd,rc;
-    char                          *scratch = (char*) request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd, dir_fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
 
     --thread->inflight;
 
-    TERM_STR(fullname,request->link_at.name,request->link_at.namelen,scratch);
+    TERM_STR(fullname, request->link_at.name, request->link_at.namelen, scratch);
 
     fd = linux_open_by_handle(&thread->mount_table,
                               request->fh,
@@ -2780,14 +2780,14 @@ chimera_io_uring_link_at(
     {
         struct stat st;
 
-        if (fstat(dir_fd,&st) == 0 && !S_ISDIR(st.st_mode)) {
+        if (fstat(dir_fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
             close(fd);
             close(dir_fd);
             request->status = CHIMERA_VFS_ENOTDIR;
             request->complete(request);
             return;
         }
-        if (fstat(fd,&st) == 0 && S_ISDIR(st.st_mode)) {
+        if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
             close(fd);
             close(dir_fd);
             request->status = CHIMERA_VFS_EISDIR;
@@ -2800,13 +2800,13 @@ chimera_io_uring_link_at(
                             &request->link_at.r_dir_pre_attr,
                             dir_fd);
 
-    rc = linkat(fd,"",dir_fd,fullname,AT_EMPTY_PATH);
+    rc = linkat(fd, "", dir_fd, fullname, AT_EMPTY_PATH);
 
     if (rc < 0) {
         if (errno == EPERM) {
             struct stat st;
 
-            if (fstat(fd,&st) == 0 && S_ISDIR(st.st_mode)) {
+            if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
                 request->status = CHIMERA_VFS_EISDIR;
             } else {
                 request->status = CHIMERA_VFS_EPERM;
@@ -2831,20 +2831,20 @@ chimera_io_uring_link_at(
 
 /* Look up the descriptor this (file handle, owner) pair locks through, without
  * opening one.  Called with range_lock held; takes no reference. */
-static struct chimera_io_uring_range_file*
+static struct chimera_io_uring_range_file *
 chimera_io_uring_range_file_find(
-    struct chimera_io_uring_shared  *shared,
-    const uint8_t                   *fh,
-    uint32_t                         fh_len,
-    uint64_t                         fh_hash,
-    const struct chimera_claim_owner*owner)
+    struct chimera_io_uring_shared   *shared,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint64_t                          fh_hash,
+    const struct chimera_claim_owner *owner)
 {
-    struct chimera_io_uring_range_file*file;
+    struct chimera_io_uring_range_file *file;
 
     for (file = shared->range_files; file; file = file->next) {
         if (file->fh_hash == fh_hash && file->fh_len == fh_len &&
-            memcmp(file->fh,fh,fh_len) == 0 &&
-            chimera_claim_owner_equal(&file->owner,owner)) {
+            memcmp(file->fh, fh, fh_len) == 0 &&
+            chimera_claim_owner_equal(&file->owner, owner)) {
             return file;
         }
     }
@@ -2854,19 +2854,19 @@ chimera_io_uring_range_file_find(
 
 /* Find (or open) the descriptor this (file handle, owner) pair locks through
  * and take a reference on it.  Called with range_lock held. */
-static struct chimera_io_uring_range_file*
+static struct chimera_io_uring_range_file *
 chimera_io_uring_range_file_get(
-    struct chimera_io_uring_thread  *thread,
-    const uint8_t                   *fh,
-    uint32_t                         fh_len,
-    uint64_t                         fh_hash,
-    const struct chimera_claim_owner*owner)
+    struct chimera_io_uring_thread   *thread,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint64_t                          fh_hash,
+    const struct chimera_claim_owner *owner)
 {
-    struct chimera_io_uring_shared    *shared = thread->shared;
-    struct chimera_io_uring_range_file*file;
-    int                                fd;
+    struct chimera_io_uring_shared     *shared = thread->shared;
+    struct chimera_io_uring_range_file *file;
+    int                                 fd;
 
-    file = chimera_io_uring_range_file_find(shared,fh,fh_len,fh_hash,owner);
+    file = chimera_io_uring_range_file_find(shared, fh, fh_len, fh_hash, owner);
 
     if (file) {
         file->refcnt++;
@@ -2875,26 +2875,26 @@ chimera_io_uring_range_file_get(
 
     /* A read lock needs a readable descriptor and a write lock a writable one,
      * so ask for both and settle for read-only on a read-only file. */
-    fd = linux_open_by_handle(&thread->mount_table,fh,fh_len,O_RDWR);
+    fd = linux_open_by_handle(&thread->mount_table, fh, fh_len, O_RDWR);
 
     if (fd < 0) {
-        fd = linux_open_by_handle(&thread->mount_table,fh,fh_len,O_RDONLY);
+        fd = linux_open_by_handle(&thread->mount_table, fh, fh_len, O_RDONLY);
     }
 
     if (fd < 0) {
         return NULL;
     }
 
-    file = calloc(1,sizeof(*file));
+    file = calloc(1, sizeof(*file));
 
-    memcpy(file->fh,fh,fh_len);
+    memcpy(file->fh, fh, fh_len);
     file->fh_len  = fh_len;
     file->fh_hash = fh_hash;
     file->owner   = *owner;
     file->fd      = fd;
     file->refcnt  = 1;
 
-    LL_PREPEND(shared->range_files,file);
+    LL_PREPEND(shared->range_files, file);
 
     return file;
 } /* chimera_io_uring_range_file_get */
@@ -2904,14 +2904,14 @@ chimera_io_uring_range_file_get(
  * Called with range_lock held. */
 static void
 chimera_io_uring_range_file_put(
-    struct chimera_io_uring_shared    *shared,
-    struct chimera_io_uring_range_file*file)
+    struct chimera_io_uring_shared     *shared,
+    struct chimera_io_uring_range_file *file)
 {
     if (--file->refcnt) {
         return;
     }
 
-    LL_DELETE(shared->range_files,file);
+    LL_DELETE(shared->range_files, file);
     close(file->fd);
     free(file);
 } /* chimera_io_uring_range_file_put */
@@ -2922,8 +2922,8 @@ chimera_io_uring_range_file_put(
  * offset) and the caller should grant it unprojected. */
 static int
 chimera_io_uring_range_to_flock(
-    const struct chimera_vfs_request*request,
-    struct flock                    *fl)
+    const struct chimera_vfs_request *request,
+    struct flock                     *fl)
 {
     uint64_t offset = request->claim_acquire.offset;
     uint64_t length = request->claim_acquire.length;
@@ -2970,15 +2970,15 @@ chimera_io_uring_range_to_flock(
  * the one the lock was placed against. */
 static void
 chimera_io_uring_range_resolve(
-    const struct flock*fl,
-    int                fd,
-    uint64_t          *r_offset,
-    uint64_t          *r_length)
+    const struct flock *fl,
+    int                 fd,
+    uint64_t           *r_offset,
+    uint64_t           *r_length)
 {
     struct stat st;
     int64_t     base;
 
-    if (fl->l_whence != SEEK_END || fstat(fd,&st) < 0) {
+    if (fl->l_whence != SEEK_END || fstat(fd, &st) < 0) {
         *r_offset = (uint64_t) fl->l_start;
         *r_length = (uint64_t) fl->l_len;
         return;
@@ -3004,8 +3004,8 @@ chimera_io_uring_range_resolve(
  * the conflict in SEEK_SET terms whatever whence was asked about. */
 static void
 chimera_io_uring_range_report_conflict(
-    struct chimera_vfs_request*request,
-    const struct flock        *fl)
+    struct chimera_vfs_request *request,
+    const struct flock         *fl)
 {
     if (fl->l_type == F_UNLCK) {
         return;
@@ -3027,16 +3027,16 @@ chimera_io_uring_range_report_conflict(
 
 static void
 chimera_io_uring_claim_acquire(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread    *thread = private_data;
-    struct chimera_io_uring_shared    *shared = thread->shared;
-    struct chimera_io_uring_range_file*file;
-    struct chimera_io_uring_range     *range     = NULL;
-    struct flock                       fl        = { 0 };
-    int                                projected = 1;
-    int                                cmd,rc;
+    struct chimera_io_uring_thread     *thread = private_data;
+    struct chimera_io_uring_shared     *shared = thread->shared;
+    struct chimera_io_uring_range_file *file;
+    struct chimera_io_uring_range      *range     = NULL;
+    struct flock                        fl        = { 0 };
+    int                                 projected = 1;
+    int                                 cmd, rc;
 
     --thread->inflight;
 
@@ -3048,7 +3048,7 @@ chimera_io_uring_claim_acquire(
         return;
     }
 
-    if (chimera_io_uring_range_to_flock(request,&fl) < 0) {
+    if (chimera_io_uring_range_to_flock(request, &fl) < 0) {
         projected = 0;
     }
 
@@ -3072,11 +3072,11 @@ chimera_io_uring_claim_acquire(
         /* Nothing to ask the host about.  A probe sees no conflict; an acquire
          * gets a record that releases as a no-op. */
         if (!(request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST)) {
-            range = calloc(1,sizeof(*range));
+            range = calloc(1, sizeof(*range));
 
             evpl_mutex_lock(&shared->range_lock);
             range->token = ++shared->range_next_token;
-            LL_PREPEND(shared->ranges,range);
+            LL_PREPEND(shared->ranges, range);
             evpl_mutex_unlock(&shared->range_lock);
 
             request->claim_acquire.r_token   = range->token;
@@ -3110,7 +3110,7 @@ chimera_io_uring_claim_acquire(
      * goes away, and every other claim on this module would be stuck behind it
      * -- including the release that would let it through.  The reference taken
      * above keeps file->fd alive meanwhile. */
-    rc = fcntl(file->fd,cmd,&fl);
+    rc = fcntl(file->fd, cmd, &fl);
 
     if (rc < 0) {
         int err = errno;
@@ -3118,9 +3118,9 @@ chimera_io_uring_claim_acquire(
         if (err == EACCES || err == EAGAIN) {
             /* Held by somebody else: a refusal, not a failure.  Ask who, so
              * the caller can describe the denial. */
-            if (chimera_io_uring_range_to_flock(request,&fl) == 0 &&
-                fcntl(file->fd,CHIMERA_IO_URING_LOCK_GET,&fl) == 0) {
-                chimera_io_uring_range_report_conflict(request,&fl);
+            if (chimera_io_uring_range_to_flock(request, &fl) == 0 &&
+                fcntl(file->fd, CHIMERA_IO_URING_LOCK_GET, &fl) == 0) {
+                chimera_io_uring_range_report_conflict(request, &fl);
             }
             request->status = CHIMERA_VFS_OK;
         } else {
@@ -3128,28 +3128,28 @@ chimera_io_uring_claim_acquire(
         }
     } else if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST) {
         /* A probe acquires nothing: the answer is the conflict block. */
-        chimera_io_uring_range_report_conflict(request,&fl);
+        chimera_io_uring_range_report_conflict(request, &fl);
         request->status = CHIMERA_VFS_OK;
     } else {
-        range            = calloc(1,sizeof(*range));
+        range            = calloc(1, sizeof(*range));
         range->file      = file;
         range->projected = 1;
 
-        chimera_io_uring_range_resolve(&fl,file->fd,&range->offset,&range->length);
+        chimera_io_uring_range_resolve(&fl, file->fd, &range->offset, &range->length);
     }
 
     evpl_mutex_lock(&shared->range_lock);
 
     if (range) {
         range->token = ++shared->range_next_token;
-        LL_PREPEND(shared->ranges,range);
+        LL_PREPEND(shared->ranges, range);
 
         request->claim_acquire.r_token   = range->token;
         request->claim_acquire.r_granted = 1;
         request->status                  = CHIMERA_VFS_OK;
     } else {
         /* Nothing standing on the descriptor from this request. */
-        chimera_io_uring_range_file_put(shared,file);
+        chimera_io_uring_range_file_put(shared, file);
     }
 
     evpl_mutex_unlock(&shared->range_lock);
@@ -3166,16 +3166,16 @@ chimera_io_uring_claim_acquire(
  * still describes.  Matching nothing is success. */
 static void
 chimera_io_uring_claim_release_ranged(
-    struct chimera_vfs_request    *request,
-    struct chimera_io_uring_thread*thread)
+    struct chimera_vfs_request     *request,
+    struct chimera_io_uring_thread *thread)
 {
-    struct chimera_io_uring_shared    *shared = thread->shared;
-    struct chimera_io_uring_range_file*file;
-    struct chimera_io_uring_range     *range,*tmp,*matched = NULL;
-    struct flock                       fl     = { 0 };
-    uint64_t                           offset = request->claim_release.offset;
-    uint64_t                           length = request->claim_release.length;
-    int                                err    = 0;
+    struct chimera_io_uring_shared     *shared = thread->shared;
+    struct chimera_io_uring_range_file *file;
+    struct chimera_io_uring_range      *range, *tmp, *matched = NULL;
+    struct flock                        fl     = { 0 };
+    uint64_t                            offset = request->claim_release.offset;
+    uint64_t                            length = request->claim_release.length;
+    int                                 err    = 0;
 
     evpl_mutex_lock(&shared->range_lock);
 
@@ -3210,7 +3210,7 @@ chimera_io_uring_claim_release_ranged(
         int64_t     start = (int64_t) offset;
         int64_t     len   = (int64_t) length;
 
-        if (fstat(file->fd,&st) < 0) {
+        if (fstat(file->fd, &st) < 0) {
             err = errno;
         } else {
             start += (int64_t) st.st_size;
@@ -3231,7 +3231,7 @@ chimera_io_uring_claim_release_ranged(
 
     if (err) {
         evpl_mutex_lock(&shared->range_lock);
-        chimera_io_uring_range_file_put(shared,file);
+        chimera_io_uring_range_file_put(shared, file);
         evpl_mutex_unlock(&shared->range_lock);
 
         request->status = chimera_linux_errno_to_status(err);
@@ -3241,7 +3241,7 @@ chimera_io_uring_claim_release_ranged(
 
     evpl_mutex_lock(&shared->range_lock);
 
-    LL_FOREACH_SAFE(shared->ranges,range,tmp)
+    LL_FOREACH_SAFE(shared->ranges, range, tmp)
     {
         /* One descriptor per (file handle, owner), so having been taken through
          * this one is the fh and chimera_claim_owner_equal() test already. */
@@ -3253,12 +3253,12 @@ chimera_io_uring_claim_release_ranged(
          * the overlap test speaks the claim wire's, where UINT64_MAX is. */
         if (!chimera_vfs_claim_range_overlap_i(range->offset,
                                                range->length ? range->length : UINT64_MAX,
-                                               offset,length)) {
+                                               offset, length)) {
             continue;
         }
 
-        LL_DELETE(shared->ranges,range);
-        LL_PREPEND(matched,range);
+        LL_DELETE(shared->ranges, range);
+        LL_PREPEND(matched, range);
     }
 
     evpl_mutex_unlock(&shared->range_lock);
@@ -3266,7 +3266,7 @@ chimera_io_uring_claim_release_ranged(
     /* Outside the registry lock, as every other lock syscall on this module is.
      * F_UNLCK does not block, but the descriptor put below wants the lock and
      * there is no reason to hold it across a syscall at all. */
-    LL_FOREACH(matched,range)
+    LL_FOREACH(matched, range)
     {
         fl.l_type   = F_UNLCK;
         fl.l_whence = SEEK_SET;
@@ -3274,19 +3274,19 @@ chimera_io_uring_claim_release_ranged(
         fl.l_len    = (off_t) range->length;
         fl.l_pid    = 0;
 
-        fcntl(file->fd,CHIMERA_IO_URING_LOCK_SET,&fl);
+        fcntl(file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
     }
 
     evpl_mutex_lock(&shared->range_lock);
 
     while (matched) {
         range = matched;
-        LL_DELETE(matched,range);
-        chimera_io_uring_range_file_put(shared,range->file);
+        LL_DELETE(matched, range);
+        chimera_io_uring_range_file_put(shared, range->file);
         free(range);
     }
 
-    chimera_io_uring_range_file_put(shared,file);
+    chimera_io_uring_range_file_put(shared, file);
 
     evpl_mutex_unlock(&shared->range_lock);
 
@@ -3296,13 +3296,13 @@ chimera_io_uring_claim_release_ranged(
 
 static void
 chimera_io_uring_claim_release(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    struct chimera_io_uring_shared*shared = thread->shared;
-    struct chimera_io_uring_range *range;
-    struct flock                   fl = { 0 };
+    struct chimera_io_uring_thread *thread = private_data;
+    struct chimera_io_uring_shared *shared = thread->shared;
+    struct chimera_io_uring_range  *range;
+    struct flock                    fl = { 0 };
 
     --thread->inflight;
 
@@ -3311,7 +3311,7 @@ chimera_io_uring_claim_release(
 
     if (request->claim_release.token == 0 &&
         request->claim_release.klass == CHIMERA_VFS_CLAIM_KLASS_RANGE) {
-        chimera_io_uring_claim_release_ranged(request,thread);
+        chimera_io_uring_claim_release_ranged(request, thread);
         return;
     }
 
@@ -3319,7 +3319,7 @@ chimera_io_uring_claim_release(
 
     for (range = shared->ranges; range; range = range->next) {
         if (range->token == request->claim_release.token) {
-            LL_DELETE(shared->ranges,range);
+            LL_DELETE(shared->ranges, range);
             break;
         }
     }
@@ -3333,10 +3333,10 @@ chimera_io_uring_claim_release(
         fl.l_len    = (off_t) range->length;
         fl.l_pid    = 0;
 
-        fcntl(range->file->fd,CHIMERA_IO_URING_LOCK_SET,&fl);
+        fcntl(range->file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
 
         evpl_mutex_lock(&shared->range_lock);
-        chimera_io_uring_range_file_put(shared,range->file);
+        chimera_io_uring_range_file_put(shared, range->file);
         evpl_mutex_unlock(&shared->range_lock);
     }
 
@@ -3348,30 +3348,30 @@ chimera_io_uring_claim_release(
 
 static void
 chimera_io_uring_get_xattr(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread  = private_data;
-    int                            fd      = (int) request->get_xattr.handle->vfs_private;
-    char                          *scratch = (char*) request->plugin_data;
-    ssize_t                        rc;
-    int                            err;
+    struct chimera_io_uring_thread *thread  = private_data;
+    int                             fd      = (int) request->get_xattr.handle->vfs_private;
+    char                           *scratch = (char *) request->plugin_data;
+    ssize_t                         rc;
+    int                             err;
 
     --thread->inflight;
 
-    TERM_STR(name,request->get_xattr.name,request->get_xattr.namelen,scratch);
+    TERM_STR(name, request->get_xattr.name, request->get_xattr.namelen, scratch);
 
     /* The descriptor was opened privileged (open_by_handle_at) and the
      * kernel checks user.* xattr access against this thread's fsuid at call
      * time, so the xattr syscalls run impersonated like every other op. */
-    err = chimera_setup_credential(request->cred,NULL);
+    err = chimera_setup_credential(request->cred, NULL);
     if (err != 0) {
         request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
 
-    rc = fgetxattr(fd,name,request->get_xattr.value,
+    rc = fgetxattr(fd, name, request->get_xattr.value,
                    request->get_xattr.value_maxlen);
     err = errno;
 
@@ -3389,16 +3389,16 @@ chimera_io_uring_get_xattr(
 
 static void
 chimera_io_uring_set_xattr(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread  = private_data;
-    int                            fd      = (int) request->set_xattr.handle->vfs_private;
-    char                          *scratch = (char*) request->plugin_data;
-    int                            flags   = 0;
-    int                            rc;
-    int                            err;
-    struct statx                   stx;
+    struct chimera_io_uring_thread *thread  = private_data;
+    int                             fd      = (int) request->set_xattr.handle->vfs_private;
+    char                           *scratch = (char *) request->plugin_data;
+    int                             flags   = 0;
+    int                             rc;
+    int                             err;
+    struct statx                    stx;
 
     --thread->inflight;
 
@@ -3408,36 +3408,36 @@ chimera_io_uring_set_xattr(
         flags = XATTR_REPLACE;
     }
 
-    if (statx(fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-              CHIMERA_IO_URING_STATX_MASK,&stx) < 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
-    chimera_linux_statx_to_attr(&request->set_xattr.r_pre_attr,&stx);
+    chimera_linux_statx_to_attr(&request->set_xattr.r_pre_attr, &stx);
 
-    TERM_STR(name,request->set_xattr.name,request->set_xattr.namelen,scratch);
+    TERM_STR(name, request->set_xattr.name, request->set_xattr.namelen, scratch);
 
-    err = chimera_setup_credential(request->cred,NULL);
+    err = chimera_setup_credential(request->cred, NULL);
     if (err != 0) {
         request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
 
-    rc = fsetxattr(fd,name,request->set_xattr.value,
-                   request->set_xattr.value_len,flags);
+    rc = fsetxattr(fd, name, request->set_xattr.value,
+                   request->set_xattr.value_len, flags);
     err = errno;
 
     chimera_restore_privilege(request->cred);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(err);
-    } else if (statx(fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                     CHIMERA_IO_URING_STATX_MASK,&stx) < 0) {
+    } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                     CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
     } else {
-        chimera_linux_statx_to_attr(&request->set_xattr.r_post_attr,&stx);
+        chimera_linux_statx_to_attr(&request->set_xattr.r_post_attr, &stx);
         request->status = CHIMERA_VFS_OK;
     }
 
@@ -3446,25 +3446,25 @@ chimera_io_uring_set_xattr(
 
 static void
 chimera_io_uring_list_xattrs(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
-    int                            fd     = (int) request->list_xattrs.handle->vfs_private;
-    ssize_t                        rc;
-    int                            err;
-    char                          *p,*end;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd     = (int) request->list_xattrs.handle->vfs_private;
+    ssize_t                         rc;
+    int                             err;
+    char                           *p, *end;
 
     --thread->inflight;
 
-    err = chimera_setup_credential(request->cred,NULL);
+    err = chimera_setup_credential(request->cred, NULL);
     if (err != 0) {
         request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
 
-    rc = flistxattr(fd,request->list_xattrs.buffer,
+    rc = flistxattr(fd, request->list_xattrs.buffer,
                     request->list_xattrs.max_bytes);
     err = errno;
 
@@ -3498,47 +3498,47 @@ chimera_io_uring_list_xattrs(
 
 static void
 chimera_io_uring_remove_xattr(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread  = private_data;
-    int                            fd      = (int) request->remove_xattr.handle->vfs_private;
-    char                          *scratch = (char*) request->plugin_data;
-    int                            rc;
-    int                            err;
-    struct statx                   stx;
+    struct chimera_io_uring_thread *thread  = private_data;
+    int                             fd      = (int) request->remove_xattr.handle->vfs_private;
+    char                           *scratch = (char *) request->plugin_data;
+    int                             rc;
+    int                             err;
+    struct statx                    stx;
 
     --thread->inflight;
 
-    if (statx(fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-              CHIMERA_IO_URING_STATX_MASK,&stx) < 0) {
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+              CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
-    chimera_linux_statx_to_attr(&request->remove_xattr.r_pre_attr,&stx);
+    chimera_linux_statx_to_attr(&request->remove_xattr.r_pre_attr, &stx);
 
-    TERM_STR(name,request->remove_xattr.name,request->remove_xattr.namelen,scratch);
+    TERM_STR(name, request->remove_xattr.name, request->remove_xattr.namelen, scratch);
 
-    err = chimera_setup_credential(request->cred,NULL);
+    err = chimera_setup_credential(request->cred, NULL);
     if (err != 0) {
         request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
 
-    rc  = fremovexattr(fd,name);
+    rc  = fremovexattr(fd, name);
     err = errno;
 
     chimera_restore_privilege(request->cred);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(err);
-    } else if (statx(fd,"",AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                     CHIMERA_IO_URING_STATX_MASK,&stx) < 0) {
+    } else if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                     CHIMERA_IO_URING_STATX_MASK, &stx) < 0) {
         request->status = chimera_linux_errno_to_status(errno);
     } else {
-        chimera_linux_statx_to_attr(&request->remove_xattr.r_post_attr,&stx);
+        chimera_linux_statx_to_attr(&request->remove_xattr.r_post_attr, &stx);
         request->status = CHIMERA_VFS_OK;
     }
 
@@ -3547,14 +3547,14 @@ chimera_io_uring_remove_xattr(
 
 static void
 chimera_io_uring_dispatch(
-    struct chimera_vfs_request*request,
-    void                      *private_data)
+    struct chimera_vfs_request *request,
+    void                       *private_data)
 {
-    struct chimera_io_uring_thread*thread = private_data;
+    struct chimera_io_uring_thread *thread = private_data;
 
     if (thread->inflight >= thread->max_inflight) {
         /* We have given the ring too much work already, wait for completions */
-        DL_APPEND(thread->pending_requests,request);
+        DL_APPEND(thread->pending_requests, request);
         return;
     }
 
@@ -3562,91 +3562,91 @@ chimera_io_uring_dispatch(
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
-            chimera_io_uring_mount(request,private_data);
+            chimera_io_uring_mount(request, private_data);
             break;
         case CHIMERA_VFS_OP_UMOUNT:
-            chimera_io_uring_umount(request,private_data);
+            chimera_io_uring_umount(request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP_AT:
-            chimera_io_uring_lookup_at(request,private_data);
+            chimera_io_uring_lookup_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_GETATTR:
-            chimera_io_uring_getattr(request,private_data);
+            chimera_io_uring_getattr(request, private_data);
             break;
         case CHIMERA_VFS_OP_OPEN_FH:
-            chimera_io_uring_open_fh(request,private_data);
+            chimera_io_uring_open_fh(request, private_data);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
-            chimera_io_uring_open_at(request,private_data);
+            chimera_io_uring_open_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_CLOSE:
-            chimera_io_uring_close(request,private_data);
+            chimera_io_uring_close(request, private_data);
             break;
         case CHIMERA_VFS_OP_MKDIR_AT:
-            chimera_io_uring_mkdir_at(request,private_data);
+            chimera_io_uring_mkdir_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_MKNOD_AT:
-            chimera_io_uring_mknod_at(request,private_data);
+            chimera_io_uring_mknod_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_READDIR:
-            chimera_io_uring_readdir(request,private_data);
+            chimera_io_uring_readdir(request, private_data);
             break;
         case CHIMERA_VFS_OP_REMOVE_AT:
-            chimera_io_uring_remove_at(request,private_data);
+            chimera_io_uring_remove_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_READ:
-            chimera_io_uring_read(request,private_data);
+            chimera_io_uring_read(request, private_data);
             break;
         case CHIMERA_VFS_OP_WRITE:
-            chimera_io_uring_write(request,private_data);
+            chimera_io_uring_write(request, private_data);
             break;
         case CHIMERA_VFS_OP_COMMIT:
-            chimera_io_uring_commit(request,private_data);
+            chimera_io_uring_commit(request, private_data);
             break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
-            chimera_io_uring_symlink_at(request,private_data);
+            chimera_io_uring_symlink_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_READLINK:
-            chimera_io_uring_readlink(request,private_data);
+            chimera_io_uring_readlink(request, private_data);
             break;
         case CHIMERA_VFS_OP_RENAME_AT:
-            chimera_io_uring_rename_at(request,private_data);
+            chimera_io_uring_rename_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_LINK_AT:
-            chimera_io_uring_link_at(request,private_data);
+            chimera_io_uring_link_at(request, private_data);
             break;
         case CHIMERA_VFS_OP_SETATTR:
-            chimera_io_uring_setattr(request,private_data);
+            chimera_io_uring_setattr(request, private_data);
             break;
         case CHIMERA_VFS_OP_ALLOCATE:
-            chimera_io_uring_allocate(request,private_data);
+            chimera_io_uring_allocate(request, private_data);
             break;
         case CHIMERA_VFS_OP_COPY_RANGE:
-            chimera_io_uring_copy_range(request,private_data);
+            chimera_io_uring_copy_range(request, private_data);
             break;
         case CHIMERA_VFS_OP_CLONE_RANGE:
-            chimera_io_uring_clone_range(request,private_data);
+            chimera_io_uring_clone_range(request, private_data);
             break;
         case CHIMERA_VFS_OP_SEEK:
-            chimera_io_uring_seek(request,private_data);
+            chimera_io_uring_seek(request, private_data);
             break;
         case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
-            chimera_io_uring_claim_acquire(request,private_data);
+            chimera_io_uring_claim_acquire(request, private_data);
             break;
         case CHIMERA_VFS_OP_CLAIM_RELEASE:
-            chimera_io_uring_claim_release(request,private_data);
+            chimera_io_uring_claim_release(request, private_data);
             break;
         case CHIMERA_VFS_OP_GET_XATTR:
-            chimera_io_uring_get_xattr(request,private_data);
+            chimera_io_uring_get_xattr(request, private_data);
             break;
         case CHIMERA_VFS_OP_SET_XATTR:
-            chimera_io_uring_set_xattr(request,private_data);
+            chimera_io_uring_set_xattr(request, private_data);
             break;
         case CHIMERA_VFS_OP_LIST_XATTRS:
-            chimera_io_uring_list_xattrs(request,private_data);
+            chimera_io_uring_list_xattrs(request, private_data);
             break;
         case CHIMERA_VFS_OP_REMOVE_XATTR:
-            chimera_io_uring_remove_xattr(request,private_data);
+            chimera_io_uring_remove_xattr(request, private_data);
             break;
         default:
             chimera_io_uring_error("io_uring_dispatch: unknown operation %d",
