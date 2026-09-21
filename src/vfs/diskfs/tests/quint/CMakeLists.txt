@@ -144,3 +144,9 @@ add_test(NAME chimera/vfs/diskfs/mbt/batch
 set_tests_properties(chimera/vfs/diskfs/mbt/batch PROPERTIES
     LABELS "quint;diskfs_mbt"
     TIMEOUT 900)
+if(WIN32)
+    # Hosted ARM64 runners need more time for the same device-I/O workload:
+    # Release takes about 14 minutes, and Debug reaches trace 10 of 11 at
+    # the 15-minute limit while still completing recovery cycles.
+    set_tests_properties(chimera/vfs/diskfs/mbt/batch PROPERTIES TIMEOUT 1800)
+endif()
