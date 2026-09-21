@@ -99,6 +99,7 @@ main(
     }
     CHECK(&dh);
     dh_release(&dh, fh);
+    printf("fragmented writes complete\n");
 
     /* ---- fragmenting churn: create + delete many small files ---- */
     for (r = 0; r < 6; r++) {
@@ -111,8 +112,10 @@ main(
             assert(dh_remove(&dh, dirh, name) == CHIMERA_VFS_OK);
         }
         CHECK(&dh);
+        printf("churn pass %d complete\n", r + 1);
     }
 
+    printf("waiting for reclaim...\n");
     diskfs_test_await_reclaim(dh.vfs, dh.evpl, 5000);
     CHECK(&dh);
     diskfs_test_space(dh.vfs, &sp);
