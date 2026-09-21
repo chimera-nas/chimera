@@ -90,6 +90,26 @@ struct chimera_nfs_export_opts {
 };
 
 /**
+ * @brief Tests whether an export name is reachable over NFSv4.
+ *
+ * A name must be a single path component with at most one leading slash
+ * ("/share" or "share"), or the root export "/".  Chimera builds no
+ * intermediate pseudo-fs nodes, so a nested name such as "/a/b" would be
+ * created but unmountable: the pseudo-root has no "a" to LOOKUP and skips
+ * the entry when listing (RFC 7530 section 7.7).
+ *
+ * chimera_nfs_add_export() applies this itself; callers that want to report
+ * a bad name in their own terms (the REST API answers 400) can test first.
+ *
+ * @param name Export name to test (NULL is invalid).
+ * @return Non-zero if the name is usable as an export name, 0 otherwise.
+ */
+int
+chimera_nfs_export_name_valid(
+    const char *name);
+
+
+/**
  * @brief Adds a new NFS export to the shared context.
  *
  * @param nfs_shared Pointer to the NFS shared context.
@@ -101,10 +121,11 @@ struct chimera_nfs_export_opts {
  *                   same directory must pin identical ids.
  * @param opts       Optional per-export settings (may be NULL); see
  *                   struct chimera_nfs_export_opts.
- * @return 0 on success, -EINVAL if export_id is out of range, -EEXIST if an
- *         export with the same name exists, -EADDRINUSE if the id is already
- *         in use, -ENOSPC if the configured export limit (nfs_max_exports)
- *         is reached, -ENOMEM on allocation failure.
+ * @return 0 on success, -EINVAL if export_id is out of range or the name is
+ *         not a single path component (see chimera_nfs_export_name_valid()),
+ *         -EEXIST if an export with the same name exists, -EADDRINUSE if the
+ *         id is already in use, -ENOSPC if the configured export limit
+ *         (nfs_max_exports) is reached, -ENOMEM on allocation failure.
  */
 int chimera_nfs_add_export(
     void                                 *nfs_shared,
