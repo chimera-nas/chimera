@@ -49,7 +49,9 @@ static inline int fsync(int fd) { return _commit(fd); }
 #define F_OK                   0
 #define R_OK                   4
 #define W_OK                   2
-#define X_OK                   0
+/* Virtual POSIX execute permission remains distinct from existence, even
+ * though the Windows CRT does not implement an execute-access check. */
+#define X_OK                   1
 
 static inline int
 chimera_clock_gettime(
