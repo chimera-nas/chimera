@@ -534,7 +534,6 @@ add_executable(smbtorture_test smbtorture_test.c)
 target_link_libraries(smbtorture_test chimera_server chimera_metrics)
 target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-endif()
 
 # Subtests needing named-stream (ADS) support.  Single source of truth, read by
 # both the driver (at run time, to set the config knob) and this file (at
@@ -5310,3 +5309,5 @@ elseif(CHIMERA_NETNS_TESTING)
     message(STATUS "smbtorture tests: disabled (smbtorture client not found; "
             "install samba-testsuite to enable)")
 endif()
+
+endif() # NOT WIN32: external Samba drivers use Unix processes and tools.
