@@ -29,11 +29,12 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
+#include "vfs/tests/compound_test_util.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 
@@ -110,62 +111,31 @@ mount_cb(
     ctx->done   = 1;
 } /* mount_cb */
 
-static void
-lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    ctx->done = 1;
-} /* lookup_cb */
-
-static void
-openfh_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->handle = oh;
-    ctx->done   = 1;
-} /* openfh_cb */
-
-static void
-getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK) {
-        ctx->attr = *attr;
-    }
-    ctx->done = 1;
-} /* getattr_cb */
-
-/* getattr `handle` with `mask`, returning the resulting attrs in ctx->attr. */
+/* GETATTR `handle` with `mask`, returning the resulting attrs in ctx->attr.
+ * The handle is named as the op's in_handle, which is what the request a
+ * protocol server builds for a stat of an object it already holds open looks
+ * like. */
 static void
 getattr(
     struct test_ctx               *ctx,
     const struct chimera_vfs_cred *cred,
     uint64_t                       mask)
 {
+    struct chimera_vfs_compound *cp;
+    int                          i_getattr;
+
     memset(&ctx->attr, 0, sizeof(ctx->attr));
-    chimera_vfs_getattr(ctx->vfs_thread, cred, ctx->handle, mask,
-                        getattr_cb, ctx);
-    wait_done(ctx);
+
+    cp        = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    i_getattr = chimera_vfs_compound_add_getattr(cp, mask);
+    chimera_vfs_compound_op_set_handle(cp, (uint32_t) i_getattr, ctx->handle);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
     assert(ctx->status == CHIMERA_VFS_OK);
+
+    ctx->attr = chimera_vfs_compound_op(cp, (uint32_t) i_getattr)->attr;
+
+    chimera_vfs_compound_free(cp);
 } /* getattr */
 
 /* (2) Observable backend behaviour. */
@@ -177,8 +147,6 @@ test_memfs_behaviour(void)
     struct chimera_vfs_module_cfg module_cfgs[2];
     struct prometheus_metrics    *metrics;
     struct chimera_vfs_cred       cred;
-    uint8_t                       root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                      root_fh_len;
 
     chimera_vfs_cred_init_unix(&cred, 0, 0, 0, NULL);
 
@@ -209,17 +177,13 @@ test_memfs_behaviour(void)
     assert(ctx.status == CHIMERA_VFS_OK);
 
     /* Resolve the mounted share's root handle. */
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
+    assert(compound_test_mount_root(ctx.vfs_thread, ctx.evpl, &cred, "test",
+                                    ctx.fh, &ctx.fh_len) == CHIMERA_VFS_OK);
 
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, ctx.fh, ctx.fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
+    assert(compound_test_open_fh(ctx.vfs_thread, ctx.evpl, &cred,
+                                 ctx.fh, ctx.fh_len,
+                                 CHIMERA_VFS_OPEN_INFERRED,
+                                 &ctx.handle) == CHIMERA_VFS_OK);
 
     /* NFSv3-style request: stat set + FSID.  FSID is satisfied, but the statfs
      * value fields are NOT computed (the hot-path win). */
