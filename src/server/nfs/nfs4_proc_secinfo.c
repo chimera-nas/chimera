@@ -6,8 +6,7 @@
 #include "nfs4_status.h"
 #include "nfs.h"
 #include "evpl/evpl_rpc2.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 
 /* RFC 7530 §16.31: SECINFO returns the security mechanisms the server will
  * accept for the named entry in the current-filehandle directory.  Chimera
@@ -18,16 +17,17 @@
 
 static void
 chimera_nfs4_secinfo_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct nfs_request              *req = private_data;
     struct SECINFO4res              *res = &req->res_compound.resarray[req->index].opsecinfo;
     const struct chimera_nfs_export *export;
+    enum chimera_vfs_error           error_code;
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
@@ -56,44 +56,17 @@ chimera_nfs4_secinfo_complete(
 } /* chimera_nfs4_secinfo_complete */
 
 static void
-chimera_nfs4_secinfo_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request  *req  = private_data;
-    struct SECINFO4args *args = &req->args_compound->argarray[req->index].opsecinfo;
-    struct SECINFO4res  *res  = &req->res_compound.resarray[req->index].opsecinfo;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    req->handle = handle;
-
-    chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
-                          handle,
-                          args->name.data,
-                          args->name.len,
-                          0,
-                          0,
-                          chimera_nfs4_secinfo_complete,
-                          req);
-} /* chimera_nfs4_secinfo_open_callback */
-
-static void
 chimera_nfs4_secinfo_resume(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     int                               at_root_export)
 {
-    struct SECINFO4args      *args =
+    struct SECINFO4args         *args =
         &req->args_compound->argarray[req->index].opsecinfo;
-    struct SECINFO4res       *res =
+    struct SECINFO4res          *res =
         &req->res_compound.resarray[req->index].opsecinfo;
-    struct chimera_nfs_export sibling;
+    struct chimera_nfs_export    sibling;
+    struct chimera_vfs_compound *compound;
 
     /* At the "/" export's root, a name matching a sibling export is a
      * junction: advertise that export's flavors directly, the same
@@ -121,12 +94,18 @@ chimera_nfs4_secinfo_resume(
 
     /* Opening the current FH as a directory yields NFS4ERR_NOTDIR when it is
      * not one; the subsequent lookup yields NFS4ERR_NOENT for a missing name. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_secinfo_open_callback,
-                        req);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    chimera_vfs_compound_add_lookup(compound,
+                                    (const char *) args->name.data,
+                                    (int) args->name.len, 0, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_secinfo_complete, req);
 } /* chimera_nfs4_secinfo_resume */
 
 void

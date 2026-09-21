@@ -86,60 +86,39 @@ chimera_nfs4_lookup_attrdir(
 } /* chimera_nfs4_lookup_attrdir */
 
 
+/* PUTFH, OPEN_CURRENT, LOOKUP: the resolve is op 2 of the run. */
+#define NFS4_LOOKUP_OP_LOOKUP 2
+
 static void
 chimera_nfs4_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req    = private_data;
-    nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].oplookup;
+    struct nfs_request                   *req = private_data;
+    struct LOOKUP4res                    *res = &req->res_compound.resarray[req->index].oplookup;
+    const struct chimera_vfs_compound_op *lop;
+    enum chimera_vfs_error                error_code;
+    nfsstat4                              status;
 
-    res->status = status;
+    error_code = chimera_vfs_compound_status(compound);
+    status     = chimera_nfs4_errno_to_nfsstat4(error_code);
 
     if (error_code == CHIMERA_VFS_OK) {
-        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-            res->status = NFS4ERR_SERVERFAULT;
-            status      = NFS4ERR_SERVERFAULT;
+        lop = chimera_vfs_compound_op(compound, NFS4_LOOKUP_OP_LOOKUP);
+
+        if (!(lop->attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+            status = NFS4ERR_SERVERFAULT;
         } else {
-            memcpy(req->fh, attr->va_fh, attr->va_fh_len);
-            req->fhlen = attr->va_fh_len;
+            memcpy(req->fh, lop->attr.va_fh, lop->attr.va_fh_len);
+            req->fhlen = lop->attr.va_fh_len;
         }
     }
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    chimera_vfs_compound_free(compound);
+
+    res->status = status;
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_lookup_complete */
-
-static void
-chimera_nfs4_lookup_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req    = private_data;
-    struct LOOKUP4args *args   = &req->args_compound->argarray[req->index].oplookup;
-    nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].oplookup;
-
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
-
-        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
-                              handle,
-                              args->objname.data,
-                              args->objname.len,
-                              CHIMERA_VFS_ATTR_FH,
-                              0,
-                              chimera_nfs4_lookup_complete,
-                              req);
-    } else {
-        res->status = status;
-        chimera_nfs4_compound_complete(req, status);
-    }
-} /* chimera_nfs4_lookup_open_callback */
 
 static void
 chimera_nfs4_lookup_resume(
@@ -147,9 +126,10 @@ chimera_nfs4_lookup_resume(
     struct nfs_request               *req,
     int                               at_root_export)
 {
-    struct LOOKUP4args       *args =
+    struct LOOKUP4args          *args =
         &req->args_compound->argarray[req->index].oplookup;
-    struct chimera_nfs_export sibling;
+    struct chimera_nfs_export    sibling;
+    struct chimera_vfs_compound *compound;
 
     /* At the "/" export's root, sibling exports are grafted over the real
      * directory as junctions: a name matching a sibling export enters that
@@ -164,13 +144,21 @@ chimera_nfs4_lookup_resume(
         return;
     }
 
-    // For non-root lookups, we can just open the directory and let the VFS handle the lookup
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_lookup_open_callback,
-                        req);
+    /* For non-root lookups the directory is opened and the VFS resolves the
+     * name in it -- which is the run PUTFH, OPEN_CURRENT, LOOKUP. */
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH |
+                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
+    chimera_vfs_compound_add_lookup(compound,
+                                    (const char *) args->objname.data,
+                                    (int) args->objname.len,
+                                    CHIMERA_VFS_ATTR_FH, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_lookup_complete, req);
 } /* chimera_nfs4_lookup_resume */
 
 void

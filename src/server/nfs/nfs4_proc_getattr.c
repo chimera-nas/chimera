@@ -302,48 +302,58 @@ chimera_nfs4_getattr_settle(
     chimera_nfs4_getattr_finish(req, attr);
 } /* chimera_nfs4_getattr_settle */
 
+/* PUTFH, OPEN_CURRENT, GETATTR: the stat is op 2 of the run. */
+#define NFS4_GETATTR_OP_GETATTR 2
+
 static void
-chimera_nfs4_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_nfs4_getattr_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req = private_data;
-    struct GETATTR4res *res = &req->res_compound.resarray[req->index].opgetattr;
+    struct nfs_request                   *req = private_data;
+    struct GETATTR4res                   *res = &req->res_compound.resarray[req->index].opgetattr;
+    const struct chimera_vfs_compound_op *gop;
+    struct chimera_vfs_attrs              attr;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_free(compound);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    chimera_nfs4_getattr_settle(req, attr);
-} /* chimera_nfs4_getattr_complete */
+    /* The settle may PARK on a CB_GETATTR, so the sequence is freed first and
+     * the attributes travel by value -- the hand-over the sequence path makes
+     * for the same reason.  The struct copy is whole for everything except the
+     * ACL, which POINTS into storage the compound frees, so that is copied once
+     * more into the request's own allocator; the SIDs that share its lifetime
+     * need no copy because no NFSv4 attribute reads them. */
+    gop  = chimera_vfs_compound_op(compound, NFS4_GETATTR_OP_GETATTR);
+    attr = gop->attr;
 
-static void
-chimera_nfs4_getattr_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request  *req  = private_data;
-    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+    if ((attr.va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr.va_acl) {
+        size_t              sz   = chimera_acl_size(attr.va_acl->num_aces);
+        struct chimera_acl *copy = xdr_dbuf_alloc_space(sz,
+                                                        req->encoding->dbuf);
 
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
+        if (!copy) {
+            chimera_vfs_compound_free(compound);
+            res->status = NFS4ERR_RESOURCE;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
 
-        uint64_t attr_mask = chimera_nfs4_attr2mask(args->attr_request,
-                                                    args->num_attr_request);
-
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                            handle,
-                            attr_mask,
-                            chimera_nfs4_getattr_complete,
-                            req);
-    } else {
-        chimera_nfs4_compound_complete(req, chimera_nfs4_errno_to_nfsstat4(error_code));
+        memcpy(copy, attr.va_acl, sz);
+        attr.va_acl = copy;
     }
-} /* chimera_nfs4_getattr_open_callback */
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs4_getattr_settle(req, &attr);
+} /* chimera_nfs4_getattr_sequence_complete */
 
 /* A named-attribute directory is synthetic: its attributes are the base file's
  * owner/timestamps presented as a directory.  The run is the base PATH-opened
@@ -429,8 +439,9 @@ chimera_nfs4_getattr(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
-    struct GETATTR4res  *res  = &resop->opgetattr;
+    struct GETATTR4args         *args = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res          *res  = &resop->opgetattr;
+    struct chimera_vfs_compound *compound;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -460,14 +471,26 @@ chimera_nfs4_getattr(
                                            args->num_attr_request);
         nfs4_root_getattr(thread, &attr, attr_mask);
         req->handle = NULL; /* No handle since root attributes are synthetic */
-        chimera_nfs4_getattr_complete(CHIMERA_VFS_OK, &attr, req);
+        chimera_nfs4_getattr_settle(req, &attr);
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs4_getattr_open_callback,
-                        req);
+    /* A PATH open, because a GETATTR reads nothing through the handle and a
+     * data open of a FIFO blocks.  The handle belongs to the run; the settle's
+     * release covers only the per-op slot, which this path never fills. */
+    req->handle = NULL;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+    chimera_vfs_compound_add_getattr(compound,
+                                     chimera_nfs4_attr2mask(
+                                         args->attr_request,
+                                         args->num_attr_request));
+
+    chimera_vfs_compound_submit(compound,
+                                chimera_nfs4_getattr_sequence_complete, req);
 } /* chimera_nfs4_getattr */
