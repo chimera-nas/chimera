@@ -54,6 +54,10 @@ nsm_state_persist(
     ctx->key_len   = nfs_kv_nsm_state_key(ctx->key);
     ctx->value_len = nsm_state_value_serialize(ctx->value, sizeof(ctx->value),
                                                state_number);
+    /* A key-value write is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, stores a record in a backend's KV
+     * band rather than creating anything in a namespace, and takes a key and a
+     * value where every sequence op takes an object. */
     chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nsm_kv_done, ctx);
 } /* nsm_state_persist */
@@ -86,6 +90,10 @@ nsm_monitor(
                                           host_len);
     ctx->value_len = nsm_monitor_value_serialize(ctx->value, sizeof(ctx->value),
                                                  peer_addr);
+    /* A key-value write is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, stores a record in a backend's KV
+     * band rather than creating anything in a namespace, and takes a key and a
+     * value where every sequence op takes an object. */
     chimera_vfs_put_key(thread->vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nsm_kv_done, ctx);
 } /* nsm_monitor */
@@ -112,6 +120,10 @@ nsm_unmonitor(
     ctx          = malloc(sizeof(*ctx));
     ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, (const uint8_t *) host,
                                           host_len);
+    /* A key-value delete is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, drops a record from a backend's KV
+     * band rather than unlinking a name from a directory, and takes a key where
+     * every sequence op takes an object. */
     chimera_vfs_delete_key(thread->vfs_thread, ctx->key, ctx->key_len,
                            nsm_kv_done, ctx);
 } /* nsm_unmonitor */
@@ -443,6 +455,10 @@ nsm_state_load_cb(
     /* Open-ended scan of the monitor band; nsm_monitor_scan_cb stops when the
      * 3-byte type header changes (the same pattern recovery/DRC use). */
     nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NSM_MONITOR);
+    /* A key-value search is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, enumerates a backend's KV store
+     * rather than a namespace, and streams its answers through a per-record
+     * callback that no sequence result can hold. */
     chimera_vfs_search_keys(thread->vfs_thread,
                             ctx->start, CHIMERA_KV_HDR_LEN,
                             NULL, 0, 0,
@@ -476,6 +492,10 @@ chimera_nfs_nsm_kickoff(struct chimera_server_nfs_thread *thread)
     ctx->thread = thread;
     ctx->state  = 0;
     klen        = nfs_kv_nsm_state_key(ctx->skey);
+    /* A key-value read is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, fetches a record out of a backend's
+     * KV band rather than an object out of a namespace, and takes a key where
+     * every sequence op takes an object. */
     chimera_vfs_get_key(thread->vfs_thread, ctx->skey, klen,
                         nsm_state_load_cb, ctx);
 } /* chimera_nfs_nsm_kickoff */
