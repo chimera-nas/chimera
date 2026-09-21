@@ -60,7 +60,7 @@ main(
     struct posix_test_env env;
     uint64_t              baseline, avail, ask, reclaimed;
     int                   fd, small_fd, rc, i, alloc_errno = 0;
-    struct stat           st;
+    chimera_posix_stat_t  st;
     char                  block[4096];
 
     posix_test_diskfs_device_count = ENOSPC_DEV_COUNT;
