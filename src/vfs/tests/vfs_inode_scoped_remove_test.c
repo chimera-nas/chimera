@@ -158,7 +158,7 @@ do_remove_match(
     uint32_t                        child_fh_len)
 {
     struct chimera_vfs_compound *cp;
-    int                          i_remove;
+    int i_remove;
 
     cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
     chimera_vfs_compound_add_puthandle(cp, dir, CHIMERA_VFS_OPEN_INFERRED);

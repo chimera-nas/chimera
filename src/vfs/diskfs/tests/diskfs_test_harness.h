@@ -393,7 +393,7 @@ dh_lookup(
 {
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
-    int                                   i_lookup;
+    int i_lookup;
 
     cp = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
     chimera_vfs_compound_add_putfh(cp, parent_fh, (int) parent_fhlen);
@@ -452,7 +452,7 @@ dh_mkdir(
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
     struct chimera_vfs_attrs              sa;
-    int                                   i_mkdir;
+    int i_mkdir;
 
     memset(&sa, 0, sizeof(sa));
     sa.va_set_mask = CHIMERA_VFS_ATTR_MODE;
@@ -500,7 +500,7 @@ dh_create(
     const struct chimera_vfs_compound_op *op;
     struct chimera_vfs_open_handle       *oh;
     struct chimera_vfs_attrs              sa;
-    int                                   i_open;
+    int i_open;
 
     memset(&sa, 0, sizeof(sa));
     sa.va_set_mask = CHIMERA_VFS_ATTR_MODE;
@@ -571,7 +571,7 @@ dh_write(
 {
     struct chimera_vfs_compound *cp;
     struct evpl_iovec            iov[16];
-    int                          niov, i;
+    int niov, i;
 
     niov = evpl_iovec_alloc(dh->evpl, len, 4096, 16, 0, iov);
     assert(niov > 0);
@@ -605,8 +605,8 @@ dh_read(
     const struct chimera_vfs_compound_op *op;
     struct evpl_iovec                     iov[64];
     struct evpl_iovec                    *got;
-    uint32_t                              copied = 0;
-    int                                   i_read, ngot, i;
+    uint32_t copied = 0;
+    int i_read, ngot, i;
 
     if (buf) {
         memset(buf, 0, len);
@@ -735,7 +735,7 @@ dh_symlink(
 {
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
-    int                                   i_sym;
+    int i_sym;
 
     cp = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
     chimera_vfs_compound_add_puthandle(cp, dirh, CHIMERA_VFS_OPEN_INFERRED);
@@ -768,7 +768,7 @@ dh_readlink(
 {
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
-    int                                   i_rl;
+    int i_rl;
 
     dh->auxlen = 0;
 
@@ -779,7 +779,7 @@ dh_readlink(
     dh->status = compound_test_run(dh->evpl, cp);
 
     if (dh->status == CHIMERA_VFS_OK) {
-        op = chimera_vfs_compound_op(cp, (uint32_t) i_rl);
+        op         = chimera_vfs_compound_op(cp, (uint32_t) i_rl);
         dh->auxlen = (int) op->target_len;
         if (dh->auxlen > (int) sizeof(dh->aux) - 1) {
             dh->auxlen = (int) sizeof(dh->aux) - 1;
@@ -829,7 +829,7 @@ dh_set_xattr(
     const char                     *value)
 {
     struct chimera_vfs_compound *cp;
-    int                          i_sx;
+    int i_sx;
 
     cp   = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
     i_sx = chimera_vfs_compound_add_setxattr(cp, 0, name, (int) strlen(name),
@@ -851,7 +851,7 @@ dh_get_xattr(
 {
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
-    int                                   i_gx;
+    int i_gx;
 
     dh->auxlen = 0;
 
@@ -878,7 +878,7 @@ dh_remove_xattr(
     const char                     *name)
 {
     struct chimera_vfs_compound *cp;
-    int                          i_rx;
+    int i_rx;
 
     cp   = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
     i_rx = chimera_vfs_compound_add_removexattr(cp, name, (int) strlen(name));
@@ -946,7 +946,7 @@ dh_seek(
 {
     struct chimera_vfs_compound          *cp;
     const struct chimera_vfs_compound_op *op;
-    int                                   i_seek;
+    int i_seek;
 
     cp     = chimera_vfs_compound_alloc(dh->thread, &dh->cred);
     i_seek = chimera_vfs_compound_add_seek(cp, h, off, what);

@@ -66,7 +66,7 @@
 
 struct test_ctx {
     int                             done;
-    enum chimera_vfs_error          status;
+    enum chimera_vfs_error status;
     struct chimera_vfs             *vfs;
     struct chimera_vfs_thread      *vfs_thread;
     struct evpl                    *evpl;
@@ -169,7 +169,7 @@ read_all(
         const struct chimera_vfs_compound_op *op;
         struct evpl_iovec                     iov[READ_NIOV];
         struct evpl_iovec                    *got;
-        uint32_t                              chunk = READ_CHUNK;
+        uint32_t                              chunk  = READ_CHUNK;
         uint32_t                              copied = 0;
         int                                   i_read, ngot;
 

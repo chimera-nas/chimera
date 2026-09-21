@@ -160,7 +160,7 @@ remove_as(
     uint32_t                        child_fh_len)
 {
     struct chimera_vfs_compound *cp;
-    int                          i_remove;
+    int i_remove;
 
     cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
     chimera_vfs_compound_add_puthandle(cp, dir, CHIMERA_VFS_OPEN_INFERRED);
@@ -369,12 +369,12 @@ main(
      * namespace op -- the same VFS gate every protocol funnels through.
      */
     {
-        struct chimera_vfs_open_handle *root_handle, *dir_handle;
-        struct chimera_vfs_attrs        dattr;
-        uint8_t                         dir_fh[CHIMERA_VFS_FH_SIZE];
-        uint32_t                        dir_fh_len;
-        uint8_t                         kid_fh[CHIMERA_VFS_FH_SIZE];
-        uint32_t                        kid_fh_len;
+        struct chimera_vfs_open_handle       *root_handle, *dir_handle;
+        struct chimera_vfs_attrs              dattr;
+        uint8_t                               dir_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                              dir_fh_len;
+        uint8_t                               kid_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                              kid_fh_len;
 
         struct chimera_vfs_compound          *cp;
         const struct chimera_vfs_compound_op *op;
