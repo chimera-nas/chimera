@@ -112,10 +112,10 @@ struct chimera_claim_range_conflict {
  * separately by the protocol layer for projection serialization.  key[16] is
  * the KEY circle (SMB LeaseKey / ParentLeaseKey); all-zero means "no key".
  *
- * chimera_claim_owner_same_key() is the raw KEY comparison; what names a LEASE
- * is chimera_claim_owner_same_lease(), which adds the client term MS-SMB2
- * 3.3.5.9.8 requires.  Use the latter unless you specifically mean "these two
- * carry the same 16 bytes". */
+ * same_key compares the object-store caching context. Windows Server 2012+
+ * uses LeaseKey as ClientLeaseId (MS-SMB2 3.3.1.4, product behavior 211), so
+ * caching compatibility spans ClientGuids. Protocol lease-record identity
+ * additionally includes the client; use owner_equal / same_lease for that. */
 struct chimera_claim_owner {
     uint8_t  proto;
     uint8_t  flags;
@@ -172,25 +172,10 @@ chimera_claim_owner_same_client(
     return a->proto == b->proto && a->client_key == b->client_key;
 } /* chimera_claim_owner_same_client */
 
-/*
- * same_lease: the same lease, not merely the same key bytes.
- *
- * MS-SMB2 3.3.5.9.8 locates a lease by looking the LeaseTable up in
- * GlobalLeaseTableList by the ClientGuid of the connection that received the
- * request, and only THEN the LeaseKey inside that table.  The same key value
- * used by two different clients therefore names two SEPARATE leases, each with
- * its own version, epoch and caching state.  Matching on the key alone let a
- * second client's RqLs open land on the first client's lease -- and, because a
- * key match also exempts the two from each other's deny rows, let both hold a
- * write cache on one file (chimera CD-5).
- *
- * A zero client_key is a WILDCARD.  The directory-lease ParentLeaseKey
- * self-exemption synthesizes an actor that is deliberately all zero but for the
- * key (chimera_vfs_notify_dir_lease_break): it names a key, not a claimant, and
- * must keep matching the lease that supplied it.  Every claim that carries a
- * real key carries the client that owns it, so the wildcard never widens a
- * claim-against-claim comparison.
- */
+/* Protocol lease identity, distinct from object-store caching equivalence.
+ * MS-SMB2 3.3.5.9.8 locates the LeaseTable by ClientGuid, then LeaseKey.
+ * Retain the zero-client wildcard for key-only synthetic actors. Admission
+ * and break self-exemptions use same_key, not this client-qualified identity. */
 static inline bool
 chimera_claim_owner_same_lease(
     const struct chimera_claim_owner *a,

@@ -531,7 +531,7 @@ chimera_vfs_claim_trigger_row(
     bool same_owner = actor &&
         chimera_claim_owner_equal(&victim->owner, &actor->owner);
     bool same_key = actor &&
-        chimera_claim_owner_same_lease(&victim->owner, &actor->owner);
+        chimera_claim_owner_same_key(&victim->owner, &actor->owner);
     bool same_handle = actor && actor->op_handle &&
         victim->op_handle == actor->op_handle;
 
