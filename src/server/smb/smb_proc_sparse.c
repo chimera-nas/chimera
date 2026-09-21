@@ -6,7 +6,6 @@
 #include "smb_procs.h"
 #include "smb_common/smb2.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 
 /* FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA and FSCTL_QUERY_ALLOCATED_RANGES are

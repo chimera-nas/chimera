@@ -10,7 +10,6 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 

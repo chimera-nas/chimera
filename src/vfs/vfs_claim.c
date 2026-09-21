@@ -9,7 +9,7 @@
 #include "vfs_claim.h"
 #include "vfs_claim_internal.h"
 #include "vfs_internal.h"
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "common/macros.h"
 
 /*

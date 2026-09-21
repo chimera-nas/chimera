@@ -18,7 +18,6 @@
 #include "common/macros.h"
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "common/logging.h"

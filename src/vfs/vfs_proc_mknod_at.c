@@ -8,7 +8,7 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #endif   /* S_ISBLK / S_ISCHR for the device gate */
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"

@@ -6,7 +6,6 @@
 #include <sys/xattr.h>
 
 #include "fuse_internal.h"
-#include "vfs/vfs_procs.h"
 
 /* Reply payloads are staged in the request buffer's reply area. */
 #define CHIMERA_FUSE_XATTR_MAX (CHIMERA_FUSE_BUFSZ - CHIMERA_FUSE_REPLY_OFF)

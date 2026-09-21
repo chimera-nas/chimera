@@ -123,7 +123,6 @@
 #include "nfs4_op_matrix.h"
 #include "server/server.h"
 #include "vfs/sdk/vfs_xattr_name.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include <xxhash.h>
 #include "vfs/vfs_claim.h"

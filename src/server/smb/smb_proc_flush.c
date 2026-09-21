@@ -6,7 +6,6 @@
 #include "smb_procs.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 
 /* Map a VFS commit error to the SMB2 status a client expects at FLUSH time.

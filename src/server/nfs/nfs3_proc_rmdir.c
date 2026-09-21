@@ -9,7 +9,6 @@
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 
 static void

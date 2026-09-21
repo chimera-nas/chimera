@@ -11,7 +11,6 @@
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
 #include "server/server.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 

@@ -26,7 +26,6 @@
 #include "nfs4_callback.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_pnfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 

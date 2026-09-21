@@ -15,7 +15,6 @@
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
 

@@ -21,7 +21,7 @@
 #include "vfs_internal.h"
 #include "vfs_rpl_cache.h"
 #include "vfs_mount_table.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_claim.h"
 #include "common/macros.h"
 

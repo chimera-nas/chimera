@@ -10,94 +10,6 @@
 
 struct evpl_iovec;
 
-/* Synchronous, no-I/O check that a file handle is structurally valid and
- * resolves to a currently-mounted VFS module. Returns 1 if the handle could
- * name an object on this server, 0 if it is malformed or names an unknown
- * mount (the caller should map 0 to NFS4ERR_BADHANDLE / NFS3ERR_BADHANDLE).
- * It does NOT verify that the target object still exists. */
-int
-chimera_vfs_fh_is_plausible(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen);
-
-typedef void (*chimera_vfs_mount_callback_t)(
-    struct chimera_vfs_thread *thread,
-    enum chimera_vfs_error     status,
-    void                      *private_data);
-
-void
-chimera_vfs_mount(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const char                    *mount_path,
-    const char                    *module_name,
-    const char                    *module_path,
-    const char                    *options,
-    chimera_vfs_mount_callback_t   callback,
-    void                          *private_data);
-
-/* Synchronous, no-I/O syntactic check of a mount options string (the
- * comma-separated key[=value] format). Returns 1 if the string is well-formed
- * (or NULL/empty), 0 if it is invalid, in which case errbuf (when non-NULL) is
- * filled with a specific reason (empty key / too many options / too long). */
-int
-chimera_vfs_mount_options_valid(
-    const char *options,
-    char       *errbuf,
-    size_t      errbuf_len);
-
-typedef void (*chimera_vfs_umount_callback_t)(
-    struct chimera_vfs_thread *thread,
-    enum chimera_vfs_error     status,
-    void                      *private_data);
-
-void
-chimera_vfs_umount(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const char                    *mount_path,
-    chimera_vfs_umount_callback_t  callback,
-    void                          *private_data);
-
-typedef void (*chimera_vfs_mkfs_callback_t)(
-    struct chimera_vfs_thread *thread,
-    enum chimera_vfs_error     status,
-    void                      *private_data);
-
-/* Create a named filesystem inside a module that advertises
- * CHIMERA_VFS_CAP_MKFS.  Completes with CHIMERA_VFS_ENOTSUP if the module
- * does not, CHIMERA_VFS_EEXIST if the name is already in use, and
- * CHIMERA_VFS_EINVAL if the name is empty or contains '/'.  options is a
- * comma-separated key[=value] string interpreted by the module (same format
- * as mount options), or NULL. */
-void
-chimera_vfs_mkfs(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const char                    *module_name,
-    const char                    *fsname,
-    const char                    *options,
-    chimera_vfs_mkfs_callback_t    callback,
-    void                          *private_data);
-
-typedef void (*chimera_vfs_rmfs_callback_t)(
-    struct chimera_vfs_thread *thread,
-    enum chimera_vfs_error     status,
-    void                      *private_data);
-
-/* Remove a named filesystem previously created with chimera_vfs_mkfs.
-* Completes with CHIMERA_VFS_EBUSY while any mount references the
-* filesystem and CHIMERA_VFS_ENOENT if no filesystem has that name. */
-void
-chimera_vfs_rmfs(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const char                    *module_name,
-    const char                    *fsname,
-    chimera_vfs_rmfs_callback_t    callback,
-    void                          *private_data);
-
 typedef void (*chimera_vfs_lookup_at_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
@@ -279,14 +191,6 @@ chimera_vfs_recall_handle_lease(
     struct chimera_vfs_open_handle *handle,
     chimera_vfs_recall_callback_t   callback,
     void                           *private_data);
-
-/* True if the file named by `fh` currently has a live (non-implicit) share
-* holder -- i.e. some protocol open is still active on it.  Synchronous. */
-int
-chimera_vfs_fh_has_share_holder(
-    struct chimera_vfs_thread *thread,
-    const uint8_t             *fh,
-    uint32_t                   fh_len);
 
 /* Completion for chimera_vfs_recall_caching_fh: `still_open` reports whether the
  * file still has a live (non-implicit) share holder once the recall has drained
@@ -492,27 +396,6 @@ chimera_vfs_create_unlinked(
     uint64_t                               attr_mask,
     chimera_vfs_create_unlinked_callback_t callback,
     void                                  *private_data);
-
-typedef void (*chimera_vfs_close_callback_t)(
-    enum chimera_vfs_error error_code,
-    void                  *private_data);
-
-/* Close the open instance named by vfs_private -- the cookie the backend
- * returned from open.  That cookie, not fh, is what identifies the instance;
- * fh names the object it was opened on and is carried so a backend can tell
- * which of its filesystems (or which mount) the close belongs to, and so the
- * op appears in traces with the handle it applies to.  Both are supplied by
- * the open-handle cache, which owns them for the handle's lifetime. */
-void
-chimera_vfs_close(
-    struct chimera_vfs_thread   *thread,
-    struct chimera_vfs_module   *vfs_module,
-    const void                  *fh,
-    int                          fhlen,
-    uint64_t                     vfs_private,
-    uint64_t                     fh_hash,
-    chimera_vfs_close_callback_t callback,
-    void                        *private_data);
 
 /*
  * Release an open handle returned by chimera_vfs_open_fh()/open_at().  This is
@@ -743,12 +626,6 @@ typedef void (*chimera_vfs_get_layout_callback_t)(
     const struct chimera_vfs_layout_device  *devices,
     void                                    *private_data);
 
-uint64_t
-chimera_vfs_module_capabilities(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen);
-
 void
 chimera_vfs_get_layout(
     struct chimera_vfs_thread        *thread,
@@ -809,12 +686,6 @@ typedef void (*chimera_vfs_rename_at_callback_t)(
     struct chimera_vfs_attrs *todir_pre_attr,
     struct chimera_vfs_attrs *todir_post_attr,
     void                     *private_data);
-
-/* rename_at `flags`: the caller knows the renamed object is a DIRECTORY, so
- * the change notification it raises is a directory-name change rather than a
- * file-name one.  Only the SMB path knows this (the open carries the type);
- * everything else leaves it clear and gets the both-filters class. */
-#define CHIMERA_VFS_RENAME_SRC_IS_DIR 0x00000001
 
 void
 chimera_vfs_rename_at(
@@ -1169,62 +1040,3 @@ chimera_vfs_remove_stream(
     uint32_t                             namelen,
     chimera_vfs_remove_stream_callback_t callback,
     void                                *private_data);
-
-/* --------------------------------------------------------------------
- * Backend lease projection (CHIMERA_VFS_CAP_CLAIM_AGGREGATE)
- * -------------------------------------------------------------------- */
-
-typedef void (*chimera_vfs_claim_acquire_backend_cb_t)(
-    enum chimera_vfs_error                     error_code,
-    uint8_t                                    granted,
-    uint64_t                                   token,
-    const struct chimera_claim_range_conflict *conflict,
-    void                                      *private_data);
-
-typedef void (*chimera_vfs_claim_release_backend_cb_t)(
-    enum chimera_vfs_error error_code,
-    void                  *private_data);
-
-void
-chimera_vfs_claim_acquire_backend(
-    struct chimera_vfs_thread             *thread,
-    const uint8_t                         *fh,
-    uint8_t                                fh_len,
-    uint64_t                               fh_hash,
-    uint8_t                                klass,
-    uint8_t                                rev_used,
-    uint8_t                                bind_deny,
-    uint8_t                                exclusive,
-    uint8_t                                flags,
-    int32_t                                whence,
-    uint64_t                               offset,
-    uint64_t                               length,
-    const struct chimera_claim_owner      *owner,
-    uint64_t                               prev_token,
-    void (                                *recall_cb )(
-        void          *recall_arg,
-        const uint8_t *fh,
-        uint8_t        fh_len,
-        uint64_t       fh_hash,
-        uint64_t       token,
-        uint8_t        retain),
-    void                                  *recall_arg,
-    chimera_vfs_claim_acquire_backend_cb_t callback,
-    void                                  *private_data);
-
-void
-chimera_vfs_claim_release_backend(
-    struct chimera_vfs_thread             *thread,
-    const uint8_t                         *fh,
-    uint8_t                                fh_len,
-    uint64_t                               fh_hash,
-    uint8_t                                klass,
-    uint64_t                               token,
-    uint8_t                                retained,
-    /* Only read when token == 0 (release a RANGE by geometry). */
-    int32_t                                whence,
-    uint64_t                               offset,
-    uint64_t                               length,
-    const struct chimera_claim_owner      *owner,
-    chimera_vfs_claim_release_backend_cb_t callback,
-    void                                  *private_data);

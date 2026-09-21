@@ -46,7 +46,6 @@
 #include "fuse/fuse.h"
 #endif /* ifdef __linux__ */
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"

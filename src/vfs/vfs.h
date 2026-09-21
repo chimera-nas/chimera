@@ -400,3 +400,129 @@ chimera_vfs_iterate_builtin_users(
 void
 chimera_vfs_watchdog(
     struct chimera_vfs_thread *thread);
+
+/* rename `flags`: the caller knows the renamed object is a DIRECTORY, so the
+ * change notification it raises is a directory-name change rather than a file
+ * name one.  Only the SMB path knows this (the open carries the type);
+ * everything else leaves it clear and gets the both-filters class.  Read by
+ * chimera_vfs_rename_at and set on a sequence's RENAME by
+ * chimera_vfs_compound_op_set_rename_opts. */
+#define CHIMERA_VFS_RENAME_SRC_IS_DIR 0x00000001
+
+
+/* ------------------------------------------------------------------------
+ * Entry points that are not sequence ops.
+ *
+ * Everything a protocol front end, the client or the SDK asks of a file
+ * system goes through vfs_compound.h.  What follows does not, and each is
+ * here for the same reason: it addresses no object through a sequence's
+ * cursors and mutates nothing a sequence holds.
+ *
+ * The LIFECYCLE calls -- mount, umount, mkfs, rmfs -- act on a mount table
+ * and on a module's set of filesystems, which exist before any sequence can
+ * name anything inside them.  The SYNCHRONOUS QUERIES answer from state
+ * already in hand, touch no backend, and complete before they return, so
+ * there is nothing for a sequence to order them against.
+ * ------------------------------------------------------------------------ */
+
+/* Synchronous, no-I/O check that a file handle is structurally valid and
+ * resolves to a currently-mounted VFS module. Returns 1 if the handle could
+ * name an object on this server, 0 if it is malformed or names an unknown
+ * mount (the caller should map 0 to NFS4ERR_BADHANDLE / NFS3ERR_BADHANDLE).
+ * It does NOT verify that the target object still exists. */
+int
+chimera_vfs_fh_is_plausible(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen);
+
+typedef void (*chimera_vfs_mount_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+void
+chimera_vfs_mount(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *mount_path,
+    const char                    *module_name,
+    const char                    *module_path,
+    const char                    *options,
+    chimera_vfs_mount_callback_t   callback,
+    void                          *private_data);
+
+/* Synchronous, no-I/O syntactic check of a mount options string (the
+ * comma-separated key[=value] format). Returns 1 if the string is well-formed
+ * (or NULL/empty), 0 if it is invalid, in which case errbuf (when non-NULL) is
+ * filled with a specific reason (empty key / too many options / too long). */
+int
+chimera_vfs_mount_options_valid(
+    const char *options,
+    char       *errbuf,
+    size_t      errbuf_len);
+
+typedef void (*chimera_vfs_umount_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+void
+chimera_vfs_umount(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *mount_path,
+    chimera_vfs_umount_callback_t  callback,
+    void                          *private_data);
+
+typedef void (*chimera_vfs_mkfs_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+/* Create a named filesystem inside a module that advertises
+ * CHIMERA_VFS_CAP_MKFS.  Completes with CHIMERA_VFS_ENOTSUP if the module
+ * does not, CHIMERA_VFS_EEXIST if the name is already in use, and
+ * CHIMERA_VFS_EINVAL if the name is empty or contains '/'.  options is a
+ * comma-separated key[=value] string interpreted by the module (same format
+ * as mount options), or NULL. */
+void
+chimera_vfs_mkfs(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *module_name,
+    const char                    *fsname,
+    const char                    *options,
+    chimera_vfs_mkfs_callback_t    callback,
+    void                          *private_data);
+
+typedef void (*chimera_vfs_rmfs_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+/* Remove a named filesystem previously created with chimera_vfs_mkfs.
+* Completes with CHIMERA_VFS_EBUSY while any mount references the
+* filesystem and CHIMERA_VFS_ENOENT if no filesystem has that name. */
+void
+chimera_vfs_rmfs(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *module_name,
+    const char                    *fsname,
+    chimera_vfs_rmfs_callback_t    callback,
+    void                          *private_data);
+
+uint64_t
+chimera_vfs_module_capabilities(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen);
+
+/* True if the file named by `fh` currently has a live (non-implicit) share
+* holder -- i.e. some protocol open is still active on it.  Synchronous. */
+int
+chimera_vfs_fh_has_share_holder(
+    struct chimera_vfs_thread *thread,
+    const uint8_t             *fh,
+    uint32_t                   fh_len);
