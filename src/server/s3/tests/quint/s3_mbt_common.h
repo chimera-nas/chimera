@@ -665,7 +665,7 @@ s3_mbt_env_open_module(
         if (!scratch || !scratch[0]) {
             scratch = ".";
         }
-        abs_scratch = realpath(scratch, NULL);
+        abs_scratch = chimera_test_absolute_path(scratch);
         if (!abs_scratch) {
             fprintf(stderr, "realpath(%s) failed: %s\n", scratch,
                     strerror(errno));

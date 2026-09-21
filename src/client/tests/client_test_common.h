@@ -6,6 +6,7 @@
 #include "common/test_host.h"
 #include "common/getopt.h"
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -129,8 +130,8 @@ client_test_init(
                                                : "/tmp/chimera_test";
     }
     snprintf(env->session_dir, sizeof(env->session_dir),
-             "%s/session_%d_%lu_%lu", test_root,
-             getpid(), tv.tv_sec, tv.tv_nsec);
+             "%s/session_%d_%" PRId64 "_%ld", test_root,
+             getpid(), (int64_t) tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
@@ -141,6 +142,7 @@ client_test_init(
      * Needs CAP_CHOWN, which only the privileged CI runs have; everywhere
      * else the backends in play are virtual and access the dir as the
      * invoking user, so ownership does not matter. */
+#ifndef _WIN32
     if (geteuid() == 0) {
         rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
         if (rc < 0) {
@@ -148,6 +150,7 @@ client_test_init(
             exit(EXIT_FAILURE);
         }
     }
+#endif // ifndef _WIN32
     if (env->use_nfs || env->use_smb) {
         server_config = chimera_server_config_init();
 

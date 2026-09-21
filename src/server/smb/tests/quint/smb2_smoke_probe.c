@@ -47,10 +47,10 @@ main(
            c->dialect, c->session_id, c->tree_id);
 
     /* CREATE (create-if-absent) a fresh file, no oplock/lease. */
-    st = smb2_create(c, "smoke.txt", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &c1);
+    st = smb2_create(c, "smoke.txt", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &c1);
     CHECK(st == ST_SUCCESS, "CREATE smoke.txt -> 0x%08x", st);
-    CHECK(c1.action == FILE_ACT_CREATED, "CreateAction=CREATED (%u)", c1.action);
+    CHECK(c1.action == MBT_FILE_ACT_CREATED, "CreateAction=CREATED (%u)", c1.action);
     CHECK(c1.end_of_file == 0, "new file EndOfFile=0 (%" PRIu64 ")",
           c1.end_of_file);
 
@@ -69,10 +69,10 @@ main(
     CHECK(st == ST_SUCCESS, "CLOSE -> 0x%08x", st);
 
     /* Re-open and confirm the write persisted and the change attribute moved. */
-    st = smb2_create(c, "smoke.txt", FILE_OPEN, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &c2);
+    st = smb2_create(c, "smoke.txt", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &c2);
     CHECK(st == ST_SUCCESS, "re-CREATE (OPEN) -> 0x%08x", st);
-    CHECK(c2.action == FILE_ACT_OPENED, "CreateAction=OPENED (%u)", c2.action);
+    CHECK(c2.action == MBT_FILE_ACT_OPENED, "CreateAction=OPENED (%u)", c2.action);
     CHECK(c2.end_of_file == 8, "re-open EndOfFile=8 (%" PRIu64 ")",
           c2.end_of_file);
     CHECK(c2.change_time != c1.change_time,

@@ -1439,7 +1439,7 @@ posix_env_setup(
         }
         /* The module opens this path from a worker thread, so it must be
          * absolute. */
-        abs_scratch = realpath(scratch, NULL);
+        abs_scratch = chimera_test_absolute_path(scratch);
         if (!abs_scratch) {
             fprintf(stderr, "posix_driver: realpath(%s): %s\n", scratch,
                     strerror(errno));

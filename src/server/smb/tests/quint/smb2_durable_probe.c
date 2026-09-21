@@ -181,7 +181,7 @@ wait_parked(
     dur.dh2c = 1;
     memcpy(dur.file_id, file_id, 16);
     memset(dur.create_guid, 0xFE, 16);   /* cannot match any real create */
-    st = smb2_create_dur(c, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(c, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "park barrier: a wrong-CreateGuid DH2C is refused (0x%08x)", st);
@@ -287,8 +287,8 @@ sec_d1(
             dur.dhnq = 1;
         }
 
-        st = smb2_create_dur(a, name, FILE_OPEN_IF, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD,
+        st = smb2_create_dur(a, name, MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD,
                              rows[i].level == SMB2_OPLOCK_LEVEL_NONE &&
                              !rows[i].is_lease ? NULL : &oreq, &dur, &o);
         EXPECT(st == ST_SUCCESS, "D1[%2d] %s: CREATE -> 0x%08x", i,
@@ -365,8 +365,8 @@ sec_d2(
         dur.timeout_ms = rows[i].ask;
         fill_guid(dur.create_guid, 0x30 + i);
 
-        st = smb2_create_dur(a, name, FILE_OPEN_IF, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, &oreq, &dur, &o);
+        st = smb2_create_dur(a, name, MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, &oreq, &dur, &o);
         EXPECT(st == ST_SUCCESS && o.has_dh2q,
                "D2[%d] %s: CREATE -> 0x%08x dh2q %d", i, rows[i].label, st,
                o.has_dh2q);
@@ -421,8 +421,8 @@ sec_d3(
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x41);
 
-    st = smb2_create_dur(a, "d3", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &o);
+    st = smb2_create_dur(a, "d3", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q && o.has_lease,
            "D3 durable leased open: st 0x%08x dh2q %d lease %s", st,
            o.has_dh2q, o.has_lease ? lease_str(o.lease_state) : "-");
@@ -451,13 +451,13 @@ sec_d3(
     fill_guid(dur.create_guid, 0x41);
     /* An empty Name is the ordinary v2 reconnect form; the surviving open
      * holds a lease, so the same lease key must be presented (3.3.5.9.7). */
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &rec);
     EXPECT(st == ST_SUCCESS, "D3 DH2C reclaim -> 0x%08x", st);
     if (st != ST_SUCCESS) {
         return b;
     }
-    EXPECT(rec.action == FILE_ACT_OPENED,
+    EXPECT(rec.action == MBT_FILE_ACT_OPENED,
            "D3 the reclaim reports CreateAction = OPENED (%u)", rec.action);
     EXPECT(memcmp(rec.file_id, o.file_id, 16) == 0,
            "D3 the reclaimed handle carries the ORIGINAL FileId");
@@ -496,8 +496,8 @@ sec_d3(
         dur.dh2c = 1;
         memcpy(dur.file_id, o.file_id, 16);
         fill_guid(dur.create_guid, 0x41);
-        st = smb2_create_dur(c2, "", FILE_OPEN, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, &lreq, &dur, &rec2);
+        st = smb2_create_dur(c2, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, &lreq, &dur, &rec2);
         EXPECT(st == ST_SUCCESS &&
                memcmp(rec2.file_id, o.file_id, 16) == 0,
                "D3b a reclaimed handle parks and reclaims a SECOND time"
@@ -533,8 +533,8 @@ sec_d4(
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(seed, "d4", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &o);
+    st = smb2_create_dur(seed, "d4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q, "D4 durable leased open");
     if (st != ST_SUCCESS || !o.has_dh2q) {
         return;
@@ -548,7 +548,7 @@ sec_d4(
     dur.dh2c = 1;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x99);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "D4a wrong CreateGuid -> OBJECT_NAME_NOT_FOUND (0x%08x)", st);
@@ -558,7 +558,7 @@ sec_d4(
     dur.dh2c = 1;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "D4b leased handle, reconnect without a lease context ->"
@@ -566,14 +566,14 @@ sec_d4(
 
     /* (c) lease context present but naming a different lease key. */
     mk_lease(&wrongkey, 0x52, SMB2_LEASE_RWH);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &wrongkey, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "D4c wrong lease key -> OBJECT_NAME_NOT_FOUND (0x%08x)", st);
 
     /* (d) a leased reconnect naming a DIFFERENT, non-empty file name. */
-    st = smb2_create_dur(b, "d4_other", FILE_OPEN, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &r);
+    st = smb2_create_dur(b, "d4_other", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &r);
     EXPECT(st == ST_INVALID_PARAMETER,
            "D4d leased reconnect naming another file -> INVALID_PARAMETER"
            " (0x%08x)", st);
@@ -584,7 +584,7 @@ sec_d4(
     dur.dh2q = 1;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &r);
     EXPECT(st == ST_INVALID_PARAMETER,
            "D4e DH2C + DH2Q -> INVALID_PARAMETER (0x%08x)", st);
@@ -595,7 +595,7 @@ sec_d4(
     dur.dhnc = 1;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &r);
     EXPECT(st == ST_INVALID_PARAMETER,
            "D4f DH2C + DHnC -> INVALID_PARAMETER (0x%08x)", st);
@@ -606,7 +606,7 @@ sec_d4(
     dur.reconnect_flags = SMB2_DHANDLE_FLAG_PERSISTENT;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &r);
     EXPECT(st == ST_INVALID_PARAMETER,
            "D4g DH2C with FLAG_PERSISTENT against a durable-only open ->"
@@ -617,7 +617,7 @@ sec_d4(
     dur.dh2c = 1;
     memset(dur.file_id, 0xEE, 16);
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "D4h unknown persistent id -> OBJECT_NAME_NOT_FOUND (0x%08x)", st);
@@ -632,15 +632,15 @@ sec_d4(
     dur.dh2c = 1;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x51);
-    st = smb2_create_dur(stranger, "", FILE_OPEN, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &r);
+    st = smb2_create_dur(stranger, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "D4i cross-client reclaim of a leased handle ->"
            " OBJECT_NAME_NOT_FOUND (0x%08x)", st);
 
     /* (j) after all of that the handle must still be reclaimable: a refused
      * reconnect must not consume it. */
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          &lreq, &dur, &r);
     EXPECT(st == ST_SUCCESS &&
            memcmp(r.file_id, o.file_id, 16) == 0,
@@ -658,7 +658,7 @@ sec_d4(
     if (st == ST_SUCCESS) {
         int i0 = b->ninterim;
 
-        st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+        st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                              &lreq, &dur, &r);
         EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
                "D4k a reconnect naming a LIVE handle is refused, never stolen"
@@ -695,8 +695,8 @@ sec_d5(struct smb2_env *env)
     mk_oplock(&breq, SMB2_OPLOCK_LEVEL_BATCH);
     memset(&dur, 0, sizeof(dur));
     dur.dhnq = 1;
-    st       = smb2_create_dur(a, "d5", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                               FILE_SHARE_RWD, &breq, &dur, &o);
+    st       = smb2_create_dur(a, "d5", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                               MBT_FILE_SHARE_RWD, &breq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dhnq,
            "D5 BATCH + DHnQ grants durable v1 (st 0x%08x dhnq %d opl 0x%02x)",
            st, o.has_dhnq, o.oplock);
@@ -713,7 +713,7 @@ sec_d5(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dhnc = 1;
     memcpy(dur.file_id, o.file_id, 16);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     EXPECT(st == ST_SUCCESS, "D5 DHnC reclaim -> 0x%08x", st);
     if (st != ST_SUCCESS) {
@@ -721,7 +721,7 @@ sec_d5(struct smb2_env *env)
     }
     EXPECT(memcmp(r.file_id, o.file_id, 16) == 0,
            "D5 the v1 reclaim carries the ORIGINAL FileId");
-    EXPECT(r.action == FILE_ACT_OPENED, "D5 CreateAction = OPENED (%u)", r.action);
+    EXPECT(r.action == MBT_FILE_ACT_OPENED, "D5 CreateAction = OPENED (%u)", r.action);
     memset(buf, 0, sizeof(buf));
     st = smb2_read(b, r.file_id, 0, 10, buf, &n);
     EXPECT(st == ST_SUCCESS && n == 10 && memcmp(buf, "V1-PAYLOAD", 10) == 0,
@@ -741,8 +741,8 @@ sec_d5(struct smb2_env *env)
         memset(&dur, 0, sizeof(dur));
         dur.dhnc = 1;
         memcpy(dur.file_id, o.file_id, 16);
-        st = smb2_create_dur(c2, "", FILE_OPEN, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, NULL, &dur, &r2);
+        st = smb2_create_dur(c2, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, NULL, &dur, &r2);
         NOTE("D5b second DHnC reclaim after a second drop -> 0x%08x", st);
         EXPECT(st == ST_SUCCESS &&
                memcmp(r2.file_id, o.file_id, 16) == 0,
@@ -772,8 +772,8 @@ sec_d5(struct smb2_env *env)
         dur.dhnc = 1;
         dur.dhnq = 1;
         memcpy(dur.file_id, o.file_id, 16);
-        st = smb2_create_dur(c3, "", FILE_OPEN, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, NULL, &dur, &r3);
+        st = smb2_create_dur(c3, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, NULL, &dur, &r3);
         NOTE("D5c DHnC + DHnQ reconnect -> 0x%08x dhnq_response %d", st,
              r3.has_dhnq);
         EXPECT(st == ST_SUCCESS,
@@ -824,7 +824,7 @@ create_await_conn_teardown(
     int      passes = 0;
 
     for (;;) {
-        st = smb2_create(c, name, FILE_OPEN, FILE_ALL_ACCESS, 0, NULL, out);
+        st = smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0, NULL, out);
         if (st != ST_SHARING_VIOLATION || passes >= D6_TEARDOWN_PASSES) {
             break;
         }
@@ -857,12 +857,12 @@ sec_d6(struct smb2_env *env)
     a = smb2_conn_open(env);
     smb2_handshake(a);
     /* ShareAccess NONE: while this handle lives, nobody else may open it. */
-    st = smb2_create(a, "d6", FILE_OPEN_IF, FILE_ALL_ACCESS, 0, NULL, &o);
+    st = smb2_create(a, "d6", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, 0, NULL, &o);
     EXPECT(st == ST_SUCCESS, "D6 exclusive-share open (st 0x%08x)", st);
 
     b = smb2_conn_open(env);
     smb2_handshake(b);
-    st = smb2_create(b, "d6", FILE_OPEN, FILE_ALL_ACCESS, 0, NULL, &r);
+    st = smb2_create(b, "d6", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0, NULL, &r);
     EXPECT(st == ST_SHARING_VIOLATION,
            "D6 a second opener is refused while the handle lives (0x%08x)",
            st);
@@ -915,7 +915,7 @@ sec_d7(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x71);
-    st = smb2_create_dur(a, "d7", FILE_OPEN_IF, FILE_ALL_ACCESS, 0, &breq,
+    st = smb2_create_dur(a, "d7", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, 0, &breq,
                          &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q && o.oplock ==
            SMB2_OPLOCK_LEVEL_BATCH,
@@ -937,7 +937,7 @@ sec_d7(struct smb2_env *env)
     {
         int i0 = b->ninterim;
 
-        st = smb2_create(b, "d7", FILE_OPEN, FILE_ALL_ACCESS, 0, NULL, &r);
+        st = smb2_create(b, "d7", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0, NULL, &r);
         /* Does dissolving a parked holder cost an async interim?  chimera
          * purges the parked holder and RETRIES the share check on a timer
          * (smb_proc_create.c gen_share_retry), and a retried create announces
@@ -960,7 +960,7 @@ sec_d7(struct smb2_env *env)
     {
         struct smb2_create_out r2;
         uint32_t               st2 =
-            smb2_create_dur(c, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+            smb2_create_dur(c, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                             NULL, &dur, &r2);
         EXPECT(st2 == ST_OBJECT_NAME_NOT_FOUND,
                "D7 the yielded handle cannot be reclaimed (0x%08x)", st2);
@@ -990,7 +990,7 @@ sec_d7(struct smb2_env *env)
         memset(&dur2, 0, sizeof(dur2));
         dur2.dh2q = 1;
         fill_guid(dur2.create_guid, 0x72);
-        st2 = smb2_create_dur(h, "d7b", FILE_OPEN_IF, FILE_ALL_ACCESS, 0,
+        st2 = smb2_create_dur(h, "d7b", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, 0,
                               &breq2, &dur2, &o2);
         EXPECT(st2 == ST_SUCCESS && o2.has_dh2q,
                "D7b durable BATCH holder (st 0x%08x dh2q %d)", st2,
@@ -1002,8 +1002,8 @@ sec_d7(struct smb2_env *env)
 
         peer = smb2_conn_open(env);
         smb2_handshake(peer);
-        /* FILE_READ_ATTRIBUTES only, FILE_OPEN: the attribute-only open. */
-        st2 = smb2_create(peer, "d7b", FILE_OPEN, 0x00000080u, 0, NULL, &r2);
+        /* MBT_FILE_READ_ATTRIBUTES only, MBT_FILE_OPEN: the attribute-only open. */
+        st2 = smb2_create(peer, "d7b", MBT_FILE_OPEN, 0x00000080u, 0, NULL, &r2);
         NOTE("D7b attribute-only open against the parked holder -> 0x%08x",
              st2);
         EXPECT(st2 == ST_SUCCESS,
@@ -1018,8 +1018,8 @@ sec_d7(struct smb2_env *env)
         dur2.dh2c = 1;
         memcpy(dur2.file_id, o2.file_id, 16);
         fill_guid(dur2.create_guid, 0x72);
-        st2 = smb2_create_dur(back, "", FILE_OPEN, FILE_ALL_ACCESS,
-                              FILE_SHARE_RWD, NULL, &dur2, &r2);
+        st2 = smb2_create_dur(back, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                              MBT_FILE_SHARE_RWD, NULL, &dur2, &r2);
         NOTE("D7b reclaim after an attribute-only open -> 0x%08x", st2);
         EXPECT(st2 == ST_SUCCESS,
                "D7b an open that breaks nobody does NOT purge the parked"
@@ -1053,8 +1053,8 @@ sec_d7(struct smb2_env *env)
         memset(&dur3, 0, sizeof(dur3));
         dur3.dh2q = 1;
         fill_guid(dur3.create_guid, 0x73);
-        st3 = smb2_create_dur(h3, "d7c", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                              FILE_SHARE_RWD, &lreq3, &dur3, &o3);
+        st3 = smb2_create_dur(h3, "d7c", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                              MBT_FILE_SHARE_RWD, &lreq3, &dur3, &o3);
         EXPECT(st3 == ST_SUCCESS && o3.has_dh2q,
                "D7c durable RWH-lease holder (st 0x%08x lease %s dh2q %d)",
                st3, o3.has_lease ? lease_str(o3.lease_state) : "-",
@@ -1067,8 +1067,8 @@ sec_d7(struct smb2_env *env)
         peer3 = smb2_conn_open(env);
         smb2_handshake(peer3);
         mk_lease(&lreq3b, 0x74, SMB2_LEASE_RWH);
-        st3 = smb2_create_dur(peer3, "d7c", FILE_OPEN, FILE_ALL_ACCESS,
-                              FILE_SHARE_RWD, &lreq3b, NULL, &n3);
+        st3 = smb2_create_dur(peer3, "d7c", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                              MBT_FILE_SHARE_RWD, &lreq3b, NULL, &n3);
         NOTE("D7c compatible RWH-lease open behind the parked holder ->"
              " st 0x%08x lease %s", st3,
              n3.has_lease ? lease_str(n3.lease_state) : "-");
@@ -1079,8 +1079,8 @@ sec_d7(struct smb2_env *env)
         dur3.dh2c = 1;
         memcpy(dur3.file_id, o3.file_id, 16);
         fill_guid(dur3.create_guid, 0x73);
-        st3 = smb2_create_dur(back3, "", FILE_OPEN, FILE_ALL_ACCESS,
-                              FILE_SHARE_RWD, &lreq3, &dur3, &r3);
+        st3 = smb2_create_dur(back3, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                              MBT_FILE_SHARE_RWD, &lreq3, &dur3, &r3);
         NOTE("D7c reclaim after a COMPATIBLE open -> 0x%08x", st3);
         if (st3 == ST_SUCCESS) {
             smb2_close(back3, r3.file_id);
@@ -1134,8 +1134,8 @@ sec_d7(struct smb2_env *env)
             memset(&d4, 0, sizeof(d4));
             d4.dh2q = 1;
             fill_guid(d4.create_guid, rows[i].key);
-            st4 = smb2_create_dur(h4, rows[i].name, FILE_OPEN_IF,
-                                  FILE_ALL_ACCESS, FILE_SHARE_RWD, &hreq, &d4,
+            st4 = smb2_create_dur(h4, rows[i].name, MBT_FILE_OPEN_IF,
+                                  MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, &hreq, &d4,
                                   &o4);
             EXPECT(st4 == ST_SUCCESS && o4.has_dh2q,
                    "D7%c durable holder, %s (st 0x%08x dh2q %d)",
@@ -1156,8 +1156,8 @@ sec_d7(struct smb2_env *env)
             {
                 int i4 = peer4->ninterim;
 
-                st4 = smb2_create_dur(peer4, rows[i].name, FILE_OPEN,
-                                      FILE_ALL_ACCESS, FILE_SHARE_RWD, &preq,
+                st4 = smb2_create_dur(peer4, rows[i].name, MBT_FILE_OPEN,
+                                      MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, &preq,
                                       NULL, &n4);
                 NOTE("D7%c compatible RWH-lease open behind %s -> st 0x%08x"
                      " granted %s (interims %d)", 'd' + i, rows[i].label, st4,
@@ -1169,8 +1169,8 @@ sec_d7(struct smb2_env *env)
             d4.dh2c = 1;
             memcpy(d4.file_id, o4.file_id, 16);
             fill_guid(d4.create_guid, rows[i].key);
-            st4 = smb2_create_dur(back4, "", FILE_OPEN, FILE_ALL_ACCESS,
-                                  FILE_SHARE_RWD,
+            st4 = smb2_create_dur(back4, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                                  MBT_FILE_SHARE_RWD,
                                   rows[i].holder_is_lease ? &hreq : NULL, &d4,
                                   &r4);
             NOTE("D7%c reclaim after that open -> 0x%08x (%s)", 'd' + i, st4,
@@ -1205,7 +1205,7 @@ sec_d7(struct smb2_env *env)
         d5.dh2q = 1;
         fill_guid(d5.create_guid, 0x77);
         /* ShareAccess NONE: while this handle counts, nobody else may open. */
-        st5 = smb2_create_dur(h5, "d7f", FILE_OPEN_IF, FILE_ALL_ACCESS, 0,
+        st5 = smb2_create_dur(h5, "d7f", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, 0,
                               &hreq, &d5, &o5);
         EXPECT(st5 == ST_SUCCESS && o5.has_dh2q,
                "D7f durable RH-lease holder, ShareAccess NONE (st 0x%08x"
@@ -1222,7 +1222,7 @@ sec_d7(struct smb2_env *env)
             {
                 int i5 = peer5->ninterim;
 
-                st5 = smb2_create(peer5, "d7f", FILE_OPEN, FILE_ALL_ACCESS, 0,
+                st5 = smb2_create(peer5, "d7f", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0,
                                   NULL, &n5);
                 NOTE("D7f share-conflicting open behind a parked RH holder ->"
                      " 0x%08x (interims %d)", st5, peer5->ninterim - i5);
@@ -1232,8 +1232,8 @@ sec_d7(struct smb2_env *env)
             d5.dh2c = 1;
             memcpy(d5.file_id, o5.file_id, 16);
             fill_guid(d5.create_guid, 0x77);
-            st5 = smb2_create_dur(back5, "", FILE_OPEN, FILE_ALL_ACCESS,
-                                  FILE_SHARE_RWD, &hreq, &d5, &r5);
+            st5 = smb2_create_dur(back5, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                                  MBT_FILE_SHARE_RWD, &hreq, &d5, &r5);
             NOTE("D7f reclaim after that open -> 0x%08x (%s)", st5,
                  st5 == ST_SUCCESS ? "SURVIVED" : "PURGED");
             if (st5 == ST_SUCCESS) {
@@ -1278,8 +1278,8 @@ sec_d8(struct smb2_env *env)
     dur.dh2q       = 1;
     dur.timeout_ms = 1;                 /* the shortest grantable window */
     fill_guid(dur.create_guid, 0x81);
-    st = smb2_create_dur(a, "d8", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &breq, &dur, &o);
+    st = smb2_create_dur(a, "d8", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &breq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q,
            "D8 durable open with a 1 ms timeout (granted %u ms)",
            o.dh2q_timeout);
@@ -1303,7 +1303,7 @@ sec_d8(struct smb2_env *env)
     dur.dh2c = 1;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0x81);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "D8 a reclaim %llu ms after a 1 ms timeout is refused (0x%08x)",
@@ -1344,14 +1344,14 @@ sec_d9(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x91);
-    st = smb2_create_dur(a, "d9a", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &o1);
-    EXPECT(st == ST_SUCCESS && o1.action == FILE_ACT_CREATED,
+    st = smb2_create_dur(a, "d9a", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &o1);
+    EXPECT(st == ST_SUCCESS && o1.action == MBT_FILE_ACT_CREATED,
            "D9a original create (st 0x%08x action %u)", st, o1.action);
 
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "d9a", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &o2);
+    st = smb2_create_dur(a, "d9a", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &o2);
     EXPECT(st == ST_SUCCESS && memcmp(o1.file_id, o2.file_id, 16) == 0,
            "D9a an immediate replay returns the SAME FileId (0x%08x)", st);
     EXPECT(o2.action == o1.action,
@@ -1362,8 +1362,8 @@ sec_d9(struct smb2_env *env)
     st = smb2_write(a, o1.file_id, 0, "x", 1, &n);
     EXPECT(st == ST_SUCCESS, "D9b an ordinary WRITE on the handle");
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "d9a", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &o3);
+    st = smb2_create_dur(a, "d9a", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &o3);
     NOTE("D9b replay after an intervening op -> st 0x%08x same_fid %d", st,
          st == ST_SUCCESS && memcmp(o1.file_id, o3.file_id, 16) == 0);
     EXPECT(st != ST_SUCCESS || memcmp(o1.file_id, o3.file_id, 16) != 0,
@@ -1386,13 +1386,13 @@ sec_d9(struct smb2_env *env)
         memset(&d2, 0, sizeof(d2));
         d2.dh2q = 1;
         fill_guid(d2.create_guid, 0x92);
-        st = smb2_create_dur(a, "d9c", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, &l2, &d2, &c1);
+        st = smb2_create_dur(a, "d9c", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, &l2, &d2, &c1);
         EXPECT(st == ST_SUCCESS && c1.has_dh2q,
                "D9c live durable open on connection A (st 0x%08x)", st);
         smb2c_set_next_flags(b, SMB2_FLAGS_REPLAY_OPERATION);
-        st = smb2_create_dur(b, "d9c", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, &l2, &d2, &c2);
+        st = smb2_create_dur(b, "d9c", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, &l2, &d2, &c2);
         NOTE("D9c cross-connection replay of a LIVE durable open -> 0x%08x",
              st);
         EXPECT(st == ST_DUPLICATE_OBJECTID,
@@ -1430,7 +1430,7 @@ sec_d10(struct smb2_env *env)
 
     /* No oplock, no lease, no durable context: resiliency has no caching
      * precondition, which is exactly what distinguishes it from D1. */
-    st = smb2_create(a, "d10", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "d10", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "D10 plain open (st 0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -1465,7 +1465,7 @@ sec_d10(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dhnc = 1;
     memcpy(dur.file_id, o.file_id, 16);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     NOTE("D10 DHnC reclaim of a RESILIENT (not durable) handle -> 0x%08x", st);
     EXPECT(st == ST_SUCCESS,
@@ -1524,8 +1524,8 @@ sec_d11(void)
     dur.dh2q  = 1;
     dur.flags = SMB2_DHANDLE_FLAG_PERSISTENT;
     fill_guid(dur.create_guid, 0xB1);
-    st = smb2_create_dur(a, "d11", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &breq, &dur, &o);
+    st = smb2_create_dur(a, "d11", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &breq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q,
            "D11 DH2Q with FLAG_PERSISTENT on a CA share (st 0x%08x dh2q %d)",
            st, o.has_dh2q);
@@ -1548,7 +1548,7 @@ sec_d11(void)
      * durable-only holder of D7, it must not simply take the file. */
     cc = smb2_conn_open(&env);
     smb2_handshake(cc);
-    st = smb2_create(cc, "d11", FILE_OPEN, FILE_ALL_ACCESS, 0, NULL, &r);
+    st = smb2_create(cc, "d11", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0, NULL, &r);
     NOTE("D11 conflicting open against a parked PERSISTENT holder -> 0x%08x",
          st);
     EXPECT(st != ST_SUCCESS,
@@ -1565,7 +1565,7 @@ sec_d11(void)
     dur.reconnect_flags = SMB2_DHANDLE_FLAG_PERSISTENT;
     memcpy(dur.file_id, o.file_id, 16);
     fill_guid(dur.create_guid, 0xB1);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     EXPECT(st == ST_SUCCESS,
            "D11 persistent reclaim with FLAG_PERSISTENT -> 0x%08x", st);

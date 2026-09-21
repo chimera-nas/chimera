@@ -198,8 +198,8 @@ probe_ea(struct smb2_conn *c)
 
     printf("# --- extended attributes ---\n");
 
-    st = smb2_create(c, "ea.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "ea.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE ea.bin -> 0x%08x", st);
 
     /* An empty EA list is the honest starting state. */
@@ -308,8 +308,8 @@ probe_agreement(struct smb2_conn *c)
         payload[i] = (uint8_t) i;
     }
 
-    st = smb2_create(c, "info.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "info.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE info.bin -> 0x%08x", st);
     st = smb2_write(c, co.file_id, 0, payload, sizeof(payload), &count);
     CHECK(st == ST_SUCCESS && count == sizeof(payload),
@@ -402,8 +402,8 @@ probe_agreement(struct smb2_conn *c)
             return;
         }
 
-        st = smb2_create(c, "info.bin", FILE_OPEN, FILE_READ_ACCESS,
-                         FILE_SHARE_RWD, NULL, &ro);
+        st = smb2_create(c, "info.bin", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                         MBT_FILE_SHARE_RWD, NULL, &ro);
         if (st == ST_SUCCESS &&
             query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T,
                      ro.file_id, acc_ro, sizeof(acc_ro),
@@ -429,8 +429,8 @@ probe_set_info(struct smb2_conn *c)
 
     printf("# --- SET_INFO round trips ---\n");
 
-    st = smb2_create(c, "setinfo.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "setinfo.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE setinfo.bin -> 0x%08x", st);
 
     /* FILE_BASIC_INFORMATION (MS-FSCC 2.4.7): 4 timestamps then attributes.
@@ -557,8 +557,8 @@ probe_streams(struct smb2_conn *c)
 
     printf("# --- named streams ---\n");
 
-    st = smb2_create(c, "streams.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &base);
+    st = smb2_create(c, "streams.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &base);
     CHECK(st == ST_SUCCESS, "setup: CREATE streams.bin -> 0x%08x", st);
     smb2_write(c, base.file_id, 0, "base", 4, &count);
 
@@ -570,8 +570,8 @@ probe_streams(struct smb2_conn *c)
           st, len);
 
     /* Create an alternate stream with the "file:stream" create syntax. */
-    st = smb2_create(c, "streams.bin:alt", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &strm);
+    st = smb2_create(c, "streams.bin:alt", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &strm);
     CHECK(st == ST_SUCCESS, "CREATE streams.bin:alt -> 0x%08x", st);
     if (st == ST_SUCCESS) {
         st = smb2_write(c, strm.file_id, 0, "alternate", 9, &count);
@@ -633,8 +633,8 @@ probe_link(struct smb2_conn *c)
 
     printf("# --- hard links (FileLinkInformation) ---\n");
 
-    st = smb2_create(c, "link_src.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "link_src.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE link_src.bin -> 0x%08x", st);
     smb2_write(c, co.file_id, 0, "linked", 6, &count);
 
@@ -651,8 +651,8 @@ probe_link(struct smb2_conn *c)
     if (st == ST_SUCCESS) {
         /* The link is a second name for the same inode: opening it must give
          * the same IndexNumber and the same content. */
-        st = smb2_create(c, "link_dst.bin", FILE_OPEN, FILE_READ_ACCESS,
-                         FILE_SHARE_RWD, NULL, &lo);
+        st = smb2_create(c, "link_dst.bin", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                         MBT_FILE_SHARE_RWD, NULL, &lo);
         CHECK(st == ST_SUCCESS, "  ... the link opens -> 0x%08x", st);
         if (st == ST_SUCCESS) {
             uint8_t  src_internal[16];
@@ -715,8 +715,8 @@ probe_security(struct smb2_conn *c)
 
     printf("# --- security descriptors ---\n");
 
-    st = smb2_create(c, "sec.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "sec.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE sec.bin -> 0x%08x", st);
 
     /* The full descriptor. */
@@ -925,8 +925,8 @@ probe_query_directory(struct smb2_conn *c)
     /* A directory with a known population.  "." and ".." are reported too, so
      * the assertions are on the three real names being present rather than on
      * an exact entry count. */
-    st = smb2_create_opts(c, "qdir", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     CHECK(st == ST_SUCCESS, "setup: CREATE qdir -> 0x%08x", st);
     if (st != ST_SUCCESS) {
         return;
@@ -941,8 +941,8 @@ probe_query_directory(struct smb2_conn *c)
             char path[64];
 
             snprintf(path, sizeof(path), "qdir\\%s", kids[i]);
-            st = smb2_create(c, path, FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, NULL, &f);
+            st = smb2_create(c, path, MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, NULL, &f);
             CHECK(st == ST_SUCCESS, "setup: CREATE %s -> 0x%08x", path, st);
             if (st == ST_SUCCESS) {
                 smb2_close(c, f.file_id);
@@ -954,8 +954,8 @@ probe_query_directory(struct smb2_conn *c)
     for (k = 0; k < sizeof(dir_classes) / sizeof(dir_classes[0]); k++) {
         const struct dir_class *dc = &dir_classes[k];
 
-        st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
-                              FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+        st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                              MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
         if (st != ST_SUCCESS) {
             CHECK(0, "%s: re-open qdir -> 0x%08x", dc->name, st);
             continue;
@@ -993,8 +993,8 @@ probe_query_directory(struct smb2_conn *c)
     /* Statefulness: a second call on the same handle continues from where the
      * first stopped, and once the directory is exhausted the server answers
      * STATUS_NO_MORE_FILES rather than repeating itself. */
-    st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
                   dir.file_id, "*", 8192, buf, sizeof(buf),
@@ -1026,8 +1026,8 @@ probe_query_directory(struct smb2_conn *c)
     }
 
     /* SMB2_RETURN_SINGLE_ENTRY caps the reply at one entry. */
-    st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         count = 0;
         st    = qdir(c, SMB2_FILE_DIRECTORY_INFO_T,
@@ -1042,8 +1042,8 @@ probe_query_directory(struct smb2_conn *c)
     }
 
     /* A pattern that matches one file selects it. */
-    st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         count = 0;
         st    = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
@@ -1069,8 +1069,8 @@ probe_query_directory(struct smb2_conn *c)
      * Recorded as-is rather than changed: it is a one-line status choice, but
      * the extended-tier pike and smbtorture directory cases assert against the
      * current behavior and this tier cannot run them. */
-    st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
                   dir.file_id, "nothing-here.xyz", 8192, buf,
@@ -1082,8 +1082,8 @@ probe_query_directory(struct smb2_conn *c)
     }
 
     /* An unsupported information class is INVALID_INFO_CLASS. */
-    st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         st = qdir(c, 0x7F, 0, dir.file_id, "*", 8192, buf,
                   sizeof(buf), &len);
@@ -1100,8 +1100,8 @@ probe_query_directory(struct smb2_conn *c)
     }
 
     /* QUERY_DIRECTORY against a FILE handle is not a directory enumeration. */
-    st = smb2_create(c, "qdir_notadir.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &f);
+    st = smb2_create(c, "qdir_notadir.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &f);
     if (st == ST_SUCCESS) {
         st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0, f.file_id,
                   "*", 8192, buf, sizeof(buf), &len);
@@ -1122,8 +1122,8 @@ probe_refusals(struct smb2_conn *c)
 
     printf("# --- buffer-length and class refusals ---\n");
 
-    st = smb2_create(c, "info_refuse.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "info_refuse.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE -> 0x%08x", st);
 
     /* An OutputBufferLength below the class's fixed size is refused, not
@@ -1194,8 +1194,8 @@ main(
     /* The sweep runs twice: several classes take a different path for a
      * directory (no EOF, the DIRECTORY attribute set, a different normalized
      * name), and a class that only ever sees files would not cover it. */
-    st = smb2_create(c, "sweep.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &file);
+    st = smb2_create(c, "sweep.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &file);
     if (st == ST_SUCCESS) {
         probe_query_sweep(c, file.file_id, "a file");
         smb2_close(c, file.file_id);
@@ -1203,8 +1203,8 @@ main(
         CHECK(0, "setup: CREATE sweep.bin -> 0x%08x", st);
     }
 
-    st = smb2_create_opts(c, "sweepdir", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    st = smb2_create_opts(c, "sweepdir", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         probe_query_sweep(c, dir.file_id, "a directory");
         smb2_close(c, dir.file_id);

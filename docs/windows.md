@@ -110,3 +110,8 @@ namespaces, and external Unix Samba tools remain Unix test paths.
 
 The daemon runs as a console application. Windows Service Control Manager
 integration and an installer are separate work.
+
+The POSIX client preserves quota and stale-handle errors on Windows using
+`EDQUOT` (2001) and `ESTALE` (2002), defined by Chimera because the Windows
+CRT does not provide them. Compare these symbols when handling errors;
+the CRT `strerror()` does not supply descriptions for these two values.

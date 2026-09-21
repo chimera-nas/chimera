@@ -1082,7 +1082,7 @@ mbt_env_open_opts(
         }
         /* The module opens this path from a server thread, so it must be
          * absolute; resolve $CHIMERA_MBT_SCRATCH (default cwd) to a real path. */
-        abs_scratch = realpath(scratch, NULL);
+        abs_scratch = chimera_test_absolute_path(scratch);
         if (!abs_scratch) {
             fprintf(stderr, "realpath(%s) failed: %s\n", scratch,
                     strerror(errno));

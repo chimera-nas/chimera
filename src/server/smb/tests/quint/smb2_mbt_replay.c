@@ -297,8 +297,8 @@ check_refused_create_side_effect(
     if (status != ST_SHARING_VIOLATION) {
         return;
     }
-    if (disp != FILE_SUPERSEDE && disp != FILE_OVERWRITE &&
-        disp != FILE_OVERWRITE_IF) {
+    if (disp != MBT_FILE_SUPERSEDE && disp != MBT_FILE_OVERWRITE &&
+        disp != MBT_FILE_OVERWRITE_IF) {
         return;
     }
 
@@ -307,8 +307,8 @@ check_refused_create_side_effect(
         return;
     }
 
-    smb2_create(c, name, FILE_OPEN, FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
+                MBT_FILE_SHARE_READ | MBT_FILE_SHARE_WRITE | MBT_FILE_SHARE_DELETE,
                 NULL, &out);
     if (out.status != ST_SUCCESS) {
         return;
@@ -397,24 +397,24 @@ static uint32_t
 disp_wire(const char *tag)
 {
     if (strcmp(tag, "DispOpen") == 0) {
-        return FILE_OPEN;
+        return MBT_FILE_OPEN;
     }
     if (strcmp(tag, "DispCreate") == 0) {
-        return FILE_CREATE;
+        return MBT_FILE_CREATE;
     }
     if (strcmp(tag, "DispOpenIf") == 0) {
-        return FILE_OPEN_IF;
+        return MBT_FILE_OPEN_IF;
     }
     if (strcmp(tag, "DispOverwrite") == 0) {
-        return FILE_OVERWRITE;
+        return MBT_FILE_OVERWRITE;
     }
     if (strcmp(tag, "DispOverwriteIf") == 0) {
-        return FILE_OVERWRITE_IF;
+        return MBT_FILE_OVERWRITE_IF;
     }
     if (strcmp(tag, "DispSupersede") == 0) {
-        return FILE_SUPERSEDE;
+        return MBT_FILE_SUPERSEDE;
     }
-    return FILE_OPEN_IF;
+    return MBT_FILE_OPEN_IF;
 } /* disp_wire */
 
 /* DesiredAccess: r->READ_DATA, w->WRITE_DATA, h->READ_ATTRIBUTES (a stat/
@@ -422,7 +422,7 @@ disp_wire(const char *tag)
 static uint32_t
 access_wire(json_t *a)
 {
-    uint32_t m = 0x00000080u;   /* FILE_READ_ATTRIBUTES always present */
+    uint32_t m = 0x00000080u;   /* MBT_FILE_READ_ATTRIBUTES always present */
 
     if (jbool(a, "r")) {
         m |= 0x00000001u;       /* FILE_READ_DATA */
@@ -442,13 +442,13 @@ share_wire(json_t *s)
     uint32_t m = 0;
 
     if (jbool(s, "r")) {
-        m |= FILE_SHARE_READ;
+        m |= MBT_FILE_SHARE_READ;
     }
     if (jbool(s, "w")) {
-        m |= FILE_SHARE_WRITE;
+        m |= MBT_FILE_SHARE_WRITE;
     }
     if (jbool(s, "d")) {
-        m |= FILE_SHARE_DELETE;
+        m |= MBT_FILE_SHARE_DELETE;
     }
     return m;
 } /* share_wire */
@@ -1087,8 +1087,8 @@ do_create(
     uint32_t                       shr   = share_wire(json_object_get(v, "share"));
     int                            doc   = jbool(v, "delOnClose");
     int                            isdir = jbool(v, "isDir");
-    uint32_t                       opts  = isdir ? FILE_DIRECTORY_FILE
-                                        : FILE_NON_DIRECTORY_FILE;
+    uint32_t                       opts  = isdir ? MBT_FILE_DIRECTORY_FILE
+                                        : MBT_FILE_NON_DIRECTORY_FILE;
     struct smb2_create_out         out;
     struct smb2_oplock_req         oreq;
     const struct smb2_oplock_req  *reqp =
@@ -1108,7 +1108,7 @@ do_create(
     interim0 = c->ninterim;
 
     if (doc) {
-        opts |= FILE_DELETE_ON_CLOSE;
+        opts |= MBT_FILE_DELETE_ON_CLOSE;
     }
 
     smb2_create_dur_opts(c, name, disp, acc, shr, opts, reqp, durp, &out);
@@ -1552,7 +1552,7 @@ park_barrier_flush(struct smb2_conn *c)
         dur.dh2c = 1;
         memcpy(dur.file_id, g_wire_fid[fid], 16);
         memset(dur.create_guid, 0xFE, 16);   /* cannot match any real create */
-        st = smb2_create_dur(c, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+        st = smb2_create_dur(c, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                              NULL, &dur, &r);
         if (st != ST_OBJECT_NAME_NOT_FOUND) {
             mism("park barrier for fid %d: a wrong-CreateGuid DH2C answered "
@@ -1858,14 +1858,14 @@ do_query(
     }
 
     /* FileBasicInformation: the attribute word.  Every open the model makes
-     * carries FILE_READ_ATTRIBUTES (access_wire sets it unconditionally), so
+     * carries MBT_FILE_READ_ATTRIBUTES (access_wire sets it unconditionally), so
      * this class must never be refused -- a refusal here would mean the
      * gate has moved, which is worth failing on. */
     st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, fid, 0,
                          buf, sizeof(buf), &blen);
     if (st != ST_SUCCESS) {
         mism("QUERY_INFO(FileBasicInformation) status: wire 0x%08x on a handle "
-             "that holds FILE_READ_ATTRIBUTES", st);
+             "that holds MBT_FILE_READ_ATTRIBUTES", st);
     } else if (blen < 40) {
         mism("QUERY_INFO(FileBasicInformation): reply carried %u bytes, "
              "MS-FSCC 2.4.7 is 40", blen);
@@ -1887,7 +1887,7 @@ do_query(
                          buf, sizeof(buf), &blen);
     if (st != ST_SUCCESS) {
         mism("QUERY_INFO(FileAllInformation) status: wire 0x%08x on a handle "
-             "that holds FILE_READ_ATTRIBUTES", st);
+             "that holds MBT_FILE_READ_ATTRIBUTES", st);
     } else if (blen < 64) {
         mism("QUERY_INFO(FileAllInformation): reply carried %u bytes, the "
              "Basic+Standard prefix alone is 64", blen);

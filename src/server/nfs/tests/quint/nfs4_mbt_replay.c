@@ -3630,10 +3630,10 @@ check_result(
 static double
 now_seconds(void)
 {
-    struct timeval tv;
+    struct timespec ts;
 
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec / 1e6;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
 } /* now_seconds */
 
 /* Fires only to break evpl_continue() out of its blocking wait; the loop that
@@ -4098,18 +4098,18 @@ report_divergence(
     fprintf(stderr, "step %d:\n", step);
     json_array_foreach(ops, i, e)
     {
-        dump = json_dumps(jf_val(e) ?: e, JSON_COMPACT | JSON_ENCODE_ANY);
+        dump = json_dumps(jf_val(e) ? jf_val(e) : e, JSON_COMPACT | JSON_ENCODE_ANY);
         fprintf(stderr, "    op[%zu] %s: %s\n", i, jf_tag(e),
-                dump ?: "<?>");
+                dump ? dump : "<?>");
         free(dump);
     }
     fprintf(stderr, "  expected status %" PRId64 "; expected results:\n",
             jf_i64(lab, "status"));
     json_array_foreach(results, i, e)
     {
-        dump = json_dumps(jf_val(e) ?: e, JSON_COMPACT | JSON_ENCODE_ANY);
+        dump = json_dumps(jf_val(e) ? jf_val(e) : e, JSON_COMPACT | JSON_ENCODE_ANY);
         fprintf(stderr, "    res[%zu] %s: %s\n", i, jf_tag(e),
-                dump ?: "<?>");
+                dump ? dump : "<?>");
         free(dump);
     }
     for (j = 0; j < m->n; j++) {

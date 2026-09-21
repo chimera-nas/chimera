@@ -42,6 +42,9 @@ static inline int fsync(int fd) { return _commit(fd); }
 #define STDIN_FILENO           0
 #define STDOUT_FILENO          1
 #define STDERR_FILENO          2
+/* Chimera POSIX-client errno extensions absent from the Windows CRT. */
+#define EDQUOT                 2001
+#define ESTALE                 2002
 #define F_OK                   0
 #define R_OK                   4
 #define W_OK                   2

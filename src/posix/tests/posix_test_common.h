@@ -7,6 +7,7 @@
 #include "common/getopt.h"
 #include "common/compiler.h"
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -932,8 +933,8 @@ posix_test_init(
     const char *session_root = posix_test_session_root();
 
     snprintf(env->session_dir, sizeof(env->session_dir),
-             "%s/posix_session_%d_%lu_%lu",
-             session_root, getpid(), tv.tv_sec, tv.tv_nsec);
+             "%s/posix_session_%d_%" PRId64 "_%ld",
+             session_root, getpid(), (int64_t) tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 

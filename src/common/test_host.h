@@ -186,3 +186,14 @@ chimera_test_remove_tree(const char *path)
         }
     }
 } // chimera_test_remove_tree
+
+/* Heap-owned absolute fixture path, released with free(). */
+static inline char *
+chimera_test_absolute_path(const char *path)
+{
+#ifdef _WIN32
+    return _fullpath(NULL, path, 0);
+#else // ifdef _WIN32
+    return realpath(path, NULL);
+#endif // ifdef _WIN32
+} // chimera_test_absolute_path
