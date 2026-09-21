@@ -104,7 +104,7 @@ jobs:
       - name: Test application smoke paths
         id: smoke
         continue-on-error: true
-        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --parallel 4 --timeout 60 --output-junit smoke-results.xml -R 'chimera/(daemon/native_lifecycle|server/mount_create|vfs/(kv_test|notify_test|claim_test|umount_wait_test|diskfs/smoke_test|clone_range_test|zerorange_memfs)|server/s3/mbt/probe_memfs|posix/mknod_nfs3_memfs|client/read_into)$'
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --parallel 4 --timeout 60 --output-junit smoke-results.xml -R 'chimera/(daemon/(config_test|native_lifecycle)|server/mount_create|vfs/(kv_test|notify_test|claim_test|umount_wait_test|diskfs/smoke_test|clone_range_test|zerorange_memfs)|server/s3/mbt/probe_memfs|posix/mknod_nfs3_memfs|client/read_into)$'
       - name: Upload smoke diagnostics
         if: always()
         uses: actions/upload-artifact@v6
