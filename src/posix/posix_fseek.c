@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "posix_internal.h"
+#include <limits.h>
 
 SYMBOL_EXPORT int
 chimera_posix_fseek(
@@ -86,6 +87,11 @@ chimera_posix_ftell(CHIMERA_FILE *stream)
     // Adjust for ungetc character if present
     if (stream->ungetc_char >= 0) {
         result--;
+    }
+
+    if (result > LONG_MAX) {
+        errno = EOVERFLOW;
+        return -1L;
     }
 
     return (long) result;

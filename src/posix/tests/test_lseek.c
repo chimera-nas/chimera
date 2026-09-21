@@ -195,6 +195,21 @@ main(
 
     fprintf(stderr, "Seek before beginning test passed\n");
 
+    /* A sparse file beyond 32 bits checks both the public offset ABI and
+     * the metadata path without allocating gigabytes of fixture data. */
+    const chimera_off_t  wide = (INT64_C(1) << 33) + 123;
+    chimera_posix_stat_t st;
+
+    if (chimera_posix_ftruncate(fd, wide) != 0 ||
+        chimera_posix_fstat(fd, &st) != 0 || st.st_size != wide ||
+        chimera_posix_lseek(fd, -1, SEEK_END) != wide - 1 ||
+        chimera_posix_read(fd, buf, 1) != 1 || buf[0] != 0 ||
+        chimera_posix_lseek64(fd, 0, SEEK_CUR) != wide) {
+        fprintf(stderr, "large sparse-file size or offset was truncated\n");
+        chimera_posix_close(fd);
+        posix_test_fail(&env);
+    }
+
     fprintf(stderr, "All lseek tests passed!\n");
 
     chimera_posix_close(fd);
