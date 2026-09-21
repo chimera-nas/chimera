@@ -62,6 +62,9 @@ struct chimera_posix_completion {
 struct chimera_posix_ofd {
     uint64_t                        offset;
     unsigned int                    oflags; // Raw open(2) flags (for O_ACCMODE checks)
+    /* S_IFMT from open; shared across dup and valid after unlink. Zero means
+     * the backend did not supply a type, so validation stays with the backend. */
+    uint32_t                        file_type;
     int                             refcnt;
     /* Byte-range lock claims this description holds in the local claim core
      * (heap chimera_posix_ofd_lock nodes, claim embedded first).  Guarded by

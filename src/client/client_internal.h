@@ -86,6 +86,7 @@ struct chimera_client_request {
 
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;
+    uint32_t                           sync_open_type;
     struct chimera_stat                sync_stat;
     struct chimera_statvfs             sync_statvfs;
     int                                sync_target_len;

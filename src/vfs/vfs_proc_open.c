@@ -101,9 +101,10 @@ chimera_vfs_open_root_complete(
         chimera_vfs_handle_stamp_access(oh, request->open.granted_access);
     }
 
+    callback(error_code, oh,
+             error_code == CHIMERA_VFS_OK && request->open.r_attr.va_set_mask ?
+             &request->open.r_attr : NULL, priv);
     chimera_vfs_request_free(thread, request);
-
-    callback(error_code, oh, NULL, priv);
 } /* chimera_vfs_open_root_complete */
 
 /* ----------------------------------------------------------------------------
@@ -429,6 +430,13 @@ chimera_vfs_open_lookup_complete(
 
     memcpy(request->open.parent_fh, attr->va_fh, attr->va_fh_len);
     request->open.parent_fh_len = attr->va_fh_len;
+    request->open.r_attr        = *attr;
+    /* ACL/SID pointers belong to the lookup callback. Only carry value
+     * attributes across the asynchronous open. */
+    request->open.r_attr.va_set_mask &= CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+    request->open.r_attr.va_acl       = NULL;
+    request->open.r_attr.va_owner_sid = NULL;
+    request->open.r_attr.va_group_sid = NULL;
 
     chimera_vfs_open_fh(
         thread,
@@ -471,9 +479,10 @@ chimera_vfs_open(
             return;
         }
 
-        request->open.callback      = callback;
-        request->open.private_data  = private_data;
-        request->open.granted_valid = 0;
+        request->open.callback           = callback;
+        request->open.private_data       = private_data;
+        request->open.granted_valid      = 0;
+        request->open.r_attr.va_set_mask = 0;
 
         chimera_vfs_open_fh(
             thread,

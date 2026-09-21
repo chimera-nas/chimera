@@ -55,10 +55,22 @@ chimera_posix_unlinkat(
     int                             path_len;
     const char                     *slash;
 
+    path_len = chimera_posix_check_path(pathname);
+    if (path_len <= 0) {
+        if (path_len == 0) {
+            errno = ENOENT;
+        }
+        return -1;
+    }
+    if (dirfd == AT_FDCWD && pathname[0] != '/' &&
+        path_len + 1 >= CHIMERA_VFS_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
     chimera_posix_completion_init(&comp, &req);
 
-    // Handle AT_FDCWD case
-    if (dirfd == AT_FDCWD) {
+    /* An absolute pathname ignores dirfd, including an invalid one. */
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
         if (pathname[0] == '/') {
             path_len = strlen(pathname);
             memcpy(req.remove.path, pathname, path_len);
@@ -86,6 +98,16 @@ chimera_posix_unlinkat(
         if (!dir_entry) {
             errno = EBADF;
             chimera_posix_completion_destroy(&comp);
+            return -1;
+        }
+
+        /* A descriptor's type cannot change. Reject a non-directory before
+         * NFS lookup: after unlink, server handle reclamation must not turn
+         * this local ENOTDIR into ESTALE. The OFD also covers duplicates. */
+        if (dir_entry->ofd->file_type && !S_ISDIR(dir_entry->ofd->file_type)) {
+            chimera_posix_fd_release(dir_entry, 0);
+            chimera_posix_completion_destroy(&comp);
+            errno = ENOTDIR;
             return -1;
         }
 

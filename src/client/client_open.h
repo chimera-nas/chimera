@@ -18,6 +18,10 @@ chimera_open_vfs_complete(
     chimera_open_callback_t        callback     = request->open.callback;
     void                          *callback_arg = request->open.private_data;
 
+    /* The synchronous POSIX caller retains the immutable type in its open
+     * file description. Do not re-fetch it later through a possibly stale FH. */
+    request->sync_open_type = error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ? attr->va_mode & S_IFMT : 0;
     chimera_client_request_free(thread, request);
 
     callback(thread, error_code, oh, callback_arg);
@@ -38,7 +42,7 @@ chimera_dispatch_open(
         request->open.path_len,
         request->open.flags,
         &request->open.set_attr,
-        CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
         chimera_open_vfs_complete,
         request);
 } /* chimera_dispatch_open */
@@ -59,6 +63,8 @@ chimera_open_at_complete(
     void                          *callback_arg   = request->open.private_data;
     int                            heap_allocated = request->heap_allocated;
 
+    request->sync_open_type = error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ? attr->va_mode & S_IFMT : 0;
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }
@@ -82,7 +88,7 @@ chimera_dispatch_open_at(
         request->open.path_len,
         request->open.flags,
         &request->open.set_attr,
-        CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
         0,
         0,
         chimera_open_at_complete,
