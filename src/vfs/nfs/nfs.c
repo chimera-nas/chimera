@@ -201,6 +201,12 @@ chimera_nfs_protocol_to_string(enum evpl_protocol_id protocol)
             return "INPROC";
         case EVPL_DATAGRAM_INPROC:
             return "INPROC-DGRAM";
+        case EVPL_STREAM_LIBFABRIC_MSG:
+            return "LIBFABRIC-MSG";
+        case EVPL_DATAGRAM_LIBFABRIC_MSG:
+            return "LIBFABRIC-MSG-DGRAM";
+        case EVPL_DATAGRAM_LIBFABRIC_RDM:
+            return "LIBFABRIC-RDM";
         case EVPL_NUM_PROTO:
             return "UNKNOWN";
     } /* switch */
