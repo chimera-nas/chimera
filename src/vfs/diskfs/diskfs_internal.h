@@ -3801,6 +3801,10 @@ diskfs_kv_entry_alloc(
     const void           *value,
     uint32_t              value_len);
 
+static inline uint64_t
+diskfs_space_reserve_bytes(
+    const struct diskfs_shared *shared);
+
 static inline int
 diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
@@ -4910,7 +4914,7 @@ diskfs_inode_alloc_async(
 
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_inode_alloc_resume, actx);
     rc = space_map_reservation_alloc(shared->space_map, &thread->meta_resv, &jnl,
-                                     SM_DEV_LOCAL, SM_BLOCK_SIZE, SM_RESERVATION_CHUNK,
+                                     SM_DEV_LOCAL, SM_BLOCK_SIZE, SM_RESERVATION_CHUNK, 0,
                                      (uint32_t) ((uintptr_t) thread >> 7),
                                      &device_id, &device_offset);
     free(actx);
@@ -4996,16 +5000,9 @@ diskfs_kv_entry_alloc(
 } /* diskfs_kv_entry_alloc */
 
 
-/*
- * Allocate file-data backing for `inode` from its own per-open-file reservation
- * (inode->space_resv) rather than a shared per-thread cache, so a file's blocks
- * lay out sequentially and the unused tail is returned when the file is closed
- * (not stranded per-thread).  `floor` is the over-reserve minimum: writes pass
- * SM_RESERVATION_MIN (reserve 1 MiB or the write, whichever is larger, and keep
- * the rest for the next write); fallocate passes 0 (exact, no retained tail).
- * Must be called with the inode write-locked (the data path holds it).  Returns
- * SM_AGAIN on a journal-block miss (caller's resume re-drives), ENOSPC, or 0.
- */
+/* File data draws from a per-thread spatial reservation. Admission charges
+ * the exact allocation against live free space, preserving the metadata
+ * reserve even when the current reservation already covers the request. */
 static inline int
 diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
@@ -5035,6 +5032,7 @@ diskfs_inode_alloc_space(
     DISKFS_SM_JNL(jnl, thread, txn, resume, resume_arg);
     rc = space_map_reservation_alloc(sm, &thread->data_resv, &jnl,
                                      role, (uint64_t) desired_size, SM_RESERVATION_CHUNK,
+                                     diskfs_space_reserve_bytes(thread->shared),
                                      (uint32_t) ((uintptr_t) thread >> 7),
                                      &dev_id, r_device_offset);
     if (rc != 0) {
@@ -5433,41 +5431,15 @@ diskfs_map_attrs(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        /* Free/used are derived from the space map's live per-AG free counts
-         * (cold path) rather than a running counter the alloc/free fast path
-         * would have to maintain. */
+        /* Live free space already excludes allocations awaiting redo retire. */
         attr->va_fs_space_total = space_map_usable_capacity(shared->space_map);
-        attr->va_fs_space_free  = space_map_free_bytes(shared->space_map);
+        attr->va_fs_space_free  = __atomic_load_n(&shared->space_map->available_bytes,
+                                                  __ATOMIC_RELAXED);
         if (attr->va_fs_space_free > attr->va_fs_space_total) {
             attr->va_fs_space_free = attr->va_fs_space_total;
         }
-        /*
-         * Hold the reserve back from BOTH free and avail.
-         *
-         * The ext4/XFS analogy that shaped the first cut of this only goes so
-         * far.  Their reserved blocks are a *privilege* reserve: root may spend
-         * them, so counting them in f_bfree is true, and root's
-         * fallocate(f_bfree) legitimately succeeds.  Ours is metadata slop --
-         * the extent records for a large allocation have to be written
-         * somewhere -- and no caller, root included, can turn it into file
-         * data.  Reporting it in f_bfree therefore overstates what is
-         * obtainable, and a root-privileged caller that believes f_bfree (as
-         * nfstest_alloc's get_freebytes() does) asks for space that cannot
-         * exist and gets ENOSPC.
-         *
-         * So space_free is the free-extent sum less the reserve: what a writer
-         * can actually place.  space_avail is the same figure -- there is no
-         * second, lower class of caller to distinguish, because the reserve is
-         * not spendable by anyone.  space_total stays the honest capacity, so
-         * space_used absorbs the reserve, which is accurate: the filesystem
-         * really is holding it.
-         *
-         * This is only safe to report because the allocator can now reach
-         * essentially all of what it advertises -- claim recall
-         * (sm_ag_recall_claims_locked) hands back the bump reservations that
-         * used to strand whole megabytes inside idle threads' claims.  Without
-         * that, subtracting a reserve here would just move the cliff.
-         */
+        /* Data admission uses this same live counter and reserve floor.
+         * Metadata may draw below it; no class of file-data caller may do so. */
         {
             uint64_t reserve = diskfs_space_reserve_bytes(shared);
 

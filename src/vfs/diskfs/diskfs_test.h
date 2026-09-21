@@ -38,6 +38,7 @@ struct diskfs_test_space {
     uint64_t claim_bytes;         /* sum of live reservation-claim lengths */
     uint64_t reserve_bytes;       /* internal reserve held back from space_avail */
     uint64_t largest_free_extent; /* largest single free extent anywhere */
+    uint64_t available_bytes; /* runtime free, excluding pending allocations */
     uint64_t total_free_extents;  /* free-extent (fragment) count across all AGs */
     uint32_t num_devices;
     uint32_t num_ags;
