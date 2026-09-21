@@ -439,6 +439,40 @@ nfs4_drc_ensure_client(
     client->nfs4_client_confirmed = 1;
     memcpy(client->nfs4_client_owner, owner, owner_len);
 
+    /* This client is being restored from its persisted session, not newly
+     * established: it will resume that session on its next SEQUENCE without
+     * ever seeing NFS4ERR_BADSESSION, so it runs no EXCHANGE_ID and no
+     * CREATE_SESSION.  RFC 8881 section 18.51.3 ties the RECLAIM_COMPLETE
+     * obligation to establishing a NEW client ID, which this client does not
+     * do, and nothing in the protocol would prompt it for one (this server
+     * never raises SEQ4_STATUS_RESTART_RECLAIM_NEEDED).  Restore it already
+     * marked, or the per-client gate in chimera_nfs4_open() refuses every
+     * non-reclaim OPEN with NFS4ERR_GRACE for the life of the mount.  The
+     * server-wide reboot window still applies and still expires normally.
+     *
+     * Two consequences of the mark are accepted deliberately:
+     *  - The same gate answers a CLAIM_PREVIOUS from this client with
+     *    NFS4ERR_NO_GRACE.  That forfeits nothing today: no open or lock
+     *    state is persisted (nfs_kv_keys.h), so a reclaim could rebuild
+     *    nothing a post-grace CLAIM_NULL cannot, and a client that
+     *    re-establishes with the same owner and verifier is answered
+     *    CONFIRMED_R on this same clientid (nfs4_client_exchange_id case 2),
+     *    which tells it no state was lost, so it does not reclaim anyway.
+     *    Another client's reclaim of a conflicting share can win a file this
+     *    one held; it could once the window closed regardless.  Revisit the
+     *    day open or lock state is persisted, or the day hydrated clients
+     *    are asked to reclaim.
+     *  - The client's own to_reclaim record is retired only by the grace
+     *    deadline or DESTROY_CLIENTID: a global RECLAIM_COMPLETE from it is
+     *    NFS4ERR_COMPLETE_ALREADY before it reaches the recovery
+     *    bookkeeping.  Such a client never sent one, so no outcome changes,
+     *    but the server-wide window cannot end early on the all-reclaimed
+     *    exit while a hydrated client's record is outstanding.
+     *
+     * Set directly rather than through nfs4_client_mark_reclaim_complete():
+     * nfs4_ct_lock is held here and is not recursive. */
+    client->nfs4_client_reclaim_complete = 1;
+
     client->nfs4_client_princ_flavor   = princ_flavor;
     client->nfs4_client_princ_uid      = princ_uid;
     client->nfs4_client_princ_gid      = princ_gid;

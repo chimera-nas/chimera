@@ -14,6 +14,8 @@
  * essence of NFSv4.1 cross-reboot exactly-once semantics.
  */
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,7 @@
 #include "common/logging.h"
 #include "nfs_common.h"
 #include "nfs4_session.h"
+#include "nfs4_lease.h"
 #include "nfs4_recovery.h"
 #include "nfs4_drc.h"
 #include "nfs3_drc.h"
@@ -342,6 +345,305 @@ test_cross_reboot_replay(void)
 
     printf("ok: cross_reboot_replay\n");
 } /* test_cross_reboot_replay */
+
+/* ------------------------------------------------------------------ *
+*  Hydrated session: the reclaim obligation                          *
+* ------------------------------------------------------------------ */
+
+/*
+ * A client whose 4.1 session is rebuilt out of the KV store resumes it without
+ * ever seeing NFS4ERR_BADSESSION, so it runs no EXCHANGE_ID and no
+ * CREATE_SESSION and nothing in the protocol ever prompts it for a
+ * RECLAIM_COMPLETE.  RFC 8881 section 18.51.3 attaches that obligation to
+ * establishing a NEW client ID, which this client did not do, so the
+ * reconstructed record must come back already carrying the mark.  Without it
+ * the per-client gate in chimera_nfs4_open() refuses every non-reclaim OPEN
+ * with NFS4ERR_GRACE for the life of the mount -- that gate has no deadline,
+ * unlike the server-wide window.
+ */
+static void
+test_cross_reboot_reclaim_complete(void)
+{
+    struct nfs4_client_table       table_a,table_b;
+    struct nfs4_session           *session;
+    struct nfs4_drc_session_record srec;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    uint8_t                        sbuf[4096];
+    uint32_t                       slen;
+    static const uint8_t           owner[] = "co_owner_hydrated";
+    uint64_t                       clientid;
+
+    /* --- instance A: a live 4.1 session that never sent RECLAIM_COMPLETE,
+     * which is the ordinary state of a persisted record: the session is
+     * written at CREATE_SESSION, before any RECLAIM_COMPLETE could arrive. */
+    nfs4_client_table_init(&table_a,1);
+    clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
+                                    0x4321ULL,41,NULL,NULL);
+    session = nfs4_create_session(&table_a,clientid,0,8,4096,
+                                  NULL,NULL,NULL);
+    CHECK(session != NULL);
+    session->nfs4_session_persist = true;
+    memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
+    CHECK(!nfs4_client_reclaim_complete(&table_a,clientid));
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = session->client_unified->client_id;
+    srec.verifier              = session->client_unified->verifier;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = session->replay_max_slots;
+    srec.replay_maxresp_cached = session->replay_maxresp_cached;
+    srec.fore                  = session->nfs4_session_fore_attrs;
+    srec.back                  = session->nfs4_session_back_attrs;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    slen = nfs4_drc_session_serialize(sbuf,sizeof(sbuf),&srec);
+    CHECK(slen > 0);
+
+    /* --- reboot --- */
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_a,NULL,NULL);
+    nfs4_client_table_free(&table_a);
+
+    /* --- instance B: the lazy hydrate a SEQUENCE on the old sessionid runs */
+    nfs4_client_table_init(&table_b,1);
+    CHECK(nfs4_drc_session_deserialize(sbuf,slen,&srec) == 0);
+    nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,0x9999ULL);
+
+    session = nfs4_session_lookup(&table_b,sessionid);
+    CHECK(session != NULL);
+
+    /* The decisive check, asked of the clientid the OPEN gate actually uses:
+     * chimera_nfs4_open() passes req->session->nfs4_session_clientid.  The
+     * restored client is not held to a reclaim it has no way to learn it
+     * owes. */
+    CHECK(nfs4_client_reclaim_complete(&table_b,
+                                       session->nfs4_session_clientid));
+
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_b,NULL,NULL);
+    nfs4_client_table_free(&table_b);
+
+    printf("ok: cross_reboot_reclaim_complete\n");
+} /* test_cross_reboot_reclaim_complete */
+
+/*
+ * Guard rails for the test above, so it cannot pass for the wrong reason.
+ *
+ * 1. A client that really did establish a new client ID in this instance owes
+ *    its RECLAIM_COMPLETE (RFC 8881 section 18.51.3) and a second global one
+ *    is NFS4ERR_COMPLETE_ALREADY (section 18.51.4).
+ * 2. Reconstructing a session whose client ALREADY exists in the table must
+ *    not stamp that client: nfs4_drc_ensure_client returns early for it, so
+ *    the mark cannot leak into the legitimate new-client-ID path.
+ */
+static void
+test_reclaim_complete_not_granted_to_new_clients(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    static const uint8_t           owner[] = "co_owner_fresh";
+    uint64_t                       clientid;
+
+    nfs4_client_table_init(&table,1);
+    clientid = nfs4_client_register(&table,owner,(int) sizeof(owner) - 1,
+                                    0x5555ULL,41,NULL,NULL);
+
+    /* (1) a freshly established client owes its RECLAIM_COMPLETE */
+    CHECK(!nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(!nfs4_client_mark_reclaim_complete(&table,clientid));
+    CHECK(nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(nfs4_client_mark_reclaim_complete(&table,clientid));
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    /* (2) reconstruction must not stamp a client that is already present */
+    nfs4_client_table_init(&table,1);
+    clientid = nfs4_client_register(&table,owner,(int) sizeof(owner) - 1,
+                                    0x5555ULL,41,NULL,NULL);
+    /* Any sessionid this table does not know will do: production hydrates
+     * only on a lookup miss, so the id must not already be live here. */
+    memset(sessionid,0xA5,NFS4_SESSIONID_SIZE);
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = clientid;
+    srec.verifier              = 0x5555ULL;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = 8;
+    srec.replay_maxresp_cached = 4096;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    nfs4_drc_reconstruct_session(&table,sessionid,&srec,0x9999ULL);
+    CHECK(!nfs4_client_reclaim_complete(&table,clientid));
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: reclaim_complete_not_granted_to_new_clients\n");
+} /* test_reclaim_complete_not_granted_to_new_clients */
+
+/*
+ * nfs_recovery_kickoff() forces the grace window open before its async KV
+ * reads have populated to_reclaim, so pending_reclaim is legitimately 0 while
+ * the scan is in flight.  The 1 Hz sweep must not read that as "everybody
+ * reclaimed" and close the window: a reclaim arriving after it would be
+ * refused NFS4ERR_NO_GRACE and the client would lose its locks.
+ */
+static void
+test_grace_survives_sweep_during_load(void)
+{
+    struct nfs_recovery rec;
+
+    /* vfs == NULL leaves kv_module unset, so persistence stays enabled --
+     * persistence_disabled keys off the module name being "memkv". */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    CHECK(!rec.persistence_disabled);
+
+    /* Mimic kickoff: claim the load, then force the window open with the scan
+     * still outstanding and nothing counted yet. */
+    atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
+    evpl_mutex_lock(&rec.lock);
+    rec.in_grace     = true;
+    rec.grace_end_ns = nfs_lease_now_ns() + 180ULL * 1000000000ULL;
+    evpl_mutex_unlock(&rec.lock);
+    CHECK(rec.pending_reclaim == 0);
+
+    /* A sweep tick lands here.  The window must survive it. */
+    nfs_recovery_sweep_once(&rec);
+    CHECK(rec.in_grace);
+
+    /* Once the scan has settled with nothing to reclaim, the same tick may
+     * close the window -- that is the intended fast path, still reachable. */
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+    nfs_recovery_sweep_once(&rec);
+    CHECK(!rec.in_grace);
+
+    nfs_recovery_free(&rec);
+
+    /* The guard is scoped to the zero-count exit: the deadline still ends the
+     * window while the load is in flight.  (That bounds rec->in_grace only;
+     * nfs_recovery_open_check answers NFS4ERR_GRACE until the load is READY
+     * regardless, so a load that never settles is an outage either way.) */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
+    evpl_mutex_lock(&rec.lock);
+    rec.in_grace     = true;
+    rec.grace_end_ns = 0;          /* deadline already in the past */
+    evpl_mutex_unlock(&rec.lock);
+    nfs_recovery_sweep_once(&rec);
+    CHECK(!rec.in_grace);
+
+    nfs_recovery_free(&rec);
+    printf("ok: grace_survives_sweep_during_load\n");
+} /* test_grace_survives_sweep_during_load */
+
+/* Add a to_reclaim record the way nfs_recovery_scan_cb does when the KV scan
+ * streams one in. */
+static void
+recovery_add_record(
+    struct nfs_recovery*rec,
+    const char         *owner)
+{
+    struct nfs_recovery_record*r = calloc(1,sizeof(*r));
+
+    r->owner_len = (uint16_t) strlen(owner);
+    memcpy(r->owner_string,owner,r->owner_len);
+
+    evpl_mutex_lock(&rec->lock);
+    HASH_ADD_KEYPTR(hh,rec->to_reclaim,r->owner_string,r->owner_len,r);
+    rec->pending_reclaim++;
+    evpl_mutex_unlock(&rec->lock);
+} /* recovery_add_record */
+
+/* The unified client record the recovery gates key on; only the owner
+ * matters to them. */
+static void
+recovery_client(
+    struct nfs_client*c,
+    const char       *owner)
+{
+    memset(c,0,sizeof(*c));
+    c->owner_len = (uint16_t) strlen(owner);
+    memcpy(c->owner_string,owner,c->owner_len);
+} /* recovery_client */
+
+/*
+ * The same zero-count hazard on the RECLAIM_COMPLETE path.  The NFS4ERR_DELAY
+ * gates that would keep a client from getting this far during the load are
+ * conditioned on server.nfs4_drc (default off), while the load itself runs
+ * for any durable KV module: with the reply cache disabled a client whose
+ * record has already streamed in can send its global RECLAIM_COMPLETE while
+ * another client's record is still in flight.
+ *
+ * Asserted through nfs_recovery_open_check, i.e. as the second client's
+ * CLAIM_PREVIOUS sees it, not through the in_grace flag alone; the populated
+ * to_reclaim set also covers the positive sweep case (records loaded, READY,
+ * one reclaim outstanding: the tick must not close) and the last-reclaim
+ * transition that nfs_recovery_sweep_once alone with an empty set cannot.
+ */
+static void
+test_grace_survives_reclaim_complete_during_load(void)
+{
+    struct nfs_recovery      rec;
+    static struct nfs_client a,b,stranger;
+
+    recovery_client(&a,"co_owner_a");
+    recovery_client(&b,"co_owner_b");
+    recovery_client(&stranger,"co_owner_never_persisted");
+
+    /* nfs4_drc off: the configuration in which nothing delays the clients */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,false) == 0);
+    CHECK(!rec.persistence_disabled);
+
+    /* kickoff: load claimed, window forced open, scan outstanding */
+    atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
+    evpl_mutex_lock(&rec.lock);
+    rec.in_grace     = true;
+    rec.grace_end_ns = nfs_lease_now_ns() + 180ULL * 1000000000ULL;
+    evpl_mutex_unlock(&rec.lock);
+
+    /* A reclaim that races its own record load is admitted, not refused. */
+    CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4_OK);
+
+    /* A's record streams in; A re-establishes and, holding nothing worth
+     * reclaiming, sends its global RECLAIM_COMPLETE at once.  B's record is
+     * still in flight. */
+    recovery_add_record(&rec,"co_owner_a");
+    CHECK(rec.pending_reclaim == 1);
+    nfs_recovery_reclaim_complete(&rec,&a);
+    CHECK(rec.pending_reclaim == 0);
+    CHECK(rec.in_grace);                 /* the window must survive that... */
+    nfs_recovery_sweep_once(&rec);
+    CHECK(rec.in_grace);                 /* ...and the next tick */
+
+    /* B's record lands and the scan settles with B still owed its reclaim. */
+    recovery_add_record(&rec,"co_owner_b");
+    CHECK(rec.pending_reclaim == 1);
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+    nfs_recovery_sweep_once(&rec);
+    CHECK(rec.in_grace);
+
+    /* What each client's OPEN sees while B is outstanding. */
+    CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4_OK);
+    CHECK(nfs_recovery_open_check(&rec,&b,false) == NFS4ERR_GRACE);
+    CHECK(nfs_recovery_open_check(&rec,&a,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_open_check(&rec,&stranger,true) == NFS4ERR_RECLAIM_BAD);
+    CHECK(nfs_recovery_io_check(&rec) == NFS4ERR_GRACE);
+
+    /* B finishes: the last outstanding reclaim closes the window at once. */
+    nfs_recovery_reclaim_complete(&rec,&b);
+    CHECK(rec.pending_reclaim == 0);
+    CHECK(!rec.in_grace);
+    CHECK(nfs_recovery_open_check(&rec,&b,false) == NFS4_OK);
+    CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_io_check(&rec) == NFS4_OK);
+
+    nfs_recovery_free(&rec);
+    printf("ok: grace_survives_reclaim_complete_during_load\n");
+} /* test_grace_survives_reclaim_complete_during_load */
 
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
@@ -977,6 +1279,10 @@ main(void)
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
     test_cross_reboot_replay();
+    test_cross_reboot_reclaim_complete();
+    test_reclaim_complete_not_granted_to_new_clients();
+    test_grace_survives_sweep_during_load();
+    test_grace_survives_reclaim_complete_during_load();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();

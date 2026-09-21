@@ -50,6 +50,30 @@ The POSIX uid and gid that chimera stamps on files created over SMB come from
 winbind's identity mapping, so the idmap backend you choose decides on-disk
 ownership.
 
+### Native SIDs in stored security descriptors
+
+Access decisions are always made from the numeric uid/gid, but the security
+descriptor a client sets is not reduced to numbers and thrown away.  When a
+SID in an incoming descriptor resolves through winbind, chimera keeps the
+native SID alongside the resolved id: on the owner and group as SID
+companions to the uid/gid, and on each DACL entry's principal.  A SID that
+does not resolve at all is kept verbatim as an opaque principal that grants
+nobody anything -- the same way NTFS keeps an entry for a departed domain
+user -- instead of being dropped from the DACL.  The native backends (memfs,
+cairn, diskfs) persist those SIDs, and a QUERY returns them byte for byte
+without consulting winbind again, so a stored descriptor survives a winbind
+outage and can be read by any other consumer of the on-disk data.
+
+Only when no native SID is known does chimera fall back to the identity
+cache and then to the algorithmic `S-1-5-88-1-<uid>` / `S-1-5-88-2-<gid>`
+scheme.  A plain chown or chgrp (over NFS, say) drops the stored owner or
+group SID, since it no longer describes the new numeric owner.
+
+The on-disk ACL encoding moved to version 2 to carry the per-entry SID;
+version 1 data written by earlier releases still reads, and an ACL with no
+native SIDs is still written as version 1.  Out-of-tree VFS modules must be
+rebuilt against SDK version 2.
+
 ### Configuration keys
 
 The chimera side of both procedures is the `server.smb_auth` object:

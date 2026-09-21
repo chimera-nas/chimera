@@ -70,9 +70,9 @@ chimera_vfs_clock_init(void)
 
     stopwatch_context_init(&chimera_vfs_clock.ctx);
 
-    clock_gettime(CLOCK_REALTIME, &ts);
+    clock_gettime(CLOCK_REALTIME,&ts);
     chimera_vfs_clock.base_wall_ns = (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
-    stopwatch_start(&chimera_vfs_clock.ctx, &chimera_vfs_clock.base_sw);
+    stopwatch_start(&chimera_vfs_clock.ctx,&chimera_vfs_clock.base_sw);
     chimera_vfs_clock.delta_ns         = 0;
     chimera_vfs_clock.last_refresh     = 0;
     chimera_vfs_clock.refresh_interval = chimera_vfs_ns_to_ticks(1000000000ULL); /* ~1s */
@@ -86,11 +86,11 @@ chimera_vfs_clock_shutdown(void)
 } /* chimera_vfs_clock_shutdown */
 
 static void
-chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread *delegation_thread)
+chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread*delegation_thread)
 {
-    struct chimera_vfs_thread  *thread = delegation_thread->vfs_thread;
-    struct chimera_vfs_request *requests, *request;
-    struct chimera_vfs_module  *module;
+    struct chimera_vfs_thread *thread = delegation_thread->vfs_thread;
+    struct chimera_vfs_request*requests,*request;
+    struct chimera_vfs_module *module;
 
     evpl_mutex_lock(&delegation_thread->lock);
     requests                    = delegation_thread->requests;
@@ -99,46 +99,46 @@ chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread *delegation_th
 
     while (requests) {
         request = requests;
-        LL_DELETE(requests, request);
+        LL_DELETE(requests,request);
 
         module = request->module;
-        module->dispatch(request, thread->module_private[module->fh_magic]);
+        module->dispatch(request,thread->module_private[module->fh_magic]);
     }
 } /* chimera_vfs_delegation_drain */
 
 static void
 chimera_vfs_delegation_thread_wake(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+    struct evpl         *evpl,
+    struct evpl_doorbell*doorbell)
 {
-    struct chimera_vfs_delegation_thread *delegation_thread = container_of(doorbell, struct
-                                                                           chimera_vfs_delegation_thread,
-                                                                           doorbell);
+    struct chimera_vfs_delegation_thread*delegation_thread = container_of(doorbell,struct
+                                                                          chimera_vfs_delegation_thread,
+                                                                          doorbell);
 
     chimera_vfs_delegation_drain(delegation_thread);
 } /* chimera_vfs_delegation_thread_wake */
 
 static void
 chimera_vfs_delegation_thread_poll(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
-    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+    struct chimera_vfs_delegation_thread*delegation_thread = private_data;
 
     chimera_vfs_delegation_drain(delegation_thread);
 } /* chimera_vfs_delegation_thread_poll */
 
-static void *
+static void*
 chimera_vfs_delegation_thread_init(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
-    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+    struct chimera_vfs_delegation_thread*delegation_thread = private_data;
 
     delegation_thread->evpl       = evpl;
-    delegation_thread->vfs_thread = chimera_vfs_thread_init(evpl, delegation_thread->vfs);
+    delegation_thread->vfs_thread = chimera_vfs_thread_init(evpl,delegation_thread->vfs);
 
-    evpl_add_doorbell(evpl, &delegation_thread->doorbell,
+    evpl_add_doorbell(evpl,&delegation_thread->doorbell,
                       chimera_vfs_delegation_thread_wake);
 
     if (delegation_thread->mode == CHIMERA_VFS_DELEGATION_ASYNC) {
@@ -154,17 +154,17 @@ chimera_vfs_delegation_thread_init(
 
 static void
 chimera_vfs_delegation_thread_shutdown(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
-    struct chimera_vfs_delegation_thread *delegation_thread = private_data;
+    struct chimera_vfs_delegation_thread*delegation_thread = private_data;
 
     if (delegation_thread->poll) {
-        evpl_remove_poll(evpl, delegation_thread->poll);
+        evpl_remove_poll(evpl,delegation_thread->poll);
         delegation_thread->poll = NULL;
     }
 
-    evpl_remove_doorbell(evpl, &delegation_thread->doorbell);
+    evpl_remove_doorbell(evpl,&delegation_thread->doorbell);
 
     chimera_vfs_thread_destroy(delegation_thread->vfs_thread);
 } /* chimera_vfs_delegation_thread_shutdown */
@@ -174,31 +174,31 @@ chimera_vfs_close_thread_callback(
     enum chimera_vfs_error status,
     void                  *private_data)
 {
-    struct chimera_vfs_close_thread *close_thread = private_data;
+    struct chimera_vfs_close_thread*close_thread = private_data;
 
     close_thread->num_pending--;
 
-    chimera_atomic_add_fetch(&close_thread->closes_completed, 1, CHIMERA_MEMORY_RELEASE);
+    chimera_atomic_add_fetch(&close_thread->closes_completed,1,CHIMERA_MEMORY_RELEASE);
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
 chimera_vfs_close_thread_sweep(
-    struct evpl                     *evpl,
-    struct chimera_vfs_close_thread *close_thread,
-    struct vfs_open_cache           *cache,
-    uint64_t                         min_age)
+    struct evpl                    *evpl,
+    struct chimera_vfs_close_thread*close_thread,
+    struct vfs_open_cache          *cache,
+    uint64_t                        min_age)
 {
-    struct chimera_vfs_thread      *thread = close_thread->vfs_thread;
-    uint64_t                        count  = 0;
-    struct chimera_vfs_open_handle *handles, *handle;
+    struct chimera_vfs_thread     *thread = close_thread->vfs_thread;
+    uint64_t                       count  = 0;
+    struct chimera_vfs_open_handle*handles,*handle;
 
-    handles = chimera_vfs_open_cache_defer_close(cache, chimera_vfs_now_ticks(), min_age, &count,
+    handles = chimera_vfs_open_cache_defer_close(cache,chimera_vfs_now_ticks(),min_age,&count,
                                                  &close_thread->closes_issued);
 
     while (handles) {
 
         handle = handles;
-        LL_DELETE(handles, handle);
+        LL_DELETE(handles,handle);
 
         if (chimera_vfs_open_handle_needs_backend_close(handle)) {
             close_thread->num_pending++;
@@ -214,7 +214,7 @@ chimera_vfs_close_thread_sweep(
         } else {
             /* Nothing to close, so the fence slot this handle took when it left
              * the cache is settled here rather than by a callback. */
-            chimera_atomic_add_fetch(&close_thread->closes_completed, 1, CHIMERA_MEMORY_RELEASE);
+            chimera_atomic_add_fetch(&close_thread->closes_completed,1,CHIMERA_MEMORY_RELEASE);
         }
 
         /* defer_close removed the handle from the bucket but frees the struct
@@ -227,16 +227,20 @@ chimera_vfs_close_thread_sweep(
     return count;
 } /* chimera_vfs_close_thread_sweep */
 
+static uint64_t
+chimera_vfs_close_sweep_min_age_ns(
+    void);
+
 static void
 chimera_vfs_close_thread_wake_shutdown(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+    struct evpl         *evpl,
+    struct evpl_doorbell*doorbell)
 {
-    struct chimera_vfs_close_thread *close_thread = container_of(doorbell, struct chimera_vfs_close_thread, doorbell);
-    int                              shutdown     = close_thread->shutdown;
-    uint64_t                         min_age, count;
+    struct chimera_vfs_close_thread*close_thread = container_of(doorbell,struct chimera_vfs_close_thread,doorbell);
+    int                             shutdown     = close_thread->shutdown;
+    uint64_t                        min_age,count;
 
-    min_age = shutdown ? 0 : 100000000UL;
+    min_age = shutdown ? 0 : chimera_vfs_close_sweep_min_age_ns();
 
     /* Sweep OUTSIDE close_thread->lock.  A close can re-enter this thread's
      * event loop -- diskfs commit drains its submission queue with a nested
@@ -246,8 +250,8 @@ chimera_vfs_close_thread_wake_shutdown(
      * the shutdown cond handshake with chimera_vfs_destroy, and the sweep state
      * it touches (num_pending, the open caches) is owned by this thread / the
      * per-shard cache locks, so it needs no protection here. */
-    count  = chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
-    count += chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
+    count  = chimera_vfs_close_thread_sweep(evpl,close_thread,close_thread->vfs->vfs_open_path_cache,min_age);
+    count += chimera_vfs_close_thread_sweep(evpl,close_thread,close_thread->vfs->vfs_open_file_cache,min_age);
 
     /* Backend-lease service work rides this doorbell too. */
     if (close_thread->vfs->vfs_state) {
@@ -273,22 +277,49 @@ chimera_vfs_close_thread_wake_shutdown(
 
 } /* chimera_vfs_close_thread_wake_shutdown */
 
+/* Idle age a cached-but-unreferenced open handle must reach before the sweep
+ * closes it.  Default 100 ms; overridable via CHIMERA_CLOSE_SWEEP_MIN_AGE_MS
+ * so tests can drive the removed-but-held reclaim deterministically (0 =
+ * reclaim on the very next sweep). */
+static uint64_t
+chimera_vfs_close_sweep_min_age_ns(void)
+{
+    static uint64_t cached_ns = UINT64_MAX;
+
+    if (cached_ns != UINT64_MAX) {
+        return cached_ns;
+    }
+
+    const char     *env = getenv("CHIMERA_CLOSE_SWEEP_MIN_AGE_MS");
+    if (env && *env) {
+        char              *endp = NULL;
+        unsigned long long ms   = strtoull(env,&endp,10);
+        if (endp && endp != env && *endp == '\0' && ms <= 60000) {
+            cached_ns = (uint64_t) ms * 1000000ULL;
+            return cached_ns;
+        }
+    }
+
+    cached_ns = 100000000UL;
+    return cached_ns;
+} /* chimera_vfs_close_sweep_min_age_ns */
+
 static void
 chimera_vfs_close_thread_wake_timer(
-    struct evpl       *evpl,
-    struct evpl_timer *timer)
+    struct evpl      *evpl,
+    struct evpl_timer*timer)
 {
-    struct chimera_vfs_close_thread *close_thread = container_of(timer, struct chimera_vfs_close_thread, timer);
-    uint64_t                         min_age;
+    struct chimera_vfs_close_thread*close_thread = container_of(timer,struct chimera_vfs_close_thread,timer);
+    uint64_t                        min_age;
 
-    min_age = 100000000UL;
+    min_age = chimera_vfs_close_sweep_min_age_ns();
 
     /* No lock: the periodic sweep touches only this thread's state (num_pending)
      * and the open caches (guarded by their own per-shard locks).  Holding
      * close_thread->lock here would self-deadlock if a close re-enters the event
      * loop and re-fires this timer (see chimera_vfs_close_thread_wake_shutdown). */
-    chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
-    chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
+    chimera_vfs_close_thread_sweep(evpl,close_thread,close_thread->vfs->vfs_open_path_cache,min_age);
+    chimera_vfs_close_thread_sweep(evpl,close_thread,close_thread->vfs->vfs_open_file_cache,min_age);
 
     /* Drop implicit I/O leases that have gone idle, bounding resident
      * per-file state for write-once / read-once workloads; drain any
@@ -316,7 +347,7 @@ chimera_vfs_close_sweep_interval_us(void)
     const char     *env = getenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS");
     if (env && *env) {
         char              *endp = NULL;
-        unsigned long long ms   = strtoull(env, &endp, 10);
+        unsigned long long ms   = strtoull(env,&endp,10);
         if (endp && endp != env && *endp == '\0' && ms >= 10 && ms <= 60000) {
             cached_us = (uint64_t) ms * 1000ULL;
             return cached_us;
@@ -329,15 +360,15 @@ chimera_vfs_close_sweep_interval_us(void)
     return cached_us;
 } /* chimera_vfs_close_sweep_interval_us */
 
-static void *
+static void*
 chimera_vfs_close_thread_init(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
-    struct chimera_vfs_close_thread *close_thread = private_data;
+    struct chimera_vfs_close_thread*close_thread = private_data;
 
     close_thread->evpl       = evpl;
-    close_thread->vfs_thread = chimera_vfs_thread_init(evpl, close_thread->vfs);
+    close_thread->vfs_thread = chimera_vfs_thread_init(evpl,close_thread->vfs);
 
     /* The close thread doubles as the claim core's backend-lease service
      * thread: aggregate CAP_LEASE dispatches and recall drains run here. */
@@ -348,10 +379,10 @@ chimera_vfs_close_thread_init(
                                          &close_thread->doorbell);
     }
 
-    evpl_add_doorbell(evpl, &close_thread->doorbell,
+    evpl_add_doorbell(evpl,&close_thread->doorbell,
                       chimera_vfs_close_thread_wake_shutdown);
 
-    evpl_add_timer(evpl, &close_thread->timer,
+    evpl_add_timer(evpl,&close_thread->timer,
                    chimera_vfs_close_thread_wake_timer,
                    chimera_vfs_close_sweep_interval_us());
 
@@ -360,10 +391,10 @@ chimera_vfs_close_thread_init(
 
 static void
 chimera_vfs_close_thread_shutdown(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
-    struct chimera_vfs_close_thread *close_thread = private_data;
+    struct chimera_vfs_close_thread*close_thread = private_data;
 
     /* Umount/RmFs teardown traffic on other vfs threads can still release
      * claims and post service work; detach first so those posts stop ringing
@@ -373,41 +404,41 @@ chimera_vfs_close_thread_shutdown(
         chimera_vfs_claim_backend_service(close_thread->vfs->vfs_state);
     }
 
-    evpl_remove_doorbell(evpl, &close_thread->doorbell);
-    evpl_remove_timer(evpl, &close_thread->timer);
+    evpl_remove_doorbell(evpl,&close_thread->doorbell);
+    evpl_remove_timer(evpl,&close_thread->timer);
 
     chimera_vfs_thread_destroy(close_thread->vfs_thread);
 } /* chimera_vfs_close_thread_shutdown */
 
 static void
-chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
+chimera_vfs_synthesize_machine_name(struct chimera_vfs*vfs)
 {
     char  hostname[64];
     char  machine_id[64];
 
 #ifdef _WIN32
     DWORD hostname_size = sizeof(hostname);
-    if (!GetComputerNameA(hostname, &hostname_size)) {
-        snprintf(hostname, sizeof(hostname), "unknown");
+    if (!GetComputerNameA(hostname,&hostname_size)) {
+        snprintf(hostname,sizeof(hostname),"unknown");
     }
-    chimera_vfs_abort_if(chimera_windows_machine_identity(machine_id, sizeof(machine_id)),
+    chimera_vfs_abort_if(chimera_windows_machine_identity(machine_id,sizeof(machine_id)),
                          "Could not determine the Windows machine identity");
 #else  /* ifdef _WIN32 */
     int   len;
     FILE *fp;
 
     /* Get hostname */
-    if (gethostname(hostname, sizeof(hostname)) != 0) {
-        snprintf(hostname, sizeof(hostname), "unknown");
+    if (gethostname(hostname,sizeof(hostname)) != 0) {
+        snprintf(hostname,sizeof(hostname),"unknown");
     }
     hostname[sizeof(hostname) - 1] = '\0';
 
     /* Get unique machine identifier from /etc/machine-id */
     machine_id[0] = '\0';
-    fp            = fopen("/etc/machine-id", "r");
+    fp            = fopen("/etc/machine-id","r");
 
     if (fp) {
-        if (fgets(machine_id, sizeof(machine_id), fp)) {
+        if (fgets(machine_id,sizeof(machine_id),fp)) {
             /* Remove trailing newline if present */
             len = strlen(machine_id);
 
@@ -425,10 +456,10 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
 
     /* If machine-id not available, try /sys/class/dmi/id/product_uuid */
     if (machine_id[0] == '\0') {
-        fp = fopen("/sys/class/dmi/id/product_uuid", "r");
+        fp = fopen("/sys/class/dmi/id/product_uuid","r");
 
         if (fp) {
-            if (fgets(machine_id, sizeof(machine_id), fp)) {
+            if (fgets(machine_id,sizeof(machine_id),fp)) {
                 len = strlen(machine_id);
 
                 if (len > 0 && machine_id[len - 1] == '\n') {
@@ -445,7 +476,7 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
 
     /* Fall back to gethostid if no machine-id found */
     if (machine_id[0] == '\0') {
-        snprintf(machine_id, sizeof(machine_id), "%08lx", gethostid());
+        snprintf(machine_id,sizeof(machine_id),"%08lx",gethostid());
     }
 
 #endif /* ifdef _WIN32 */
@@ -464,27 +495,27 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
         vfs->machine_name_len = sizeof(vfs->machine_name) - 1;
     }
 
-    chimera_vfs_info("Machine name: %.*s", vfs->machine_name_len, vfs->machine_name);
+    chimera_vfs_info("Machine name: %.*s",vfs->machine_name_len,vfs->machine_name);
 } /* chimera_vfs_synthesize_machine_name */
 
-static struct chimera_vfs_delegation_thread *
+static struct chimera_vfs_delegation_thread*
 chimera_vfs_spawn_delegation_pool(
     struct chimera_vfs              *vfs,
     int                              count,
     enum chimera_vfs_delegation_mode mode)
 {
-    struct chimera_vfs_delegation_thread *pool;
+    struct chimera_vfs_delegation_thread*pool;
 
     if (count <= 0) {
         return NULL;
     }
 
-    pool = calloc(count, sizeof(struct chimera_vfs_delegation_thread));
+    pool = calloc(count,sizeof(struct chimera_vfs_delegation_thread));
 
     for (int i = 0; i < count; i++) {
         pool[i].vfs  = vfs;
         pool[i].mode = mode;
-        evpl_mutex_init(&pool[i].lock, NULL);
+        evpl_mutex_init(&pool[i].lock,NULL);
 
         pool[i].evpl_thread = evpl_thread_create(
             NULL,
@@ -517,8 +548,8 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 static void
 chimera_vfs_create_call_rcu_workers(int nworkers)
 {
-    long                   ncpu = sysconf(_SC_NPROCESSORS_CONF);
-    struct call_rcu_data **workers;
+    long                  ncpu = sysconf(_SC_NPROCESSORS_CONF);
+    struct call_rcu_data**workers;
 
     if (nworkers <= 0 || (ncpu > 0 && nworkers >= ncpu)) {
         if (create_all_cpu_call_rcu_data(0) != 0) {
@@ -533,16 +564,16 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
         return;
     }
 
-    workers = calloc(nworkers, sizeof(*workers));
+    workers = calloc(nworkers,sizeof(*workers));
     if (!workers) {
         return;
     }
 
     for (int i = 0; i < nworkers; i++) {
-        workers[i] = create_call_rcu_data(0, -1);
+        workers[i] = create_call_rcu_data(0,-1);
         if (!workers[i]) {
             chimera_vfs_error("Failed to create call_rcu worker %d/%d; "
-                              "falling back to the default RCU reclaim thread", i, nworkers);
+                              "falling back to the default RCU reclaim thread",i,nworkers);
             /* Tear down the ones we did create and bail to the default worker. */
             for (int j = 0; j < i; j++) {
                 call_rcu_data_free(workers[j]);
@@ -553,7 +584,7 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
     }
 
     for (long cpu = 0; cpu < ncpu; cpu++) {
-        set_cpu_call_rcu_data(cpu, workers[cpu % nworkers]);
+        set_cpu_call_rcu_data(cpu,workers[cpu % nworkers]);
     }
 
     free(workers);
@@ -563,12 +594,12 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 
 /* Native builds resolve built-ins explicitly so archive members are retained.
 * External modules require a shared Chimera SDK and remain a Unix facility. */
-static struct chimera_vfs_module *
-chimera_vfs_find_module(const char *symbol)
+static struct chimera_vfs_module*
+chimera_vfs_find_module(const char*symbol)
 {
 #ifdef _WIN32
-    extern struct chimera_vfs_module vfs_root, vfs_memfs, vfs_memkv;
-    extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
+    extern struct chimera_vfs_module vfs_root,vfs_memfs,vfs_memkv;
+    extern struct chimera_vfs_module vfs_nfs,vfs_smb,vfs_diskfs;
 #ifdef CHIMERA_HAVE_SQLITE_VFS
     extern struct chimera_vfs_module vfs_sqlite;
 #endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
@@ -587,37 +618,37 @@ chimera_vfs_find_module(const char *symbol)
 #endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
     };
     for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
-        if (!strncmp(symbol, "vfs_", 4) && !strcmp(symbol + 4, builtins[i]->name)) {
+        if (!strncmp(symbol,"vfs_",4) && !strcmp(symbol + 4,builtins[i]->name)) {
             return builtins[i];
         }
     }
     return NULL;
 #else  /* ifdef _WIN32 */
-    return dlsym(RTLD_DEFAULT, symbol);
+    return dlsym(RTLD_DEFAULT,symbol);
 #endif /* ifdef _WIN32 */
 } /* chimera_vfs_find_module */
 
-SYMBOL_EXPORT struct chimera_vfs *
+SYMBOL_EXPORT struct chimera_vfs*
 chimera_vfs_init(
-    int                                  num_sync_delegation_threads,
-    int                                  num_async_delegation_threads,
-    const struct chimera_vfs_module_cfg *module_cfgs,
-    int                                  num_modules,
-    const char                          *kv_module_name,
-    int                                  cache_ttl,
-    int                                  attr_cache_enabled,
-    int                                  name_cache_enabled,
-    int                                  num_rcu_reclaim_threads,
-    struct prometheus_metrics           *metrics)
+    int                                 num_sync_delegation_threads,
+    int                                 num_async_delegation_threads,
+    const struct chimera_vfs_module_cfg*module_cfgs,
+    int                                 num_modules,
+    const char                         *kv_module_name,
+    int                                 cache_ttl,
+    int                                 attr_cache_enabled,
+    int                                 name_cache_enabled,
+    int                                 num_rcu_reclaim_threads,
+    struct prometheus_metrics          *metrics)
 {
-    struct chimera_vfs        *vfs;
-    struct chimera_vfs_module *module;
-    char                       modsym[80];
+    struct chimera_vfs       *vfs;
+    struct chimera_vfs_module*module;
+    char                      modsym[80];
 
 #ifndef _WIN32
-    void                      *handle;
+    void                     *handle;
 #endif /* ifndef _WIN32 */
-    const char                *effective_kv_module;
+    const char               *effective_kv_module;
 
     /* Bring up the process-wide TSC clock before any cache/timestamp use. */
     chimera_vfs_clock_init();
@@ -631,7 +662,7 @@ chimera_vfs_init(
      * failure call_rcu falls back to the default worker. */
     chimera_vfs_create_call_rcu_workers(num_rcu_reclaim_threads);
 
-    vfs = calloc(1, sizeof(*vfs));
+    vfs = calloc(1,sizeof(*vfs));
 
     /* Sane default for a VFS brought up without a server or client config
      * behind it (in-process module tests); chimera_vfs_set_umount_timeout
@@ -650,70 +681,70 @@ chimera_vfs_init(
                                                                            "The latency of VFS operations in nanoseconds",
                                                                            34);
 
-        vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_series *));
+        vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM,sizeof(struct prometheus_histogram_series*));
 
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
             vfs->metrics.op_latency_series[i] = prometheus_histogram_create_series(vfs->metrics.op_latency,
-                                                                                   (const char *[]) { "name" },
-                                                                                   (const char *[]) {
+                                                                                   (const char*[]) { "name" },
+                                                                                   (const char*[]) {
                 chimera_vfs_op_name(i)
             },
                                                                                    1);
         }
     }
 
-    vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH, 10, 128 * 1024, metrics,
+    vfs->vfs_open_path_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_PATH,10,128 * 1024,metrics,
                                                            "path_handles");
-    vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE, 10, 128 * 1024, metrics,
+    vfs->vfs_open_file_cache = chimera_vfs_open_cache_init(CHIMERA_VFS_OPEN_ID_FILE,10,128 * 1024,metrics,
                                                            "file_handles");
 
     /* The name (lookup) cache is optional (common.name_cache).  When off we
      * leave it NULL; its helpers (lookup/insert/remove/destroy) are all no-ops
      * on a NULL cache, so nothing is cached, consulted, or freed. */
     vfs->vfs_name_cache = name_cache_enabled ?
-        chimera_vfs_name_cache_create(8, 4, 2, cache_ttl, metrics) : NULL;
+        chimera_vfs_name_cache_create(8,4,2,cache_ttl,metrics) : NULL;
     /* The attr cache is optional (common.attr_cache).  When off we leave it
      * NULL; the cache helpers (lookup/insert/refresh/destroy) are all no-ops on
      * a NULL cache, so nothing is cached, consulted, or freed. */
     vfs->vfs_attr_cache = attr_cache_enabled ?
-        chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics) : NULL;
+        chimera_vfs_attr_cache_create(8,4,2,cache_ttl,metrics) : NULL;
 
-    vfs->vfs_user_cache = chimera_vfs_user_cache_create(8192, 600);
-    vfs->identity       = chimera_vfs_identity_create(vfs, 4);
+    vfs->vfs_user_cache = chimera_vfs_user_cache_create(8192,600);
+    vfs->identity       = chimera_vfs_identity_create(vfs,4);
 
     vfs->vfs_notify = chimera_vfs_notify_init(vfs);
     vfs->vfs_state  = chimera_vfs_state_init();
     vfs->pnfs       = chimera_vfs_pnfs_create();
 
     /* Register the root pseudo-filesystem module */
-    chimera_vfs_register(vfs, &vfs_root, NULL);
+    chimera_vfs_register(vfs,&vfs_root,NULL);
     /* Create the root mount entry in the mount table */
     chimera_vfs_root_register_mount(vfs);
 
     for (int i = 0; i < num_modules; i++) {
-        chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
-        snprintf(modsym, sizeof(modsym), "vfs_%s", module_cfgs[i].module_name);
+        chimera_vfs_info("Initializing VFS module %s...",module_cfgs[i].module_name);
+        snprintf(modsym,sizeof(modsym),"vfs_%s",module_cfgs[i].module_name);
 
         // If a module path is specified, attempt to load the shared object
         if (module_cfgs[i].module_path[0] != '\0') {
             // Check if the symbol is already present (module already loaded)
             if (chimera_vfs_find_module(modsym) != NULL) {
                 chimera_vfs_error("Module %s already loaded, skipping dlopen of %s",
-                                  module_cfgs[i].module_name, module_cfgs[i].module_path);
+                                  module_cfgs[i].module_name,module_cfgs[i].module_path);
             } else {
 #ifdef _WIN32
-                chimera_vfs_abort_if(1, "External VFS modules require a shared-library build: %s",
+                chimera_vfs_abort_if(1,"External VFS modules require a shared-library build: %s",
                                      module_cfgs[i].module_path);
 #else  /* ifdef _WIN32 */
                 // Attempt to load the module shared object
-                handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
+                handle = dlopen(module_cfgs[i].module_path,RTLD_NOW | RTLD_GLOBAL);
                 if (!handle) {
-                    chimera_vfs_abort_if(1, "Failed to load module %s from %s: %s",
+                    chimera_vfs_abort_if(1,"Failed to load module %s from %s: %s",
                                          module_cfgs[i].module_name,
                                          module_cfgs[i].module_path,
                                          dlerror());
                 }
-                chimera_vfs_info("Module %s loaded from %s", module_cfgs[i].module_name, module_cfgs[i].module_path);
+                chimera_vfs_info("Module %s loaded from %s",module_cfgs[i].module_name,module_cfgs[i].module_path);
 #endif /* ifdef _WIN32 */
             }
         }
@@ -727,7 +758,7 @@ chimera_vfs_init(
                              module_cfgs[i].module_path);
 
         // Register the module with the VFS, passing its config path
-        chimera_vfs_register(vfs, module, module_cfgs[i].config_data);
+        chimera_vfs_register(vfs,module,module_cfgs[i].config_data);
     }
 
     /* Set up the default KV module - a KV-only backend (memkv or sqlite) that
@@ -739,7 +770,7 @@ chimera_vfs_init(
     /* Find the KV module among those already registered. */
     vfs->kv_module = NULL;
     for (int i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
-        if (vfs->modules[i] && strcmp(vfs->modules[i]->name, effective_kv_module) == 0) {
+        if (vfs->modules[i] && strcmp(vfs->modules[i]->name,effective_kv_module) == 0) {
             vfs->kv_module = vfs->modules[i];
             break;
         }
@@ -750,40 +781,40 @@ chimera_vfs_init(
      * auto-register it from its built-in symbol (vfs_memkv / vfs_sqlite, linked
      * into chimera_vfs). */
     if (!vfs->kv_module) {
-        if (strcmp(effective_kv_module, "memkv") == 0) {
+        if (strcmp(effective_kv_module,"memkv") == 0) {
             /* memkv is built into chimera_vfs; reference it directly so the
             * symbol is always retained regardless of linker --as-needed. */
             module = &vfs_memkv;
         } else {
-            snprintf(modsym, sizeof(modsym), "vfs_%s", effective_kv_module);
+            snprintf(modsym,sizeof(modsym),"vfs_%s",effective_kv_module);
             module = chimera_vfs_find_module(modsym);
         }
         chimera_vfs_abort_if(!module,
                              "KV module '%s' not found (symbol vfs_%s)",
-                             effective_kv_module, effective_kv_module);
-        chimera_vfs_register(vfs, module, NULL);
+                             effective_kv_module,effective_kv_module);
+        chimera_vfs_register(vfs,module,NULL);
         vfs->kv_module = vfs->modules[module->fh_magic];
     }
 
     chimera_vfs_abort_if(!vfs->kv_module,
-                         "KV module '%s' not found", effective_kv_module);
+                         "KV module '%s' not found",effective_kv_module);
 
     chimera_vfs_abort_if(!(vfs->kv_module->capabilities & CHIMERA_VFS_CAP_KV),
                          "KV module '%s' does not support KV operations (missing CHIMERA_VFS_CAP_KV)",
                          effective_kv_module);
 
-    chimera_vfs_info("Using '%s' as KV backend", effective_kv_module);
+    chimera_vfs_info("Using '%s' as KV backend",effective_kv_module);
 
     vfs->num_sync_delegation_threads = num_sync_delegation_threads;
     vfs->sync_delegation_threads     = chimera_vfs_spawn_delegation_pool(
-        vfs, num_sync_delegation_threads, CHIMERA_VFS_DELEGATION_SYNC);
+        vfs,num_sync_delegation_threads,CHIMERA_VFS_DELEGATION_SYNC);
 
     vfs->num_async_delegation_threads = num_async_delegation_threads;
     vfs->async_delegation_threads     = chimera_vfs_spawn_delegation_pool(
-        vfs, num_async_delegation_threads, CHIMERA_VFS_DELEGATION_ASYNC);
+        vfs,num_async_delegation_threads,CHIMERA_VFS_DELEGATION_ASYNC);
 
-    evpl_mutex_init(&vfs->close_thread.lock, NULL);
-    evpl_cond_init(&vfs->close_thread.cond, NULL);
+    evpl_mutex_init(&vfs->close_thread.lock,NULL);
+    evpl_cond_init(&vfs->close_thread.cond,NULL);
     vfs->close_thread.vfs      = vfs;
     vfs->close_thread.shutdown = 0;
 
@@ -806,33 +837,33 @@ chimera_vfs_set_tcp_flavor(
 
 SYMBOL_EXPORT void
 chimera_vfs_set_umount_timeout(
-    struct chimera_vfs *vfs,
-    int                 timeout_ms)
+    struct chimera_vfs*vfs,
+    int                timeout_ms)
 {
     vfs->umount_timeout_us = (uint64_t) timeout_ms * 1000;
 } /* chimera_vfs_set_umount_timeout */
 
 SYMBOL_EXPORT void
 chimera_vfs_set_caching_enabled(
-    struct chimera_vfs *vfs,
-    int                 enabled)
+    struct chimera_vfs*vfs,
+    int                enabled)
 {
     vfs->caching_enabled = enabled;
 } /* chimera_vfs_set_caching_enabled */
 
 SYMBOL_EXPORT int
 chimera_vfs_fh_is_plausible(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen)
+    struct chimera_vfs_thread*thread,
+    const void               *fh,
+    int                       fhlen)
 {
-    return chimera_vfs_get_module(thread, fh, fhlen) != NULL;
+    return chimera_vfs_get_module(thread,fh,fhlen) != NULL;
 } /* chimera_vfs_fh_is_plausible */
 
 SYMBOL_EXPORT int
 chimera_vfs_can_persist_handle_state(
-    struct chimera_vfs_thread      *thread,
-    struct chimera_vfs_open_handle *handle)
+    struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_open_handle*handle)
 {
     if (!handle || !handle->vfs_module) {
         return 0;
@@ -852,11 +883,11 @@ chimera_vfs_can_persist_handle_state(
  * learn a file's backend pNFS capabilities. */
 SYMBOL_EXPORT uint64_t
 chimera_vfs_module_capabilities(
-    struct chimera_vfs_thread *thread,
-    const void                *fh,
-    int                        fhlen)
+    struct chimera_vfs_thread*thread,
+    const void               *fh,
+    int                       fhlen)
 {
-    struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+    struct chimera_vfs_module*module = chimera_vfs_get_module(thread,fh,fhlen);
 
     return module ? module->capabilities : 0;
 } /* chimera_vfs_module_capabilities */
@@ -872,17 +903,17 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 #else  /* if defined(_WIN32) || defined(CHIMERA_NATIVE_RCU) */
 #define CHIMERA_RCU_TEARDOWN_MAX_THREADS 64
 
-struct chimera_rcu_teardown_ctx {
-    evpl_native_thread_t   thread;
-    struct call_rcu_data **crdps;
-    int                    count;
-    int                    started;
+struct chimera_rcu_teardown_ctx{
+    evpl_native_thread_t  thread;
+    struct call_rcu_data**crdps;
+    int                   count;
+    int                   started;
 };
 
-static void *
-chimera_vfs_rcu_teardown_worker(void *arg)
+static void*
+chimera_vfs_rcu_teardown_worker(void*arg)
 {
-    struct chimera_rcu_teardown_ctx *ctx = arg;
+    struct chimera_rcu_teardown_ctx*ctx = arg;
 
     for (int i = 0; i < ctx->count; i++) {
         call_rcu_data_free(ctx->crdps[i]);
@@ -908,11 +939,11 @@ chimera_vfs_rcu_teardown_worker(void *arg)
 static void
 chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 {
-    long                             ncpu = sysconf(_SC_NPROCESSORS_CONF);
-    struct call_rcu_data            *defaultcrdp;
-    struct call_rcu_data           **crdps;
-    struct chimera_rcu_teardown_ctx *ctx;
-    int                              n = 0, nthreads, per, idx;
+    long                            ncpu = sysconf(_SC_NPROCESSORS_CONF);
+    struct call_rcu_data           *defaultcrdp;
+    struct call_rcu_data          **crdps;
+    struct chimera_rcu_teardown_ctx*ctx;
+    int                             n = 0,nthreads,per,idx;
 
     if (ncpu <= 0) {
         free_all_cpu_call_rcu_data();
@@ -920,7 +951,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
     }
 
     defaultcrdp = get_default_call_rcu_data();
-    crdps       = calloc(ncpu, sizeof(*crdps));
+    crdps       = calloc(ncpu,sizeof(*crdps));
 
     if (!crdps) {
         free_all_cpu_call_rcu_data();
@@ -931,14 +962,14 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
      * the unique crdps to free.  Skip the shared default worker -- liburcu owns
      * its lifetime and call_rcu_data_free() refuses to free it anyway. */
     for (long cpu = 0; cpu < ncpu; cpu++) {
-        struct call_rcu_data *crdp = get_cpu_call_rcu_data(cpu);
-        int                   dup  = 0;
+        struct call_rcu_data*crdp = get_cpu_call_rcu_data(cpu);
+        int                  dup  = 0;
 
         if (crdp == NULL || crdp == defaultcrdp) {
             continue;
         }
 
-        set_cpu_call_rcu_data(cpu, NULL);
+        set_cpu_call_rcu_data(cpu,NULL);
 
         for (int i = 0; i < n; i++) {
             if (crdps[i] == crdp) {
@@ -963,7 +994,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
     synchronize_rcu();
 
     nthreads = n < CHIMERA_RCU_TEARDOWN_MAX_THREADS ? n : CHIMERA_RCU_TEARDOWN_MAX_THREADS;
-    ctx      = calloc(nthreads, sizeof(*ctx));
+    ctx      = calloc(nthreads,sizeof(*ctx));
 
     if (!ctx) {
         /* Fall back to a serial free of everything we detached. */
@@ -982,7 +1013,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
         ctx[t].count = (idx + per <= n) ? per : (n - idx);
         idx         += ctx[t].count;
 
-        if (evpl_native_thread_create(&ctx[t].thread, NULL, chimera_vfs_rcu_teardown_worker, &ctx[t]) == 0) {
+        if (evpl_native_thread_create(&ctx[t].thread,NULL,chimera_vfs_rcu_teardown_worker,&ctx[t]) == 0) {
             ctx[t].started = 1;
         } else {
             /* Spawn failed -- free this chunk inline so nothing leaks. */
@@ -992,7 +1023,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 
     for (int t = 0; t < nthreads; t++) {
         if (ctx[t].started) {
-            evpl_native_thread_join(ctx[t].thread, NULL);
+            evpl_native_thread_join(ctx[t].thread,NULL);
         }
     }
 
@@ -1003,10 +1034,10 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 
 
 SYMBOL_EXPORT void
-chimera_vfs_destroy(struct chimera_vfs *vfs)
+chimera_vfs_destroy(struct chimera_vfs*vfs)
 {
-    struct chimera_vfs_module *module;
-    int                        i;
+    struct chimera_vfs_module*module;
+    int                       i;
 
     evpl_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;
@@ -1015,7 +1046,7 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     evpl_ring_doorbell(&vfs->close_thread.doorbell);
 
-    evpl_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
+    evpl_cond_wait(&vfs->close_thread.cond,&vfs->close_thread.lock);
     evpl_mutex_unlock(&vfs->close_thread.lock);
 
     /* Stop the identity resolver first: its workers ring protocol/delegation
@@ -1099,10 +1130,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     if (vfs->metrics.op_latency) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-            prometheus_histogram_destroy_series(vfs->metrics.op_latency, vfs->metrics.op_latency_series[i]);
+            prometheus_histogram_destroy_series(vfs->metrics.op_latency,vfs->metrics.op_latency_series[i]);
         }
         free(vfs->metrics.op_latency_series);
-        prometheus_histogram_destroy(vfs->metrics.metrics, vfs->metrics.op_latency);
+        prometheus_histogram_destroy(vfs->metrics.metrics,vfs->metrics.op_latency);
     }
 
     chimera_vfs_clock_shutdown();
@@ -1112,11 +1143,11 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
 static void
 chimera_vfs_process_completion(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+    struct evpl         *evpl,
+    struct evpl_doorbell*doorbell)
 {
-    struct chimera_vfs_thread  *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
-    struct chimera_vfs_request *complete_requests, *unblocked_requests, *io_resume_requests, *request;
+    struct chimera_vfs_thread *thread = container_of(doorbell,struct chimera_vfs_thread,doorbell);
+    struct chimera_vfs_request*complete_requests,*unblocked_requests,*io_resume_requests,*request;
 
     evpl_mutex_lock(&thread->lock);
     complete_requests                 = thread->pending_complete_requests;
@@ -1129,14 +1160,14 @@ chimera_vfs_process_completion(
 
     while (complete_requests) {
         request = complete_requests;
-        DL_DELETE(complete_requests, request);
+        DL_DELETE(complete_requests,request);
         request->complete_delegate(request);
     }
 
     while (unblocked_requests) {
         request = unblocked_requests;
-        LL_DELETE(unblocked_requests, request);
-        request->unblock_callback(request, request->pending_handle);
+        LL_DELETE(unblocked_requests,request);
+        request->unblock_callback(request,request->pending_handle);
     }
 
     /* Resume parked I/O/metadata requests on this (their owning) thread.
@@ -1144,7 +1175,7 @@ chimera_vfs_process_completion(
      * completion; everything else re-runs the lease-mediation retry. */
     while (io_resume_requests) {
         request = io_resume_requests;
-        DL_DELETE(io_resume_requests, request);
+        DL_DELETE(io_resume_requests,request);
         if (request->notify_gate_resume) {
             request->notify_gate_resume = 0;
             request->complete(request);
@@ -1159,10 +1190,10 @@ chimera_vfs_process_completion(
 } /* chimera_vfs_process_completion */
 
 SYMBOL_EXPORT void
-chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
+chimera_vfs_watchdog(struct chimera_vfs_thread*thread)
 {
-    struct chimera_vfs_request *request;
-    uint64_t                    elapsed;
+    struct chimera_vfs_request*request;
+    uint64_t                   elapsed;
 
     request = thread->active_requests;
 
@@ -1181,7 +1212,7 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
          * does not flood. */
         struct timespec ts;
 
-        clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+        clock_gettime(CLOCK_MONOTONIC_COARSE,&ts);
 
         if (ts.tv_sec - thread->watchdog_last_report >= 30) {
             thread->watchdog_last_report = ts.tv_sec;
@@ -1193,7 +1224,7 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 
                 chimera_vfs_error(
                     "request %p op %s active for %lu sec wait=%s wait_sec=%llu arg0=%llu arg1=%llu arg2=%llu (oldest on this thread)",
-                    (void *) request,
+                    (void*) request,
                     chimera_vfs_op_name(request->opcode),
                     elapsed / 1000000000UL,
                     request->wait_reason,
@@ -1204,7 +1235,7 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
             } else {
                 chimera_vfs_error(
                     "request %p op %s active for %lu sec (oldest on this thread)",
-                    (void *) request,
+                    (void*) request,
                     chimera_vfs_op_name(request->opcode),
                     elapsed / 1000000000UL);
             }
@@ -1232,8 +1263,8 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
  */
 static void
 chimera_vfs_rcu_quiescent(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
     (void) evpl;
     (void) private_data;
@@ -1242,8 +1273,8 @@ chimera_vfs_rcu_quiescent(
 
 static void
 chimera_vfs_rcu_offline(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
     (void) evpl;
     (void) private_data;
@@ -1252,8 +1283,8 @@ chimera_vfs_rcu_offline(
 
 static void
 chimera_vfs_rcu_online(
-    struct evpl *evpl,
-    void        *private_data)
+    struct evpl*evpl,
+    void       *private_data)
 {
     (void) evpl;
     (void) private_data;
@@ -1275,16 +1306,16 @@ static const struct evpl_loop_hooks chimera_vfs_rcu_hooks = {
  */
 static CHIMERA_THREAD_LOCAL int chimera_vfs_rcu_refs;
 
-SYMBOL_EXPORT struct chimera_vfs_thread *
+SYMBOL_EXPORT struct chimera_vfs_thread*
 chimera_vfs_thread_init(
-    struct evpl        *evpl,
-    struct chimera_vfs *vfs)
+    struct evpl       *evpl,
+    struct chimera_vfs*vfs)
 {
-    struct chimera_vfs_thread *thread;
-    struct chimera_vfs_module *module;
-    int                        i;
+    struct chimera_vfs_thread*thread;
+    struct chimera_vfs_module*module;
+    int                       i;
 
-    thread       = calloc(1, sizeof(*thread));
+    thread       = calloc(1,sizeof(*thread));
     thread->evpl = evpl;
     thread->vfs  = vfs;
 
@@ -1294,7 +1325,7 @@ chimera_vfs_thread_init(
      * CPU migration -- and never strands in a stripe nothing pops. */
     {
         static uint32_t rcu_stripe_seq;
-        uint32_t        s = chimera_atomic_fetch_add(&rcu_stripe_seq, 1, CHIMERA_MEMORY_RELAXED);
+        uint32_t        s = chimera_atomic_fetch_add(&rcu_stripe_seq,1,CHIMERA_MEMORY_RELAXED);
         int             p;
 
         for (p = 0; p < CHIMERA_RCU_POOL_COUNT; p++) {
@@ -1303,7 +1334,7 @@ chimera_vfs_thread_init(
     }
 
     if (vfs->metrics.metrics) {
-        thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_instance *));
+        thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM,sizeof(struct prometheus_histogram_instance*));
 
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
             thread->metrics.op_latency_series[i] = prometheus_histogram_series_create_instance(vfs->metrics.
@@ -1313,14 +1344,14 @@ chimera_vfs_thread_init(
 
     if (chimera_vfs_rcu_refs++ == 0) {
         urcu_qsbr_register_thread();
-        evpl_set_loop_hooks(evpl, &chimera_vfs_rcu_hooks);
+        evpl_set_loop_hooks(evpl,&chimera_vfs_rcu_hooks);
     }
 
     evpl_mutex_init(
         &thread->lock,
         NULL);
 
-    evpl_add_doorbell(evpl, &thread->doorbell, chimera_vfs_process_completion);
+    evpl_add_doorbell(evpl,&thread->doorbell,chimera_vfs_process_completion);
 
     for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = vfs->modules[i];
@@ -1334,22 +1365,22 @@ chimera_vfs_thread_init(
         }
 
         thread->module_private[i] = module->thread_init(
-            evpl, vfs->module_private[i]);
+            evpl,vfs->module_private[i]);
     }
 
     return thread;
 } /* chimera_vfs_thread_init */
 
 SYMBOL_EXPORT void
-chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
+chimera_vfs_thread_destroy(struct chimera_vfs_thread*thread)
 {
-    struct chimera_vfs_module      *module;
-    struct chimera_vfs_request     *request;
-    struct chimera_vfs_open_handle *handle;
-    struct chimera_vfs_find_result *find_result;
-    int                             i;
+    struct chimera_vfs_module     *module;
+    struct chimera_vfs_request    *request;
+    struct chimera_vfs_open_handle*handle;
+    struct chimera_vfs_find_result*find_result;
+    int                            i;
 
-    evpl_remove_doorbell(thread->evpl, &thread->doorbell);
+    evpl_remove_doorbell(thread->evpl,&thread->doorbell);
 
     for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = thread->vfs->modules[i];
@@ -1367,19 +1398,19 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 
     while (thread->free_find_results) {
         find_result = thread->free_find_results;
-        LL_DELETE(thread->free_find_results, find_result);
+        LL_DELETE(thread->free_find_results,find_result);
         free(find_result);
     }
 
     while (thread->free_synth_handles) {
         handle = thread->free_synth_handles;
-        LL_DELETE(thread->free_synth_handles, handle);
+        LL_DELETE(thread->free_synth_handles,handle);
         free(handle);
     }
 
     while (thread->free_requests) {
         request = thread->free_requests;
-        LL_DELETE(thread->free_requests, request);
+        LL_DELETE(thread->free_requests,request);
         free(request->plugin_data);
         free(request);
     }
@@ -1399,7 +1430,7 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
     }
 
     if (--chimera_vfs_rcu_refs == 0) {
-        evpl_set_loop_hooks(thread->evpl, NULL);
+        evpl_set_loop_hooks(thread->evpl,NULL);
         urcu_qsbr_unregister_thread();
     }
 
@@ -1408,9 +1439,9 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 
 void
 chimera_vfs_register(
-    struct chimera_vfs        *vfs,
-    struct chimera_vfs_module *module,
-    const char                *cfgdata)
+    struct chimera_vfs       *vfs,
+    struct chimera_vfs_module*module,
+    const char               *cfgdata)
 {
     /* A module built against a different SDK contract would misinterpret the
      * request/module structures; refuse it at load time rather than corrupt
@@ -1418,20 +1449,20 @@ chimera_vfs_register(
      * is their only compatibility gate. */
     chimera_vfs_abort_if(module->sdk_version != CHIMERA_VFS_SDK_VERSION,
                          "module %s was built against VFS SDK version %u; this chimera provides version %u",
-                         module->name, module->sdk_version, CHIMERA_VFS_SDK_VERSION);
+                         module->name,module->sdk_version,CHIMERA_VFS_SDK_VERSION);
 
     vfs->modules[module->fh_magic] = module;
 
-    vfs->module_private[module->fh_magic] = module->init(cfgdata, vfs->metrics.metrics);
+    vfs->module_private[module->fh_magic] = module->init(cfgdata,vfs->metrics.metrics);
 
     if (vfs->module_private[module->fh_magic] == NULL) {
-        chimera_vfs_error("Failed to initialize module %s", module->name);
+        chimera_vfs_error("Failed to initialize module %s",module->name);
     }
 
 } /* chimera_vfs_register */
 
 SYMBOL_EXPORT void
-chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)
+chimera_vfs_thread_drain(struct chimera_vfs_thread*thread)
 {
     while (thread->num_active_requests) {
         evpl_continue(thread->evpl);
@@ -1440,74 +1471,74 @@ chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)
 
 SYMBOL_EXPORT void
 chimera_vfs_get_root_fh(
-    uint8_t  *fh,
-    uint32_t *fh_len)
+    uint8_t *fh,
+    uint32_t*fh_len)
 {
-    chimera_vfs_root_get_fh(fh, fh_len);
+    chimera_vfs_root_get_fh(fh,fh_len);
 } /* chimera_vfs_get_root_fh */
 
 SYMBOL_EXPORT int
 chimera_vfs_add_user(
-    struct chimera_vfs *vfs,
-    const char         *username,
-    const char         *password,
-    const char         *smbpasswd,
-    const char         *sid,
-    uint32_t            uid,
-    uint32_t            gid,
-    uint32_t            ngids,
-    const uint32_t     *gids,
-    int                 pinned)
+    struct chimera_vfs*vfs,
+    const char        *username,
+    const char        *password,
+    const char        *smbpasswd,
+    const char        *sid,
+    uint32_t           uid,
+    uint32_t           gid,
+    uint32_t           ngids,
+    const uint32_t    *gids,
+    int                pinned)
 {
     return chimera_vfs_user_cache_add(vfs->vfs_user_cache,
-                                      username, password, smbpasswd, sid,
-                                      uid, gid, ngids, gids, pinned);
+                                      username,password,smbpasswd,sid,
+                                      uid,gid,ngids,gids,pinned);
 } /* chimera_vfs_add_user */
 
 SYMBOL_EXPORT int
 chimera_vfs_remove_user(
-    struct chimera_vfs *vfs,
-    const char         *username)
+    struct chimera_vfs*vfs,
+    const char        *username)
 {
-    return chimera_vfs_user_cache_remove(vfs->vfs_user_cache, username);
+    return chimera_vfs_user_cache_remove(vfs->vfs_user_cache,username);
 } /* chimera_vfs_remove_user */
 
-SYMBOL_EXPORT const struct chimera_vfs_user *
+SYMBOL_EXPORT const struct chimera_vfs_user*
 chimera_vfs_lookup_user_by_name(
-    struct chimera_vfs *vfs,
-    const char         *username)
+    struct chimera_vfs*vfs,
+    const char        *username)
 {
-    return chimera_vfs_user_cache_lookup_by_name(vfs->vfs_user_cache, username);
+    return chimera_vfs_user_cache_lookup_by_name(vfs->vfs_user_cache,username);
 } /* chimera_vfs_lookup_user_by_name */
 
 SYMBOL_EXPORT int
 chimera_vfs_user_is_member(
-    struct chimera_vfs *vfs,
-    uint32_t            uid,
-    uint32_t            gid)
+    struct chimera_vfs*vfs,
+    uint32_t           uid,
+    uint32_t           gid)
 {
-    return chimera_vfs_user_cache_is_member(vfs->vfs_user_cache, uid, gid);
+    return chimera_vfs_user_cache_is_member(vfs->vfs_user_cache,uid,gid);
 } /* chimera_vfs_user_is_member */
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_uid_to_sid(
-    struct chimera_vfs *vfs,
-    uint32_t            uid,
-    char               *buf,
-    int                 buflen)
+    struct chimera_vfs*vfs,
+    uint32_t           uid,
+    char              *buf,
+    int                buflen)
 {
-    const struct chimera_vfs_user *user;
-    int                            rc = -1;
+    const struct chimera_vfs_user*user;
+    int                           rc = -1;
 
     urcu_qsbr_read_lock();
 
-    user = chimera_vfs_user_cache_lookup_by_uid(vfs->vfs_user_cache, uid);
+    user = chimera_vfs_user_cache_lookup_by_uid(vfs->vfs_user_cache,uid);
 
     if (user && user->sid[0]) {
         int len = (int) strlen(user->sid);
 
         if (len + 1 <= buflen) {
-            memcpy(buf, user->sid, len + 1);
+            memcpy(buf,user->sid,len + 1);
             rc = len;
         }
     }
@@ -1519,16 +1550,16 @@ chimera_vfs_identity_uid_to_sid(
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_sid_to_uid(
-    struct chimera_vfs *vfs,
-    const char         *sid,
-    uint32_t           *uid)
+    struct chimera_vfs*vfs,
+    const char        *sid,
+    uint32_t          *uid)
 {
-    const struct chimera_vfs_user *user;
-    int                            rc = -1;
+    const struct chimera_vfs_user*user;
+    int                           rc = -1;
 
     urcu_qsbr_read_lock();
 
-    user = chimera_vfs_user_cache_lookup_by_sid(vfs->vfs_user_cache, sid);
+    user = chimera_vfs_user_cache_lookup_by_sid(vfs->vfs_user_cache,sid);
 
     if (user) {
         *uid = user->uid;
@@ -1542,23 +1573,23 @@ chimera_vfs_identity_sid_to_uid(
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_gid_to_sid(
-    struct chimera_vfs *vfs,
-    uint32_t            gid,
-    char               *buf,
-    int                 buflen)
+    struct chimera_vfs*vfs,
+    uint32_t           gid,
+    char              *buf,
+    int                buflen)
 {
-    const struct chimera_vfs_group *group;
-    int                             rc = -1;
+    const struct chimera_vfs_group*group;
+    int                            rc = -1;
 
     urcu_qsbr_read_lock();
 
-    group = chimera_vfs_group_cache_lookup_by_gid(vfs->vfs_user_cache, gid);
+    group = chimera_vfs_group_cache_lookup_by_gid(vfs->vfs_user_cache,gid);
 
     if (group && group->sid[0]) {
         int len = (int) strlen(group->sid);
 
         if (len + 1 <= buflen) {
-            memcpy(buf, group->sid, len + 1);
+            memcpy(buf,group->sid,len + 1);
             rc = len;
         }
     }
@@ -1570,16 +1601,16 @@ chimera_vfs_identity_gid_to_sid(
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_sid_to_gid(
-    struct chimera_vfs *vfs,
-    const char         *sid,
-    uint32_t           *gid)
+    struct chimera_vfs*vfs,
+    const char        *sid,
+    uint32_t          *gid)
 {
-    const struct chimera_vfs_group *group;
-    int                             rc = -1;
+    const struct chimera_vfs_group*group;
+    int                            rc = -1;
 
     urcu_qsbr_read_lock();
 
-    group = chimera_vfs_group_cache_lookup_by_sid(vfs->vfs_user_cache, sid);
+    group = chimera_vfs_group_cache_lookup_by_sid(vfs->vfs_user_cache,sid);
 
     if (group) {
         *gid = group->gid;
@@ -1598,5 +1629,5 @@ chimera_vfs_iterate_builtin_users(
     chimera_vfs_user_iterate_cb callback,
     void                       *data)
 {
-    chimera_vfs_user_cache_iterate_builtin(vfs->vfs_user_cache, callback, data);
+    chimera_vfs_user_cache_iterate_builtin(vfs->vfs_user_cache,callback,data);
 } /* chimera_vfs_iterate_builtin_users */

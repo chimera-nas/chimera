@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include "vfs/vfs_idmap.h"
+#include "vfs/sdk/vfs_sid.h"
+
 void
 chimera_smb_complete_request(
     struct chimera_smb_request *request,
@@ -227,11 +230,69 @@ void chimera_smb_parse_sd_to_attrs(
     uint32_t                  sd_len,
     struct chimera_vfs_attrs *attrs);
 
+/* Collects real (non-algorithmic) SID strings a decode pass could not resolve,
+* so the SET_SECURITY handler can resolve them off the event loop and retry. */
+#define SMB_MAX_UNRES_SIDS 16
+struct smb_unres_sids {
+    char sids[SMB_MAX_UNRES_SIDS][CHIMERA_IDMAP_SID_MAX];
+    int  count;
+};
+
+struct chimera_vfs;
+
+/*
+ * Decode a self-relative security descriptor into owner/group ids (and their
+ * native-SID companions, written into *owner_sid_out / *group_sid_out when
+ * non-NULL and the SID resolved through the identity authority), a POSIX mode
+ * from the modefromsid ACE, and a canonical DACL of at most `acl_max_aces`.
+ * With `unres` non-NULL (the first SET_SECURITY pass) a real SID that is not
+ * yet cached is recorded there and its ACE skipped; with `unres` NULL (the
+ * final pass, or the create-time path) it is kept as an opaque
+ * CHIMERA_PRINCIPAL_SID.  Returns 0 on success.  Exported for the SMB unit
+ * tests.
+ */
+int chimera_smb_sd_to_acl(
+    const uint8_t            *sd_buf,
+    uint32_t                  sd_len,
+    struct chimera_vfs_attrs *attrs,
+    struct chimera_acl       *acl,
+    unsigned                  acl_max_aces,
+    struct chimera_vfs       *vfs,
+    struct smb_unres_sids    *unres,
+    struct chimera_sid       *owner_sid_out,
+    struct chimera_sid       *group_sid_out,
+    int                       canonicalize_inherited);
+
+/*
+ * Build a self-relative security descriptor from owner/group ids, their
+ * optional native-SID companions, and a canonical ACL into `out` (capacity
+ * `cap`).  A stored native SID (owner_sid / group_sid / an ACE principal's
+ * sid) is emitted verbatim; otherwise the identity cache is consulted and the
+ * algorithmic modefromsid SID is the last resort.  Returns the SD length, or
+ * -1 if it does not fit.  Exported for the SMB unit tests.
+ */
+int chimera_smb_acl_to_sd(
+    uint32_t                  uid,
+    uint32_t                  gid,
+    uint32_t                  mode,
+    const struct chimera_acl *acl,
+    const struct chimera_sid *owner_sid,
+    const struct chimera_sid *group_sid,
+    int                       has_owner,
+    int                       has_group,
+    int                       has_dacl,
+    uint8_t                  *out,
+    uint32_t                  cap,
+    struct chimera_vfs       *vfs);
+
 /*
  * Decode a self-relative security descriptor into owner/group/mode AND a full
  * canonical DACL.  The decoded ACL is written into `acl_buf` (capacity
  * `acl_buf_len` bytes) and, when non-empty, attrs->va_acl is pointed at it with
- * the ATTR_ACL set-mask bit raised.
+ * the ATTR_ACL set-mask bit raised.  `vfs` (may be NULL) is the identity
+ * authority used to map real SIDs that are already cached; a real SID that is
+ * not cached is kept as an opaque CHIMERA_PRINCIPAL_SID (no async resolution
+ * here -- this is the create-time path).
  */
 void chimera_smb_parse_sd_to_acl(
     const uint8_t            *sd_buf,
@@ -239,6 +300,7 @@ void chimera_smb_parse_sd_to_acl(
     struct chimera_vfs_attrs *attrs,
     void                     *acl_buf,
     uint32_t                  acl_buf_len,
+    struct chimera_vfs       *vfs,
     int                       canonicalize_inherited);
 
 int chimera_smb_parse_echo(

@@ -11,19 +11,53 @@
 #include "vfs_release.h"
 #include "common/macros.h"
 static void
-chimera_vfs_open_fh_complete(struct chimera_vfs_request *request)
+chimera_vfs_open_fh_complete(struct chimera_vfs_request*request)
 {
-    struct chimera_vfs_thread      *thread   = request->thread;
-    struct chimera_vfs_open_handle *handle   = request->pending_handle;
-    chimera_vfs_open_fh_callback_t  callback = request->proto_callback;
+    struct chimera_vfs_thread     *thread   = request->thread;
+    struct chimera_vfs_open_handle*handle   = request->pending_handle;
+    chimera_vfs_open_fh_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_populate_handle(thread, handle, request->open_fh.r_vfs_private);
+        chimera_vfs_populate_handle(thread,handle,request->open_fh.r_vfs_private);
         if (request->open_fh.r_stream) {
             handle->flags |= CHIMERA_VFS_OPEN_HANDLE_STREAM;
         }
+    } else if (request->status == CHIMERA_VFS_ESTALE &&
+               (request->open_fh.flags & CHIMERA_VFS_OPEN_PATH) &&
+               (request->open_fh.flags & CHIMERA_VFS_OPEN_INFERRED)) {
+        /* A path / validation open (INFERRED|PATH -- e.g. NFSv4 PUTFH
+         * validation, or a metadata op resolving a bare filehandle) that the
+         * backend refused as ESTALE may still name a live object.  On a
+         * handle-resolving backend (linux, io_uring) open_by_handle_at cannot
+         * resolve an inode whose last name is gone, yet that object is a
+         * valid, resolvable handle for as long as an open descriptor pins it
+         * -- which is exactly what read-after-unlink depends on.  The pin
+         * lives in the file cache (a data open is a real open there since
+         * 6f8f7f22); the two caches age independently, so the idle close
+         * sweep can retire this path handle while the data handle still
+         * holds the object open.  Reuse that live pin rather than propagating
+         * a STALE it disproves.  chimera_vfs_release routes the returned
+         * handle back to its own cache by cache_id, so handing a file-cache
+         * handle to a path-open caller is safe. */
+        struct chimera_vfs_open_handle*pinned;
+        uint64_t                       fh_hash;
+
+        fh_hash = chimera_vfs_hash(handle->fh,handle->fh_len);
+
+        pinned = chimera_vfs_open_cache_lookup_ref(
+            thread->vfs->vfs_open_file_cache,
+            handle->fh,handle->fh_len,fh_hash);
+
+        chimera_vfs_release_failed(thread,handle,request->status);
+
+        if (pinned) {
+            request->status = CHIMERA_VFS_OK;
+            handle          = pinned;
+        } else {
+            handle = NULL;
+        }
     } else {
-        chimera_vfs_release_failed(thread, handle, request->status);
+        chimera_vfs_release_failed(thread,handle,request->status);
         handle = NULL;
     }
 
@@ -33,14 +67,14 @@ chimera_vfs_open_fh_complete(struct chimera_vfs_request *request)
              handle,
              request->proto_private_data);
 
-    chimera_vfs_request_free(request->thread, request);
+    chimera_vfs_request_free(request->thread,request);
 
 } /* chimera_vfs_open_fh_complete */
 
 static void
 chimera_vfs_open_fh_hdl_callback(
-    struct chimera_vfs_request     *request,
-    struct chimera_vfs_open_handle *handle)
+    struct chimera_vfs_request    *request,
+    struct chimera_vfs_open_handle*handle)
 {
     chimera_vfs_open_fh_callback_t callback = request->proto_callback;
 
@@ -50,8 +84,8 @@ chimera_vfs_open_fh_hdl_callback(
         /* Someone was already in process opening the file when we tried
          * and they failed, so we fail too.
          */
-        callback(request->status, NULL, request->proto_private_data);
-        chimera_vfs_request_free(request->thread, request);
+        callback(request->status,NULL,request->proto_private_data);
+        chimera_vfs_request_free(request->thread,request);
     } else if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_PENDING) {
         /* Miss on the open cache, so a pending open record was inserted
          * for us and its now our job to actually dispatch the open
@@ -60,26 +94,26 @@ chimera_vfs_open_fh_hdl_callback(
         chimera_vfs_dispatch(request);
     } else {
         /* File was already open in the cache so we're done */
-        callback(CHIMERA_VFS_OK, handle, request->proto_private_data);
-        chimera_vfs_request_free(request->thread, request);
+        callback(CHIMERA_VFS_OK,handle,request->proto_private_data);
+        chimera_vfs_request_free(request->thread,request);
     }
 } /* chimera_vfs_open_fh_hdl_callback */
 
 SYMBOL_EXPORT void
 chimera_vfs_open_fh_hs(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    const void                      *fh,
-    int                              fhlen,
-    unsigned int                     flags,
-    struct chimera_vfs_handle_state *handle_state,
-    chimera_vfs_open_fh_callback_t   callback,
-    void                            *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    const void                     *fh,
+    int                             fhlen,
+    unsigned int                    flags,
+    struct chimera_vfs_handle_state*handle_state,
+    chimera_vfs_open_fh_callback_t  callback,
+    void                           *private_data)
 {
-    struct chimera_vfs_module  *module;
-    struct chimera_vfs_request *request;
-    struct vfs_open_cache      *cache;
-    uint64_t                    fh_hash;
+    struct chimera_vfs_module *module;
+    struct chimera_vfs_request*request;
+    struct vfs_open_cache     *cache;
+    uint64_t                   fh_hash;
 
     if (flags & CHIMERA_VFS_OPEN_PATH) {
         cache = thread->vfs->vfs_open_path_cache;
@@ -87,17 +121,17 @@ chimera_vfs_open_fh_hs(
         cache = thread->vfs->vfs_open_file_cache;
     }
 
-    fh_hash = chimera_vfs_hash(fh, fhlen);
+    fh_hash = chimera_vfs_hash(fh,fhlen);
 
-    module = chimera_vfs_get_module(thread, fh, fhlen);
+    module = chimera_vfs_get_module(thread,fh,fhlen);
 
     if (!module) {
-        callback(CHIMERA_VFS_ESTALE, NULL, private_data);
+        callback(CHIMERA_VFS_ESTALE,NULL,private_data);
         return;
     }
 
-    if (chimera_vfs_open_handle_retained(flags, module->capabilities) ||
-        chimera_vfs_gate_needed(module->capabilities, cred)) {
+    if (chimera_vfs_open_handle_retained(flags,module->capabilities) ||
+        chimera_vfs_gate_needed(module->capabilities,cred)) {
 
         /* We really need to open the file -- or we are on an engine-authoritative
          * backend for a non-exempt caller, in which case we route the inferred
@@ -105,10 +139,10 @@ chimera_vfs_open_fh_hs(
          * computed on first I/O is cached and reused, rather than re-derived on a
          * throwaway synthetic handle for every operation. */
 
-        request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
+        request = chimera_vfs_request_alloc_by_hash(thread,cred,fh,fhlen,fh_hash);
 
         if (CHIMERA_VFS_IS_ERR(request)) {
-            callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
+            callback(CHIMERA_VFS_PTR_ERR(request),NULL,private_data);
             return;
         }
 
@@ -141,10 +175,10 @@ chimera_vfs_open_fh_hs(
          * NFSv3-style stateless operation.  The handle has no backend open, so
          * cache eviction/release must skip chimera_vfs_close().
          */
-        request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
+        request = chimera_vfs_request_alloc_by_hash(thread,cred,fh,fhlen,fh_hash);
 
         if (CHIMERA_VFS_IS_ERR(request)) {
-            callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
+            callback(CHIMERA_VFS_PTR_ERR(request),NULL,private_data);
             return;
         }
 
@@ -180,5 +214,5 @@ chimera_vfs_open_fh(
     chimera_vfs_open_fh_callback_t callback,
     void                          *private_data)
 {
-    chimera_vfs_open_fh_hs(thread, cred, fh, fhlen, flags, NULL, callback, private_data);
+    chimera_vfs_open_fh_hs(thread,cred,fh,fhlen,flags,NULL,callback,private_data);
 } /* chimera_vfs_open_fh */

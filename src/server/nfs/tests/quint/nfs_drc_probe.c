@@ -61,6 +61,29 @@ check_status(
     report(name, got == want, "status=%u, model says %u", got, want);
 } /* check_status */
 
+/*
+ * A removed object that NOTHING holds open is kept resolvable only by the VFS
+ * handle cache, and only until the idle close sweep retires the entry (min_age,
+ * default 100 ms).  So an operation on such a handle may find it still there
+ * (the model's answer) OR already reclaimed (NFS3ERR_STALE, RFC 1813 3.3) --
+ * which of the two depends on scheduling, not on correctness.  Both are
+ * conformant here; assert the object is not mis-answered as something else.
+ *
+ * This tolerance is ONLY for objects with no live opener.  Read-after-unlink
+ * through a genuinely open descriptor must always succeed, and is asserted
+ * without tolerance by the POSIX batch suites (a real fd pins the object; the
+ * VFS reuses that pin rather than re-resolving a nameless handle).
+ */
+static void
+check_status_or_stale(
+    const char *name,
+    uint32_t    got,
+    uint32_t    want)
+{
+    report(name, got == want || got == NFS3ERR_STALE,
+           "status=%u, model says %u (or STALE)", got, want);
+} /* check_status_or_stale */
+
 /* ---- NFSv3 helpers, parameterised by connection / credential / xid ------- */
 
 static uint32_t
@@ -737,8 +760,8 @@ main(
          */
         (void) v3_create(&c, 0, &u1, x++, "j", &gone_fh);
         (void) v3_remove(&c, 0, &u1, x++, "j");
-        check_status("op/setsize-removed-file-still-held",
-                     v3_setsize(&c, 0, &u1, x++, &gone_fh, 0), NFS3_OK);
+        check_status_or_stale("op/setsize-removed-file-still-held",
+                              v3_setsize(&c, 0, &u1, x++, &gone_fh, 0), NFS3_OK);
 
         /*
          * LINK is the one operation that cannot follow the object there, and
@@ -752,10 +775,10 @@ main(
          * or of the handle -- which is why it is asserted per backend rather
          * than recorded as a deviation from one answer.
          */
-        check_status("op/link-removed-file-still-held",
-                     v3_link(&c, 0, &u1, x++, &gone_fh, "k"),
-                     mbt_module_is_passthrough(env.module) ? NFS3ERR_NOENT :
-                     NFS3_OK);
+        check_status_or_stale("op/link-removed-file-still-held",
+                              v3_link(&c, 0, &u1, x++, &gone_fh, "k"),
+                              mbt_module_is_passthrough(env.module) ? NFS3ERR_NOENT :
+                              NFS3_OK);
 
         /* A directory nothing opened: its handle IS stale once the name is
          * gone, which is the RFC 1813 section 3.3 case. */
@@ -806,8 +829,8 @@ main(
             check_status("op/getattr-live-directory",
                          v3_getattr_st(&c, 0, &u1, x++, &touched), NFS3_OK);
             (void) v3_rmdir(&c, 0, &u1, x++, "t1");
-            check_status("op/getattr-pinned-removed-directory",
-                         v3_getattr_st(&c, 0, &u1, x++, &touched), NFS3_OK);
+            check_status_or_stale("op/getattr-pinned-removed-directory",
+                                  v3_getattr_st(&c, 0, &u1, x++, &touched), NFS3_OK);
         }
 
         /* The same, for a regular file. */
@@ -818,8 +841,8 @@ main(
             check_status("op/getattr-live-file",
                          v3_getattr_st(&c, 0, &u1, x++, &tf), NFS3_OK);
             (void) v3_remove(&c, 0, &u1, x++, "t2");
-            check_status("op/getattr-pinned-removed-file",
-                         v3_getattr_st(&c, 0, &u1, x++, &tf), NFS3_OK);
+            check_status_or_stale("op/getattr-pinned-removed-file",
+                                  v3_getattr_st(&c, 0, &u1, x++, &tf), NFS3_OK);
         }
 
         /* And a directory both created and removed through NFSv4. */
