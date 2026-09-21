@@ -4,7 +4,13 @@
 
 add_executable(chimera daemon.c)
 
-target_link_libraries(chimera chimera_server chimera_common chimera_metrics ${CHIMERA_OTEL_LIBS})
+target_link_libraries(chimera PRIVATE chimera_server chimera_common chimera_metrics ${CHIMERA_OTEL_LIBS})
+
+# Certificate generation passes CRT FILE streams into the OpenSSL DLL. Its
+# Windows application bridge must be compiled into this executable exactly once.
+if(MSVC)
+    target_link_libraries(chimera PRIVATE OpenSSL::applink)
+endif()
 
 install(TARGETS chimera DESTINATION sbin)
 install(FILES chimera.json DESTINATION etc)
