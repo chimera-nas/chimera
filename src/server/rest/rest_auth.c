@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -371,8 +372,8 @@ chimera_rest_jwt_create(
     int               h_len, p_len, s_len, si_len;
 
     snprintf(payload_json, sizeof(payload_json),
-             "{\"sub\":\"%s\",\"iat\":%ld,\"exp\":%ld}",
-             claims->sub, (long) claims->iat, (long) claims->exp);
+             "{\"sub\":\"%s\",\"iat\":%" PRId64 ",\"exp\":%" PRId64 "}",
+             claims->sub, (int64_t) claims->iat, (int64_t) claims->exp);
 
     h_len = base64url_encode((const unsigned char *) header_json,
                              strlen(header_json),

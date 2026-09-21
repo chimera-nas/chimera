@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3247,7 +3248,7 @@ chimera_s3_list_parts(
         chimera_s3_mp_append(&bp, "    <PartNumber>%d</PartNumber>\n", part->part_number);
         chimera_s3_mp_append(&bp, "    <LastModified>%s</LastModified>\n", date_buf);
         chimera_s3_mp_append(&bp, "    <ETag>%s</ETag>\n", etag_hex);
-        chimera_s3_mp_append(&bp, "    <Size>%ld</Size>\n", (long) part->size);
+        chimera_s3_mp_append(&bp, "    <Size>%" PRId64 "</Size>\n", part->size);
         chimera_s3_mp_append(&bp, "  </Part>\n");
         emitted++;
     }

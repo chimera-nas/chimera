@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -472,7 +473,7 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_object_attributes_lookup_callback,
     bp += sprintf(bp, "<GetObjectAttributesOutput xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
     bp += sprintf(bp, "  <ETag>%s</ETag>\n", etag_hex);
     bp += sprintf(bp, "  <StorageClass>STANDARD</StorageClass>\n");
-    bp += sprintf(bp, "  <ObjectSize>%ld</ObjectSize>\n", (long) attr->va_size);
+    bp += sprintf(bp, "  <ObjectSize>%" PRIu64 "</ObjectSize>\n", attr->va_size);
     bp += sprintf(bp, "</GetObjectAttributesOutput>\n");
 
     evpl_iovec_set_length(&request->multipart.response, bp - body_start);

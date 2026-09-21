@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -832,7 +833,7 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_list_find_complete,
             chimera_s3_out_append(&out, "  <IsLatest>true</IsLatest>\n");
             chimera_s3_out_append(&out, "  <LastModified>%s</LastModified>\n", date);
             chimera_s3_out_append(&out, "  <ETag>%s</ETag>\n", etag);
-            chimera_s3_out_append(&out, "  <Size>%lu</Size>\n", e->size);
+            chimera_s3_out_append(&out, "  <Size>%" PRIu64 "</Size>\n", e->size);
             chimera_s3_out_append(&out, "  <StorageClass>STANDARD</StorageClass>\n");
             chimera_s3_out_append(&out, " </Version>\n");
         } else {
@@ -840,7 +841,7 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_list_find_complete,
             chimera_s3_out_append(&out, "  <Key>%s</Key>\n", enc);
             chimera_s3_out_append(&out, "  <LastModified>%s</LastModified>\n", date);
             chimera_s3_out_append(&out, "  <ETag>%s</ETag>\n", etag);
-            chimera_s3_out_append(&out, "  <Size>%lu</Size>\n", e->size);
+            chimera_s3_out_append(&out, "  <Size>%" PRIu64 "</Size>\n", e->size);
             chimera_s3_out_append(&out, "  <StorageClass>STANDARD</StorageClass>\n");
             if (request->list.fetch_owner) {
                 /* V2 fetch-owner=true: same canonical owner as ListBuckets/ACL. */
