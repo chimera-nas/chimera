@@ -14,7 +14,6 @@
 #include "nfs_nlm_state.h"
 #include "nfs_nlm_granted.h"
 #include "nfs_nsm.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/vfs_compound.h"
@@ -794,6 +793,34 @@ chimera_nfs_nlm4_lock_open_cb(
                               chimera_nfs_nlm4_lock_blocked_cb, ctx);
 } /* chimera_nfs_nlm4_lock_open_cb */
 
+/* PUTFH, OPEN(current), GETHANDLE: the open the LOCK needs is an ordinary
+ * sequence -- it is the CLAIM behind it that cannot be one (see the note on
+ * chimera_nfs_nlm4_do_lock), so only the claim stays out of band. */
+#define NLM_LOCK_OP_GETHANDLE 2
+
+static void
+chimera_nfs_nlm4_lock_open_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nlm_lock_ctx            *ctx    = private_data;
+    enum chimera_vfs_error          status = chimera_vfs_compound_status(compound);
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    if (status == CHIMERA_VFS_OK) {
+        handle = chimera_vfs_compound_take_handle(compound,
+                                                  NLM_LOCK_OP_GETHANDLE);
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    if (status == CHIMERA_VFS_OK && !handle) {
+        status = CHIMERA_VFS_EIO;
+    }
+
+    chimera_nfs_nlm4_lock_open_cb(status, handle, ctx);
+} /* chimera_nfs_nlm4_lock_open_complete */
+
 /* -------------------------------------------------------------------------
  * UNLOCK procedure callbacks
  * ---------------------------------------------------------------------- */
@@ -959,8 +986,9 @@ chimera_nfs_nlm4_test(
 } /* chimera_nfs_nlm4_test */
 
 /*
- * LOCK IS DELIBERATELY NOT A SEQUENCE, and the reason is not a hop that could
- * be shortened.
+ * LOCK'S CLAIM IS DELIBERATELY NOT A SEQUENCE OP, and the reason is not a hop
+ * that could be shortened.  (The open it needs IS a sequence -- see
+ * chimera_nfs_nlm4_lock_open_complete.  Only the acquire stays out of band.)
  *
  * `entry->pending` means "not held yet" to every other NLM RPC on the file --
  * nlm_client_find_lock_in_range (nfs_nlm_state.h) SKIPS a pending entry, so an
@@ -979,7 +1007,11 @@ chimera_nfs_nlm4_test(
  * chimera_vfs_claim_cancel's return, and a sequenced LOCK would arbitrate on
  * chimera_vfs_compound_cancel_post's, which promises nothing synchronously.)
  *
- * TEST does not have the problem and IS a sequence -- see
+ * A claim transition is one of the VFS's enumerated non-sequence entry points
+ * for exactly this kind of reason, and it reaches the claim core through
+ * vfs_claim.h rather than through the per-op API.
+ *
+ * TEST does not have the problem and IS a sequence throughout -- see
  * chimera_nfs_nlm4_do_test: a probe inserts nothing, so there is no state to
  * settle at the moment of the answer.
  */
@@ -996,6 +1028,7 @@ chimera_nfs_nlm4_do_lock(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    struct chimera_vfs_compound      *compound;
     struct nlm_lock_entry            *entry;
     struct nlm_lock_ctx              *ctx;
     struct nlm_client                *client;
@@ -1173,12 +1206,16 @@ chimera_nfs_nlm4_do_lock(
         evpl_mutex_unlock(&shared->nlm_state.mutex);
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
-                        vfh,
-                        vfh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs_nlm4_lock_open_cb,
-                        ctx);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          &nlm_system_cred);
+
+    chimera_vfs_compound_add_putfh(compound, vfh, vfh_len);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_gethandle(compound);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs_nlm4_lock_open_complete,
+                                ctx);
 } /* chimera_nfs_nlm4_do_lock */
 
 void
