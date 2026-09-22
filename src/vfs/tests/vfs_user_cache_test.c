@@ -488,6 +488,44 @@ test_group_ttl_expiration(void)
     TEST_PASS("expired groups are swept, pinned groups survive");
 } /* test_group_ttl_expiration */
 
+/*
+ * Removal is by name -- the administrative handle -- while a record's identity
+ * is its gid, so one name can front several records.  remove() must take them
+ * all, and must survive the NULL name that add() accepts.
+ */
+static void
+test_group_remove(void)
+{
+    struct chimera_vfs_user_cache *cache;
+
+    cache = chimera_vfs_user_cache_create(64, 600);
+
+    chimera_vfs_group_cache_add(cache, "eng", "S-1-5-21-1-2-3-100", 100, 1);
+    chimera_vfs_group_cache_add(cache, "eng", "S-1-5-21-1-2-3-200", 200, 1);
+    chimera_vfs_group_cache_add(cache, "ops", "S-1-5-21-1-2-3-300", 300, 1);
+
+    assert(chimera_vfs_group_cache_remove(cache, NULL) == -1);
+    assert(chimera_vfs_group_cache_remove(cache, "nobody") == -1);
+
+    assert(chimera_vfs_group_cache_remove(cache, "eng") == 0);
+    urcu_qsbr_synchronize_rcu();
+
+    urcu_qsbr_read_lock();
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 100) == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 200) == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache, "S-1-5-21-1-2-3-100") == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache, "S-1-5-21-1-2-3-200") == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 300) != NULL);
+    urcu_qsbr_read_unlock();
+
+    /* Nothing left by that name. */
+    assert(chimera_vfs_group_cache_remove(cache, "eng") == -1);
+
+    chimera_vfs_user_cache_destroy(cache);
+
+    TEST_PASS("group removal by name takes every record of that name and tolerates NULL");
+} /* test_group_remove */
+
 int
 main(void)
 {
@@ -506,6 +544,7 @@ main(void)
     test_group_index();
     test_group_user_isolation();
     test_group_ttl_expiration();
+    test_group_remove();
 
     fprintf(stderr, "All tests passed.\n");
 

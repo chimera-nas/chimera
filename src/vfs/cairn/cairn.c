@@ -3218,7 +3218,8 @@ cairn_mkdir_at(
         (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
         ? request->mkdir_at.set_attr->va_acl : NULL;
 
-    if (parent_inode->mode & S_ISGID) {
+    if (chimera_vfs_create_inherits_gid(request->mkdir_at.set_attr,
+                                        parent_inode->mode)) {
         chimera_vfs_attrs_drop_group_sid(request->mkdir_at.set_attr);
     }
 
@@ -3358,7 +3359,8 @@ cairn_mknod_at(
         inode.rdev = request->mknod_at.set_attr->va_rdev;
     }
 
-    if (parent_inode->mode & S_ISGID) {
+    if (chimera_vfs_create_inherits_gid(request->mknod_at.set_attr,
+                                        parent_inode->mode)) {
         chimera_vfs_attrs_drop_group_sid(request->mknod_at.set_attr);
     }
 
@@ -3957,7 +3959,8 @@ cairn_open_at(
             (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
             ? request->open_at.set_attr->va_acl : NULL;
 
-        if (parent_inode->mode & S_ISGID) {
+        if (chimera_vfs_create_inherits_gid(request->open_at.set_attr,
+                                            parent_inode->mode)) {
             chimera_vfs_attrs_drop_group_sid(request->open_at.set_attr);
         }
 

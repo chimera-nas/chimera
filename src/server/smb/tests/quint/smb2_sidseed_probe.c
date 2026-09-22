@@ -209,6 +209,20 @@ make_objects(struct smb2_conn *c)
     if (st == ST_SUCCESS) {
         smb2_close(c, co.file_id);
     }
+
+    /* A stream create can bring the base file into existence as well.  That
+     * base is this session's creation and owes it a stored owner exactly as a
+     * plain create would; it is only the STREAM half that must never touch
+     * an existing base's ownership (probe_stream_create_leaves_base_owner). */
+    st = smb2_create(c, "streamed.bin:meta", FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                     FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS,
+          "CREATE streamed.bin:meta (the base file made by a stream create) "
+          "-> 0x%08x", st);
+
+    if (st == ST_SUCCESS) {
+        smb2_close(c, co.file_id);
+    }
 } /* make_objects */
 
 /* A set-group-ID directory owned by the OTHER group, and the creator's
@@ -360,6 +374,18 @@ probe_stored_not_resolved(
               "stored group SID (%s)", group);
     } else {
         CHECK(0, "the directory's principals can be read back after eviction");
+    }
+
+    if (principals_of(c, "streamed.bin", FILE_NON_DIRECTORY_FILE, owner,
+                      sizeof(owner), group, sizeof(group)) == 0) {
+        CHECK(strcmp(owner, CREATOR_SID) == 0,
+              "with the account evicted, the base file a stream create made "
+              "still reports the stored SID (%s)", owner);
+        CHECK(strcmp(group, CREATOR_GROUP_SID) == 0,
+              "  ... and the stored group SID (%s)", group);
+    } else {
+        CHECK(0, "the stream-created base file's principals can be read back "
+              "after eviction");
     }
 
     /* Under the set-group-ID parent nothing named the inherited group's SID
