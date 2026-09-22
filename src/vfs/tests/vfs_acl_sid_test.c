@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #undef NDEBUG
 #include <assert.h>
 
@@ -143,6 +144,21 @@ openat_cb(
     ctx->handle = oh;
     ctx->done   = 1;
 } /* openat_cb */
+
+static void
+mkdir_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre,
+    struct chimera_vfs_attrs *dir_post,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* mkdir_cb */
 
 static void
 setattr_cb(
@@ -750,6 +766,162 @@ main(
     assert((ctx.got_mode & 0777) == (chimera_acl_to_mode(acl) & 0777));
     assert(chimera_sid_equal(&ctx.got_owner_sid, &owner_sid));
     TEST_PASS("a shrinking truncate keeps SID and ACL coherence");
+
+    /* --- 6b. a set-group-ID parent drops a seeded group SID only when it also
+     *        forces the gid.  A caller that names a gid of its own keeps the
+     *        companion it named beside it; one that names no gid takes the
+     *        parent's group, and the companion for the group it did not get
+     *        is dropped.  Through both create paths, since each backend
+     *        applies the rule itself.
+     *
+     *        Only memfs persists the SID companions a CREATE carries; diskfs
+     *        and cairn store them through setattr alone today.  So the gid
+     *        half is asserted on every backend, and the SID half only where
+     *        a plain create is seen to store one -- decided by a create
+     *        under a parent that is NOT set-group-ID, so the rule under test
+     *        cannot be what hides it. --- */
+    {
+        struct chimera_vfs_open_handle *sg_handle;
+        struct chimera_sid              named_sid;
+        uint8_t                         sg_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        sg_fh_len;
+        int                             stores_at_create;
+
+        chimera_sid_from_str(&named_sid, SID_GROUP);
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GID | CHIMERA_VFS_ATTR_GROUP_SID;
+        sattr.va_mode      = 0644;
+        sattr.va_uid       = 1000;
+        sattr.va_gid       = 1000;
+        sattr.va_group_sid = &named_sid;
+        chimera_vfs_open_at(ctx.vfs_thread, &cred, root_handle, "plain", 5,
+                            CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                            0, 0, openat_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        do_getattr(&ctx, &cred);
+        assert(ctx.got_gid == 1000);
+        stores_at_create = chimera_sid_present(&ctx.got_group_sid);
+        if (stores_at_create) {
+            assert(chimera_sid_equal(&ctx.got_group_sid, &named_sid));
+        } else {
+            fprintf(stderr, "  NOTE: %s stores no SID companion at create; "
+                    "asserting the gid half of set-group-ID only\n", backend);
+        }
+        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+        /* The engine masks set-group-ID off a REQUESTED create mode
+         * (vfs_proc_mkdir_at), so the parent gets the bit by a chmod after
+         * the fact, as a client would set it. */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GID;
+        sattr.va_mode = 0755;
+        sattr.va_uid  = 0;
+        sattr.va_gid  = 2000;
+        chimera_vfs_mkdir_at(ctx.vfs_thread, &cred, root_handle, "sg", 2, &sattr,
+                             CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+
+        open_child(&ctx, &cred, root_fh, root_fh_len, "sg");
+        sg_handle = ctx.handle;
+        memcpy(sg_fh, ctx.fh, ctx.fh_len);
+        sg_fh_len = ctx.fh_len;
+
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        sattr.va_mode     = 02770;
+        do_setattr(&ctx, &cred, &sattr);
+        do_getattr(&ctx, &cred);
+        assert(ctx.got_gid == 2000);
+        assert(ctx.got_mode & S_ISGID);
+
+        /* file, gid and SID both named: both kept */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GID | CHIMERA_VFS_ATTR_GROUP_SID;
+        sattr.va_mode      = 0644;
+        sattr.va_uid       = 1000;
+        sattr.va_gid       = 1000;
+        sattr.va_group_sid = &named_sid;
+        chimera_vfs_open_at(ctx.vfs_thread, &cred, sg_handle, "kept", 4,
+                            CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                            0, 0, openat_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        do_getattr(&ctx, &cred);
+        assert(ctx.got_gid == 1000);
+        if (stores_at_create) {
+            assert(chimera_sid_equal(&ctx.got_group_sid, &named_sid));
+        } else {
+            assert(!chimera_sid_present(&ctx.got_group_sid));
+        }
+        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+        /* file, SID only: the parent's gid, and no companion */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GROUP_SID;
+        sattr.va_mode      = 0644;
+        sattr.va_uid       = 1000;
+        sattr.va_group_sid = &named_sid;
+        chimera_vfs_open_at(ctx.vfs_thread, &cred, sg_handle, "inherited", 9,
+                            CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                            0, 0, openat_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        do_getattr(&ctx, &cred);
+        assert(ctx.got_gid == 2000);
+        assert(!chimera_sid_present(&ctx.got_group_sid));
+        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+        /* directory, gid and SID both named: both kept */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GID | CHIMERA_VFS_ATTR_GROUP_SID;
+        sattr.va_mode      = 0755;
+        sattr.va_uid       = 1000;
+        sattr.va_gid       = 1000;
+        sattr.va_group_sid = &named_sid;
+        chimera_vfs_mkdir_at(ctx.vfs_thread, &cred, sg_handle, "keptdir", 7,
+                             &sattr, CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        open_child(&ctx, &cred, sg_fh, sg_fh_len, "keptdir");
+        do_getattr(&ctx, &cred);
+        assert(ctx.got_gid == 1000);
+        if (stores_at_create) {
+            assert(chimera_sid_equal(&ctx.got_group_sid, &named_sid));
+        } else {
+            assert(!chimera_sid_present(&ctx.got_group_sid));
+        }
+        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+        /* directory, SID only: the parent's gid, and no companion */
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GROUP_SID;
+        sattr.va_mode      = 0755;
+        sattr.va_uid       = 1000;
+        sattr.va_group_sid = &named_sid;
+        chimera_vfs_mkdir_at(ctx.vfs_thread, &cred, sg_handle, "inhdir", 6,
+                             &sattr, CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        open_child(&ctx, &cred, sg_fh, sg_fh_len, "inhdir");
+        do_getattr(&ctx, &cred);
+        assert(ctx.got_gid == 2000);
+        assert(!chimera_sid_present(&ctx.got_group_sid));
+        chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+        chimera_vfs_release(ctx.vfs_thread, sg_handle);
+        TEST_PASS(stores_at_create
+                  ? "a set-group-ID parent drops the group SID only when it forces the gid"
+                  : "a set-group-ID parent forces the gid only when none was named");
+    }
 
     /* --- 7. everything stored comes back after a cold restart (memfs: after
      *        a plain umount/mount) --- */

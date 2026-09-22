@@ -826,7 +826,7 @@ diskfs_mkdir_at_alloc_cb(
         (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
         ? request->mkdir_at.set_attr->va_acl : NULL;
 
-    if (parent->mode & S_ISGID) {
+    if (chimera_vfs_create_inherits_gid(request->mkdir_at.set_attr, parent->mode)) {
         chimera_vfs_attrs_drop_group_sid(request->mkdir_at.set_attr);
     }
 
@@ -1038,7 +1038,7 @@ diskfs_mknod_at_alloc_cb(
         inode->rdev = request->mknod_at.set_attr->va_rdev;
     }
 
-    if (parent->mode & S_ISGID) {
+    if (chimera_vfs_create_inherits_gid(request->mknod_at.set_attr, parent->mode)) {
         chimera_vfs_attrs_drop_group_sid(request->mknod_at.set_attr);
     }
 
@@ -2002,7 +2002,7 @@ diskfs_open_at_alloc_cb(
         (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL)
         ? request->open_at.set_attr->va_acl : NULL;
 
-    if (parent->mode & S_ISGID) {
+    if (chimera_vfs_create_inherits_gid(request->open_at.set_attr, parent->mode)) {
         chimera_vfs_attrs_drop_group_sid(request->open_at.set_attr);
     }
 

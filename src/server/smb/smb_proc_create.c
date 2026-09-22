@@ -2223,13 +2223,8 @@ chimera_smb_create_issue_truncate(struct chimera_smb_request *request)
     request->create.trunc_attr.va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_ACL;
     request->create.trunc_attr.va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_ACL;
 
-    request->create.trunc_attr.va_owner_sid = NULL;
-    request->create.trunc_attr.va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_OWNER_SID;
-    request->create.trunc_attr.va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_OWNER_SID;
-
-    request->create.trunc_attr.va_group_sid = NULL;
-    request->create.trunc_attr.va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_GROUP_SID;
-    request->create.trunc_attr.va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_GROUP_SID;
+    chimera_vfs_attrs_drop_owner_sid(&request->create.trunc_attr);
+    chimera_vfs_attrs_drop_group_sid(&request->create.trunc_attr);
 
     request->create.trunc_attr.va_size      = 0;
     request->create.trunc_attr.va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
@@ -2790,6 +2785,15 @@ chimera_smb_create_open_stream_chain(
     } /* switch */
 
     request->create.base_oh = base_oh;
+
+    /* The base is open and, if this create brought it into existence, already
+     * carries the creator's SID companions from the base open.  The stream
+     * open applies the create's set_attr to the BASE again, through the open
+     * path where no chown gate runs, so the companions must not ride along:
+     * on a base another user made they would hand that user's ownership --
+     * the SID half of it -- to whoever creates a stream on it. */
+    chimera_vfs_attrs_drop_owner_sid(&request->create.set_attr);
+    chimera_vfs_attrs_drop_group_sid(&request->create.set_attr);
 
     chimera_vfs_open_stream(
         vfs_thread,
@@ -4579,25 +4583,27 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
      *
      * The guard is NOT the ARCHIVE one above.  ARCHIVE is stamped again when
      * an overwrite replaces an existing file's contents; an owner is not.  A
-     * create-capable open is the only place this belongs:
+     * create-capable open is the only place this belongs: OPEN_CREATE alone,
+     * because the backend applies set_attr only when it actually creates the
+     * inode, so an OVERWRITE_IF that finds the file already there stamps
+     * nothing.  (The deferred truncate that replaces its contents strips the
+     * companions outright -- see chimera_smb_create_issue_truncate.)
      *
-     *   - OPEN_CREATE alone, because the backend applies set_attr only when it
-     *     actually creates the inode, so an OVERWRITE_IF that finds the file
-     *     already there stamps nothing.  (The deferred truncate that replaces
-     *     its contents strips the companion outright -- see
-     *     chimera_smb_create_issue_truncate.)
-     *   - never on a stream open, because the backends apply a stream create's
-     *     set_attr to the BASE file, which already exists and belongs to
-     *     whoever made it.  Creating an ADS on another user's file must not
-     *     take the SID half of its ownership, and an open runs no chown gate
-     *     that would refuse it.
+     * That holds for the base open of a named-stream create too: it carries
+     * OPEN_CREATE when the disposition can create, and stamps the base only
+     * if this open is what brings it into existence -- an ordinary create
+     * that happens to open a stream next.  It is the STREAM open that must
+     * not carry the companions, because the backends apply a stream create's
+     * set_attr to the BASE file through the open path, where no chown gate
+     * runs, and an existing base belongs to whoever made it.
+     * chimera_smb_create_open_stream_chain strips them before that open.
      *
      * Never a resolve: the SIDs were captured on the session at logon, so the
      * seed is two struct copies and a create never waits on the identity
      * authority.  A session with nothing captured (a local user with no SID,
      * a winbind outage at logon) leaves the companions unstamped and the
      * backend falls back to modefromsid exactly as before. */
-    if ((flags & CHIMERA_VFS_OPEN_CREATE) && !request->create.has_stream) {
+    if (flags & CHIMERA_VFS_OPEN_CREATE) {
         chimera_smb_seed_creator_sids(request);
     }
 
