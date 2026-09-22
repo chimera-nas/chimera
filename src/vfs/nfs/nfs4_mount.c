@@ -633,6 +633,7 @@ chimera_nfs4_mount(
     int                                      i, idx = -1;
     int                                      need_discover = 0;
     int                                      port;
+    enum evpl_protocol_id                    rdma_protocol;
 
     /* Parse hostname from "hostname:path" */
     for (i = 0; i < request->mount.pathlen; i++) {
@@ -650,14 +651,22 @@ chimera_nfs4_mount(
         return;
     }
 
+    rdma_protocol = chimera_nfs4_mount_get_rdma_protocol(&request->mount.options,
+                                                         shared->tcp_flavor);
+    port = chimera_nfs4_mount_get_port(&request->mount.options,
+                                       rdma_protocol ? CHIMERA_NFS4_RDMA_PORT : CHIMERA_NFS4_DEFAULT_PORT);
+
     pthread_mutex_lock(&shared->lock);
 
-    /* Check if we already have a server connection for this host */
+    /* Share connections only for the same endpoint and transport.  Separate
+     * data servers can export the same path on different ports of one host. */
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i] &&
             strncmp(shared->servers[i]->hostname, hostname, hostnamelen) == 0 &&
             shared->servers[i]->hostname[hostnamelen] == '\0' &&
-            shared->servers[i]->nfsvers == 4) {
+            shared->servers[i]->nfsvers == 4 &&
+            shared->servers[i]->nfs_port == port &&
+            shared->servers[i]->rdma_protocol == rdma_protocol) {
             server = shared->servers[i];
             break;
         }
@@ -698,9 +707,8 @@ chimera_nfs4_mount(
         server->shared  = shared;
 
         /* Parse RDMA options */
-        server->rdma_protocol = chimera_nfs4_mount_get_rdma_protocol(&request->mount.options,
-                                                                     shared->tcp_flavor);
-        server->use_rdma = server->rdma_protocol != 0;
+        server->rdma_protocol = rdma_protocol;
+        server->use_rdma      = server->rdma_protocol != 0;
 
         /* pNFS opt-in (default off); confirmed against eir_flags at EXCHANGE_ID. */
         server->pnfs_requested = chimera_nfs4_mount_get_pnfs(&request->mount.options);
@@ -709,9 +717,7 @@ chimera_nfs4_mount(
         server->requested_session_slots = chimera_nfs4_mount_get_session_slots(
             &request->mount.options, CHIMERA_NFS4_DEFAULT_SESSION_SLOTS);
 
-        /* Get port (default 2049 for TCP, 20049 for RDMA) */
-        port = chimera_nfs4_mount_get_port(&request->mount.options,
-                                           server->use_rdma ? CHIMERA_NFS4_RDMA_PORT : CHIMERA_NFS4_DEFAULT_PORT);
+        /* Endpoint selected before looking for a reusable connection. */
         server->nfs_port = port;
 
         strncpy(server->hostname, hostname, hostnamelen);

@@ -1140,8 +1140,8 @@ void chimera_nfs4_cb_thread_destroy(
 
 void chimera_nfs4_cb_resume_on_thread(
     struct chimera_nfs_thread *thread,
-    void (*fn)(void *),
-    void *arg);
+    void (                    *fn )(void *),
+    void                      *arg);
 
 /*
  * Request the control thread establish `server`'s NFSv4.1 session on its
@@ -1438,8 +1438,8 @@ int chimera_nfs4_open_file_get(
     const struct stateid4            *stateid,
     struct chimera_nfs4_open_file   **r_file);
 
-/* Drop a reference.  Non-zero if it was the last, in which case the entry has
- * been retired and its stateid copied out for the caller to CLOSE with. */
+/* Drop a reference.  Non-zero if it was the last, in which case the entry is
+ * marked closing and its stateid copied out for the caller to CLOSE with. */
 int chimera_nfs4_open_file_put(
     struct chimera_nfs_client_server *server,
     const uint8_t                    *fh,
@@ -1448,8 +1448,7 @@ int chimera_nfs4_open_file_put(
 
 void chimera_nfs4_open_file_close_done(
     struct chimera_nfs_client_server *server,
-    const uint8_t                    *fh,
-    int                               fh_len);
+    struct chimera_nfs4_open_file    *file);
 
 /* Free any entries left on a server at module teardown. */
 void chimera_nfs4_open_file_drain(

@@ -27,23 +27,23 @@
  */
 
 struct chimera_nfs4_open_state {
-    uint8_t                    server_index; /* NFS server index for dispatch routing */
-    struct stateid4            stateid;    /* NFS4 stateid for this open */
-    uint32_t                   seqid;      /* Sequence ID for state operations */
-    uint32_t                   access;     /* Share access mode */
-    atomic_int                 dirty;      /* Count of uncommitted unstable writes */
-    int                        silly_renamed; /* File has been silly renamed */
-    uint8_t                    dir_fh_len; /* Directory fh for silly remove on close */
-    uint8_t                    dir_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                        server_index; /* NFS server index for dispatch routing */
+    struct stateid4                stateid; /* NFS4 stateid for this open */
+    uint32_t                       seqid;  /* Sequence ID for state operations */
+    uint32_t                       access; /* Share access mode */
+    atomic_int                     dirty;  /* Count of uncommitted unstable writes */
+    int                            silly_renamed; /* File has been silly renamed */
+    uint8_t                        dir_fh_len; /* Directory fh for silly remove on close */
+    uint8_t                        dir_fh[CHIMERA_VFS_FH_SIZE];
 
     /*
      * Credentials for silly remove on close.
      */
-    struct chimera_vfs_cred    silly_remove_cred;
+    struct chimera_vfs_cred        silly_remove_cred;
 
     /* Shared server OPEN and pNFS layout for this file. */
     struct chimera_nfs4_open_file *open_file;
-    struct stateid4              close_stateid;
+    struct stateid4                close_stateid;
 };
 
 _Static_assert(offsetof(struct chimera_nfs4_open_state, server_index) == 0,
@@ -72,19 +72,21 @@ struct chimera_nfs4_open_file {
     /* All guarded by server->open_state_lock, hash linkage included: the count
     * reaching zero and the unhashing that retires the entry have to be one
     * step, or a concurrent open could revive one already bound for a CLOSE. */
-    int             refcnt;
+    int                        refcnt;
     /* Wire CLOSEs in flight for this file.  The entry stays hashed while one
      * is outstanding so a concurrent OPEN of the same file can see it: the
      * server keys state on (owner, fh) and this client uses one owner, so an
      * OPEN that lands before an in-flight CLOSE coalesces into the very
      * state that CLOSE then destroys.  chimera_nfs4_open_file_get detects
-     * that (see the seqid rule there) and the opener re-sends. */
-    int             closing;
-    struct stateid4 stateid;
-    uint8_t         fh_len;
-    uint8_t         fh[CHIMERA_VFS_FH_SIZE];
+     * that (see the seqid rule there) and the opener re-sends.  A fresh OPEN
+     * may replace this entry in the hash before the CLOSE reply arrives;
+     * the old close retains its pointer and owns its layout until completion. */
+    int                        closing;
+    struct stateid4            stateid;
+    uint8_t                    fh_len;
+    uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
     struct chimera_nfs4_layout layout;
-    UT_hash_handle  hh;
+    UT_hash_handle             hh;
 };
 
 /*
