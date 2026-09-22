@@ -86,6 +86,9 @@ jobs:
           ref: ${{ steps.manifest.outputs.baseline }}
           path: _vcpkg
           persist-credentials: false
+      - name: Prepare the publisher's platform dependency recipes
+        shell: pwsh
+        run: ./etc/prepare-windows-vcpkg.ps1 -Triplet ('${{ matrix.arch }}'.ToLower() + '-windows')
       - name: Select the publisher's toolchain and bootstrap vcpkg
         shell: pwsh
         run: |
