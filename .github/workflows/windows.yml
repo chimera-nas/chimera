@@ -152,6 +152,12 @@ jobs:
             if (Test-Path $path) { Remove-Item $path -Recurse -Force }
           }
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free
+      # A TLS regression should fail before model generation or the long
+      # application suite. These tests also run again in the full suite.
+      - name: Build TLS and HTTPS smoke tests
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4 --target hello_world_stream hello_world_connected_msg ping_pong_stream ping_pong_connected_msg bulk_connected_msg bulk_stream rand_full_duplex_stream http_h2_client_tls http_h2_tls
+      - name: Test TLS and HTTPS smoke paths
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure --no-tests=error --timeout 90 --output-junit tls-results.xml -R 'libevpl/(tls/|http/h2.*tls)'
       - name: Build server
         run: cmake --build build --target chimera --config ${{ matrix.config }} --parallel 4
       # Fail common runtime paths before spending time generating the full
@@ -201,6 +207,7 @@ jobs:
           name: windows-${{ matrix.arch }}-${{ matrix.config }}
           path: |
             build/results.xml
+            build/tls-results.xml
             build/Testing/Temporary/
             build/**/*.debug.log
             build/**/*.metrics.prom
