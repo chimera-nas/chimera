@@ -414,7 +414,7 @@ chimera_vfs_pnfs_request_retarget(
         default:
             chimera_vfs_abort("pnfs retarget: opcode %d has no data handle",
                               request->opcode);
-    }
+    } /* switch */
 } /* chimera_vfs_pnfs_request_retarget */
 
 static struct chimera_vfs_open_handle *
@@ -427,7 +427,7 @@ chimera_vfs_pnfs_request_handle(struct chimera_vfs_request *request)
         case CHIMERA_VFS_OP_READ_PLUS:  return request->read_plus.handle;
         case CHIMERA_VFS_OP_WRITE_SAME: return request->write_same.handle;
         default:                        return NULL;
-    }
+    } /* switch */
 } /* chimera_vfs_pnfs_request_handle */
 
 static void
@@ -574,9 +574,9 @@ chimera_vfs_pnfs_sync_size_cb(
  */
 SYMBOL_EXPORT void
 chimera_vfs_pnfs_sync_mds(
-    struct chimera_vfs_request     *request,
-    const struct chimera_vfs_attrs *backing_post,
-    uint64_t                        end_offset,
+    struct chimera_vfs_request      *request,
+    const struct chimera_vfs_attrs  *backing_post,
+    uint64_t                         end_offset,
     chimera_vfs_pnfs_sync_callback_t next)
 {
     struct chimera_vfs_attrs *sync = &request->io_pnfs_sync_attr;

@@ -668,15 +668,15 @@ _Static_assert(sizeof(struct chimera_vfs_setattr_pnfs_ctx) <= CHIMERA_VFS_GATE_S
 static void
 chimera_vfs_setattr_pnfs_resume(struct chimera_vfs_setattr_pnfs_ctx *ctx)
 {
-    struct chimera_vfs_thread      *thread        = ctx->thread;
-    const struct chimera_vfs_cred  *cred          = ctx->cred;
-    struct chimera_vfs_open_handle *handle        = ctx->handle;
-    struct chimera_vfs_attrs       *set_attr      = ctx->set_attr;
-    uint64_t                        pre_mask      = ctx->pre_attr_mask;
-    uint64_t                        post_mask     = ctx->post_attr_mask;
-    int                             fd_rights     = ctx->fd_rights;
-    chimera_vfs_setattr_callback_t  callback      = ctx->callback;
-    void                           *private_data  = ctx->private_data;
+    struct chimera_vfs_thread      *thread       = ctx->thread;
+    const struct chimera_vfs_cred  *cred         = ctx->cred;
+    struct chimera_vfs_open_handle *handle       = ctx->handle;
+    struct chimera_vfs_attrs       *set_attr     = ctx->set_attr;
+    uint64_t                        pre_mask     = ctx->pre_attr_mask;
+    uint64_t                        post_mask    = ctx->post_attr_mask;
+    int                             fd_rights    = ctx->fd_rights;
+    chimera_vfs_setattr_callback_t  callback     = ctx->callback;
+    void                           *private_data = ctx->private_data;
 
     if (ctx->backing) {
         chimera_vfs_release(thread, ctx->backing);

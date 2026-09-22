@@ -335,7 +335,7 @@ chimera_vfs_copy_range(
      * cannot drive it safely.  A proxy doing server-side copy by round-tripping
      * every byte to its upstream would also defeat the point, so the proxy keeps
      * surfacing ENOTSUP (its prior behaviour) and lets the client copy. */
-        /* Server-side range copy is declined outright while pNFS is configured.
+    /* Server-side range copy is declined outright while pNFS is configured.
      * Either handle may be DS-resident, so a correct implementation would have
      * to resolve both and drive the copy between two backing files; until it
      * does, ENOTSUP sends the caller down the read+write fallback, which is
@@ -348,7 +348,7 @@ chimera_vfs_copy_range(
         return;
     }
 
-if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
+    if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
         if (dst_handle->vfs_module->fh_magic == CHIMERA_VFS_FH_MAGIC_NFS ||
             src_handle->vfs_module->fh_magic == CHIMERA_VFS_FH_MAGIC_NFS) {
             callback(CHIMERA_VFS_ENOTSUP, 0, NULL, NULL, private_data);

@@ -340,28 +340,28 @@ struct mbt_env_opts {
      * of the flex-files device encoder.  A suite that needs the client to
      * actually reach a DS pins 3 -- chimera's pNFS client only drives NFSv3
      * data servers and falls back to the MDS for any other version. */
-    int         pnfs_ds_version;
+    int             pnfs_ds_version;
     /* Advertise a second, RDMA netaddr for every data server alongside the tcp
      * one.  The device then carries two netaddrs, which is what makes the
      * client's transport-preference loop (and its "consume them all to stay
      * aligned" decode) do any work.  The address is never dialed: a client that
      * mounted the MDS over TCP must select the tcp netaddr. */
-    int         pnfs_ds_advertise_rdma;
+    int             pnfs_ds_advertise_rdma;
     /* Stand up the pNFS PROXY tier as well (requires pnfs_num_ds > 0): a third
      * server whose backing store is the nfs module mounting env->server with
      * pNFS enabled.  env->proxy_server is that server; every per-trace
      * filesystem gets a matching proxy mount and export.  See the port block
      * near MBT_PROXY_PORT for the topology. */
-    int         pnfs_proxy;
+    int             pnfs_proxy;
     /* Point the harness's OWN client at the proxy instead of env->server, so a
      * replayer drives its whole corpus through the proxy tier.  The proxy is an
      * ordinary NFSv4 server on the wire -- everything pNFS about it is internal
      * -- so no replay logic changes; what changes is which implementation
      * answers, and the model is the oracle for both. */
-    int         client_at_proxy;
+    int             client_at_proxy;
     /* NFS version the proxy's control path speaks to the MDS ("vers=" in its
      * mount options).  0 => 4, which is what pNFS requires. */
-    int         pnfs_proxy_vers;
+    int             pnfs_proxy_vers;
     /* Leave the `pnfs` mount option OFF on the proxy's mount of the MDS, so the
      * proxy is a plain NFSv4 client.  Used to pin that the pNFS path is what
      * makes the difference, not the proxy tier itself. */

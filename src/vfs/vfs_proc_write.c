@@ -17,7 +17,8 @@
 #include "common/macros.h"
 
 static void
-chimera_vfs_write_finish(struct chimera_vfs_request *request);
+chimera_vfs_write_finish(
+    struct chimera_vfs_request *request);
 
 static void
 chimera_vfs_write_complete(struct chimera_vfs_request *request)
@@ -109,9 +110,9 @@ chimera_vfs_write_dispatch(
         return;
     }
 
-    request->opcode       = CHIMERA_VFS_OP_WRITE;
-    request->complete     = chimera_vfs_write_complete;
-    request->write.handle = io_handle;
+    request->opcode          = CHIMERA_VFS_OP_WRITE;
+    request->complete        = chimera_vfs_write_complete;
+    request->write.handle    = io_handle;
     request->io_pnfs_backing = redirected ? io_handle : NULL;
     /* Anchor the implicit claim on the cached handle (chimera_vfs_io_claim_acquire).
      * The CALLER-named handle even when redirected: leases and oplocks are held
@@ -333,7 +334,7 @@ chimera_vfs_write_gate_complete(
                               gate->pre_attr_mask, gate->post_attr_mask,
                               gate->iov, gate->niov,
                               gate->has_io_owner ? &gate->io_owner : NULL,
-                               gate->callback, gate->private_data);
+                              gate->callback, gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_write_gate_complete */
 

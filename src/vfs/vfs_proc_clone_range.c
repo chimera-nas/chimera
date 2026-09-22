@@ -48,7 +48,7 @@ chimera_vfs_clone_range(
 {
     struct chimera_vfs_request *request;
 
-        /* Server-side range copy is declined outright while pNFS is configured.
+    /* Server-side range copy is declined outright while pNFS is configured.
      * Either handle may be DS-resident, so a correct implementation would have
      * to resolve both and drive the copy between two backing files; until it
      * does, ENOTSUP sends the caller down the read+write fallback, which is
@@ -61,7 +61,7 @@ chimera_vfs_clone_range(
         return;
     }
 
-if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_CLONE_RANGE)) {
+    if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_CLONE_RANGE)) {
         callback(CHIMERA_VFS_ENOTSUP, NULL, NULL, private_data);
         return;
     }
