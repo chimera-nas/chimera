@@ -180,6 +180,20 @@ chimera_rest_handle_exports_create(
         return;
     }
 
+    /* An export name has to be one path component: the NFSv4 pseudo-root
+     * publishes each export as a single directory entry and clients walk a
+     * path one component at a time, so a nested name like "/a/b" would be
+     * created and then be unmountable and invisible.  create_export below
+     * rejects it too; testing here turns that into a 400 that names the
+     * offending field instead of a generic one. */
+    if (!chimera_nfs_export_name_valid(name)) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                "name must be a single path component "
+                                "(\"/share\"), or \"/\" for the root export");
+        return;
+    }
+
     /* Optional stable export id.  Validate the signed json value before any
      * unsigned cast so negatives and non-integers are rejected rather than
      * silently becoming auto-assignment (0) or wrapping into range. */
@@ -344,7 +358,7 @@ chimera_rest_handle_exports_create(
 
     if (rc == -EINVAL) {
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
-                                "export_id out of range");
+                                "Invalid export name or export_id");
         return;
     }
 

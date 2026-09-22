@@ -1021,6 +1021,45 @@ nfs_server_thread_destroy(void *data)
     free(thread);
 } /* nfs_server_thread_destroy */
 
+/*
+ * An export name has to be a single path component, optionally preceded by
+ * one slash ("/share" or "share"), or the root export "/".
+ *
+ * RFC 7530 section 7.7 makes presenting a complete namespace the server's
+ * responsibility, and an NFSv4 client walks a path one component at a time.
+ * Chimera builds no intermediate pseudo-fs nodes to bridge a gap: the
+ * pseudo-root routes a LOOKUP straight to a whole export name, lists one
+ * directory entry per export, and grafts sibling exports over a "/" export
+ * by component.  So an export named "/a/b" has no reachable "a" to walk
+ * through -- LOOKUP "a" answers NFS4ERR_NOENT, the pseudo-root listing
+ * skips the entry, and no client can mount it.  A flat namespace has no gap
+ * to bridge, hence rejecting the name is what keeps the presented namespace
+ * complete.  (Nesting is still available the other way round: export "/"
+ * over a real directory tree and the intermediate directories are real.)
+ *
+ * Only one leading slash is tolerated because that is what the mount-path
+ * matcher in chimera_nfs_find_export_path() strips; "//share" would pass
+ * the component test yet match no mount path.
+ */
+SYMBOL_EXPORT int
+chimera_nfs_export_name_valid(const char *name)
+{
+    if (!name) {
+        return 0;
+    }
+
+    /* The root export names the namespace root itself, not an entry in it. */
+    if (strcmp(name, "/") == 0) {
+        return 1;
+    }
+
+    if (name[0] == '/') {
+        name++;
+    }
+
+    return name[0] != '\0' && strchr(name, '/') == NULL;
+} /* chimera_nfs_export_name_valid */
+
 SYMBOL_EXPORT int
 chimera_nfs_add_export(
     void                                 *nfs_shared,
@@ -1036,6 +1075,18 @@ chimera_nfs_add_export(
     if (export_id > CHIMERA_NFS_EXPORT_ID_MAX) {
         chimera_nfs_error("Export '%s' id %u out of range (1..%u)",
                           name, export_id, CHIMERA_NFS_EXPORT_ID_MAX);
+        return -EINVAL;
+    }
+
+    /* Reject a name no client could reach before the export is published;
+     * see chimera_nfs_export_name_valid().  This is the one chokepoint every
+     * caller goes through (config file, REST, tests), so the pseudo-root and
+     * junction code downstream can rely on every live export name being a
+     * single component. */
+    if (!chimera_nfs_export_name_valid(name)) {
+        chimera_nfs_error("Export name '%s' is not a single path component; "
+                          "a nested export name is unreachable over NFSv4",
+                          name);
         return -EINVAL;
     }
 

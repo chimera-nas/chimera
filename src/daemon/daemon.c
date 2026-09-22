@@ -1539,10 +1539,12 @@ main(
 
             if (chimera_server_create_export(server, name, path, export_id,
                                              &opts) != 0) {
-                /* Duplicate name or unusable export_id: proceeding would mint
-                 * file handles under a different id than the operator pinned,
-                 * which breaks cluster failover in a way clients only notice
-                 * later.  Fail hard like the mount-path errors above. */
+                /* Unreachable name, duplicate name or unusable export_id.
+                 * Proceeding would serve a namespace the operator did not
+                 * configure -- an export no client can mount, or file handles
+                 * minted under a different id than was pinned, which breaks
+                 * cluster failover in a way clients only notice later.  Fail
+                 * hard like the mount-path errors above. */
                 chimera_server_error("Failed to create export '%s'", name);
                 startup_validation_fail();
             }

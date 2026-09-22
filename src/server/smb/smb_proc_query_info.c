@@ -320,8 +320,8 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
     /* Gate: named streams must be enabled and the backend must support them.
      * Without them the object still has its default data fork, so report that
      * one synthesized "::$DATA" stream instead of failing the level. */
-    if (!thread->shared->config.named_streams ||
-        !(open_file->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
+    if (!chimera_smb_named_streams_enabled(open_file->handle->vfs_module->capabilities,
+                                           thread->shared->config.named_streams)) {
         chimera_vfs_getattr(thread->vfs_thread,
                             &request->session_handle->session->cred,
                             open_file->handle,
@@ -864,6 +864,13 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     request->query_info.output_length = 8;
                     break;
                 case SMB2_FILE_FS_ATTRIBUTE_INFO:
+                    /* The flag word follows the serving module, and the open
+                     * is released before the reply is marshalled, so derive
+                     * it here while the handle is still ours. */
+                    request->query_info.r_fs_attrs.smb_fs_attributes =
+                        chimera_smb_fs_attributes(
+                            request->query_info.open_file->handle->vfs_module->capabilities,
+                            thread->shared->config.named_streams);
                     request->query_info.output_length = 16;
                     break;
                 case SMB2_FILE_FS_CONTROL_INFO:
@@ -1076,12 +1083,7 @@ chimera_smb_query_info_reply(
                     break;
                 case SMB2_FILE_FS_ATTRIBUTE_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor,
-                                                    SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
-                                                    SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
-                                                    SMB2_FS_ATTR_UNICODE_ON_DISK |
-                                                    SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES |
-                                                    SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS |
-                                                    SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING);
+                                                    request->query_info.r_fs_attrs.smb_fs_attributes);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 255);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 4);
 

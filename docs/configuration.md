@@ -123,7 +123,7 @@ the canonical place to set them.
 | `kv_module` | string | - | Key-value module used to persist server state. |
 | `state_dir` | string | `<prefix>/share/state` | Directory for persisted NFS/SMB state. |
 | `smb_persistent_handles` | bool | `false` | Enable SMB durable/persistent handles (needed for Continuous Availability). |
-| `smb_named_streams` | bool | `false` | Enable SMB named streams (alternate data streams). |
+| `smb_named_streams` | bool | `false` | Enable SMB named streams (alternate data streams). Honored only on backends that support them, and advertised to clients as `FILE_NAMED_STREAMS` in `FileFsAttributeInformation` only when both hold. |
 | `smb_encryption` | string/int | `"off"` | SMB3 transport encryption: `"off"`/`"disabled"` (0), `"enabled"`/`"on"` (1), or `"required"` (2). |
 | `smb_acl_inherited_canonicalize` | bool | `true` | Canonicalize inherited ACLs on SMB. |
 | `smb_replay_pending_windows` | bool | `false` | Answer a replayed durable-v2 CREATE that collides with a still-deferred CREATE the way Windows servers do (`STATUS_ACCESS_DENIED`, and no replay detection while the original waits on a share conflict). The default answers `STATUS_FILE_NOT_AVAILABLE`, which clients retry until the original create completes. MS-SMB2 does not specify this race; the two profiles are mutually exclusive. |
@@ -220,6 +220,14 @@ becomes visible in the Chimera namespace at `/<name>`.
 
 An object keyed by export name. Each export publishes a VFS path
 (`/<mount-name>[/subdir]`) over NFSv3/NFSv4.
+
+An export name must be a single path component -- `"/share"` (or `"share"`)
+-- or `"/"` for the root export. A nested name such as `"/a/b"` fails
+startup: the NFSv4 pseudo-root publishes one directory entry per export and
+clients walk a path one component at a time, so there is no `a` to walk
+through and the export would be unmountable and invisible (RFC 7530
+section 7.7). To serve a nested namespace, export `"/"` over a directory
+tree instead; its intermediate directories are real and walkable.
 
 | Key | Type | Default | Description |
 |---|---|---|---|

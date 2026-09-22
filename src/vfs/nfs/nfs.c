@@ -432,10 +432,22 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
      * on the upstream server over NLM (nfs3_lock.c), which is what makes a
      * conflict with another client of that server visible to the claim core.
      * CAP_CLAIM_AGGREGATE is deliberately absent: nothing here holds a
-     * revocable per-node cache token upstream. */
+     * revocable per-node cache token upstream.
+     *
+     * CAP_SPARSE is a per-mount truth stated once per module.  Over NFSv4.2
+     * both halves are real: DEALLOCATE punches the hole (nfs4_allocate.c) and
+     * SEEK classifies DATA/HOLE (nfs4_seek.c).  Over NFSv3 only the first half
+     * exists, and only as zero-writes (nfs3_allocate.c); a SEEK falls through
+     * nfs3_dispatch to ENOTSUP, so FSCTL_QUERY_ALLOCATED_RANGES on a v3 share
+     * answers STATUS_NOT_SUPPORTED.  The word can be right for one version or
+     * the other, not both, and the SMB server read it as always-on before the
+     * capability existed; declare it so v4.2 shares keep the hole punching
+     * they had, and v3 shares keep the over-advertisement they had.  Making
+     * this correct on both needs the capability answered per mount (off the
+     * handle, not the module), which is a separate change. */
     .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
         CHIMERA_VFS_CAP_CLAIM_RANGE | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS | CHIMERA_VFS_CAP_DELEGATES_DAC |
-        CHIMERA_VFS_CAP_REMOTE_DAC,
+        CHIMERA_VFS_CAP_REMOTE_DAC | CHIMERA_VFS_CAP_SPARSE,
     .init           = chimera_nfs_init,
     .destroy        = chimera_nfs_destroy,
     .thread_init    = chimera_nfs_thread_init,
