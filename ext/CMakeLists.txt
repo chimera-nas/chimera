@@ -10,6 +10,12 @@ set(XDRZCC ${XDRZCC} PARENT_SCOPE)
 
 add_subdirectory(ndrzcc)
 
+if(WIN32)
+    # WinFlex uses shared temporary filenames. Keep the two lexer generators
+    # from racing when MSBuild builds these independent tools in parallel.
+    add_dependencies(ndrzcc xdrzcc)
+endif()
+
 set(NDRZCC ${NDRZCC} PARENT_SCOPE)
 
 remove_definitions(-fvisibility=hidden)
