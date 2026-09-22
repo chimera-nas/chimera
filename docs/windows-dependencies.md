@@ -65,6 +65,34 @@ binary caches are disabled for this check. Thus an upload failure cannot be
 hidden behind a successful source build. Each job records the source commit,
 manifest hash, runner image, MSVC tools version, and restored package status
 in a diagnostic artifact. NuGet credentials are temporary and are not uploaded.
+The restored OpenSSL libraries must also complete native TLS 1.2 and TLS 1.3
+handshakes and exchange encrypted requests and responses in both Debug and
+Release. The probe uses paired memory BIOs, so it needs no external server or
+network access. Changes to the publisher, dependency recipes, manifest, or probe
+run this test on x64 and ARM64 pull-request jobs with read-only package access;
+those jobs install only OpenSSL and its build helpers.
+
+## ARM64 OpenSSL compiler workaround
+
+MSVC 19.51.36257 miscompiles OpenSSL 3.6.4's `tls_parse_all_extensions` with
+optimized ARM64 builds and OpenSSL's `/Gs0` option. The generated function calls
+`__chkstk` before saving the link register, then saves that overwritten return
+address. Returning from the function re-enters its prologue with the integer
+result `1` in the first argument register; its next pointer access faults at
+address `0x879`.
+
+`etc/prepare-windows-vcpkg.ps1` generates an OpenSSL overlay from the pinned
+vcpkg checkout. For ARM64 MSVC Release it appends `/Gs4096`, MSVC's normal
+page-size stack-probe threshold. Optimization and `/GS` buffer-overrun checks
+remain enabled. x64 recipes are unchanged. The generated directory is ignored
+by Git; the shared helper keeps publishers and consumers on the same recipe,
+and vcpkg hashes the modified port into its package ABI. Existing unmodified
+OpenSSL packages therefore cannot satisfy the new ARM64 recipe.
+
+When changing the baseline or removing this workaround, run the native TLS
+probe with Release libraries as well as Debug libraries. Successfully generating
+an RSA key or self-signed certificate does not exercise the failing handshake
+path. See [MSVC's stack-probe documentation](https://learn.microsoft.com/en-us/cpp/build/reference/gs-control-stack-checking-calls).
 
 ## Consuming the packages
 
@@ -72,6 +100,9 @@ The Windows build workflow should use:
 
 - The same `vcpkg.json`, vcpkg baseline, Visual Studio selection, runner families,
   and target/host triplets as the publisher.
+- Run `./etc/prepare-windows-vcpkg.ps1 -Triplet <triplet>` after checking out
+  `_vcpkg`, before the first install. Keep the generated `VCPKG_OVERLAY_PORTS`
+  setting for both the explicit install and CMake configuration.
 - `X_VCPKG_NUGET_ID_PREFIX=chimera-`.
 - A NuGet config authenticating to this feed using `GITHUB_TOKEN`, with package
   read access. Consumer jobs need `contents: read` and `packages: read`, not

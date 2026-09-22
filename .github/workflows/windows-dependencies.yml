@@ -9,19 +9,25 @@ name: Publish Windows dependencies
 # Consumers use this same manifest/baseline and restore with --only-binarycaching.
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-dependencies.yml'
+      - 'etc/prepare-windows-vcpkg.ps1'
+      - 'etc/windows-dependency-tests/**'
+      - 'vcpkg.json'
 
 permissions:
   contents: read
 
 # Let an expensive publication finish instead of cancelling it on redispatch.
 concurrency:
-  group: publish-windows-dependencies
+  group: publish-windows-dependencies-${{ github.event.pull_request.number || 'main' }}
   cancel-in-progress: false
 
 jobs:
   publish:
     name: Publish ${{ matrix.triplet }} (Debug and Release)
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
@@ -31,8 +37,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-2022, triplet: x64-windows, vs: '[17.0,18.0)'}
-          - {runner: windows-11-vs2026-arm, triplet: arm64-windows, vs: '[18.0,19.0)'}
+          - {runner: windows-2022, triplet: x64-windows, vs: '[17.0,18.0)', arch: x64, generator: 'Visual Studio 17 2022'}
+          - {runner: windows-11-vs2026-arm, triplet: arm64-windows, vs: '[18.0,19.0)', arch: ARM64, generator: 'Visual Studio 18 2026'}
     defaults:
       run:
         shell: pwsh
@@ -65,6 +71,9 @@ jobs:
           path: _vcpkg
           persist-credentials: false
 
+      - name: Prepare platform dependency recipes
+        run: ./etc/prepare-windows-vcpkg.ps1 -Triplet $env:TRIPLET
+
       - name: Select the runner's Visual Studio and bootstrap vcpkg
         run: |
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
@@ -81,6 +90,7 @@ jobs:
             triplet = $env:TRIPLET
             runner_image = $env:ImageVersion
             visual_studio = $vs
+            openssl_overlay_sha256 = if ($env:TRIPLET -eq 'arm64-windows') { (Get-FileHash "$env:VCPKG_OVERLAY_PORTS/openssl/windows/portfile.cmake" -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
             msvc_tools = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
           }
           New-Item -ItemType Directory -Force dependency-report | Out-Null
@@ -144,11 +154,24 @@ jobs:
           @(
             "### Windows dependency publication: $env:TRIPLET"
             ''
-            'Debug and Release packages published; a fresh binary-only restore from GitHub Packages passed.'
+            'Debug and Release packages published; a fresh binary-only restore from GitHub Packages passed. TLS runtime validation follows.'
             ''
             "Manifest SHA256: $((Get-FileHash vcpkg.json -Algorithm SHA256).Hash.ToLowerInvariant())"
             "Runner image: $env:ImageVersion"
           ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Test restored OpenSSL in Debug and Release
+        run: |
+          $restore = "$env:RUNNER_TEMP/chimera-dependencies-verify"
+          cmake -S etc/windows-dependency-tests -B dependency-tests -G "${{ matrix.generator }}" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=OFF "-DVCPKG_INSTALLED_DIR=$restore" "-DVCPKG_TARGET_TRIPLET=$env:TRIPLET" "-DVCPKG_HOST_TRIPLET=$env:TRIPLET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($configuration in @('Debug', 'Release')) {
+            cmake --build dependency-tests --config $configuration
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ctest --test-dir dependency-tests -C $configuration --output-on-failure --no-tests=error --output-junit "tls-$configuration.xml"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          'Native TLS 1.2 and TLS 1.3 handshakes and encrypted request/response passed in Debug and Release.' >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload dependency build diagnostics
         if: always()
@@ -159,9 +182,102 @@ jobs:
           if-no-files-found: ignore
           path: |
             dependency-report/
+            dependency-tests/*.xml
+            dependency-tests/Testing/Temporary/
             vcpkg_installed/**/share/*/vcpkg_abi_info.txt
             _vcpkg/buildtrees/**/*.log
 
+      - name: Remove temporary package credentials
+        if: always()
+        run: |
+          Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue
+
+  test:
+    name: Dependency TLS ${{ matrix.arch }}
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, triplet: x64-windows, vs: '[17.0,18.0)', arch: x64, generator: 'Visual Studio 17 2022'}
+          - {runner: windows-11-vs2026-arm, triplet: arm64-windows, vs: '[18.0,19.0)', arch: ARM64, generator: 'Visual Studio 18 2026'}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_USE_NUGET_CACHE: 'false'
+      X_VCPKG_NUGET_ID_PREFIX: chimera-
+      TRIPLET: ${{ matrix.triplet }}
+      VS_VERSION_RANGE: ${{ matrix.vs }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Read pinned vcpkg revision
+        id: manifest
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'Expected a pinned vcpkg baseline' }
+          "baseline=$baseline" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v5
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.manifest.outputs.baseline }}
+          path: _vcpkg
+          persist-credentials: false
+      - name: Prepare platform dependency recipes and bootstrap vcpkg
+        run: |
+          ./etc/prepare-windows-vcpkg.ps1 -Triplet $env:TRIPLET
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -version $env:VS_VERSION_RANGE -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio $env:VS_VERSION_RANGE is required" }
+          "VCPKG_VISUAL_STUDIO_PATH=$vs" >> $env:GITHUB_ENV
+          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure read-only package access
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $nuget = & ./_vcpkg/vcpkg.exe fetch nuget | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $feed = "https://nuget.pkg.github.com/$($env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant())/index.json"
+          '<configuration><packageSources><clear /></packageSources></configuration>' | Set-Content $config
+          & $nuget sources Add -Name Chimera -Source $feed -UserName $env:GITHUB_ACTOR -Password $env:GH_PACKAGES_TOKEN -StorePasswordInClearText -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,read" >> $env:GITHUB_ENV
+      # Test only the TLS dependency here; never rebuild RocksDB/Protobuf in
+      # these PR jobs. Recipe changes deliberately permit an OpenSSL build.
+      - name: Install OpenSSL for runtime validation
+        run: |
+          & ./_vcpkg/vcpkg.exe install openssl --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$pwd/dependency-installed"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test native TLS in Debug and Release
+        run: |
+          cmake -S etc/windows-dependency-tests -B dependency-tests -G "${{ matrix.generator }}" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=OFF "-DVCPKG_INSTALLED_DIR=$pwd/dependency-installed" "-DVCPKG_TARGET_TRIPLET=$env:TRIPLET" "-DVCPKG_HOST_TRIPLET=$env:TRIPLET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($configuration in @('Debug', 'Release')) {
+            cmake --build dependency-tests --config $configuration
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ctest --test-dir dependency-tests -C $configuration --output-on-failure --no-tests=error --output-junit "tls-$configuration.xml"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Upload TLS validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-dependency-tls-${{ matrix.arch }}
+          path: |
+            dependency-tests/*.xml
+            dependency-tests/Testing/Temporary/
+            _vcpkg/buildtrees/openssl/*.log
+          if-no-files-found: ignore
       - name: Remove temporary package credentials
         if: always()
         run: |
