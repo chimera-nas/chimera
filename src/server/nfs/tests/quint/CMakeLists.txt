@@ -54,6 +54,22 @@ target_link_libraries(nfs3_mbt_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs3_mbt_probe)
 
+add_executable(nfs_pnfs_io_probe nfs_pnfs_io_probe.c)
+target_include_directories(nfs_pnfs_io_probe PRIVATE ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs_pnfs_io_probe chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_pnfs_io_probe)
+foreach(backend memfs diskfs cairn)
+    if(backend STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    foreach(topology local remote)
+        add_test(NAME chimera/server/nfs/pnfs/io_${backend}_${topology}
+            COMMAND $<TARGET_FILE:nfs_pnfs_io_probe> ${backend} ${topology})
+        set_tests_properties(chimera/server/nfs/pnfs/io_${backend}_${topology} PROPERTIES
+            LABELS "quint;nfs3_mbt;pnfs;${backend}" TIMEOUT 90)
+    endforeach()
+endforeach()
+
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)

@@ -18,13 +18,6 @@ chimera_vfs_allocate_finish(
 static void
 chimera_vfs_allocate_complete(struct chimera_vfs_request *request)
 {
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr, "PNFSIO: allocate redir=%d flags=%u off=%llu len=%llu -> st=%d\n",
-                !!request->io_pnfs_backing, request->allocate.flags,
-                (unsigned long long) request->allocate.offset,
-                (unsigned long long) request->allocate.length,
-                request->status);
-    }
 
     chimera_vfs_pnfs_sync_mds(request, &request->allocate.r_post_attr,
                               request->allocate.offset +

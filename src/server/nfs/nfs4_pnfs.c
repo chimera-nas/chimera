@@ -1482,9 +1482,10 @@ chimera_nfs4_layoutcommit_getattr_complete(
     chimera_nfs_info("LAYOUTCOMMIT req=%p size %llu -> %llu mtime_chg=%d",
                      req, (unsigned long long) cur, (unsigned long long) want,
                      args->loca_time_modify.nt_timechanged);
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, req->handle,
-                        set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
-                        chimera_nfs4_layoutcommit_setattr_complete, req);
+    /* The layout already authorized the data write; only publish its metadata. */
+    chimera_vfs_setattr_after_write(req->thread->vfs_thread, &req->cred, req->handle,
+                                    set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
+                                    chimera_nfs4_layoutcommit_setattr_complete, req);
 } /* chimera_nfs4_layoutcommit_getattr_complete */
 
 static void

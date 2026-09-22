@@ -135,11 +135,6 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
         k = 1;          /* a single block larger than the byte budget */
     }
 
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr, "PNFSIO: ws_step k=%llu tmpl.data=%p tmpl.len=%u remaining=%llu\n",
-                (unsigned long long) k, ctx->tmpl.data, ctx->tmpl.length,
-                (unsigned long long) ctx->remaining);
-    }
 
     for (uint64_t i = 0; i < k; i++) {
         evpl_iovec_clone(&ctx->chunk_iov[i], &ctx->tmpl);
