@@ -606,13 +606,13 @@ chimera_nfs4_cb_control_init(
     shared->cb_rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 6,
                                                    chimera_nfs4_cb_control_notify, shared);
 
-    shared->cb_nfs_thread = calloc(1, sizeof(*shared->cb_nfs_thread));
-    shared->cb_nfs_thread->evpl = evpl;
-    shared->cb_nfs_thread->shared = shared;
-    shared->cb_nfs_thread->rpc2_thread = shared->cb_rpc2_thread;
+    shared->cb_nfs_thread                     = calloc(1, sizeof(*shared->cb_nfs_thread));
+    shared->cb_nfs_thread->evpl               = evpl;
+    shared->cb_nfs_thread->shared             = shared;
+    shared->cb_nfs_thread->rpc2_thread        = shared->cb_rpc2_thread;
     shared->cb_nfs_thread->max_server_threads = shared->max_servers;
-    shared->cb_nfs_thread->server_threads = calloc(shared->max_servers,
-        sizeof(*shared->cb_nfs_thread->server_threads));
+    shared->cb_nfs_thread->server_threads     = calloc(shared->max_servers,
+                                                       sizeof(*shared->cb_nfs_thread->server_threads));
     atomic_fetch_add(&shared->nfs_thread_count, 1);
 
     evpl_add_doorbell(evpl, &shared->cb_doorbell, chimera_nfs4_cb_control_doorbell);
@@ -668,27 +668,28 @@ chimera_nfs4_cb_control_stop(struct chimera_nfs_shared *shared)
  * root FH on the mount connection).
  */
 struct chimera_nfs4_async_resume {
-    void (*fn)(void *);
-    void *arg;
+    void                              (*fn)(
+        void *);
+    void                             *arg;
     struct chimera_nfs4_async_resume *next;
 };
 
 void
 chimera_nfs4_cb_resume_on_thread(
     struct chimera_nfs_thread *thread,
-    void (*fn)(void *),
-    void *arg)
+    void (                    *fn )(void *),
+    void                      *arg)
 {
     struct chimera_nfs4_async_resume *item = calloc(1, sizeof(*item));
 
-    item->fn = fn;
+    item->fn  = fn;
     item->arg = arg;
     pthread_mutex_lock(&thread->cb_resume_lock);
-    item->next = thread->cb_async_resume;
+    item->next              = thread->cb_async_resume;
     thread->cb_async_resume = item;
     pthread_mutex_unlock(&thread->cb_resume_lock);
     evpl_ring_doorbell(&thread->cb_resume_doorbell);
-}
+} /* chimera_nfs4_cb_resume_on_thread */
 
 static void
 chimera_nfs4_cb_resume_drain(
@@ -703,8 +704,8 @@ chimera_nfs4_cb_resume_drain(
     (void) evpl;
 
     pthread_mutex_lock(&thread->cb_resume_lock);
-    item                   = thread->cb_resume_done;
-    thread->cb_resume_done = NULL;
+    item                    = thread->cb_resume_done;
+    thread->cb_resume_done  = NULL;
     async                   = thread->cb_async_resume;
     thread->cb_async_resume = NULL;
     pthread_mutex_unlock(&thread->cb_resume_lock);
@@ -767,7 +768,7 @@ chimera_nfs4_cb_thread_destroy(struct chimera_nfs_thread *thread)
         item = next;
     }
     thread->cb_resume_done = NULL;
-    async = thread->cb_async_resume;
+    async                  = thread->cb_async_resume;
     while (async) {
         anext = async->next;
         free(async);

@@ -220,10 +220,10 @@ chimera_nfs4_open_at_callback(
          * stateid is dead on arrival, so re-send the OPEN; once the CLOSE has
          * landed the retry receives a fresh state. */
         open_file_status = chimera_nfs4_open_file_get(ctx->server,
-                                                       request->open_at.r_attr.va_fh,
-                                                       request->open_at.r_attr.va_fh_len,
-                                                       &open_res->opopen.resok4.stateid,
-                                                       &open_file);
+                                                      request->open_at.r_attr.va_fh,
+                                                      request->open_at.r_attr.va_fh_len,
+                                                      &open_res->opopen.resok4.stateid,
+                                                      &open_file);
         if (open_file_status == -2) {
             request->status = CHIMERA_VFS_EFAULT;
             request->complete(request);

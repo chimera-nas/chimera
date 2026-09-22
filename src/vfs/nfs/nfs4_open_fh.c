@@ -26,7 +26,7 @@ chimera_nfs4_open_fh_callback(
     struct nfs_resop4                *open_res;
     struct chimera_nfs4_open_state   *state;
     struct chimera_nfs4_open_file    *open_file;
-    int                              open_file_status;
+    int                               open_file_status;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
