@@ -199,6 +199,7 @@ struct chimera_nfs_client_mount;
 struct chimera_nfs4_compound_ctx;   /* in-flight wrapper context (nfs4_slot.c)   */
 struct chimera_nfs4_parked;                   /* queued request awaiting a slot (nfs4_slot.c) */
 struct chimera_nfs4_layout;                   /* per-file pNFS layout (nfs4_pnfs.h)        */
+struct chimera_nfs4_async_resume;
 struct chimera_nfs4_open_state;               /* per-handle open state (nfs4_open_state.h) */
 struct chimera_nfs4_open_file;                /* per-file open refcount (same header)      */
 
@@ -446,6 +447,7 @@ struct chimera_nfs_shared {
     struct evpl_thread                 *cb_thread;
     struct evpl                        *cb_evpl;
     struct evpl_rpc2_thread            *cb_rpc2_thread;
+    struct chimera_nfs_thread          *cb_nfs_thread;
     struct evpl_doorbell                cb_doorbell;
     pthread_mutex_t                     cb_lock;
     struct chimera_nfs4_cb_establish   *cb_establish_queue;
@@ -482,6 +484,7 @@ struct chimera_nfs_thread {
     struct evpl_doorbell                      cb_resume_doorbell;
     pthread_mutex_t                           cb_resume_lock;
     struct chimera_nfs4_cb_establish         *cb_resume_done;
+    struct chimera_nfs4_async_resume         *cb_async_resume;
     int                                       cb_resume_armed;
 };
 
@@ -1135,6 +1138,11 @@ void chimera_nfs4_cb_thread_init(
 void chimera_nfs4_cb_thread_destroy(
     struct chimera_nfs_thread *thread);
 
+void chimera_nfs4_cb_resume_on_thread(
+    struct chimera_nfs_thread *thread,
+    void (*fn)(void *),
+    void *arg);
+
 /*
  * Request the control thread establish `server`'s NFSv4.1 session on its
  * persistent connection (with the back channel bound), then resume the mount on
@@ -1427,7 +1435,8 @@ int chimera_nfs4_open_file_get(
     struct chimera_nfs_client_server *server,
     const uint8_t                    *fh,
     int                               fh_len,
-    const struct stateid4            *stateid);
+    const struct stateid4            *stateid,
+    struct chimera_nfs4_open_file   **r_file);
 
 /* Drop a reference.  Non-zero if it was the last, in which case the entry has
  * been retired and its stateid copied out for the caller to CLOSE with. */

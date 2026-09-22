@@ -408,8 +408,14 @@ chimera_nfs4_slot_table_reset(
 
     /* Parked requests never went on the wire; error-complete them too. */
     while ((p = chimera_nfs4_park_pop(st)) != NULL) {
-        p->request->status = CHIMERA_VFS_EIO;
-        p->request->complete(p->request);
+        if (p->request) {
+            p->request->status = CHIMERA_VFS_EIO;
+            p->request->complete(p->request);
+        } else {
+            /* Internal pNFS recall work has no VFS request to complete.
+             * Let its retry hook schedule a reconnect attempt. */
+            p->retry_fn(NULL, NULL, NULL, p->retry_ctx);
+        }
         p->next             = st->parked_freelist;
         st->parked_freelist = p;
     }

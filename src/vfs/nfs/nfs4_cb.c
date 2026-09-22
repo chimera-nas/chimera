@@ -16,9 +16,8 @@
  * reaching, the session that carries it is established on a dedicated long-lived
  * control connection (see nfs4_cb_control_*), not the transient mount connection.
  *
- * The only recall this client cares about today is CB_LAYOUTRECALL (pNFS).  On
- * main no layouts are held, so it answers NFS4ERR_NOMATCHING_LAYOUT; the pNFS
- * client overrides chimera_nfs4_cb_layoutrecall() to find and return the layout.
+ * The pNFS client handles CB_LAYOUTRECALL by fencing DS I/O and asynchronously
+ * committing and returning the matching layout.
  */
 
 #include <errno.h>
@@ -572,6 +571,18 @@ chimera_nfs4_cb_control_notify(
         }
     }
     pthread_mutex_unlock(&shared->lock);
+
+    if (shared->cb_nfs_thread) {
+        struct chimera_nfs_thread *nfs_thread = shared->cb_nfs_thread;
+        for (i = 0; i < nfs_thread->max_server_threads; i++) {
+            struct chimera_nfs_client_server_thread *st = nfs_thread->server_threads[i];
+            if (st && st->nfs_conn == conn) {
+                st->nfs_conn = NULL;
+                chimera_nfs4_slot_table_reset(nfs_thread->evpl, &st->slots);
+                break;
+            }
+        }
+    }
 } /* chimera_nfs4_cb_control_notify */
 
 /* Control-thread init (runs on the control thread's evpl before
@@ -595,6 +606,15 @@ chimera_nfs4_cb_control_init(
     shared->cb_rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 6,
                                                    chimera_nfs4_cb_control_notify, shared);
 
+    shared->cb_nfs_thread = calloc(1, sizeof(*shared->cb_nfs_thread));
+    shared->cb_nfs_thread->evpl = evpl;
+    shared->cb_nfs_thread->shared = shared;
+    shared->cb_nfs_thread->rpc2_thread = shared->cb_rpc2_thread;
+    shared->cb_nfs_thread->max_server_threads = shared->max_servers;
+    shared->cb_nfs_thread->server_threads = calloc(shared->max_servers,
+        sizeof(*shared->cb_nfs_thread->server_threads));
+    atomic_fetch_add(&shared->nfs_thread_count, 1);
+
     evpl_add_doorbell(evpl, &shared->cb_doorbell, chimera_nfs4_cb_control_doorbell);
 
     return shared;
@@ -612,6 +632,19 @@ chimera_nfs4_cb_control_shutdown(
     if (shared->cb_rpc2_thread) {
         evpl_rpc2_thread_destroy(shared->cb_rpc2_thread);
         shared->cb_rpc2_thread = NULL;
+    }
+    if (shared->cb_nfs_thread) {
+        struct chimera_nfs_thread *thread = shared->cb_nfs_thread;
+        for (int i = 0; i < thread->max_server_threads; i++) {
+            if (thread->server_threads[i]) {
+                chimera_nfs4_slot_table_destroy(thread->server_threads[i]);
+                free(thread->server_threads[i]);
+            }
+        }
+        free(thread->server_threads);
+        free(thread);
+        shared->cb_nfs_thread = NULL;
+        atomic_fetch_sub(&shared->nfs_thread_count, 1);
     }
 } /* chimera_nfs4_cb_control_shutdown */
 
@@ -634,6 +667,29 @@ chimera_nfs4_cb_control_stop(struct chimera_nfs_shared *shared)
  * no evpl object) and either fail the mount or resume it (RECLAIM_COMPLETE +
  * root FH on the mount connection).
  */
+struct chimera_nfs4_async_resume {
+    void (*fn)(void *);
+    void *arg;
+    struct chimera_nfs4_async_resume *next;
+};
+
+void
+chimera_nfs4_cb_resume_on_thread(
+    struct chimera_nfs_thread *thread,
+    void (*fn)(void *),
+    void *arg)
+{
+    struct chimera_nfs4_async_resume *item = calloc(1, sizeof(*item));
+
+    item->fn = fn;
+    item->arg = arg;
+    pthread_mutex_lock(&thread->cb_resume_lock);
+    item->next = thread->cb_async_resume;
+    thread->cb_async_resume = item;
+    pthread_mutex_unlock(&thread->cb_resume_lock);
+    evpl_ring_doorbell(&thread->cb_resume_doorbell);
+}
+
 static void
 chimera_nfs4_cb_resume_drain(
     struct evpl          *evpl,
@@ -642,12 +698,15 @@ chimera_nfs4_cb_resume_drain(
     struct chimera_nfs_thread        *thread =
         container_of(doorbell, struct chimera_nfs_thread, cb_resume_doorbell);
     struct chimera_nfs4_cb_establish *item, *next;
+    struct chimera_nfs4_async_resume *async, *anext;
 
     (void) evpl;
 
     pthread_mutex_lock(&thread->cb_resume_lock);
     item                   = thread->cb_resume_done;
     thread->cb_resume_done = NULL;
+    async                   = thread->cb_async_resume;
+    thread->cb_async_resume = NULL;
     pthread_mutex_unlock(&thread->cb_resume_lock);
 
     while (item) {
@@ -667,6 +726,13 @@ chimera_nfs4_cb_resume_drain(
 
         item = next;
     }
+
+    while (async) {
+        anext = async->next;
+        async->fn(async->arg);
+        free(async);
+        async = anext;
+    }
 } /* chimera_nfs4_cb_resume_drain */
 
 void
@@ -683,6 +749,7 @@ void
 chimera_nfs4_cb_thread_destroy(struct chimera_nfs_thread *thread)
 {
     struct chimera_nfs4_cb_establish *item, *next;
+    struct chimera_nfs4_async_resume *async, *anext;
 
     if (!thread->cb_resume_armed) {
         return;
@@ -700,6 +767,13 @@ chimera_nfs4_cb_thread_destroy(struct chimera_nfs_thread *thread)
         item = next;
     }
     thread->cb_resume_done = NULL;
+    async = thread->cb_async_resume;
+    while (async) {
+        anext = async->next;
+        free(async);
+        async = anext;
+    }
+    thread->cb_async_resume = NULL;
     pthread_mutex_destroy(&thread->cb_resume_lock);
 } /* chimera_nfs4_cb_thread_destroy */
 
