@@ -176,16 +176,6 @@ chimera_nfs4_write(
      * If the compound PARKS instead of sending, the marshaller never ran and
      * the clones are still ours: drop them, because the replay rebuilds these
      * args (and re-clones) from scratch. */
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr, "PNFSIO: nfs4_write niov=%d iov=%p len=%u off=%llu\n",
-                request->write.niov, (void *) request->write.iov,
-                request->write.length,
-                (unsigned long long) request->write.offset);
-        for (i = 0; i < request->write.niov; i++) {
-            fprintf(stderr, "PNFSIO:   iov[%d] data=%p len=%u\n", i,
-                    request->write.iov[i].data, request->write.iov[i].length);
-        }
-    }
 
     ds_iov = malloc((size_t) request->write.niov * sizeof(*ds_iov));
     for (i = 0; i < request->write.niov; i++) {
@@ -211,12 +201,6 @@ chimera_nfs4_write(
         request,
         chimera_nfs4_dispatch, private_data);
 
-    if (getenv("CHIMERA_VFS_WRITE_TRACE")) {
-        fprintf(stderr, "WRITETRACE: nfs4_write parked=%d niov=%d clone0=%p src0=%p\n",
-                parked, request->write.niov,
-                request->write.niov > 0 ? ds_iov[0].data : NULL,
-                request->write.niov > 0 ? request->write.iov[0].data : NULL);
-    }
 
     if (parked) {
         evpl_iovecs_release(thread->evpl, ds_iov, request->write.niov);

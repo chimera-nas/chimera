@@ -14,20 +14,6 @@ chimera_vfs_seek_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_seek_callback_t callback = request->proto_callback;
 
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr,
-                "PNFSIO: seek redir=%d mds=%016llx fh=%016llx mod=%s in_off=%llu what=%u -> st=%d off=%llu eof=%u\n",
-                !!request->io_pnfs_backing,
-                (unsigned long long) (request->io_handle ?
-                                      request->io_handle->fh_hash : 0),
-                (unsigned long long) request->seek.handle->fh_hash,
-                request->module->name,
-                (unsigned long long) request->seek.offset,
-                request->seek.what,
-                request->status,
-                (unsigned long long) request->seek.r_offset,
-                request->seek.r_eof);
-    }
 
     chimera_vfs_complete(request);
 

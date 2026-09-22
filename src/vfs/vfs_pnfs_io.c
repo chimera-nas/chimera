@@ -130,9 +130,6 @@ chimera_vfs_pnfs_io_setattr_cb(
     struct chimera_vfs_open_handle *backing = ctx->backing_handle;
 
     if (error_code != CHIMERA_VFS_OK) {
-        if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-            fprintf(stderr, "PNFSIO: MATERIALIZE FAIL setattr err=%d\n", error_code);
-        }
         /* The backing file exists but nothing points at it.  Serve the I/O
          * locally rather than failing it; the file simply stays MDS-resident
          * and the orphan is inert (a later attempt makes its own). */
@@ -189,11 +186,6 @@ chimera_vfs_pnfs_io_create_cb(
 
     if (error_code != CHIMERA_VFS_OK || !oh ||
         !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-            fprintf(stderr, "PNFSIO: MATERIALIZE FAIL create err=%d oh=%d fh=%d\n",
-                    error_code, !!oh,
-                    attr ? !!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH) : -1);
-        }
         chimera_vfs_pnfs_io_done(ctx, CHIMERA_VFS_OK, ctx->mds_handle, 0);
         return;
     }
@@ -250,9 +242,6 @@ chimera_vfs_pnfs_io_dsroot_cb(
     struct chimera_vfs_pnfs_io_ctx *ctx = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-            fprintf(stderr, "PNFSIO: MATERIALIZE FAIL dsroot err=%d\n", error_code);
-        }
         chimera_vfs_pnfs_io_done(ctx, CHIMERA_VFS_OK, ctx->mds_handle, 0);
         return;
     }
@@ -279,11 +268,6 @@ chimera_vfs_pnfs_io_dsroot_cb(
     ctx->attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     ctx->attr.va_mode     = S_IFREG | 0666;
 
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr, "PNFSIO: materialize mds_fh=%016llx fileid=%llu name=%s\n",
-                (unsigned long long) ctx->mds_handle->fh_hash,
-                (unsigned long long) ctx->fileid, ctx->backing_name);
-    }
 
     chimera_vfs_open_at(ctx->thread, ctx->cred, ctx->ds_root_handle,
                         ctx->backing_name, strlen(ctx->backing_name),
@@ -299,9 +283,6 @@ chimera_vfs_pnfs_io_materialize(struct chimera_vfs_pnfs_io_ctx *ctx)
     ctx->ds = chimera_vfs_pnfs_steer(ctx->thread->vfs);
 
     if (!ctx->ds) {
-        if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-            fprintf(stderr, "PNFSIO: MATERIALIZE FAIL no-ds\n");
-        }
         /* No data server ready: stay MDS-resident.  Legal and self-consistent,
          * since LAYOUTGET will decline for the same reason. */
         chimera_vfs_pnfs_io_done(ctx, CHIMERA_VFS_OK, ctx->mds_handle, 0);
@@ -339,11 +320,6 @@ chimera_vfs_pnfs_io_getattr_cb(
          * it one; anything else leaves it where it is -- a read has nothing to
          * redirect to, and a file that already holds bytes must not acquire a
          * backing file that would strand them. */
-        if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-            fprintf(stderr, "PNFSIO: noblob w=%d size=%llu inum=%d\n",
-                    ctx->for_write, (unsigned long long) size,
-                    !!(attr->va_set_mask & CHIMERA_VFS_ATTR_INUM));
-        }
 
         if (ctx->for_write && size == 0 &&
             (attr->va_set_mask & CHIMERA_VFS_ATTR_INUM)) {
@@ -531,6 +507,7 @@ chimera_vfs_pnfs_sync_size_cb(
         !(attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
         /* Nothing trustworthy to publish; leave the metadata server's size
          * alone rather than move it to a value we are guessing at. */
+        request->status = error_code != CHIMERA_VFS_OK ? error_code : CHIMERA_VFS_EIO;
         request->pnfs_sync_next(request);
         return;
     }
@@ -544,17 +521,11 @@ chimera_vfs_pnfs_sync_size_cb(
         sync->va_mtime     = attr->va_mtime;
     }
 
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr, "PNFSIO: sync(fetched) op=%d fh=%016llx -> size=%llu\n",
-                request->opcode,
-                (unsigned long long) request->io_handle->fh_hash,
-                (unsigned long long) sync->va_size);
-    }
 
-    chimera_vfs_setattr_nopnfs(request->thread, request->cred,
-                               request->io_handle, sync, 0,
-                               CHIMERA_VFS_ATTR_MASK_STAT,
-                               chimera_vfs_pnfs_sync_cb, request);
+    chimera_vfs_setattr_after_write(request->thread, request->cred,
+                                    request->io_handle, sync, 0,
+                                    CHIMERA_VFS_ATTR_MASK_STAT,
+                                    chimera_vfs_pnfs_sync_cb, request);
 } /* chimera_vfs_pnfs_sync_size_cb */
 
 /*
@@ -627,19 +598,11 @@ chimera_vfs_pnfs_sync_mds(
         sync->va_mtime     = backing_post->va_mtime;
     }
 
-    if (getenv("CHIMERA_PNFS_IO_TRACE")) {
-        fprintf(stderr, "PNFSIO: sync fh=%016llx set=%llu backing_has=%d end=%llu\n",
-                (unsigned long long) request->io_handle->fh_hash,
-                (unsigned long long) sync->va_size,
-                !!(backing_post &&
-                   (backing_post->va_set_mask & CHIMERA_VFS_ATTR_SIZE)),
-                (unsigned long long) end_offset);
-    }
 
-    chimera_vfs_setattr_nopnfs(request->thread, request->cred,
-                               request->io_handle, sync, 0,
-                               CHIMERA_VFS_ATTR_MASK_STAT,
-                               chimera_vfs_pnfs_sync_cb, request);
+    chimera_vfs_setattr_after_write(request->thread, request->cred,
+                                    request->io_handle, sync, 0,
+                                    CHIMERA_VFS_ATTR_MASK_STAT,
+                                    chimera_vfs_pnfs_sync_cb, request);
 } /* chimera_vfs_pnfs_sync_mds */
 
 SYMBOL_EXPORT int

@@ -205,10 +205,10 @@ chimera_nfs4_open_at_callback(
         chimera_nfs4_unmarshall_dir_attr(res, 7, &request->open_at.r_dir_post_attr);
     }
 
-    /* Allocate and store open state with stateid.  Skip for inferred opens
-     * (synthetic handles which don't call close) and for path opens (resolved
-     * via LOOKUP, so there is no OPEN stateid). */
-    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED) && !path_open) {
+    /* Every wire OPEN needs a counted state, including inferred data opens.
+     * Otherwise a later CLAIM_FH upgrades an untracked state forever.
+     * Path opens use LOOKUP and have no stateid to retain. */
+    if (!path_open) {
         /* Count this handle against the file's open on the server, which every
          * handle on the file shares.  Keyed on the handle OPEN just returned
          * (unmarshalled into r_attr above), not request->fh, which still names

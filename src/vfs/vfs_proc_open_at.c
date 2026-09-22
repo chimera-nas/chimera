@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include "vfs_procs.h"
+#include "vfs_pnfs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "sdk/vfs_access.h"
@@ -32,13 +33,59 @@ chimera_vfs_open_at_checked(
 } /* chimera_vfs_open_at_checked */
 
 static void
+chimera_vfs_open_at_reply(
+    struct chimera_vfs_request     *request,
+    struct chimera_vfs_open_handle *handle)
+{
+    chimera_vfs_open_at_callback_t callback = request->proto_callback;
+
+    chimera_vfs_complete(request);
+
+    callback(request->status,
+             handle,
+             request->open_at.set_attr,
+             &request->open_at.r_attr,
+             &request->open_at.r_dir_pre_attr,
+             &request->open_at.r_dir_post_attr,
+             request->proto_private_data);
+
+    chimera_vfs_request_free(request->thread, request);
+} /* chimera_vfs_open_at_reply */
+
+static void
+chimera_vfs_open_at_truncate_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request     *request = private_data;
+    struct chimera_vfs_open_handle *handle  = request->io_handle;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(request->thread, handle);
+        handle          = NULL;
+        request->status = error_code;
+    } else {
+        uint64_t want = request->open_at.r_attr.va_req_mask;
+
+        request->open_at.r_attr             = *post_attr;
+        request->open_at.r_attr.va_req_mask = want;
+        memcpy(request->open_at.r_attr.va_fh, handle->fh, handle->fh_len);
+        request->open_at.r_attr.va_fh_len    = handle->fh_len;
+        request->open_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    }
+    chimera_vfs_open_at_reply(request, handle);
+} /* chimera_vfs_open_at_truncate_complete */
+
+static void
 chimera_vfs_open_at_hdl_callback(
     struct chimera_vfs_request     *request,
     struct chimera_vfs_open_handle *handle)
 {
-    struct chimera_vfs_thread     *thread   = request->thread;
-    struct chimera_vfs_name_cache *cache    = thread->vfs->vfs_name_cache;
-    chimera_vfs_open_at_callback_t callback = request->proto_callback;
+    struct chimera_vfs_thread     *thread = request->thread;
+    struct chimera_vfs_name_cache *cache  = thread->vfs->vfs_name_cache;
 
     if (request->status == CHIMERA_VFS_OK) {
         /* A create is a directory content change: raise it for change
@@ -176,17 +223,21 @@ chimera_vfs_open_at_hdl_callback(
         }
     }
 
-    chimera_vfs_complete(request);
+    if (request->status == CHIMERA_VFS_OK && handle &&
+        request->open_at.pnfs_set_attr && !request->open_at.r_created) {
+        struct chimera_vfs_attrs *trunc = &request->io_pnfs_sync_attr;
 
-    callback(request->status,
-             handle,
-             request->open_at.set_attr,
-             &request->open_at.r_attr,
-             &request->open_at.r_dir_pre_attr,
-             &request->open_at.r_dir_post_attr,
-             request->proto_private_data);
+        request->io_handle = handle;
+        memset(trunc, 0, sizeof(*trunc));
+        trunc->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+        trunc->va_size     = 0;
+        chimera_vfs_fsetattr(thread, request->cred, handle, trunc, 0,
+                             request->open_at.r_attr.va_req_mask,
+                             chimera_vfs_open_at_truncate_complete, request);
+        return;
+    }
 
-    chimera_vfs_request_free(request->thread, request);
+    chimera_vfs_open_at_reply(request, handle);
 } /* chimera_vfs_open_at_hdl_callback */
 
 static void
@@ -271,6 +322,11 @@ static void
 chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_handle_state *hs = request->open_at.handle_state;
+
+    if (request->open_at.pnfs_set_attr) {
+        request->open_at.set_attr = request->open_at.pnfs_set_attr;
+        request->open_at.flags    = request->open_at.pnfs_flags;
+    }
 
     /* Backends that persist handle-state atomically (CAP_ATOMIC_HANDLE_STATE)
      * have already stored it as part of the open.  For backends without native
@@ -522,16 +578,31 @@ chimera_vfs_open_at_hs_dispatch(
         return;
     }
 
-    request->opcode                     = CHIMERA_VFS_OP_OPEN_AT;
-    request->complete                   = chimera_vfs_open_complete;
-    request->open_at.handle             = handle;
-    request->open_at.name               = name;
-    request->open_at.namelen            = namelen;
-    request->open_at.name_hash          = chimera_vfs_hash(name, namelen);
-    request->open_at.flags              = flags;
-    request->open_at.set_attr           = set_attr;
-    request->open_at.handle_state       = handle_state;
-    request->open_at.r_created          = 0;
+    request->opcode                = CHIMERA_VFS_OP_OPEN_AT;
+    request->complete              = chimera_vfs_open_complete;
+    request->open_at.handle        = handle;
+    request->open_at.name          = name;
+    request->open_at.namelen       = namelen;
+    request->open_at.name_hash     = chimera_vfs_hash(name, namelen);
+    request->open_at.flags         = flags;
+    request->open_at.set_attr      = set_attr;
+    request->open_at.handle_state  = handle_state;
+    request->open_at.r_created     = 0;
+    request->open_at.pnfs_set_attr = NULL;
+
+    if (chimera_vfs_pnfs_io_possible(thread, handle) &&
+        ((flags & CHIMERA_VFS_OPEN_TRUNCATE) ||
+         ((flags & CHIMERA_VFS_OPEN_CREATE) &&
+          (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+          set_attr->va_size == 0))) {
+        request->open_at.pnfs_set_attr          = set_attr;
+        request->open_at.pnfs_flags             = flags;
+        request->io_pnfs_sync_attr              = *set_attr;
+        request->io_pnfs_sync_attr.va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
+        request->open_at.set_attr               = &request->io_pnfs_sync_attr;
+        request->open_at.flags                 &= ~CHIMERA_VFS_OPEN_TRUNCATE;
+    }
+
     request->open_at.r_attr.va_req_mask = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
 
     /* The completion checks need the mode (and, for the access gate,

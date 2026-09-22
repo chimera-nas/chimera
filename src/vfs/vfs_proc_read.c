@@ -149,6 +149,13 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
         request->read.r_niov = request->read.dest_niov;
     }
 
+    /* These attributes describe the backing object, not the client-visible
+     * inode.  NFSv3 permits omitting post_op_attr; never poison its metadata
+     * cache with the DS file's mode, owner, or fileid. */
+    if (request->io_pnfs_backing) {
+        request->read.r_attr.va_set_mask = 0;
+    }
+
     /* Only refresh the attr cache when the caller actually requested stat
      * attributes (e.g. NFSv3 READ, which carries post_op_attr).  READ is
      * never a mutating operation, so it has no role in keeping the cache

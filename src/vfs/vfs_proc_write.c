@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "vfs/vfs_procs.h"
@@ -209,11 +208,6 @@ chimera_vfs_write_resolve(
 {
     struct chimera_vfs_write_resolve_ctx *ctx;
 
-    if (getenv("CHIMERA_VFS_WRITE_TRACE") && count > 0 && niov > 0 &&
-        iov[0].data == NULL) {
-        fprintf(stderr, "WRITETRACE: count=%u niov=%d but iov[0] is NULL/empty (len=%u)\n",
-                count, niov, iov[0].length);
-    }
 
     if (!chimera_vfs_pnfs_io_possible(thread, handle)) {
         chimera_vfs_write_dispatch(thread, cred, handle, handle, 0,
@@ -356,20 +350,6 @@ chimera_vfs_write_owned(
 {
     struct chimera_vfs_write_gate *gate;
 
-    if (getenv("CHIMERA_VFS_WRITE_TRACE") && count > 0 && niov > 0 &&
-        iov[0].data == NULL) {
-        Dl_info dli;
-        void   *ra = __builtin_return_address(0);
-
-        if (dladdr(ra, &dli) && dli.dli_sname) {
-            fprintf(stderr, "WRITETRACE: NULL payload count=%u caller=%s (%s)\n",
-                    count, dli.dli_sname,
-                    dli.dli_fname ? dli.dli_fname : "?");
-        } else {
-            fprintf(stderr, "WRITETRACE: NULL payload count=%u ra=%p unresolved\n",
-                    count, ra);
-        }
-    }
 
     /* gate_needed_dac, not gate_needed: a DELEGATES_DAC passthrough backend
      * resolves the object with open_by_handle_at (privileged) and caches the
