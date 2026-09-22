@@ -99,9 +99,26 @@ jobs:
           '<configuration><packageSources><clear /></packageSources></configuration>' | Set-Content $config
           & $nuget sources Add -Name Chimera -Source $feed -UserName $env:GITHUB_ACTOR -Password $env:GH_PACKAGES_TOKEN -StorePasswordInClearText -ConfigFile $config -NonInteractive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # vcpkg's nugetconfig provider pushes without a -Source argument.
+          & $nuget config -Set "defaultPushSource=$feed" -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $nuget setapikey $env:GH_PACKAGES_TOKEN -Source $feed -ConfigFile $config -NonInteractive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,readwrite" >> $env:GITHUB_ENV
+
+      # Check the feed with a tiny CMake-script package before compiling the
+      # full manifest. A failed upload must not cost another hour to detect.
+      - name: Verify package publication before the full build
+        run: |
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $build = "$env:RUNNER_TEMP/chimera-dependencies-preflight"
+          $restore = "$env:RUNNER_TEMP/chimera-dependencies-preflight-verify"
+          if ((Test-Path $build) -or (Test-Path $restore)) { throw 'Preflight requires fresh install directories' }
+          & ./_vcpkg/vcpkg.exe install vcpkg-cmake --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$build" --clean-after-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:VCPKG_BINARY_SOURCES = "clear;nugetconfig,$config,read"
+          & ./_vcpkg/vcpkg.exe install vcpkg-cmake --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$restore" --only-binarycaching
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Standard Windows triplets build both configurations. Debug and Release
       # test jobs can therefore share these packages instead of building twice.

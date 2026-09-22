@@ -53,6 +53,12 @@ packages must grant this repository's Actions workflows access. No personal
 access token is required for this same-repository workflow. Publishing runs
 only on manual dispatch of the default branch, not on pull requests.
 
+The temporary NuGet config sets `defaultPushSource` to the authenticated feed,
+because vcpkg's config-based publisher does not pass `-Source` to `nuget push`.
+Before compiling the manifest, each job installs the small `vcpkg-cmake` package
+and restores it into a fresh directory from the remote feed. This catches feed
+configuration and access problems before the expensive dependency build.
+
 A successful job must also restore the entire manifest into a fresh install
 directory using **only the remote feed** and `--only-binarycaching`. Local
 binary caches are disabled for this check. Thus an upload failure cannot be
