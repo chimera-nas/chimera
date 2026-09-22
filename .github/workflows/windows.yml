@@ -22,10 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-2022, arch: x64, config: Debug}
-          - {runner: windows-2022, arch: x64, config: Release}
-          - {runner: windows-11-arm, arch: ARM64, config: Debug}
-          - {runner: windows-11-arm, arch: ARM64, config: Release}
+          - {runner: windows-2022, arch: x64, config: Debug, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
+          - {runner: windows-2022, arch: x64, config: Release, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Debug, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Release, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,7 +33,7 @@ jobs:
       - name: Test native runtime
         shell: pwsh
         run: |
-          cmake -S src/common/tests/native -B runtime -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
+          cmake -S src/common/tests/native -B runtime -G "${{ matrix.generator }}" -A ${{ matrix.arch }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build runtime --config ${{ matrix.config }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -45,14 +45,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: read
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_USE_NUGET_CACHE: 'false'
+      X_VCPKG_NUGET_ID_PREFIX: chimera-
+      VS_VERSION_RANGE: ${{ matrix.vs }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-2022, arch: x64, config: Debug}
-          - {runner: windows-2022, arch: x64, config: Release}
-          - {runner: windows-11-arm, arch: ARM64, config: Debug}
-          - {runner: windows-11-arm, arch: ARM64, config: Release}
+          - {runner: windows-2022, arch: x64, config: Debug, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
+          - {runner: windows-2022, arch: x64, config: Release, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Debug, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Release, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -67,26 +73,53 @@ jobs:
           npm install -g "@informalsystems/quint@$version"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force /tmp, /build/test | Out-Null
+      - name: Read pinned vcpkg revision
+        id: manifest
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'Expected a pinned vcpkg baseline' }
+          "baseline=$baseline" >> $env:GITHUB_OUTPUT
       - uses: actions/checkout@v5
         with:
           repository: microsoft/vcpkg
-          ref: a1cae005c39be7b18ba319fced856b68d7276271
+          ref: ${{ steps.manifest.outputs.baseline }}
           path: _vcpkg
-      - name: Identify dependency toolchain image
-        id: dependency-image
+          persist-credentials: false
+      - name: Select the publisher's toolchain and bootstrap vcpkg
         shell: pwsh
         run: |
-          if (-not $env:ImageVersion) { throw 'Hosted runner image version is missing' }
-          "version=$env:ImageVersion" >> $env:GITHUB_OUTPUT
-      - uses: actions/cache/restore@v4
-        id: vcpkg-cache
-        with:
-          path: ~/AppData/Local/vcpkg/archives
-          key: vcpkg-v2-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}-${{ steps.dependency-image.outputs.version }}
-          restore-keys: |
-            vcpkg-v2-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}-
-            vcpkg-v2-${{ matrix.arch }}-
-            vcpkg-${{ matrix.arch }}-${{ hashFiles('vcpkg.json') }}
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -version $env:VS_VERSION_RANGE -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio $env:VS_VERSION_RANGE is required" }
+          "VCPKG_VISUAL_STUDIO_PATH=$vs" >> $env:GITHUB_ENV
+          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure read-only package access
+        shell: pwsh
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $nuget = & ./_vcpkg/vcpkg.exe fetch nuget | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $feed = "https://nuget.pkg.github.com/$($env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant())/index.json"
+          '<configuration><packageSources><clear /></packageSources></configuration>' | Set-Content $config
+          & $nuget sources Add -Name Chimera -Source $feed -UserName $env:GITHUB_ACTOR -Password $env:GH_PACKAGES_TOKEN -StorePasswordInClearText -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,read" >> $env:GITHUB_ENV
+      - name: Restore prebuilt dependencies
+        shell: pwsh
+        run: |
+          $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          & ./_vcpkg/vcpkg.exe install --triplet $triplet --host-triplet $triplet "--x-install-root=$pwd/build/vcpkg_installed" --only-binarycaching
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'Binary dependency restore failed. Check package access and run Publish Windows dependencies on main for this manifest/toolchain.'
+            exit 1
+          }
+          $timer.Stop()
+          "Prebuilt dependency restore ($triplet): $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds; no dependency source builds permitted." >> $env:GITHUB_STEP_SUMMARY
       - name: Install parser generators
         shell: pwsh
         run: |
@@ -102,26 +135,23 @@ jobs:
         with:
           path: build/specs-corpus
           key: windows-specs-v1-${{ matrix.arch }}-${{ hashFiles('ext/specs/.quint-version', 'ext/specs/CMakeLists.txt', 'ext/specs/cmake/**', 'ext/specs/quint/**', 'ext/specs/tools/**', 'src/**/quint/configs/**', 'src/**/CMakeLists.txt', 'CMakeLists.txt', 'cmake/**', 'vcpkg.json', '.github/workflows/windows.yml') }}
-      - name: Configure native Windows with dependencies
+      - name: Configure native Windows
         id: configure
         shell: pwsh
         run: |
-          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
           $prebuiltCorpus = if ('${{ steps.corpus-cache.outputs.cache-hit }}' -eq 'true') { 'ON' } else { 'OFF' }
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DSPECS_CORPUS_PREBUILT=$prebuiltCorpus" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
+          cmake -S . -B build -G "${{ matrix.generator }}" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DSPECS_CORPUS_PREBUILT=$prebuiltCorpus" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # Cache entries are immutable. Publish only after all dependencies are
-      # installed; saving after a failure can freeze an incomplete archive
-      # under an exact key and force expensive rebuilds on every later run.
-      # A new runner image gets a fresh key, allowing changed compiler/SDK
-      # binaries to replace packages restored from the previous image.
-      - uses: actions/cache/save@v4
-        if: steps.configure.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        with:
-          path: ~/AppData/Local/vcpkg/archives
-          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+      # The installed libraries live in build/vcpkg_installed. Drop temporary
+      # package extraction/probe trees before diskfs tests need scratch space.
+      - name: Release dependency staging space
+        shell: pwsh
+        run: |
+          foreach ($path in @('_vcpkg/packages', '_vcpkg/buildtrees')) {
+            if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+          }
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free
       - name: Build server
         run: cmake --build build --target chimera --config ${{ matrix.config }} --parallel 4
       # Fail common runtime paths before spending time generating the full
@@ -176,3 +206,8 @@ jobs:
             build/**/*.metrics.prom
             build/**/*.map
           if-no-files-found: ignore
+      - name: Remove temporary package credentials
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue

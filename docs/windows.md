@@ -16,7 +16,7 @@ and test both Debug and Release; the CI matrix includes x64 and ARM64.
 
 ## Build
 
-Install Visual Studio 2022 or its Build Tools with the Desktop development
+Install Visual Studio 2022 or 2026 (or its Build Tools) with the Desktop development
 with C++ workload, a Windows SDK, and the compiler tools for your target
 architecture. Also install CMake, Git, Python 3, Node.js 22, and
 WinFlexBison 2.5.25. Use an ARM64 target and dependencies in a Windows ARM
@@ -27,7 +27,8 @@ From PowerShell, starting in a recursive checkout:
 ```powershell
 git submodule update --init --recursive
 git clone https://github.com/microsoft/vcpkg _vcpkg
-git -C _vcpkg checkout a1cae005c39be7b18ba319fced856b68d7276271
+$baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+git -C _vcpkg checkout $baseline
 ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
 $quintVersion = (Get-Content ext/specs/.quint-version).Trim()
 npm install -g "@informalsystems/quint@$quintVersion"
@@ -35,8 +36,10 @@ npm install -g "@informalsystems/quint@$quintVersion"
 # Change both values to x64 / x64-windows for an Intel/AMD target.
 $arch = 'ARM64'
 $triplet = 'arm64-windows'
+# Use 'Visual Studio 17 2022' if that is the version installed locally.
+$generator = 'Visual Studio 18 2026'
 $parserTools = 'C:/tools/winflexbison'
-cmake -S . -B build -G 'Visual Studio 17 2022' -A $arch `
+cmake -S . -B build -G $generator -A $arch `
   "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" `
   "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" `
   "-DFLEX_EXECUTABLE=$parserTools/win_flex.exe" `
@@ -50,6 +53,15 @@ generators are build tools, not a POSIX runtime dependency. Generated model
 traces use the pinned Quint release through Node.js, without requiring Unix
 symlinks or a shell. Model corpus generation can take substantially longer
 than compiling the C sources.
+
+CI uses prebuilt dependencies from the [Windows dependency publisher](/windows-dependencies):
+VS2022 on `windows-2022` for x64, and VS2026 on the explicit
+`windows-11-vs2026-arm` image for ARM64. It restores packages with read-only
+access and `--only-binarycaching`, then passes that restriction to CMake too.
+A missing package fails promptly instead of starting a source build. Rerun the
+publisher on `main` when the manifest or dependency toolchain changes, then
+rerun the Windows job. The restore step records its duration in the job summary.
+The local build commands above still permit source builds when no feed is configured.
 
 Executables and their dependent DLLs are placed in `build/bin/Debug` or
 `build/bin/Release`. Keep the DLLs beside the executable when running it.
@@ -72,7 +84,7 @@ The runtime primitives can be built and tested independently, without
 vcpkg or model generation:
 
 ```powershell
-cmake -S src/common/tests/native -B runtime -G 'Visual Studio 17 2022' -A ARM64
+cmake -S src/common/tests/native -B runtime -G $generator -A $arch
 cmake --build runtime --config Debug
 ctest --test-dir runtime -C Debug --output-on-failure
 ```
