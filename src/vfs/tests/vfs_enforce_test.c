@@ -534,6 +534,102 @@ main(
         chimera_vfs_release(ctx.vfs_thread, dir_handle);
     }
 
+    /*
+     * The open-time access gate must authorize the open itself, not merely
+     * the per-operation READ/WRITE that follows.  NFSv4 OPEN and SMB CREATE
+     * bind I/O rights at open time, and a kernel NFS client defers write
+     * authorization entirely to the server's OPEN -- so an open the mode
+     * denies has to fail here, with nothing downstream to catch it.
+     *
+     * Each file is owned 1000:1000, so an open by 2000 lands in the "other"
+     * class and only the low mode digit applies to it; the owner cells check
+     * the same split from the other side.  Every cell uses a fresh name so no
+     * open-handle or attribute cache entry from an earlier cell can satisfy
+     * the next one.
+     */
+    {
+        struct chimera_vfs_open_handle *root_handle;
+        static const struct {
+            const char  *name;
+            uint32_t     mode;
+            int          as_owner;
+            unsigned int flags;
+            enum chimera_vfs_error expect;
+        }
+        /* *INDENT-OFF* */
+        cells[] = {
+            { "g_oth_w_0000", 0000, 0, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_EACCES },
+            { "g_oth_r_0000", 0000, 0, CHIMERA_VFS_OPEN_READ_ONLY,  CHIMERA_VFS_EACCES },
+            { "g_oth_w_0004", 0004, 0, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_EACCES },
+            { "g_oth_r_0004", 0004, 0, CHIMERA_VFS_OPEN_READ_ONLY,  CHIMERA_VFS_OK     },
+            { "g_oth_w_0002", 0002, 0, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OK     },
+            { "g_oth_r_0002", 0002, 0, CHIMERA_VFS_OPEN_READ_ONLY,  CHIMERA_VFS_EACCES },
+            { "g_oth_w_0700", 0700, 0, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_EACCES },
+            { "g_own_w_0400", 0400, 1, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_EACCES },
+            { "g_own_r_0400", 0400, 1, CHIMERA_VFS_OPEN_READ_ONLY,  CHIMERA_VFS_OK     },
+            { "g_own_w_0200", 0200, 1, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OK     },
+        };
+        /* *INDENT-ON* */
+        unsigned int i;
+        int          failures = 0;
+
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, root_fh, root_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        root_handle = ctx.handle;
+
+        for (i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+            const struct chimera_vfs_cred *actor = cells[i].as_owner ? &owner : &other;
+
+            /* Create the cell's file as its owner, with the cell's mode.  A
+             * fresh attrs struct per call: the backends rewrite the caller's
+             * va_set_mask, so a reused struct no longer describes what the
+             * next call is asking for. */
+            memset(&sattr, 0, sizeof(sattr));
+            sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+                CHIMERA_VFS_ATTR_GID;
+            sattr.va_mode = cells[i].mode;
+            sattr.va_uid  = 1000;
+            sattr.va_gid  = 1000;
+
+            chimera_vfs_open_at(ctx.vfs_thread, &owner, root_handle,
+                                cells[i].name, strlen(cells[i].name),
+                                CHIMERA_VFS_OPEN_CREATE, &sattr,
+                                CHIMERA_VFS_ATTR_FH, 0, 0, openat_cb, &ctx);
+            wait_done(&ctx);
+            assert(ctx.status == CHIMERA_VFS_OK);
+            chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+
+            /* Open it by name with the cell's data-access intent and no create
+             * bit -- the shape an NFSv4 CLAIM_NULL / OPEN4_NOCREATE produces. */
+            memset(&sattr, 0, sizeof(sattr));
+            chimera_vfs_open_at(ctx.vfs_thread, actor, root_handle,
+                                cells[i].name, strlen(cells[i].name),
+                                cells[i].flags, &sattr,
+                                CHIMERA_VFS_ATTR_FH, 0, 0, openat_cb, &ctx);
+            wait_done(&ctx);
+
+            if (ctx.status != cells[i].expect) {
+                fprintf(stderr,
+                        "  FAIL: open_at %s mode %04o as %s flags 0x%x: "
+                        "expected %d, got %d\n",
+                        cells[i].name, cells[i].mode,
+                        cells[i].as_owner ? "owner" : "other",
+                        cells[i].flags, cells[i].expect, ctx.status);
+                failures++;
+            }
+
+            if (ctx.status == CHIMERA_VFS_OK && ctx.handle) {
+                chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+            }
+        }
+
+        chimera_vfs_release(ctx.vfs_thread, root_handle);
+        assert(failures == 0);
+        TEST_PASS("open_at: mode gates data-access intent at open time");
+    }
+
     /* Unmount and remove the filesystem to exercise the full lifecycle. */
     chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, &ctx);
     wait_done(&ctx);
