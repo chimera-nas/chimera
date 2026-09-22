@@ -799,7 +799,7 @@ ff_lg_dsroot_cb(
     ctx->ds_root_handle = handle;
 
     /* One backing file per MDS file, flat on the DS.  Shared with the non-pNFS
-     * write redirect (vfs_pnfs_io.c), which must resolve the very same file. */
+    * write redirect (vfs_pnfs_io.c), which must resolve the very same file. */
     chimera_vfs_pnfs_backing_name(ctx->backing_name, ctx->mds_handle->fh,
                                   ctx->fileid);
 

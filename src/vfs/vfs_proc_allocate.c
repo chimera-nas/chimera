@@ -10,7 +10,8 @@
 #include "vfs_attr_cache.h"
 #include "common/macros.h"
 static void
-chimera_vfs_allocate_finish(struct chimera_vfs_request *request);
+chimera_vfs_allocate_finish(
+    struct chimera_vfs_request *request);
 
 /* Allocating space extends the file, so a redirected allocate leaves the MDS
  * inode's size behind exactly as a redirected write does. */
@@ -41,7 +42,7 @@ chimera_vfs_allocate_finish(struct chimera_vfs_request *request)
     if (request->io_pnfs_backing && request->status == CHIMERA_VFS_OK) {
         uint64_t want = request->allocate.r_post_attr.va_req_mask;
 
-        request->allocate.r_post_attr            = request->io_pnfs_sync_attr;
+        request->allocate.r_post_attr             = request->io_pnfs_sync_attr;
         request->allocate.r_post_attr.va_req_mask = want;
     }
 

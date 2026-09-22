@@ -4846,8 +4846,8 @@ main(
     }
 
     /* The proxy has to have a metadata server to front.  Two data servers by
-     * default, so the MDS's round-robin steering spreads the corpus's files
-     * over more than one device and the client resolves (and caches) each. */
+    * default, so the MDS's round-robin steering spreads the corpus's files
+    * over more than one device and the client resolves (and caches) each. */
     if (opts.pnfs_proxy && opts.pnfs_num_ds == 0) {
         opts.pnfs_num_ds = 2;
     }

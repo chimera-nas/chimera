@@ -219,9 +219,9 @@ chimera_vfs_read_dispatch(
         return;
     }
 
-    request->opcode      = CHIMERA_VFS_OP_READ;
-    request->complete    = chimera_vfs_read_complete;
-    request->read.handle = io_handle;
+    request->opcode          = CHIMERA_VFS_OP_READ;
+    request->complete        = chimera_vfs_read_complete;
+    request->read.handle     = io_handle;
     request->io_pnfs_backing = redirected ? io_handle : NULL;
     /* Anchor the implicit claim on the cached handle (chimera_vfs_io_claim_acquire).
      * Deliberately the CALLER-named handle even when the I/O was redirected: a

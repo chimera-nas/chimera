@@ -231,7 +231,8 @@ chimera_vfs_write_same_fallback(
 } /* chimera_vfs_write_same_fallback */
 
 static void
-chimera_vfs_write_same_finish(struct chimera_vfs_request *request);
+chimera_vfs_write_same_finish(
+    struct chimera_vfs_request *request);
 
 static void
 chimera_vfs_write_same_complete(struct chimera_vfs_request *request)
