@@ -35,6 +35,7 @@
 #include <sys/time.h>
 
 #include "nfs3_mbt_common.h"
+#include "vfs/vfs_pnfs.h"
 #include "common/mbt_trace_dir.h"
 #include "common/mbt_watchdog.h"
 
@@ -491,6 +492,7 @@ struct oracle {
     /* Per-model-client connections (a model client
     * owns its own connection, like a real one). */
     struct evpl_rpc2_conn *conns[V4_MAX_CLIENTS];
+    struct evpl_rpc2_conn *ds_conns[MBT_MAX_DS];
 
     /* CB_RECALL observations (stateid others seen on any backchannel). */
     uint8_t                recalls[64][12];
@@ -3701,6 +3703,117 @@ await_recalls(
     }
 } /* await_recalls */
 
+/* The model's LAYOUTCOMMIT folds an implicit DS size extension into the
+ * operation.  Materialize that side effect on the backing file before sending
+ * the metadata RPC.  Sparse extension preserves both existing symbols and the
+ * model's zero/hole blocks; writing zeroes would change SEEK semantics.
+ *
+ * Only successful, non-replayed model operations have this precondition.
+ * MDS size, commit status, and subsequent READ/SEEK results remain checked by
+ * the normal oracle.  In particular, do not SETATTR the MDS: that would hide a
+ * broken LAYOUTCOMMIT implementation. */
+static int
+prepare_layoutcommits(
+    struct oracle *o,
+    json_t        *ops,
+    json_t        *results,
+    struct mism   *m)
+{
+    int64_t cur = -1, saved = -1;
+    size_t  i;
+    json_t *result;
+
+    if (!o->env->num_ds) {
+        return 0;
+    }
+
+    json_array_foreach(results, i, result)
+    {
+        json_t     *v    = jf_val(result);
+        json_t     *op   = json_array_get(ops, i);
+        const char *tag  = jf_tag(op);
+        const char *rtag = jf_tag(result);
+
+        if (jf_i64(v, "st") != NFS4_OK) {
+            break;
+        }
+        if (strcmp(rtag, "SSequence") == 0 && jf_bool(v, "replay")) {
+            return 0;
+        }
+        if (strcmp(tag, "RPutfh") == 0) {
+            cur = itf_i64(jf_val(op));
+        } else if (strcmp(tag, "RPutrootfh") == 0) {
+            cur = 0;
+        } else if (strcmp(tag, "RSavefh") == 0) {
+            saved = cur;
+        } else if (strcmp(tag, "RRestorefh") == 0) {
+            cur = saved;
+        } else if (strcmp(rtag, "SGetfh") == 0 || strcmp(rtag, "SCreate") == 0) {
+            cur = jf_i64(v, "ino");
+        } else if (strcmp(rtag, "SLookup") == 0) {
+            cur = jf_i64(v, "child");
+        } else if (strcmp(rtag, "SLookupp") == 0) {
+            cur = jf_i64(v, "parent");
+        } else if (strcmp(tag, "RSecinfo") == 0) {
+            cur = -1;
+        } else if (strcmp(tag, "RLayoutcommit") == 0) {
+            struct mbt_env        *env = o->env;
+            struct v4_layout_loc  *loc;
+            struct evpl_rpc2_conn *mds_conn;
+            struct evpl_rpc2_cred  mds_cred;
+            struct mbt_result     *r;
+            uint64_t               size = (uint64_t) jf_i64(jf_val(op), "hi") * V4_BLOCK_SIZE;
+            int                    ds;
+
+            if (cur < 0 || cur >= V4_MAX_INOS || !o->layout_loc[cur].fh.len) {
+                mism_add(m, "layoutcommit setup: no backing location for inode %" PRId64, cur);
+                return -1;
+            }
+            loc = &o->layout_loc[cur];
+            for (ds = 0; ds < env->num_ds; ds++) {
+                const struct chimera_vfs_ds *device = chimera_vfs_pnfs_get_device(
+                    chimera_server_get_vfs(env->server), ds);
+
+                if (device && memcmp(device->deviceid, loc->deviceid, 16) == 0) {
+                    break;
+                }
+            }
+            if (ds == env->num_ds) {
+                mism_add(m, "layoutcommit setup: unknown data server");
+                return -1;
+            }
+            if (!o->ds_conns[ds]) {
+                struct evpl_endpoint *ep = chimera_tcp_flavor_endpoint_create(
+                    CHIMERA_TCP_FLAVOR_INPROC, "127.0.0.1", MBT_DS_PORT_BASE + ds);
+
+                o->ds_conns[ds] = evpl_rpc2_client_connect(env->rpc2_thread,
+                                                           EVPL_STREAM_INPROC, ep, NULL, 0, NULL);
+                if (!o->ds_conns[ds]) {
+                    mism_add(m, "layoutcommit setup: data server connection failed");
+                    return -1;
+                }
+            }
+            /* The fixture DS exports support v3 even when the layout
+             * advertises v4.1.  Use root AUTH_SYS for this model side effect. */
+            mds_conn      = env->nfs_conn;
+            mds_cred      = env->cred;
+            env->nfs_conn = o->ds_conns[ds];
+            env->cred     = env->aux_cred;
+            r             = mbt_getattr(env, &loc->fh);
+            if (r->status == NFS3_OK && r->obj_attrs.a.size < size) {
+                r = mbt_setattr(env, &loc->fh, -1, size, NULL);
+            }
+            env->nfs_conn = mds_conn;
+            env->cred     = mds_cred;
+            if (r->status != NFS3_OK) {
+                mism_add(m, "layoutcommit setup: DS extension failed: %u", r->status);
+                return -1;
+            }
+        }
+    }
+    return 0;
+} /* prepare_layoutcommits */
+
 static int
 run_compound(
     struct oracle *o,
@@ -3782,6 +3895,10 @@ run_compound(
                 cd_wchunk = (int) argarray[i].opread.count;
             }
         }
+    }
+
+    if (prepare_layoutcommits(o, ops, results, m) < 0) {
+        return -1;
     }
 
     memset(&args, 0, sizeof(args));
@@ -4680,6 +4797,11 @@ run_trace(
     for (c = 0; c < V4_MAX_CLIENTS; c++) {
         if (o->conns[c]) {
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);
+        }
+    }
+    for (c = 0; c < MBT_MAX_DS; c++) {
+        if (o->ds_conns[c]) {
+            evpl_rpc2_client_disconnect(env->rpc2_thread, o->ds_conns[c]);
         }
     }
     mbt_env_fs_teardown(env, fsname);

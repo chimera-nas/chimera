@@ -60,8 +60,7 @@ chimera_nfs4_close_callback(
                                 res->resarray[2].opclose.status);
     }
 
-    chimera_nfs4_open_file_close_done(ctx->server, request->fh,
-                                      request->fh_len);
+    chimera_nfs4_open_file_close_done(ctx->server, ctx->open_state->open_file);
 
     chimera_nfs4_close_done(request);
 } /* chimera_nfs4_close_callback */
@@ -120,8 +119,7 @@ chimera_nfs4_close_transmit(
     if (!server_thread || !server_thread->server->nfs4_session) {
         chimera_nfsclient_error("CLOSE: no session for open stateid; "
                                 "leaked until lease expiry");
-        chimera_nfs4_open_file_close_done(ctx->server, request->fh,
-                                          request->fh_len);
+        chimera_nfs4_open_file_close_done(ctx->server, ctx->open_state->open_file);
         chimera_nfs4_close_done(request);
         return;
     }
@@ -184,8 +182,7 @@ chimera_nfs4_close_send(
 
     /* Nothing was opened on the server, so there is no stateid to release. */
     if (!chimera_nfs4_stateid_is_open(&ctx->stateid)) {
-        chimera_nfs4_open_file_close_done(ctx->server, request->fh,
-                                          request->fh_len);
+        chimera_nfs4_open_file_close_done(ctx->server, ctx->open_state->open_file);
         chimera_nfs4_close_done(request);
         return;
     }
