@@ -52,6 +52,8 @@ chimera_nfs4_open_at_callback(
     struct nfs_resop4               *getattr_res;
     xdr_opaque                      *remote_fh;
     struct chimera_nfs4_open_state  *state;
+    struct chimera_nfs4_open_file   *open_file;
+    int                              open_file_status;
     int                              path_open;
     /* A creating OPEN mutates the parent, so the OPEN shape brackets itself
      * with the parent's change attribute (ops 2 and 6) and everything after
@@ -217,10 +219,17 @@ chimera_nfs4_open_at_callback(
          * CLOSE destroys (see chimera_nfs4_open_file_get) -- the returned
          * stateid is dead on arrival, so re-send the OPEN; once the CLOSE has
          * landed the retry receives a fresh state. */
-        if (chimera_nfs4_open_file_get(ctx->server,
-                                       request->open_at.r_attr.va_fh,
-                                       request->open_at.r_attr.va_fh_len,
-                                       &open_res->opopen.resok4.stateid) != 0) {
+        open_file_status = chimera_nfs4_open_file_get(ctx->server,
+                                                       request->open_at.r_attr.va_fh,
+                                                       request->open_at.r_attr.va_fh_len,
+                                                       &open_res->opopen.resok4.stateid,
+                                                       &open_file);
+        if (open_file_status == -2) {
+            request->status = CHIMERA_VFS_EFAULT;
+            request->complete(request);
+            return;
+        }
+        if (open_file_status != 0) {
             chimera_nfs4_open_at_send(ctx->thread, ctx->shared, request,
                                       ctx->dispatch_private);
             return;
@@ -237,6 +246,7 @@ chimera_nfs4_open_at_callback(
         /* Store the stateid from OPEN response */
         state->server_index = ctx->server->index;
         state->stateid      = open_res->opopen.resok4.stateid;
+        state->open_file    = open_file;
 
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {

@@ -38,7 +38,8 @@ chimera_nfs4_open_file_get(
     struct chimera_nfs_client_server *server,
     const uint8_t                    *fh,
     int                               fh_len,
-    const struct stateid4            *stateid)
+    const struct stateid4            *stateid,
+    struct chimera_nfs4_open_file   **r_file)
 {
     struct chimera_nfs4_open_file *file;
     uint8_t                       *wire_fh;
@@ -46,13 +47,13 @@ chimera_nfs4_open_file_get(
     int                            coalesced = stateid && stateid->seqid >= 2;
 
     if (!server) {
-        return 0;
+        return -2;
     }
 
     chimera_nfs4_map_fh(fh, fh_len, &wire_fh, &wire_fh_len);
 
     if (wire_fh_len <= 0 || wire_fh_len > CHIMERA_VFS_FH_SIZE) {
-        return 0;
+        return -2;
     }
 
     pthread_mutex_lock(&server->open_state_lock);
@@ -64,7 +65,7 @@ chimera_nfs4_open_file_get(
             memcmp(file->stateid.other, stateid->other,
                    sizeof(stateid->other)) == 0;
 
-        if (coalesced && (!same_state || file->closing)) {
+        if (file->closing || (coalesced && !same_state)) {
             /* An upgrade of a doomed state: either one other than the entry
              * tracks (its CLOSE already retired it, or a fresh open already
              * replaced it and this reply raced past both), or the tracked
@@ -82,6 +83,8 @@ chimera_nfs4_open_file_get(
             file->stateid = *stateid;
         }
 
+        *r_file = file;
+
         pthread_mutex_unlock(&server->open_state_lock);
         return 0;
     }
@@ -98,10 +101,12 @@ chimera_nfs4_open_file_get(
 
     if (!file) {
         pthread_mutex_unlock(&server->open_state_lock);
-        return 0;
+        return -2;
     }
 
     file->refcnt = 1;
+    pthread_mutex_init(&file->layout.acq_lock, NULL);
+    pthread_mutex_init(&file->layout.io_lock, NULL);
     file->fh_len = wire_fh_len;
     memcpy(file->fh, wire_fh, wire_fh_len);
 
@@ -110,6 +115,8 @@ chimera_nfs4_open_file_get(
     }
 
     HASH_ADD_KEYPTR(hh, server->open_files, file->fh, file->fh_len, file);
+
+    *r_file = file;
 
     pthread_mutex_unlock(&server->open_state_lock);
     return 0;
@@ -201,6 +208,8 @@ chimera_nfs4_open_file_close_done(
     if (file && --file->closing == 0 && file->refcnt == 0) {
         HASH_DEL(server->open_files, file);
         pthread_mutex_unlock(&server->open_state_lock);
+        pthread_mutex_destroy(&file->layout.acq_lock);
+        pthread_mutex_destroy(&file->layout.io_lock);
         free(file);
         return;
     }
@@ -235,6 +244,8 @@ chimera_nfs4_open_file_drain(struct chimera_nfs_client_server *server)
 
     while (file) {
         next = file->hh.next;
+        pthread_mutex_destroy(&file->layout.acq_lock);
+        pthread_mutex_destroy(&file->layout.io_lock);
         free(file);
         file = next;
     }

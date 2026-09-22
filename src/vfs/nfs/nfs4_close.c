@@ -178,17 +178,9 @@ chimera_nfs4_close_send(
     ctx->open_state = open_state;
     ctx->server     = shared->servers[open_state->server_index];
 
-    /* This handle is done with the file.  The open on the server is not this
-     * handle's to end, though: every handle on the file shares it, so the CLOSE
-     * goes only when the last one lets go.  This consumes the handle's
-     * reference, so it must run exactly once per close -- the slot layer's
-     * park replay re-enters chimera_nfs4_close_transmit, never here. */
-    if (!chimera_nfs4_open_file_put(ctx->server,
-                                    request->fh, request->fh_len,
-                                    &ctx->stateid)) {
-        chimera_nfs4_close_done(request);
-        return;
-    }
+    /* The last handle already dropped its reference before returning the
+     * shared layout.  Keep that stateid across the asynchronous layout RPCs. */
+    ctx->stateid = open_state->close_stateid;
 
     /* Nothing was opened on the server, so there is no stateid to release. */
     if (!chimera_nfs4_stateid_is_open(&ctx->stateid)) {
@@ -219,14 +211,25 @@ chimera_nfs4_close(
         return;
     }
 
-    /* Drop this handle's layout from the recall registry before it is freed.
-    * Idempotent: a no-op unless the layout reached VALID (or was fenced). */
-    chimera_nfs4_pnfs_layout_unregister(shared, &open_state->layout);
+    /* Only the final handle may return the file's shared layout.  Mark the
+     * file closing first, so a concurrent OPEN cannot attach to that layout
+     * while its LAYOUTCOMMIT/LAYOUTRETURN is in flight. */
+    if (!chimera_nfs4_open_file_put(shared->servers[open_state->server_index],
+                                    request->fh, request->fh_len,
+                                    &open_state->close_stateid)) {
+        chimera_nfs4_open_state_free(open_state);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
 
-    /* If this handle holds a pNFS layout, report the new size to the MDS
+    /* Remove the file's layout from the recall registry before final close.
+     * A recall already in progress retains the layout until it returns. */
+    chimera_nfs4_pnfs_layout_unregister(shared, &open_state->open_file->layout);
+
+    /* If this file holds a pNFS layout, report the new size to the MDS
      * (LAYOUTCOMMIT) and return the layout (LAYOUTRETURN) before the CLOSE.
-     * This is per handle, as the layout is: the writes it drove to the data
-     * server are invisible to the MDS until its own LAYOUTCOMMIT lands.  When
+     * Its DS writes are invisible to the MDS until LAYOUTCOMMIT lands. When
      * it takes the request it chains into chimera_nfs4_close_send once the
      * layout is back. */
     if (chimera_nfs4_pnfs_close(thread, shared, request, open_state)) {
