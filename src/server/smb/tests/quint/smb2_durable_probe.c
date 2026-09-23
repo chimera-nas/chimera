@@ -50,6 +50,9 @@
  *                          persistent reclaim, and what a parked PERSISTENT
  *                          holder does to a conflicting opener
  *
+ * D12 is an implementation lifetime regression: server shutdown with live
+ * durable connections spread across multiple workers.
+ *
  * Each connection gets its own ClientGuid unless it is deliberately reopened
  * as the same client (smb2_conn_reopen inherits guid_tag) -- chimera derives
  * both the lease owner's client key and the durable reclaim's identity check
@@ -1628,8 +1631,6 @@ main(
                                   .directory_leases   = 1,
                                   .persistent_handles = 1 };
     struct smb2_conn    *a, *seed, *b;
-
-    setvbuf(stdout, NULL, _IONBF, 0);
 
     (void) argc;
     (void) argv;

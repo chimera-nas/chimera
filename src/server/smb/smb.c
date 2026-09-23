@@ -2910,6 +2910,7 @@ chimera_smb_server_thread_destroy(void *data)
     struct chimera_smb_compound       *compound;
     struct chimera_smb_session_handle *session_handle;
     struct chimera_server_smb_thread **tpp;
+    bool                               last_thread;
 
     /* Unregister from the process-global thread list first so a peer thread's
      * resume broadcast can no longer ring this thread's (about-to-be-removed)
@@ -2921,14 +2922,19 @@ chimera_smb_server_thread_destroy(void *data)
             break;
         }
     }
+    last_thread = thread->shared->threads == NULL;
     evpl_mutex_unlock(&thread->shared->threads_lock);
 
-    /* Release any durable/persistent handles still parked in the shared
-     * registry while this thread's vfs_thread is alive.  Each parked open
-     * pins a VFS open handle; leaving it referenced makes the VFS close
+    /* libevpl closes a worker's binds before calling thread_destroy, but peer
+     * workers may still have live connections.  Only the last SMB worker can
+     * drain the global registry: doing it earlier frees opens still hashed in
+     * a peer's tree, which that peer will walk during connection teardown.
+     *
+     * Release the parked handles while this last worker's vfs_thread is alive.
+     * Each parked open pins a VFS open handle; leaving it referenced makes the VFS close
      * thread spin and chimera_vfs_destroy hang.  Must run before the
      * free_open_files drain below so the released opens are reclaimed. */
-    if (thread->shared->config.persistent_handles) {
+    if (last_thread && thread->shared->config.persistent_handles) {
         chimera_smb_durable_drain_all(thread);
     }
 
