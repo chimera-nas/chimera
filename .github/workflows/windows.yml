@@ -168,10 +168,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ctest-junit-windows-${{ matrix.arch }}-${{ matrix.config }}-${{ inputs.test_tier }}
-          path: |
-            ctest-results/
-            build/Testing/Temporary/LastTest.log
+          name: ctest-junit-windows-${{ matrix.arch }}-${{ matrix.config }}
+          path: ctest-results/
           if-no-files-found: warn
           retention-days: 30
       - name: Remove temporary package credentials

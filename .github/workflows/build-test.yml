@@ -779,7 +779,7 @@ jobs:
   # reports) and never fails the build: the test jobs stay the source of truth.
   publish-test-results:
     name: Report
-    needs: [test, test-dev, macos]
+    needs: [test, test-dev, macos, windows]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     permissions:
