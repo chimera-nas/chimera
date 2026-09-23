@@ -778,12 +778,12 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
     }
 } /* chimera_smb_durable_sweep */
 
-/* Release every registry entry's live open at thread shutdown.  A parked
- * durable/persistent handle keeps its VFS open handle referenced
+/* Release every registry entry's parked open at final SMB thread shutdown.
+ * A parked durable/persistent handle keeps its VFS open handle referenced
  * indefinitely; without this the VFS close thread can never reach a
  * quiescent (zero open handles) state and chimera_vfs_destroy hangs.
  *
- * Runs from the SMB thread-destroy path, which still has a live vfs_thread
+ * Runs only from the LAST SMB thread-destroy path, with a live vfs_thread
  * (protocols are destroyed before the VFS, precisely so they can release
  * their open handles).  By that point all connections are gone, so any
  * remaining entry with a live open_file is orphaned state to reclaim --
