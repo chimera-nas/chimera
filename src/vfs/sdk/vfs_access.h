@@ -93,6 +93,20 @@ int chimera_vfs_open_gate_needed(
     const struct chimera_vfs_cred *cred);
 
 /*
+ * The attribute bits an engine access gate evaluates, for a backend with
+ * `module_capabilities`: mode, uid and gid always, plus the native ACL for a
+ * CHIMERA_VFS_CAP_ACL_NATIVE backend (whose ACL, not its mode, is the
+ * authority).  Returns the subset of those bits NOT set in attr->va_set_mask,
+ * so 0 means the attrs are complete enough to authorize against.  A gate
+ * handed a non-zero answer must refuse the operation rather than evaluate:
+ * a missing mode would skip the check and a missing uid/gid would be read as
+ * root:root, both of which grant access the object does not.
+ */
+uint64_t chimera_vfs_gate_attrs_missing(
+    const struct chimera_vfs_attrs *attr,
+    uint64_t                        module_capabilities);
+
+/*
  * The enforcement decision itself: CHIMERA_VFS_OK if every bit in `required`
  * (canonical CHIMERA_ACE_* mask) is granted to `cred` on the object described
  * by `attr` (which must carry mode/uid/gid and, for a natively-stored ACL, the

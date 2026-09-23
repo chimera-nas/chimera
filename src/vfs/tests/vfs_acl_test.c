@@ -389,6 +389,56 @@ test_gate(void)
     TEST_PASS("gate: enforcement scoping + owner-implicit WRITE_ACL, not WRITE_OWNER");
 } /* test_gate */
 
+/*
+ * gate_attrs_missing names exactly the attrs a gate evaluates: mode, uid and
+ * gid always, plus the ACL for a backend whose ACL (not its mode) is
+ * authoritative.  Anything else in the mask is irrelevant to it.
+ */
+static void
+test_gate_attrs_missing(void)
+{
+    struct chimera_vfs_attrs attr;
+    const uint64_t           stat3 = CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+
+    memset(&attr, 0, sizeof(attr));
+
+    /* A mode-authoritative backend needs mode/uid/gid and nothing else. */
+    attr.va_set_mask = stat3;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == 0);
+
+    /* An ACL-native backend must also return its ACL. */
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_ACL_NATIVE) ==
+           CHIMERA_VFS_ATTR_ACL);
+    attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_ACL_NATIVE) == 0);
+
+    /* Each of mode, uid and gid is reported on its own. */
+    attr.va_set_mask = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == CHIMERA_VFS_ATTR_MODE);
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_GID;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == CHIMERA_VFS_ATTR_UID);
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == CHIMERA_VFS_ATTR_GID);
+
+    /* An empty reply is missing everything the gate reads. */
+    attr.va_set_mask = 0;
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_ACL_NATIVE) ==
+           (stat3 | CHIMERA_VFS_ATTR_ACL));
+
+    /* Bits the gate does not read neither help nor hurt. */
+    attr.va_set_mask = stat3 | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == 0);
+
+    /* A DAC-delegating backend gets no exemption here: whether a gate runs
+     * at all is gate_needed's decision, not this helper's. */
+    attr.va_set_mask = 0;
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_DELEGATES_DAC) ==
+           stat3);
+
+    TEST_PASS("gate_attrs_missing: mode/uid/gid always, ACL only when native");
+} /* test_gate_attrs_missing */
+
 #define INIT_ATTR(a, m, u, g)                                            \
         do {                                                             \
             memset(&(a), 0, sizeof(a));                                  \
@@ -652,6 +702,7 @@ main(
     test_inherit_fallback();
     test_serialize_roundtrip();
     test_gate();
+    test_gate_attrs_missing();
     test_delete_allowed();
     test_sid_principal_never_matches();
     test_sid_survives_chmod_and_inherit();
