@@ -382,7 +382,21 @@ function(add_test)
         set(_quick TRUE)
     endif()
 
-    if(_quick)
+    # An explicit configuration restriction overrides the directory's tier
+    # (for example, the extended-only Kerberos security-flavor probes).
+    list(FIND _args CONFIGURATIONS _config_index)
+    if(NOT _config_index EQUAL -1)
+        if(CMAKE_CONFIGURATION_TYPES)
+            math(EXPR _config_value "${_config_index} + 1")
+            list(GET _args ${_config_value} _configuration)
+            if(_configuration STREQUAL "extended")
+                list(REMOVE_AT _args ${_config_value})
+                list(INSERT _args ${_config_value} ${CMAKE_CONFIGURATION_TYPES})
+            endif()
+        endif()
+        _add_test(${_args})
+    elseif(_quick)
+        set_property(GLOBAL APPEND PROPERTY CHIMERA_QUICK_TESTS "${_name}")
         _add_test(${_args})
     else()
         if(CMAKE_CONFIGURATION_TYPES)
@@ -859,4 +873,14 @@ add_subdirectory(examples/vfs_module)
 # created until they are all known.
 if (CHIMERA_MBT_AVAILABLE)
     specs_corpus_finalize()
+endif()
+
+# Multi-config generators need CTest's -C for Debug/Release, so it cannot also
+# select our quick/extended tier. Export exactly the same quick test names the
+# add_test wrapper selects for single-config builds; no second naming policy.
+if(NOT DISABLE_TESTS)
+    get_property(_quick_tests GLOBAL PROPERTY CHIMERA_QUICK_TESTS)
+    list(REMOVE_DUPLICATES _quick_tests)
+    list(JOIN _quick_tests "\n" _quick_tests_text)
+    file(WRITE "${CMAKE_BINARY_DIR}/quick-tests.txt" "${_quick_tests_text}\n")
 endif()

@@ -26,7 +26,7 @@ on:
 # What gates a merge is the QUICK test tier plus static analysis, run on every
 # supported OS rather than on a chosen few:
 #   - all OS images built for amd64 (devcontainer also for arm64)
-#   - quick-tier ctest on every image, and on macOS
+#   - quick-tier ctest on every image, macOS, and native Windows
 #   - static analysis on every image, and on macOS
 #
 # The extended tier -- pynfs, pjdfstest, cthon, ltp, pike, smbtorture, wpts,
@@ -1267,6 +1267,7 @@ jobs:
       - static-analysis
       - macos
       - analyze-macos
+      - windows
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     permissions:
@@ -1285,3 +1286,13 @@ jobs:
               exit 1
             fi
           done
+
+  windows:
+    name: Windows
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/windows.yml
+    with:
+      test_tier: quick
+      full_matrix: true

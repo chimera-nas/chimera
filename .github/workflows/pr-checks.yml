@@ -24,7 +24,8 @@ name: PR checks
 # It also carries the pre-merge signal that is cheap enough to be worth having
 # before the queue: clang static analysis on devcontainer and macOS, and the
 # full quick test tier on devcontainer, including model replays, strict twins
-# and supporting probes. Catching regressions here rather than in the queue
+# and supporting probes, plus native Windows x64 Release quick tests.
+# Catching regressions here rather than in the queue
 # is worth one image build. macOS runs quick post-merge in build-test.yml's
 # macOS job, rather than twice.
 #
@@ -69,7 +70,7 @@ env:
 jobs:
   ci-complete:
     name: CI complete
-    needs: [analyze-dev, quint-coverage, analyze-macos]
+    needs: [analyze-dev, quint-coverage, analyze-macos, windows]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
@@ -448,3 +449,13 @@ jobs:
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
+
+  windows:
+    name: Windows (pre-merge)
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/windows.yml
+    with:
+      test_tier: quick
+      full_matrix: false
