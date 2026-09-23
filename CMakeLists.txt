@@ -233,13 +233,77 @@ include(cmake/Platform.cmake)
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 add_definitions(-DCHIMERA_STATE_DIR="${CMAKE_INSTALL_PREFIX}/share/state")
 
-# chimera uses userspace-RCU in the QSBR flavor process-wide.  <urcu/urcu-qsbr.h>
-# clears the unprefixed RCU API map (rcu_read_lock, call_rcu, rcu_barrier, ...)
-# at the end of the header unless URCU_API_MAP is defined, so we set it globally:
-# any TU that (even transitively) includes a chimera RCU header -- the VFS caches,
-# the mount table, the identity/cred caches -- needs the map kept active.  It is
-# a no-op for TUs that include no urcu headers (e.g. the fio plugin).
-add_definitions(-DURCU_API_MAP)
+# liburcu is optional.  Everything in chimera that used to call urcu directly
+# now goes through the shim in src/common/chimera_rcu.h, which maps a critical
+# section either onto userspace-RCU in the QSBR flavor or, where liburcu is not
+# installed, onto a reader/writer lock on the construct being read.  See that
+# header for what the substitution does and does not preserve.
+#
+# URCU_SUPPORT is tri-state, matching CUDA_SUPPORT above:
+#   AUTO (default) - use liburcu iff it is present, else fall back to rwlocks
+#   ON             - require liburcu; hard fail if it is missing
+#   OFF            - never use liburcu, even where it is installed
+set(URCU_SUPPORT "AUTO" CACHE STRING
+    "userspace-RCU: AUTO (use iff available), ON (require), or OFF")
+set_property(CACHE URCU_SUPPORT PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${URCU_SUPPORT}" URCU_SUPPORT)
+
+if(NOT URCU_SUPPORT MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "URCU_SUPPORT must be AUTO, ON or OFF (got \"${URCU_SUPPORT}\").")
+endif()
+
+set(URCU_ENABLED FALSE)
+set(CHIMERA_RCU_LIBS "")
+
+if(WIN32 AND URCU_SUPPORT STREQUAL "ON")
+    message(FATAL_ERROR "Native Windows uses the domain-lock fallback; liburcu is unavailable")
+endif()
+
+if(NOT WIN32 AND NOT URCU_SUPPORT STREQUAL "OFF")
+    find_package(PkgConfig QUIET)
+
+    if(PkgConfig_FOUND)
+        pkg_check_modules(URCU_QSBR QUIET liburcu-qsbr)
+        pkg_check_modules(URCU_CDS QUIET liburcu-cds)
+    endif()
+
+    if(URCU_QSBR_FOUND AND URCU_CDS_FOUND)
+        set(URCU_ENABLED TRUE)
+        set(CHIMERA_RCU_LIBS urcu-qsbr urcu-cds urcu-common)
+    else()
+        # liburcu has shipped pkg-config files for a long time, but a
+        # hand-installed copy may have none; probe for the pieces directly
+        # before concluding it is absent.
+        find_path(URCU_INCLUDE_DIR urcu/urcu-qsbr.h)
+        find_library(URCU_QSBR_LIBRARY urcu-qsbr)
+        find_library(URCU_CDS_LIBRARY urcu-cds)
+        find_library(URCU_COMMON_LIBRARY urcu-common)
+
+        if(URCU_INCLUDE_DIR AND URCU_QSBR_LIBRARY AND URCU_CDS_LIBRARY AND URCU_COMMON_LIBRARY)
+            set(URCU_ENABLED TRUE)
+            set(CHIMERA_RCU_LIBS
+                ${URCU_QSBR_LIBRARY} ${URCU_CDS_LIBRARY} ${URCU_COMMON_LIBRARY})
+        endif()
+    endif()
+endif()
+
+if(URCU_ENABLED)
+    # <urcu/urcu-qsbr.h> clears the unprefixed RCU API map (rcu_read_lock,
+    # call_rcu, rcu_barrier, ...) at the end of the header unless URCU_API_MAP
+    # is defined, so we set it globally: any TU that (even transitively)
+    # includes the chimera RCU shim needs the map kept active.  It is a no-op
+    # for TUs that include no urcu headers (e.g. the fio plugin).
+    add_definitions(-DURCU_API_MAP -DCHIMERA_HAVE_URCU)
+    message(STATUS "userspace-RCU enabled (URCU_SUPPORT=${URCU_SUPPORT})")
+elseif(URCU_SUPPORT STREQUAL "ON")
+    message(FATAL_ERROR
+        "URCU_SUPPORT=ON but liburcu was not found (need liburcu-qsbr and "
+        "liburcu-cds, headers and libraries).  Install liburcu-dev or re-run "
+        "with -DURCU_SUPPORT=AUTO/OFF.")
+else()
+    message(STATUS "userspace-RCU not in use (URCU_SUPPORT=${URCU_SUPPORT}); "
+                   "RCU critical sections fall back to per-construct rwlocks")
+endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/libevpl/ext/prometheus-c)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/libevpl/ext/prometheus-c/ext/stopwatch)

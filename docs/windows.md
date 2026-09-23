@@ -97,10 +97,12 @@ namespaces, and external Unix Samba tools remain Unix test paths.
 
 ## Platform choices
 
-* Native threads, synchronization, QSBR reclamation, scalar atomics, timers,
-  and secure randomness replace dependencies on pthreads and liburcu.
-  Unix retains its existing liburcu implementation; `CHIMERA_NATIVE_RCU=ON`
-  lets developers exercise the native implementation there too.
+* Native threads, synchronization, scalar atomics, timers and secure randomness
+  replace POSIX dependencies. Windows uses the domain-lock reclamation fallback
+  from `common/chimera_rcu.h`, backed by native mutexes and condition variables
+  with writer preference. Unix uses liburcu when available; `URCU_SUPPORT=OFF`
+  exercises the same fallback there. The earlier Windows-specific QSBR
+  implementation and `CHIMERA_NATIVE_RCU` option have been removed.
 * `memfs`, `diskfs`, and `cairn` use the shared VFS. Windows diskfs uses
   libevpl's native implementation of its portable block backend. The Linux
   passthrough backend, io_uring, libaio, RDMA, XLIO, FUSE, and GPUDirect

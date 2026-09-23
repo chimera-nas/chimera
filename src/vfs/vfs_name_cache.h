@@ -7,7 +7,7 @@
 #include "common/thread.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
-#include "common/rcu.h"
+#include "common/chimera_rcu.h"
 
 struct chimera_vfs_name_cache_entry {
     struct chimera_rcu_node rnode; /* must be first: aliases the entry pointer */
@@ -24,6 +24,7 @@ struct chimera_vfs_name_cache_entry {
 
 struct chimera_vfs_name_cache_shard {
     struct chimera_vfs_name_cache_entry **entries;
+    struct chimera_rcu_domain             rcu;
     evpl_mutex_t                          entry_lock;
     struct prometheus_counter_instance   *miss;
     struct prometheus_counter_instance   *hit;
@@ -104,6 +105,7 @@ chimera_vfs_name_cache_create(
         shard          = &cache->shards[i];
         shard->entries = calloc(cache->num_slots * cache->num_entries, sizeof(struct chimera_vfs_name_cache_entry *));
 
+        chimera_rcu_domain_init(&shard->rcu);
         evpl_mutex_init(&shard->entry_lock, NULL);
 
         shard->miss   = prometheus_counter_series_create_instance(cache->miss_series);
@@ -125,7 +127,7 @@ chimera_vfs_name_cache_destroy(struct chimera_vfs_name_cache *cache)
         return;
     }
 
-    rcu_barrier();
+    chimera_rcu_barrier();
 
     for (i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
@@ -146,6 +148,7 @@ chimera_vfs_name_cache_destroy(struct chimera_vfs_name_cache *cache)
         free(shard->entries);
 
         evpl_mutex_destroy(&shard->entry_lock);
+        chimera_rcu_domain_destroy(&shard->rcu);
     }
 
     chimera_rcu_pool_destroy(&cache->pool);
@@ -193,10 +196,10 @@ chimera_vfs_name_cache_lookup(
 
     rc = -1;
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&shard->rcu);
 
     while (slot < slot_end) {
-        entry = rcu_dereference(*slot);
+        entry = chimera_rcu_deref(*slot);
 
         if (entry && entry->key == key &&
             entry->expiration >= now &&
@@ -214,7 +217,7 @@ chimera_vfs_name_cache_lookup(
         slot++;
     }
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&shard->rcu);
 
     if (rc == 0) {
         prometheus_counter_increment(shard->hit);
@@ -277,7 +280,7 @@ chimera_vfs_name_cache_insert(
         memcpy(entry->child_name, name, name_len);
     }
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_mutate_begin(&shard->rcu);
 
     evpl_mutex_lock(&shard->entry_lock);
 
@@ -330,17 +333,16 @@ chimera_vfs_name_cache_insert(
         slot++;
     }
 
-    rcu_assign_pointer(*slot_best, entry);
+    chimera_rcu_replace(&shard->rcu, *slot_best, entry,
+                        best_entry ? &best_entry->rnode.rcu : NULL,
+                        chimera_rcu_pool_retire);
 
     prometheus_counter_increment(shard->insert);
 
     evpl_mutex_unlock(&shard->entry_lock);
 
-    urcu_qsbr_read_unlock();
-
-    if (best_entry) {
-        call_rcu(&best_entry->rnode.rcu, chimera_rcu_pool_retire);
-    }
+    /* Dispatches the displaced entry, after the shard mutex is dropped. */
+    chimera_rcu_mutate_end(&shard->rcu);
 
 } /* chimera_vfs_name_cache_insert */
 
@@ -354,7 +356,7 @@ chimera_vfs_name_cache_remove(
     const char                    *name,
     int                            name_len)
 {
-    struct chimera_vfs_name_cache_entry  *entry, *removed_entry = NULL;
+    struct chimera_vfs_name_cache_entry  *entry;
     struct chimera_vfs_name_cache_shard  *shard;
     struct chimera_vfs_name_cache_entry **slot, **slot_end;
     uint64_t                              key = fh_hash ^ name_hash;
@@ -369,7 +371,7 @@ chimera_vfs_name_cache_remove(
 
     slot_end = slot + cache->num_entries;
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_mutate_begin(&shard->rcu);
 
     evpl_mutex_lock(&shard->entry_lock);
 
@@ -381,8 +383,9 @@ chimera_vfs_name_cache_remove(
             chimera_memequal(entry->parent_fh, entry->parent_fh_len, fh, fh_len) &&
             chimera_memequal(entry->child_name, entry->name_len, name, name_len)) {
 
-            removed_entry = entry;
-            rcu_assign_pointer(*slot, NULL);
+            chimera_rcu_replace(&shard->rcu, *slot, NULL,
+                                &entry->rnode.rcu,
+                                chimera_rcu_pool_retire);
             break;
         }
 
@@ -393,10 +396,6 @@ chimera_vfs_name_cache_remove(
 
     evpl_mutex_unlock(&shard->entry_lock);
 
-    urcu_qsbr_read_unlock();
-
-    if (removed_entry) {
-        call_rcu(&removed_entry->rnode.rcu, chimera_rcu_pool_retire);
-    }
+    chimera_rcu_mutate_end(&shard->rcu);
 
 } /* chimera_vfs_name_cache_remove */

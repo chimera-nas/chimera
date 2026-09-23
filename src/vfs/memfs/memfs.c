@@ -26,7 +26,7 @@
 #endif /* ifdef _WIN32 */
 #include <jansson.h>
 #include <utlist.h>
-#include "common/rcu.h"
+#include "common/chimera_rcu.h"
 
 #include "vfs/sdk/vfs_varint.h"
 #include "common/rbtree.h"
@@ -357,7 +357,7 @@ struct memfs_fs {
     uint64_t                 fs_space_used;
     struct memfs_fs         *prev;
     struct memfs_fs         *next;
-    struct rcu_head          rcu;
+    chimera_rcu_head         rcu;
 };
 
 struct memfs_shared {
@@ -1555,7 +1555,11 @@ memfs_thread_init(
     struct memfs_shared *shared = private_data;
     struct memfs_thread *thread = calloc(1, sizeof(*thread));
 
-    evpl_iovec_alloc(evpl, shared->block_size, 4096, 1, 0, &thread->zero);
+    /* Reads hand block references back to the requesting protocol thread.
+     * Data blocks are SHARED for that reason; sparse extents use this zero
+     * block and need the same lifetime/threading semantics. */
+    evpl_iovec_alloc(evpl, shared->block_size, 4096, 1,
+                     EVPL_IOVEC_FLAG_SHARED, &thread->zero);
     memset(thread->zero.data, 0, shared->block_size);
 
     thread->shared = shared;
@@ -2603,9 +2607,9 @@ memfs_umount(
 } /* memfs_umount */
 
 static void
-memfs_fs_free_rcu(struct rcu_head *head)
+memfs_fs_free_rcu(chimera_rcu_head *head)
 {
-    struct memfs_fs *fs = caa_container_of(head, struct memfs_fs, rcu);
+    struct memfs_fs *fs = container_of(head, struct memfs_fs, rcu);
 
     memfs_fs_free_contents(fs);
     free(fs);
@@ -2701,8 +2705,10 @@ memfs_rmfs(
      * the mount is gone, so no new op can reach this filesystem -- but an op
      * that took mount_private just before its mount was claimed may still be
      * in flight, and memfs ops complete within their dispatch, so it is done
-     * by the time all threads pass a quiescent state. */
-    call_rcu(&fs->rcu, memfs_fs_free_rcu);
+     * by the time all threads pass a quiescent state.  That is a property of
+     * the event loops, not of any critical section the in-flight op holds, so
+     * the grace period is taken on the quiescence domain. */
+    chimera_rcu_retire(&chimera_rcu_global, &fs->rcu, memfs_fs_free_rcu);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);

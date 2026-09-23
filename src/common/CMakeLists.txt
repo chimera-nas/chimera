@@ -5,12 +5,8 @@
 include(crypto.cmake)
 
 add_library(chimera_common ${CHIMERA_LIBRARY_TYPE}
-    logging.c snprintf.c chimera_tracing.c
+    logging.c snprintf.c chimera_tracing.c chimera_rcu.c
 )
-
-if(CHIMERA_NATIVE_RCU)
-    target_sources(chimera_common PRIVATE rcu.c)
-endif()
 
 if(WIN32)
     target_link_libraries(chimera_common bcrypt advapi32)
@@ -20,7 +16,7 @@ if(NOT WIN32)
     target_sources(chimera_common PRIVATE pthread_create_interpose.c)
 endif()
 
-target_link_libraries(chimera_common chimera_crypto ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS})
+target_link_libraries(chimera_common chimera_crypto ${CHIMERA_RCU_LIBS} ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS})
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)
