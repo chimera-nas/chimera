@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2022","arch":"x64","config":"Debug","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Debug","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Release","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"}]' || '[{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"}]') }}
+        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2022","arch":"x64","config":"Debug","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Debug","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Release","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"}]' || '[{"runner":"windows-2022","arch":"x64","config":"Debug","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"}]') }}
     steps:
       - uses: actions/checkout@v5
         with:
