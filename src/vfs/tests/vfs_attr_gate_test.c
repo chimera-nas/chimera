@@ -328,6 +328,48 @@ open_as(
     return ctx->status;
 } /* open_as */
 
+static void
+read_cb(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  count,
+    uint32_t                  eof,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* read_cb */
+
+/* Open `fh` through a fresh inferred (unstamped) handle as `cred` and read
+ * it; return the read's status.  The per-op read gate fetches the file's
+ * attrs with a GETATTR, which is what the read cells strip. */
+static enum chimera_vfs_error
+read_as(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *fh,
+    uint32_t                       fh_len)
+{
+    enum chimera_vfs_error st;
+
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_read(ctx->vfs_thread, cred, ctx->handle, 0, 0, NULL, 0, 0,
+                     read_cb, ctx);
+    wait_done(ctx);
+    st = ctx->status;
+
+    chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+    return st;
+} /* read_as */
+
 static int
 check_cell(
     const char             *what,
@@ -549,6 +591,38 @@ main(
 
         assert(failures == 0);
         TEST_PASS("open: lookup and by-handle opens refuse a short reply");
+    }
+
+    /*
+     * The per-op READ gate: its attrs come from a GETATTR on the handle, and
+     * it has no MODE guard of its own, so this pins access_check's contract.
+     */
+    {
+        /* *INDENT-OFF* */
+        static const struct open_cell read_cells[] = {
+            { "r_ctl_0066",  0066, ACTOR_OWNER, 0, 0, 0, CHIMERA_VFS_EACCES },
+            { "r_uid_0066",  0066, ACTOR_OWNER, 0, CHIMERA_VFS_OP_GETATTR, CHIMERA_VFS_ATTR_UID,  CHIMERA_VFS_EACCES },
+            { "r_gid_0060",  0060, ACTOR_WHEEL, 0, CHIMERA_VFS_OP_GETATTR, CHIMERA_VFS_ATTR_GID,  CHIMERA_VFS_EACCES },
+            { "r_root_0000", 0000, ACTOR_ROOT,  0, CHIMERA_VFS_OP_GETATTR, CHIMERA_VFS_ATTR_MODE, CHIMERA_VFS_OK     },
+        };
+        /* *INDENT-ON* */
+        uint8_t  file_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t file_fh_len;
+
+        for (i = 0; i < sizeof(read_cells) / sizeof(read_cells[0]); i++) {
+            const struct open_cell *c = &read_cells[i];
+
+            make_file(&ctx, &creds[ACTOR_ROOT], dir, c->name, c->mode);
+            memcpy(file_fh, ctx.fh, ctx.fh_len);
+            file_fh_len = ctx.fh_len;
+            strip_set(c->strip_op, c->strip);
+            st = read_as(&ctx, &creds[c->actor], file_fh, file_fh_len);
+            strip_set(0, 0);
+            failures += check_cell("read", c, st);
+        }
+
+        assert(failures == 0);
+        TEST_PASS("read: the per-op gate denies on a short GETATTR reply");
     }
 
     chimera_vfs_release(ctx.vfs_thread, dir);

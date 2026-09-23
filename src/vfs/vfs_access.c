@@ -31,6 +31,15 @@ chimera_vfs_access_check(
         return requested;
     }
 
+    /* Grant nothing on under-filled attrs.  Reading 0 for a missing mode,
+     * uid or gid does not deny -- it evaluates the object as if owned by
+     * root:root, which hands the real owner the group or other class and
+     * every gid-0 member the group class.  Root is decided without looking
+     * at the object (the ACL engine's root bypass) and keeps its answer. */
+    if (cred->uid != 0 && chimera_vfs_gate_attrs_missing(attr, 0)) {
+        return 0;
+    }
+
     if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
         acl = attr->va_acl;
     }
