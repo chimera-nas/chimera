@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <utlist.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <time.h>
 
 #include "nfs_internal.h"
@@ -181,10 +181,10 @@ chimera_nfs4_mount_fail(
         struct chimera_nfs_client_server *server = ctx->mount->server;
         struct chimera_nfs_shared        *shared = server->shared;
 
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         DL_DELETE(shared->mounts, ctx->mount);
         server->refcnt--;
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
 
         free(ctx->mount);
         ctx->mount = NULL;
@@ -351,9 +351,9 @@ chimera_nfs4_mount_get_root_fh_callback(
 
     request->mount.r_mount_private = mount;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     mount->status = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTED;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     chimera_nfsclient_info("NFS4 mount complete: %s", mount->path);
 
@@ -556,9 +556,9 @@ chimera_nfs4_mount_process_mount(
 
     memcpy(mount->path, path, strlen(path) + 1);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     DL_APPEND(shared->mounts, mount);
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     /* Store mount context in request */
     ctx                = request->plugin_data;
@@ -610,15 +610,15 @@ chimera_nfs4_mount_null_callback(
         return;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     server->state = CHIMERA_NFS_CLIENT_SERVER_STATE_DISCOVERED;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     chimera_nfs4_mount_process_mount(server_thread, request);
 } /* chimera_nfs4_mount_null_callback */
 
 void
-chimera_nfs4_mount(
+chimera_vfs_nfs4_mount(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -656,7 +656,7 @@ chimera_nfs4_mount(
     port = chimera_nfs4_mount_get_port(&request->mount.options,
                                        rdma_protocol ? CHIMERA_NFS4_RDMA_PORT : CHIMERA_NFS4_DEFAULT_PORT);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     /* Share connections only for the same endpoint and transport.  Separate
      * data servers can export the same path on different ports of one host. */
@@ -678,7 +678,7 @@ chimera_nfs4_mount(
         if (server->state == CHIMERA_NFS_CLIENT_SERVER_STATE_DISCOVERING) {
             /* Someone else is discovering this server, wait for them */
             DL_APPEND(server->pending_mounts, request);
-            pthread_mutex_unlock(&shared->lock);
+            evpl_mutex_unlock(&shared->lock);
             return;
         }
     } else {
@@ -726,14 +726,14 @@ chimera_nfs4_mount(
         shared->servers[idx] = server;
         server->index        = idx;
 
-        pthread_mutex_init(&server->open_state_lock, NULL);
+        evpl_mutex_init(&server->open_state_lock, NULL);
 
         need_discover = 1;
 
         DL_APPEND(server->pending_mounts, request);
     }
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     /* Create server thread context */
     server_thread         = calloc(1, sizeof(*server_thread));
@@ -798,4 +798,4 @@ chimera_nfs4_mount(
             chimera_nfs4_mount_null_callback,
             request);
     }
-} /* chimera_nfs4_mount */
+} /* chimera_vfs_nfs4_mount */

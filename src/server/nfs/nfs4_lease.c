@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <time.h>
@@ -35,7 +35,7 @@ nfs_deleg_recall_timeout_check(struct nfs_client *uc)
     struct nfs_delegation *deleg;
     bool                   timed_out = false;
 
-    pthread_mutex_lock(&uc->lock);
+    evpl_mutex_lock(&uc->lock);
     LL_FOREACH2(uc->delegations, deleg, next_in_client)
     {
         if (deleg->lease_held &&
@@ -45,7 +45,7 @@ nfs_deleg_recall_timeout_check(struct nfs_client *uc)
             break;
         }
     }
-    pthread_mutex_unlock(&uc->lock);
+    evpl_mutex_unlock(&uc->lock);
 
     if (timed_out) {
         atomic_store_explicit(&uc->cb_path.cb_state, NFS4_CB_DOWN,
@@ -71,7 +71,7 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     lease_ns    = (uint64_t) shared->nfs_lease_time_s * 1000000000ULL;
     courtesy_ns = (uint64_t) shared->nfs_courtesy_time_s * 1000000000ULL;
 
-    pthread_mutex_lock(&table->nfs4_ct_lock);
+    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
     {
@@ -158,7 +158,7 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
         nfs_deleg_recall_timeout_check(uc);
     }
 
-    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     for (size_t i = 0; i < expired_count; i++) {
         nfs_client_expire_state(expired_clients[i],

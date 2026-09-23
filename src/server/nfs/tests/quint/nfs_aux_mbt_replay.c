@@ -33,7 +33,8 @@
  * details.
  */
 
-#include <getopt.h>
+#include "common/compiler.h"
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "nfs_aux_mbt_common.h"
@@ -74,7 +75,7 @@ static void
 mism_add(
     struct mism *m,
     const char  *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static void
 mism_add(
@@ -709,7 +710,7 @@ op_mnt_dump(
         check_str(m, label, r->mounts[i].host, AUX_MOUNT_HOST);
         snprintf(label, sizeof(label), "mount table[%zu] dir", i);
         check_str(m, label, r->mounts[i].dir,
-                  json_string_value(json_object_get(e, "dir")) ?: "");
+                  json_string_value(json_object_get(e, "dir")) ? json_string_value(json_object_get(e, "dir")) : "");
     }
 } /* op_mnt_dump */
 
@@ -758,7 +759,7 @@ op_mnt_export(
 
         snprintf(label, sizeof(label), "export[%zu]", i);
         check_str(m, label, r->exports[i].dir,
-                  json_string_value(json_array_get(want, i)) ?: "");
+                  json_string_value(json_array_get(want, i)) ? json_string_value(json_array_get(want, i)) : "");
         if (r->exports[i].ngroups != 0) {
             mism_add(m, "export[%zu] carries %d group(s); none expected", i,
                      r->exports[i].ngroups);
@@ -1443,7 +1444,7 @@ report_divergence(
     fprintf(stderr, "\n=== DIVERGENCE in %s ===\n", trace_path);
     dump = json_dumps(op, JSON_COMPACT | JSON_ENCODE_ANY);
     fprintf(stderr, "step %d: %s args/expectation: %s\n", step, tag,
-            dump ?: "<?>");
+            dump ? dump : "<?>");
     free(dump);
     for (i = 0; i < m->n; i++) {
         fprintf(stderr, "  MISMATCH: %s\n", m->msg[i]);
@@ -1451,7 +1452,7 @@ report_divergence(
     fprintf(stderr, "\nlast operations before failure:\n");
     for (i = 0; i < o->nhist; i++) {
         fprintf(stderr, "  [%4d] %s %s\n", o->history[i].idx,
-                o->history[i].tag, o->history[i].op_dump ?: "<?>");
+                o->history[i].tag, o->history[i].op_dump ? o->history[i].op_dump : "<?>");
     }
 } /* report_divergence */
 
@@ -1741,7 +1742,11 @@ main(
      * boundary, including the line naming the trace that was executing and
      * the fatal log message itself.  That is exactly what made a CI abort
      * here undiagnosable from its artifacts. */
-    setvbuf(stdout, NULL, _IOLBF, 0);
+#ifdef _WIN32
+    setvbuf(stdout, NULL, _IONBF, 0);
+#else  /* ifdef _WIN32 */
+    setvbuf(stdout, NULL, _IONBF, 0);
+#endif /* ifdef _WIN32 */
 
     traces = mbt_collect_traces(argc, argv, &ntraces);
 

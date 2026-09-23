@@ -77,9 +77,9 @@ chimera_nfs3_remove_finish_silly(
         (struct chimera_nfs3_open_state *) ctx->silly_handle->vfs_private;
 
     if (!success) {
-        pthread_mutex_lock(&ctx->shared->nfs3_open_lock);
+        evpl_mutex_lock(&ctx->shared->nfs3_open_lock);
         state->silly_renamed = 0;
-        pthread_mutex_unlock(&ctx->shared->nfs3_open_lock);
+        evpl_mutex_unlock(&ctx->shared->nfs3_open_lock);
     }
     chimera_vfs_open_cache_release(request->thread,
                                    request->thread->vfs->vfs_open_file_cache,
@@ -269,7 +269,7 @@ chimera_nfs3_remove_do_rmdir(
 } /* chimera_nfs3_remove_do_rmdir */
 
 void
-chimera_nfs3_remove_at(
+chimera_vfs_nfs3_remove_at(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -375,4 +375,4 @@ chimera_nfs3_remove_at(
                                                           ctx->silly_name, sizeof(ctx->silly_name));
 
     chimera_nfs3_remove_do_silly_rename(request, ctx);
-} /* chimera_nfs3_remove_at */
+} /* chimera_vfs_nfs3_remove_at */

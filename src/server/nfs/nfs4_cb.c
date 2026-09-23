@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,10 +75,10 @@ nfs4_cb_resume_bounce(void *arg)
     struct nfs4_cb_resume_ctx        *ctx    = arg;
     struct chimera_server_nfs_thread *origin = ctx->origin;
 
-    pthread_mutex_lock(&origin->cb_recall_lock);
+    evpl_mutex_lock(&origin->cb_recall_lock);
     ctx->next               = origin->cb_resume_queue;
     origin->cb_resume_queue = ctx;
-    pthread_mutex_unlock(&origin->cb_recall_lock);
+    evpl_mutex_unlock(&origin->cb_recall_lock);
 
     evpl_ring_doorbell(&origin->cb_doorbell);
 } /* nfs4_cb_resume_bounce */
@@ -87,10 +88,10 @@ nfs4_cb_drain_resume_queue(struct chimera_server_nfs_thread *thread)
 {
     struct nfs4_cb_resume_ctx *q;
 
-    pthread_mutex_lock(&thread->cb_recall_lock);
+    evpl_mutex_lock(&thread->cb_recall_lock);
     q                       = thread->cb_resume_queue;
     thread->cb_resume_queue = NULL;
-    pthread_mutex_unlock(&thread->cb_recall_lock);
+    evpl_mutex_unlock(&thread->cb_recall_lock);
 
     while (q) {
         struct nfs4_cb_resume_ctx *ctx = q;
@@ -130,10 +131,10 @@ nfs4_cb_recall_holder(
      * conn.  If there is no backchannel the send below fails -> revoke. */
     if (cb_owner && thread != cb_owner) {
         nfs_layout_state_get(holder);
-        pthread_mutex_lock(&cb_owner->cb_recall_lock);
+        evpl_mutex_lock(&cb_owner->cb_recall_lock);
         holder->recall_qnext            = cb_owner->cb_layoutrecall_queue;
         cb_owner->cb_layoutrecall_queue = holder;
-        pthread_mutex_unlock(&cb_owner->cb_recall_lock);
+        evpl_mutex_unlock(&cb_owner->cb_recall_lock);
         evpl_ring_doorbell(&cb_owner->cb_doorbell);
         return;
     }

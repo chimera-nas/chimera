@@ -164,8 +164,8 @@ struct netbuf {
 const PMAP_PORT = 111;
 
 /* protocol numbers for TCP/IP and UDP/IP */
-const IPPROTO_TCP = 6;
-const IPPROTO_UDP = 17;
+const PMAP_IPPROTO_TCP = 6;
+const PMAP_IPPROTO_UDP = 17;
 
 /* A mapping of (program, version, protocol) to port number */
 struct mapping {

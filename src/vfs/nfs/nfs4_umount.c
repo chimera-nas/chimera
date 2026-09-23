@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs_internal.h"
 
 
@@ -228,7 +229,7 @@ chimera_nfs4_umount_send_destroy_session(struct chimera_nfs4_umount_teardown *td
 } /* chimera_nfs4_umount_send_destroy_session */
 
 void
-chimera_nfs4_umount(
+chimera_vfs_nfs4_umount(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -241,7 +242,7 @@ chimera_nfs4_umount(
     struct chimera_nfs_client_server_thread *server_thread;
     struct chimera_nfs4_umount_teardown     *td;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     DL_DELETE(shared->mounts, mount);
 
@@ -262,7 +263,7 @@ chimera_nfs4_umount(
         server->nfs4_session = NULL;
     }
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     if (session) {
         /* This thread may never have talked to the server -- the umount can
@@ -293,4 +294,4 @@ chimera_nfs4_umount(
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 
-} /* chimera_nfs4_umount */
+} /* chimera_vfs_nfs4_umount */

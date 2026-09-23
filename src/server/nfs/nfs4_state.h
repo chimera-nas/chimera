@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -288,7 +288,7 @@ struct nfs_client {
     UT_hash_handle           hh_by_id;
 
     _Atomic uint32_t         refcount;
-    pthread_mutex_t          lock;
+    evpl_mutex_t             lock;
 };
 
 struct nfs_open_owner {
@@ -300,7 +300,7 @@ struct nfs_open_owner {
     struct nfs4_replay_cache replay;       /* 4.0 only */
     struct nfs_open_state   *states_by_fh; /* uthash keyed on {fh, fh_len} */
     UT_hash_handle           hh;
-    pthread_mutex_t          lock;
+    evpl_mutex_t             lock;
 
     /* Lifetime: starts at 1 for the hash-table slot.  find_or_create returns
      * the owner with one extra caller ref (taken under client->lock, the only
@@ -373,7 +373,7 @@ struct nfs_lock_owner {
     struct nfs4_replay_cache replay;       /* 4.0 only */
     struct nfs_lock_state   *states;       /* utlist via next_in_owner */
     UT_hash_handle           hh;
-    pthread_mutex_t          lock;
+    evpl_mutex_t             lock;
 
     /* Lifetime: same refcount contract as nfs_open_owner (see above). */
     _Atomic uint32_t         refcount;
@@ -473,7 +473,7 @@ struct nfs_delegation {
      * `combine_lock` guards these fields, which may be read/updated from any
      * requester thread that runs a peer GETATTR against this delegation.
      */
-    pthread_mutex_t        combine_lock;
+    evpl_mutex_t           combine_lock;
     uint64_t               combine_sc;              /* cached change attr (sc) */
     uint64_t               combine_last;            /* last nsc returned to a peer */
     bool                   combine_valid;           /* sc captured at grant     */
@@ -580,7 +580,7 @@ struct nfs_state_slot {
 };
 
 struct nfs_state_shard {
-    pthread_rwlock_t       lock;
+    evpl_rwlock_t          lock;
     struct nfs_state_slot *slots;
     uint32_t               slots_capacity;
     uint32_t               slots_used;       /* high-water of allocated entries */

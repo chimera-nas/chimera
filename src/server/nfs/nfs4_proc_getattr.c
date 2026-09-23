@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
@@ -180,7 +181,7 @@ chimera_nfs4_getattr_cb_resume(
         bool     modified;
         uint64_t nsc = 0;
 
-        pthread_mutex_lock(&deleg->combine_lock);
+        evpl_mutex_lock(&deleg->combine_lock);
 
         if (!deleg->combine_valid) {
             /* sc was not captured at grant (CLAIM_FH / probe-deferred resume):
@@ -210,7 +211,7 @@ chimera_nfs4_getattr_cb_resume(
             deleg->combine_last = nsc;
         }
 
-        pthread_mutex_unlock(&deleg->combine_lock);
+        evpl_mutex_unlock(&deleg->combine_lock);
 
         if (modified) {
             struct timespec now;

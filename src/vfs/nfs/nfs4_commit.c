@@ -7,7 +7,7 @@
 #include "nfs4_pnfs.h"
 
 void
-chimera_nfs4_commit(
+chimera_vfs_nfs4_commit(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -28,4 +28,4 @@ chimera_nfs4_commit(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_nfs4_commit */
+} /* chimera_vfs_nfs4_commit */

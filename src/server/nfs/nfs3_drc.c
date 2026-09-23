@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,9 +343,9 @@ nfs3_drc_cache_insert(
     uint32_t                      body_len,
     uint64_t                      ts)
 {
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     nfs3_drc_cache_insert_locked(drc, key, body, body_len, ts, NULL, 0);
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 } /* nfs3_drc_cache_insert */
 
 int
@@ -358,7 +359,7 @@ nfs3_drc_cache_lookup(
     uint8_t               *buf = NULL;
     uint32_t               len = 0;
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     HASH_FIND(hh, drc->table, key, sizeof(*key), e);
     if (e) {
         len = e->len;
@@ -367,7 +368,7 @@ nfs3_drc_cache_lookup(
             memcpy(buf, e->buf, len);
         }
     }
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 
     if (!buf) {
         return 0;
@@ -487,10 +488,10 @@ nfs3_drc_capture_reply(
 
     ts = nfs_lease_now_ns();
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     nev = nfs3_drc_cache_insert_locked(drc, &ctx->key, buf, rpc_len, ts,
                                        evicted, NFS3_DRC_EVICT_MAX);
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 
     if (!drc->persistence_disabled) {
         nfs3_drc_kv_put(thread->vfs_thread, drc->kv_type, &ctx->key, buf,
@@ -532,9 +533,9 @@ nfs3_drc_addr_hydrated(
     memcpy(keyh.addr, addr, addr_len);
     keyh.addr_len = addr_len;
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     HASH_FIND(hh, drc->hydrated, keyh.addr, NFS3_DRC_HYDRA_KEYLEN, h);
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
     return h != NULL;
 } /* nfs3_drc_addr_hydrated */
 
@@ -550,14 +551,14 @@ nfs3_drc_addr_mark_hydrated(
     memcpy(keyh.addr, addr, addr_len);
     keyh.addr_len = addr_len;
 
-    pthread_mutex_lock(&drc->lock);
+    evpl_mutex_lock(&drc->lock);
     HASH_FIND(hh, drc->hydrated, keyh.addr, NFS3_DRC_HYDRA_KEYLEN, h);
     if (!h) {
         h  = malloc(sizeof(*h));
         *h = keyh;
         HASH_ADD(hh, drc->hydrated, addr, NFS3_DRC_HYDRA_KEYLEN, h);
     }
-    pthread_mutex_unlock(&drc->lock);
+    evpl_mutex_unlock(&drc->lock);
 } /* nfs3_drc_addr_mark_hydrated */
 
 /* In-memory lookup, then either replay (hit) or arm-capture + run the real
@@ -824,7 +825,7 @@ nfs3_drc_init(
     struct nfs3_drc *drc,
     uint8_t          kv_type)
 {
-    pthread_mutex_init(&drc->lock, NULL);
+    evpl_mutex_init(&drc->lock, NULL);
     drc->table                = NULL;
     drc->hydrated             = NULL;
     drc->bytes                = 0;
@@ -855,7 +856,7 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
         free(h);
     }
 #endif /* ifndef __clang_analyzer__ */
-    pthread_mutex_destroy(&drc->lock);
+    evpl_mutex_destroy(&drc->lock);
 } /* nfs3_drc_destroy */
 
 void

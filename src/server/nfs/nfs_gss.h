@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "evpl/evpl.h"
 #include "evpl/evpl_rpc2_gss.h"
 
 struct chimera_vfs_cred;

@@ -22,9 +22,10 @@
  * targets.
  */
 
+#include "common/compiler.h"
 #include <string.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "nfs_common.h"
 #include "nfs_internal.h"
@@ -59,7 +60,7 @@ struct nlm_granter {
 
     /* Intake queue: producers (core threads) append under `lock` and ring the
      * doorbell; the granter thread drains it on its own evpl. */
-    pthread_mutex_t                   lock;
+    evpl_mutex_t                      lock;
     struct nlm_grant_intake          *intake_head;   /* singly-linked via ->next */
     struct nlm_grant_intake          *intake_tail;
     struct evpl_doorbell              doorbell;
@@ -101,7 +102,7 @@ struct nlm_grant_ctx {
 /* The granter thread stashes its ctx here so the doorbell callback (which only
  * gets evpl + doorbell) can reach it.  Set once in init, before the doorbell is
  * armed, and read only on the granter thread. */
-static __thread struct nlm_grant_ctx *nlm_grant_tls_ctx;
+static CHIMERA_THREAD_LOCAL struct nlm_grant_ctx *nlm_grant_tls_ctx;
 
 static void nlm_grant_job_send(
     struct nlm_grant_job *job);
@@ -365,11 +366,11 @@ nlm_grant_doorbell_cb(
     (void) evpl;
 
     /* Steal the whole intake list under the lock, then process lock-free. */
-    pthread_mutex_lock(&granter->lock);
+    evpl_mutex_lock(&granter->lock);
     head                 = granter->intake_head;
     granter->intake_head = NULL;
     granter->intake_tail = NULL;
-    pthread_mutex_unlock(&granter->lock);
+    evpl_mutex_unlock(&granter->lock);
 
     for (node = head; node; node = next) {
         next = node->next;
@@ -410,11 +411,11 @@ nlm_granter_thread_init(
      * ring will find a usable ctx via TLS. */
     evpl_add_doorbell(evpl, &granter->doorbell, nlm_grant_doorbell_cb);
 
-    pthread_mutex_lock(&granter->lock);
+    evpl_mutex_lock(&granter->lock);
     granter->doorbell_armed = 1;
     /* A producer may have queued work before the doorbell existed; ring it once
      * so we drain anything already pending. */
-    pthread_mutex_unlock(&granter->lock);
+    evpl_mutex_unlock(&granter->lock);
     evpl_ring_doorbell(&granter->doorbell);
 
     return ctx;
@@ -453,11 +454,11 @@ nlm_granter_thread_shutdown(
     evpl_remove_doorbell(evpl, &granter->doorbell);
 
     /* Drop any intake nodes that arrived after shutdown was flagged. */
-    pthread_mutex_lock(&granter->lock);
+    evpl_mutex_lock(&granter->lock);
     head                 = granter->intake_head;
     granter->intake_head = NULL;
     granter->intake_tail = NULL;
-    pthread_mutex_unlock(&granter->lock);
+    evpl_mutex_unlock(&granter->lock);
     for (node = head; node; node = next) {
         next = node->next;
         free(node);
@@ -485,12 +486,12 @@ nlm_granter_get_or_create(struct chimera_server_nfs_shared *shared)
         return NULL;
     }
     granter->shared = shared;
-    pthread_mutex_init(&granter->lock, NULL);
+    evpl_mutex_init(&granter->lock, NULL);
 
     granter->thread = evpl_thread_create(NULL, nlm_granter_thread_init,
                                          nlm_granter_thread_shutdown, granter);
     if (!granter->thread) {
-        pthread_mutex_destroy(&granter->lock);
+        evpl_mutex_destroy(&granter->lock);
         free(granter);
         return NULL;
     }
@@ -517,9 +518,9 @@ nlm_granter_submit(
     node->req  = *req;
     node->next = NULL;
 
-    pthread_mutex_lock(&granter->lock);
+    evpl_mutex_lock(&granter->lock);
     if (granter->shutdown) {
-        pthread_mutex_unlock(&granter->lock);
+        evpl_mutex_unlock(&granter->lock);
         free(node);
         return;
     }
@@ -529,7 +530,7 @@ nlm_granter_submit(
         granter->intake_head = node;
     }
     granter->intake_tail = node;
-    pthread_mutex_unlock(&granter->lock);
+    evpl_mutex_unlock(&granter->lock);
 
     /* The doorbell is armed once the granter thread has run its init; before
      * that, the work sits on the intake list and the init's priming ring picks
@@ -546,14 +547,14 @@ nlm_granter_destroy(struct nlm_granter *granter)
         return;
     }
 
-    pthread_mutex_lock(&granter->lock);
+    evpl_mutex_lock(&granter->lock);
     granter->shutdown = 1;
-    pthread_mutex_unlock(&granter->lock);
+    evpl_mutex_unlock(&granter->lock);
 
     /* Joins the granter thread, running nlm_granter_thread_shutdown on it. */
     if (granter->thread) {
         evpl_thread_destroy(granter->thread);
     }
-    pthread_mutex_destroy(&granter->lock);
+    evpl_mutex_destroy(&granter->lock);
     free(granter);
 } /* nlm_granter_destroy */

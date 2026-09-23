@@ -116,9 +116,9 @@ chimera_nfs3_open_state_alloc(
         state->file_fh_len = fh_len;
         memcpy(state->file_fh, fh, fh_len);
         state->bucket = XXH3_64bits(fh, fh_len) & 255;
-        pthread_mutex_lock(&shared->nfs3_open_lock);
+        evpl_mutex_lock(&shared->nfs3_open_lock);
         LL_PREPEND(shared->nfs3_open_states[state->bucket], state);
-        pthread_mutex_unlock(&shared->nfs3_open_lock);
+        evpl_mutex_unlock(&shared->nfs3_open_lock);
     }
 
     return state;
@@ -195,13 +195,13 @@ chimera_nfs3_open_state_mark_silly(
     struct chimera_nfs_shared      *shared = state->shared;
     struct chimera_nfs3_open_state *other;
 
-    pthread_mutex_lock(&shared->nfs3_open_lock);
+    evpl_mutex_lock(&shared->nfs3_open_lock);
     LL_FOREACH(shared->nfs3_open_states[state->bucket], other)
     {
         if (other->file_fh_len == file_fh_len &&
             memcmp(other->file_fh, file_fh, file_fh_len) == 0 &&
             other->silly_renamed) {
-            pthread_mutex_unlock(&shared->nfs3_open_lock);
+            evpl_mutex_unlock(&shared->nfs3_open_lock);
             return -1;
         }
     }
@@ -218,7 +218,7 @@ chimera_nfs3_open_state_mark_silly(
         memset(&state->silly_remove_cred, 0, sizeof(state->silly_remove_cred));
     }
 
-    pthread_mutex_unlock(&shared->nfs3_open_lock);
+    evpl_mutex_unlock(&shared->nfs3_open_lock);
     return 1;
 } /* chimera_nfs3_open_state_mark_silly */
 
@@ -231,7 +231,7 @@ chimera_nfs3_open_state_detach(struct chimera_nfs3_open_state *state)
     struct chimera_nfs_shared      *shared = state->shared;
     struct chimera_nfs3_open_state *other;
 
-    pthread_mutex_lock(&shared->nfs3_open_lock);
+    evpl_mutex_lock(&shared->nfs3_open_lock);
     LL_DELETE(shared->nfs3_open_states[state->bucket], state);
     if (state->silly_renamed) {
         LL_FOREACH(shared->nfs3_open_states[state->bucket], other)
@@ -247,5 +247,5 @@ chimera_nfs3_open_state_detach(struct chimera_nfs3_open_state *state)
             }
         }
     }
-    pthread_mutex_unlock(&shared->nfs3_open_lock);
+    evpl_mutex_unlock(&shared->nfs3_open_lock);
 } /* chimera_nfs3_open_state_detach */

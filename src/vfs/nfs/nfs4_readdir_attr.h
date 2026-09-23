@@ -27,8 +27,8 @@ chimera_nfs4_readdir_parse_attrs(
     uint8_t                  *fh_data,
     int                      *fh_len)
 {
-    void    *data    = fattr->attr_vals.data;
-    void    *dataend = data + fattr->attr_vals.len;
+    char    *data    = fattr->attr_vals.data;
+    char    *dataend = data + fattr->attr_vals.len;
     uint32_t type;
     uint32_t len;
 

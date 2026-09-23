@@ -4,11 +4,15 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
 #include "common/platform.h"
 #include <utlist.h>
 #include "vfs/vfs.h"
@@ -31,7 +35,7 @@ static inline uint32_t
 chimera_nfs_hton32(uint32_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap32(value);
+    return chimera_bswap32(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -41,7 +45,7 @@ static inline uint64_t
 chimera_nfs_hton64(uint64_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap64(value);
+    return chimera_bswap64(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -176,13 +180,13 @@ struct chimera_nfs4_client_session {
      * destroyed on the wire; the memory outlives that until every table has
      * noticed and let go, so no thread ever dereferences a freed session. */
     _Atomic int      refcnt;
-    pthread_mutex_t  lock;          /* guards the pool + usable; NOT per-op        */
+    evpl_mutex_t     lock;       /* guards the pool + usable; NOT per-op        */
     uint8_t          sessionid[NFS4_SESSIONID_SIZE];
     uint64_t         clientid;
     uint32_t         max_slots;     /* fore-channel slots granted (ca_maxrequests) */
-    _Atomic uint32_t usable;        /* applied usable count = clamp(target+1, ...,   *
-                                     * max_slots); relaxed-read on the hot path to  *
-                                     * fill sa_highest_slotid, written under lock.  */
+    _Atomic uint32_t usable;     /* applied usable count = clamp(target+1, ...,   *
+                                  * max_slots); relaxed-read on the hot path to  *
+                                  * fill sa_highest_slotid, written under lock.  */
     _Atomic uint32_t target_usable; /* server-requested usable (sr_target+1); set   *
                                      * relaxed on a reply when it changes, applied  *
                                      * to `usable` + pool under lock at next batch.  */
@@ -313,7 +317,7 @@ struct chimera_nfs_client_server {
      * server hands back a single stateid per file however many times it is
      * opened, and the CLOSE that ends it may only go once the last handle is
      * done; see nfs4_open_state.h. */
-    pthread_mutex_t                     open_state_lock;
+    evpl_mutex_t                        open_state_lock;
     struct chimera_nfs4_open_file      *open_files;
 
     /* Persistent back-channel / control connection, owned by the control thread
@@ -343,7 +347,7 @@ struct chimera_nfs_client_mount {
      * must resolve to the root itself: the real parent on the server is the
      * pseudo-fs node above the export, which a mounted client must never see
      * (the kernel client likewise never sends LOOKUPP across its mount root).
-     * chimera_nfs4_lookup_at compares against this to clamp. */
+     * chimera_vfs_nfs4_lookup_at compares against this to clamp. */
     uint8_t                           root_fh[CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
     int                               root_fh_len;
 };
@@ -368,7 +372,7 @@ struct chimera_nfs4_client_devcache_entry {
 };
 
 struct chimera_nfs4_client_devcache {
-    pthread_mutex_t                           lock;
+    evpl_mutex_t                              lock;
     uint32_t                                  count;
     struct chimera_nfs4_client_devcache_entry entries[CHIMERA_NFS4_CLIENT_DEVCACHE_MAX];
 };
@@ -406,7 +410,7 @@ struct chimera_nfs_shared {
     struct chimera_nfs_client_server  **servers;
     struct chimera_nfs_client_server   *servers_map;
     int                                 max_servers;
-    pthread_mutex_t                     lock;
+    evpl_mutex_t                        lock;
 
     /* Number of NFS client (evpl) threads, counted at thread_init; used to size
      * each thread's fore-channel slot block (max_slots / nfs_thread_count). */
@@ -419,15 +423,15 @@ struct chimera_nfs_shared {
      * back-channel CB_LAYOUTRECALL handler can find one by file handle and fence
      * its DS I/O.  Layouts are embedded in open states; this list links them via
      * layout->reg_next under pnfs_layout_lock. */
-    pthread_mutex_t                     pnfs_layout_lock;
+    evpl_mutex_t                        pnfs_layout_lock;
     struct chimera_nfs4_layout         *pnfs_layouts;
 
     /* Granted byte-range claims, keyed by the token we minted for them (see
      * struct chimera_nfs3_range above). */
     /* Per-file lifetime across NFS3 opens with different credentials/access. */
-    pthread_mutex_t                     nfs3_open_lock;
+    evpl_mutex_t                        nfs3_open_lock;
     struct chimera_nfs3_open_state     *nfs3_open_states[256];
-    pthread_mutex_t                     nlm_range_lock;
+    evpl_mutex_t                        nlm_range_lock;
     struct chimera_nfs3_range          *nlm_ranges;
     uint64_t                            nlm_next_token;
 
@@ -449,7 +453,7 @@ struct chimera_nfs_shared {
     struct evpl_rpc2_thread            *cb_rpc2_thread;
     struct chimera_nfs_thread          *cb_nfs_thread;
     struct evpl_doorbell                cb_doorbell;
-    pthread_mutex_t                     cb_lock;
+    evpl_mutex_t                        cb_lock;
     struct chimera_nfs4_cb_establish   *cb_establish_queue;
     int                                 cb_started;
 
@@ -482,7 +486,7 @@ struct chimera_nfs_thread {
      * thread_init, removed at thread_destroy) -- per RFC of evpl, doorbells must
      * not be freed from their own callback. */
     struct evpl_doorbell                      cb_resume_doorbell;
-    pthread_mutex_t                           cb_resume_lock;
+    evpl_mutex_t                              cb_resume_lock;
     struct chimera_nfs4_cb_establish         *cb_resume_done;
     struct chimera_nfs4_async_resume         *cb_async_resume;
     int                                       cb_resume_armed;
@@ -612,7 +616,7 @@ static inline uint32_t
 chimera_nfs_ntoh32(uint32_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap32(value);
+    return chimera_bswap32(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -622,7 +626,7 @@ static inline uint64_t
 chimera_nfs_ntoh64(uint64_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap64(value);
+    return chimera_bswap64(value);
 #else // if __BYTE_ORDER == __LITTLE_ENDIAN
     return value;
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -788,8 +792,8 @@ chimera_nfs4_unmarshall_fattr(
     const struct fattr4      *fattr,
     struct chimera_vfs_attrs *attr)
 {
-    void    *data    = fattr->attr_vals.data;
-    void    *dataend = data + fattr->attr_vals.len;
+    char    *data    = fattr->attr_vals.data;
+    char    *dataend = data + fattr->attr_vals.len;
     uint32_t type;
 
     if (fattr->num_attrmask < 1) {
@@ -1159,12 +1163,12 @@ void chimera_nfs4_mount_resume_after_session(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_vfs_request              *request);
 
-void chimera_nfs3_dispatch(
+void chimera_vfs_nfs3_dispatch(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_dispatch(
+void chimera_vfs_nfs4_dispatch(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -1173,7 +1177,7 @@ void chimera_nfs4_dispatch(
 /* ---- NFSv4.1 session fore-channel slot layer (nfs4_slot.c) -------------- */
 
 /* How a parked request is replayed once a slot frees.  For plain VFS ops this
- * is chimera_nfs4_dispatch (re-routes by request->opcode); internal multi-step
+ * is chimera_vfs_nfs4_dispatch (re-routes by request->opcode); internal multi-step
  * issuers (mount, pNFS) pass a shim that re-runs that step. */
 typedef void (*chimera_nfs4_retry_fn)(
     struct chimera_nfs_thread *,
@@ -1192,7 +1196,7 @@ typedef void (*chimera_nfs4_retry_fn)(
  *
  * Returns 0 if the compound was handed to the marshaller, or 1 if it was
  * parked instead.  That distinction matters to any caller that put payload
- * iovecs in `args`: the marshaller MOVES them (see chimera_nfs4_write), so a
+ * iovecs in `args`: the marshaller MOVES them (see chimera_vfs_nfs4_write), so a
  * sent compound owns them and a parked one leaves them with the caller, whose
  * retry_fn will build the args again from scratch.
  */
@@ -1248,166 +1252,168 @@ void chimera_nfs4_pnfs_conn_connected(
 void chimera_nfs4_pnfs_conn_failed(
     struct chimera_nfs_client_server_thread *server_thread);
 
-void chimera_nfs3_mount(
+/* Client operations have their own namespace: the Windows static link also
+ * contains the server's chimera_nfs[34]_* RPC handlers with different ABIs. */
+void chimera_vfs_nfs3_mount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs3_umount(
+void chimera_vfs_nfs3_umount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs3_lookup_at(
+void chimera_vfs_nfs3_lookup_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_getattr(
+void chimera_vfs_nfs3_getattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_setattr(
+void chimera_vfs_nfs3_setattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_mkdir_at(
+void chimera_vfs_nfs3_mkdir_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_remove_at(
+void chimera_vfs_nfs3_remove_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_readdir(
+void chimera_vfs_nfs3_readdir(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_open_fh(
+void chimera_vfs_nfs3_open_fh(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_open_at(
+void chimera_vfs_nfs3_open_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_close(
+void chimera_vfs_nfs3_close(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_read(
+void chimera_vfs_nfs3_read(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_allocate(
+void chimera_vfs_nfs3_allocate(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
     void                       *private_data);
 
-void chimera_nfs3_write(
+void chimera_vfs_nfs3_write(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_commit(
+void chimera_vfs_nfs3_commit(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_symlink_at(
+void chimera_vfs_nfs3_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_readlink(
+void chimera_vfs_nfs3_readlink(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_rename_at(
+void chimera_vfs_nfs3_rename_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_mknod_at(
+void chimera_vfs_nfs3_mknod_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_link_at(
+void chimera_vfs_nfs3_link_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_claim_acquire(
+void chimera_vfs_nfs3_claim_acquire(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_claim_release(
+void chimera_vfs_nfs3_claim_release(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
 
-void chimera_nfs4_mount(
+void chimera_vfs_nfs4_mount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_lookup_at(
+void chimera_vfs_nfs4_lookup_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_getattr(
+void chimera_vfs_nfs4_getattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_setattr(
+void chimera_vfs_nfs4_setattr(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_mkdir_at(
+void chimera_vfs_nfs4_mkdir_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_remove_at(
+void chimera_vfs_nfs4_remove_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_readdir(
+void chimera_vfs_nfs4_readdir(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_open_fh(
+void chimera_vfs_nfs4_open_fh(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_open_at(
+void chimera_vfs_nfs4_open_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_close(
+void chimera_vfs_nfs4_close(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
@@ -1415,7 +1421,7 @@ void chimera_nfs4_close(
 
 /* Terminal step of a close: drop this handle's reference to the file's open,
  * send the CLOSE if it was the last, then free the handle's open state and
- * complete the request.  Split out of chimera_nfs4_close so the pNFS close path
+ * complete the request.  Split out of chimera_vfs_nfs4_close so the pNFS close path
  * can run its LAYOUTCOMMIT/LAYOUTRETURN first and then hand the request here,
  * rather than completing with the layout still held.  Takes ownership of
  * open_state and of request->plugin_data. */
@@ -1454,57 +1460,57 @@ void chimera_nfs4_open_file_close_done(
 void chimera_nfs4_open_file_drain(
     struct chimera_nfs_client_server *server);
 
-void chimera_nfs4_umount(
+void chimera_vfs_nfs4_umount(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_read(
+void chimera_vfs_nfs4_read(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_write(
+void chimera_vfs_nfs4_write(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_commit(
+void chimera_vfs_nfs4_commit(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_allocate(
+void chimera_vfs_nfs4_allocate(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_seek(
+void chimera_vfs_nfs4_seek(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_symlink_at(
+void chimera_vfs_nfs4_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_readlink(
+void chimera_vfs_nfs4_readlink(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_rename_at(
+void chimera_vfs_nfs4_rename_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_mknod_at(
+void chimera_vfs_nfs4_mknod_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs4_link_at(
+void chimera_vfs_nfs4_link_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,

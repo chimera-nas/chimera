@@ -78,7 +78,7 @@ chimera_nfs4_write_callback(
 } /* chimera_nfs4_write_callback */
 
 void
-chimera_nfs4_write(
+chimera_vfs_nfs4_write(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -199,11 +199,11 @@ chimera_nfs4_write(
         1, 0, NULL, 0, 0,
         chimera_nfs4_write_callback,
         request,
-        chimera_nfs4_dispatch, private_data);
+        chimera_vfs_nfs4_dispatch, private_data);
 
 
     if (parked) {
         evpl_iovecs_release(thread->evpl, ds_iov, request->write.niov);
     }
     free(ds_iov);
-} /* chimera_nfs4_write */
+} /* chimera_vfs_nfs4_write */

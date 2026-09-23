@@ -77,7 +77,7 @@ static void chimera_nfs4_close_transmit(
  * captured the stateid into the ctx; running it again would find the file
  * entry gone, mistake this CLOSE for "not the last handle", and complete
  * without ever sending it, leaking the open state on the server.  (And not
- * chimera_nfs4_dispatch either, which would repeat any pNFS
+ * chimera_vfs_nfs4_dispatch either, which would repeat any pNFS
  * LAYOUTCOMMIT/LAYOUTRETURN that already ran.)  Only the transmit repeats.
  */
 static void
@@ -191,7 +191,7 @@ chimera_nfs4_close_send(
 } /* chimera_nfs4_close_send */
 
 void
-chimera_nfs4_close(
+chimera_vfs_nfs4_close(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -234,4 +234,4 @@ chimera_nfs4_close(
     }
 
     chimera_nfs4_close_send(thread, shared, request, open_state);
-} /* chimera_nfs4_close */
+} /* chimera_vfs_nfs4_close */

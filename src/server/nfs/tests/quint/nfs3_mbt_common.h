@@ -20,14 +20,22 @@
  * validated the wire encoding this harness shares with the server.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <inttypes.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
 
 #include "server/server.h"
 #include "common/tcp_flavor.h"
@@ -852,7 +860,7 @@ mbt_pnfs_ds_start(
     char                          fsname[32];
 
     snprintf(dir, sizeof(dir), "%s/ds%d", env->session_dir, idx);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr, "pnfs ds%d state dir %s: %s\n", idx, dir,
                 strerror(errno));
         exit(1);
@@ -922,7 +930,7 @@ mbt_pnfs_proxy_start(struct mbt_env *env)
     char                          dir[300];
 
     snprintf(dir, sizeof(dir), "%s/proxy", env->session_dir);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr, "pnfs proxy state dir %s: %s\n", dir, strerror(errno));
         exit(1);
     }
@@ -1184,7 +1192,7 @@ mbt_env_open_opts(
         char dir[300], cfg[512];
 
         snprintf(dir, sizeof(dir), "%s/cairn", env->session_dir);
-        if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "cairn dir %s: %s\n", dir, strerror(errno));
             exit(1);
         }
@@ -1211,7 +1219,7 @@ mbt_env_open_opts(
         }
         /* The module opens this path from a server thread, so it must be
          * absolute; resolve $CHIMERA_MBT_SCRATCH (default cwd) to a real path. */
-        abs_scratch = realpath(scratch, NULL);
+        abs_scratch = chimera_test_absolute_path(scratch);
         if (!abs_scratch) {
             fprintf(stderr, "realpath(%s) failed: %s\n", scratch,
                     strerror(errno));
@@ -1462,7 +1470,7 @@ mbt_env_fs_setup_as(
         /* The model's export root is 0777, owned root:root; create it that way
          * (umask is neutralized in the replayer main) so the passthrough tree
          * starts from the same state as the mkfs backends. */
-        if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0777) != 0 && errno != EEXIST) {
             fprintf(stderr, "failed to create %s backing dir %s: %s\n",
                     env->module, dir, strerror(errno));
             exit(1);
@@ -1699,8 +1707,8 @@ mbt_env_start(struct mbt_env *env)
 static inline void
 mbt_env_stop(struct mbt_env *env)
 {
-    char cmd[300];
-    int  i;
+
+    int i;
 
     if (env->portmap_conn) {
         evpl_rpc2_client_disconnect(env->rpc2_thread, env->portmap_conn);
@@ -1778,8 +1786,7 @@ mbt_env_stop(struct mbt_env *env)
 
     free(env->data_buf);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-    if (system(cmd) != 0) {
+    if (chimera_test_remove_tree(env->session_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
     }
 } /* mbt_env_stop */

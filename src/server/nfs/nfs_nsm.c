@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <time.h>
 
 #include "nfs_common.h"
@@ -69,9 +69,9 @@ nsm_monitor(
     size_t             host_len;
     int                changed;
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     changed = nsm_monitor_set(nsm, host, peer_addr);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     /* Only persist on first sight or an address change, so a lock-heavy client
      * does not hammer the KV store. */
@@ -100,9 +100,9 @@ nsm_unmonitor(
     size_t             host_len;
     int                removed;
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     removed = nsm_monitor_remove(nsm, host);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     if (!removed || nsm->persistence_disabled) {
         return;
@@ -300,9 +300,9 @@ nsm_spawn_notify(
     uint32_t                  count;
     struct evpl_thread       *old;
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     count = nsm_monitors_snapshot(nsm, &targets);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     if (count == 0) {
         return;
@@ -314,11 +314,11 @@ nsm_spawn_notify(
     job->state   = state;
     snprintf(job->my_name, sizeof(job->my_name), "%s", nsm->my_name);
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     old                = nsm->notify_thread;
     nsm->notify_thread = evpl_thread_create(NULL, nsm_notify_thread_init,
                                             nsm_notify_thread_shutdown, job);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     if (old) {
         evpl_thread_destroy(old);
@@ -370,9 +370,9 @@ nsm_monitor_scan_cb(
         return 0;  /* skip a corrupt value */
     }
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     nsm_monitor_set(nsm, host, addr);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
     return 0;
 } /* nsm_monitor_scan_cb */
 
@@ -388,16 +388,16 @@ nsm_monitor_scan_complete(
 
     (void) error_code;
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     count = HASH_COUNT(nsm->monitors);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     if (count == 0) {
         /* Nothing to reclaim -- end the forced grace window early so fresh
          * locks are accepted immediately (matches the no-clients case). */
-        pthread_mutex_lock(&thread->shared->nlm_state.mutex);
+        evpl_mutex_lock(&thread->shared->nlm_state.mutex);
         nlm_state_end_grace(&thread->shared->nlm_state);
-        pthread_mutex_unlock(&thread->shared->nlm_state.mutex);
+        evpl_mutex_unlock(&thread->shared->nlm_state.mutex);
         chimera_nfs_info("NSM cold-start: no monitored hosts; NLM grace ended early");
     } else {
         chimera_nfs_info("NSM cold-start: %u monitored host(s); notifying and "
@@ -431,9 +431,9 @@ nsm_state_load_cb(
         newstate = 1;
     }
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     nsm->state_number = newstate;
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
     ctx->state = newstate;
 
     chimera_nfs_info("NSM cold-start: state number %u -> %u", prev, newstate);
@@ -610,7 +610,7 @@ chimera_nfs_sm_unmon_all(
                      "(prog=%d vers=%d proc=%d)", caller,
                      args->my_prog, args->my_vers, args->my_proc);
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     HASH_ITER(hh, nsm->monitors, mon, tmp)
     {
         if (strcmp(mon->host, caller) != 0) {
@@ -622,7 +622,7 @@ chimera_nfs_sm_unmon_all(
             truncated = 1;
         }
     }
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     if (truncated) {
         chimera_nfs_info("NSM SM_UNMON_ALL: >%d monitors for '%s'; removing "
@@ -656,10 +656,10 @@ chimera_nfs_sm_simu_crash(
 
     /* Simulate a crash: bump our state number (keeping it odd), persist it, and
      * tell every monitored host so they reclaim. */
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     nsm->state_number += (nsm->state_number & 1) ? 2 : 1;
     newstate           = nsm->state_number;
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     chimera_nfs_info("NSM SIMU_CRASH: bumped state to %u, notifying monitored hosts",
                      newstate);
@@ -718,10 +718,10 @@ nsm_notify_src_ok(
     struct nsm_monitor *mon;
     int                 ok;
 
-    pthread_mutex_lock(&nsm->mutex);
+    evpl_mutex_lock(&nsm->mutex);
     HASH_FIND_STR(nsm->monitors, host, mon);
     ok = (mon == NULL) || (strcmp(mon->addr, src) == 0);
-    pthread_mutex_unlock(&nsm->mutex);
+    evpl_mutex_unlock(&nsm->mutex);
 
     return ok;
 } /* nsm_notify_src_ok */
@@ -742,9 +742,9 @@ nsm_release_host_locks(
     /* Locate the client under the lock, then release outside it: release_all
     * takes state->mutex itself and must not be called with it held (it pumps
     * the VFS pending queue, which can re-enter the NLM acquire callback). */
-    pthread_mutex_lock(&shared->nlm_state.mutex);
+    evpl_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, host, client);
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
 
     if (client) {
         found = 1;
@@ -808,7 +808,7 @@ chimera_nfs_sm_notify(
         struct nsm_monitor *mon, *tmp;
         int                 n = 0, truncated = 0, i;
 
-        pthread_mutex_lock(&shared->nsm_state.mutex);
+        evpl_mutex_lock(&shared->nsm_state.mutex);
         HASH_ITER(hh, shared->nsm_state.monitors, mon, tmp)
         {
             if (strcmp(mon->addr, src) != 0) {
@@ -820,7 +820,7 @@ chimera_nfs_sm_notify(
                 truncated = 1;
             }
         }
-        pthread_mutex_unlock(&shared->nsm_state.mutex);
+        evpl_mutex_unlock(&shared->nsm_state.mutex);
 
         if (truncated) {
             chimera_nfs_info("NSM SM_NOTIFY: >%d monitored hosts at %s; releasing "

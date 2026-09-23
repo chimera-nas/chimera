@@ -4,7 +4,7 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <xxhash.h>
 
 #include "nfs_common.h"
@@ -395,9 +395,9 @@ chimera_nfs_nlm4_submit_grant(
 
     /* Lazily create the granter (idempotent).  Done under nlm_state.mutex so two
      * threads cannot both create one. */
-    pthread_mutex_lock(&shared->nlm_state.mutex);
+    evpl_mutex_lock(&shared->nlm_state.mutex);
     granter = nlm_granter_get_or_create(shared);
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
 
     nlm_granter_submit(granter, req);
 } /* chimera_nfs_nlm4_submit_grant */
@@ -525,10 +525,10 @@ chimera_nfs_nlm4_resume_drain(
 
     (void) evpl;
 
-    pthread_mutex_lock(&thread->nlm_resume_lock);
+    evpl_mutex_lock(&thread->nlm_resume_lock);
     q                        = thread->nlm_resume_queue;
     thread->nlm_resume_queue = NULL;
-    pthread_mutex_unlock(&thread->nlm_resume_lock);
+    evpl_mutex_unlock(&thread->nlm_resume_lock);
 
     /* Reverse: the queue is push-front, and a client's completions should
      * reach it in the order the claim core decided them. */
@@ -555,7 +555,7 @@ chimera_nfs_nlm4_resume_drain(
 void
 chimera_nfs_nlm4_thread_init(struct chimera_server_nfs_thread *thread)
 {
-    pthread_mutex_init(&thread->nlm_resume_lock, NULL);
+    evpl_mutex_init(&thread->nlm_resume_lock, NULL);
     thread->nlm_resume_queue = NULL;
     evpl_add_doorbell(thread->evpl, &thread->nlm_doorbell,
                       chimera_nfs_nlm4_resume_drain);
@@ -569,7 +569,7 @@ chimera_nfs_nlm4_thread_destroy(struct chimera_server_nfs_thread *thread)
         evpl_remove_doorbell(thread->evpl, &thread->nlm_doorbell);
         thread->nlm_doorbell_armed = 0;
     }
-    pthread_mutex_destroy(&thread->nlm_resume_lock);
+    evpl_mutex_destroy(&thread->nlm_resume_lock);
 } /* chimera_nfs_nlm4_thread_destroy */
 
 /* Claim-core completion for a lock acquire.  Fires on the acquiring thread
@@ -608,7 +608,7 @@ chimera_nfs_nlm4_lock_acquire_cb(
     if (result == CHIMERA_CLAIM_GRANTED) {
         bool reaped;
 
-        pthread_mutex_lock(&shared->nlm_state.mutex);
+        evpl_mutex_lock(&shared->nlm_state.mutex);
         reaped = entry->reaped;
         if (reaped) {
             /* The client was reaped (FREE_ALL, SM_NOTIFY, or its last
@@ -630,7 +630,7 @@ chimera_nfs_nlm4_lock_acquire_cb(
                 work.deliver = true;
             }
         }
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
 
         if (reaped) {
             chimera_nfs_debug(
@@ -654,9 +654,9 @@ chimera_nfs_nlm4_lock_acquire_cb(
         }
     } else {
         /* DENIED or wait=false-with-BREAKING: drop the entry. */
-        pthread_mutex_lock(&shared->nlm_state.mutex);
+        evpl_mutex_lock(&shared->nlm_state.mutex);
         DL_DELETE(ctx->client->locks, entry);
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_vfs_state_put(vfs_state, entry->file_state);
         entry->file_state = NULL;
         work.handle       = entry->handle;
@@ -686,10 +686,10 @@ chimera_nfs_nlm4_lock_acquire_cb(
     r  = malloc(sizeof(*r));
     *r = work;
 
-    pthread_mutex_lock(&thread->nlm_resume_lock);
+    evpl_mutex_lock(&thread->nlm_resume_lock);
     r->next                  = thread->nlm_resume_queue;
     thread->nlm_resume_queue = r;
-    pthread_mutex_unlock(&thread->nlm_resume_lock);
+    evpl_mutex_unlock(&thread->nlm_resume_lock);
 
     evpl_ring_doorbell(&thread->nlm_doorbell);
 } /* chimera_nfs_nlm4_lock_acquire_cb */
@@ -714,9 +714,9 @@ chimera_nfs_nlm4_lock_open_cb(
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs_debug("NLM LOCK open failed: error %d -> NLM4_STALE_FH", error_code);
         /* Remove the pending sentinel that was pre-inserted in do_lock */
-        pthread_mutex_lock(&shared->nlm_state.mutex);
+        evpl_mutex_lock(&shared->nlm_state.mutex);
         DL_DELETE(ctx->client->locks, entry);
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         nlm_lock_entry_free(entry);
         res.cookie.len  = ctx->cookie.len;
         res.cookie.data = ctx->cookie.data;
@@ -746,9 +746,9 @@ chimera_nfs_nlm4_lock_open_cb(
                                               handle->fh_hash, true);
 
     if (!entry->file_state) {
-        pthread_mutex_lock(&shared->nlm_state.mutex);
+        evpl_mutex_lock(&shared->nlm_state.mutex);
         DL_DELETE(ctx->client->locks, entry);
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_vfs_release(thread->vfs_thread, handle);
         nlm_lock_entry_free(entry);
         res.cookie.len  = ctx->cookie.len;
@@ -1054,11 +1054,11 @@ chimera_nfs_nlm4_do_lock(
     * the TOCTOU window between conflict detection and VFS lock acquisition.
     * The pending entry is visible to concurrent LOCK requests immediately,
     * so a second client cannot slip through while this one is in-flight. */
-    pthread_mutex_lock(&shared->nlm_state.mutex);
+    evpl_mutex_lock(&shared->nlm_state.mutex);
 
     /* Grace period check: only reclaim locks are accepted during grace */
     if (nlm_state_in_grace(&shared->nlm_state) && !args->reclaim) {
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM LOCK: rejected -> server in grace period");
         res.cookie.len  = ctx->cookie.len;
         res.cookie.data = ctx->cookie.data;
@@ -1085,7 +1085,7 @@ chimera_nfs_nlm4_do_lock(
     /* Look up or create per-client state */
     client = nlm_client_lookup_or_create(&shared->nlm_state, safe_hostname);
     if (!client) {
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         nlm_lock_entry_free(entry);
         free(ctx);
         nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
@@ -1106,7 +1106,7 @@ chimera_nfs_nlm4_do_lock(
                              entry->svid,
                              entry->fh, entry->fh_len,
                              entry->offset, entry->length)) {
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM LOCK: duplicate lock request -> NLM4_GRANTED (idempotent)");
         res.cookie.len  = ctx->cookie.len;
         res.cookie.data = ctx->cookie.data;
@@ -1133,16 +1133,16 @@ chimera_nfs_nlm4_do_lock(
     /* Pre-insert the pending entry so concurrent requests see it immediately */
     DL_APPEND(client->locks, entry);
 
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
 
     /* Associate this connection with the client so the disconnect handler
      * knows whose locks to release.  Increment conn_count once per conn
      * (only on the first LOCK that sets private_data for this connection). */
     if (!evpl_rpc2_conn_get_private_data(conn)) {
         evpl_rpc2_conn_set_private_data(conn, client);
-        pthread_mutex_lock(&shared->nlm_state.mutex);
+        evpl_mutex_lock(&shared->nlm_state.mutex);
         client->conn_count++;
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
     }
 
     chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
@@ -1200,7 +1200,7 @@ chimera_nfs_nlm4_do_cancel(
 
     want_length = NLM_TO_POSIX_LEN(args->alock.l_len);
 
-    pthread_mutex_lock(&shared->nlm_state.mutex);
+    evpl_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, safe_hostname, client);
     match = NULL;
     if (client) {
@@ -1246,7 +1246,7 @@ chimera_nfs_nlm4_do_cancel(
         cancelled       = chimera_vfs_claim_cancel(vfs_state, &match->ticket);
         ctx_for_lock_cb = match->ticket.private_data;
     }
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
 
     nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_GRANTED,
                   proc);
@@ -1312,11 +1312,11 @@ chimera_nfs_nlm4_do_unlock(
                           args->alock.svid, argfh);
     }
 
-    pthread_mutex_lock(&shared->nlm_state.mutex);
+    evpl_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, safe_hostname, client);
     if (!client) {
         /* Unknown client -- nothing to unlock */
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM UNLOCK: unknown client '%s' -> NLM4_GRANTED", safe_hostname);
         res.cookie.len  = args->cookie.len;
         res.cookie.data = args->cookie.data;
@@ -1356,7 +1356,7 @@ chimera_nfs_nlm4_do_unlock(
     }
 
     if (!sweep) {
-        pthread_mutex_unlock(&shared->nlm_state.mutex);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM UNLOCK: lock entry not found -> NLM4_GRANTED");
         /* Lock not found -- treat as already unlocked */
         res.cookie.len  = args->cookie.len;
@@ -1373,7 +1373,7 @@ chimera_nfs_nlm4_do_unlock(
         return;
     }
 
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
 
     /* Release each swept lock: the claim (sync), the file_state ref (sync),
      * and the open handle that was held for the lock's lifetime.  RFC 1813
@@ -1811,9 +1811,9 @@ chimera_nfs_nlm4_free_all(
     chimera_nfs_debug("Received NLM FREE_ALL for client '%s'", safe_hostname);
     /* Locate under the lock, release outside it (release_all takes the lock
      * itself and pumps the VFS queue, which can re-enter the NLM callback). */
-    pthread_mutex_lock(&shared->nlm_state.mutex);
+    evpl_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, safe_hostname, client);
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
     if (client) {
         chimera_vfs_cred_init_anonymous(&anon_cred,
                                         CHIMERA_VFS_ANON_UID,

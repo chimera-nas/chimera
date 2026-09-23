@@ -30,9 +30,15 @@
  * nfs4_replay.py, in git history -- compared raw bytes.)
  */
 
-#include <getopt.h>
+#include "common/compiler.h"
+#include "common/test_host.h"
+#include "common/getopt.h"
 #include <jansson.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/time.h>
+#endif /* ifdef _WIN32 */
 
 #include "nfs3_mbt_common.h"
 #include "vfs/vfs_pnfs.h"
@@ -107,7 +113,7 @@ static void
 mism_add(
     struct mism *m,
     const char  *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static void
 mism_add(
@@ -568,7 +574,7 @@ caps_mismatch(
     struct mism   *m,
     const char    *feature,
     const char    *fmt,
-    ...) __attribute__((format(printf, 4, 5)));
+    ...) CHIMERA_PRINTF(4, 5);
 
 static int
 caps_mismatch(
@@ -2681,7 +2687,7 @@ decode_resop(
                         ? V4_FF_DEVICEID_OFF : 4;
 
                     if (body->len >= off + 16) {
-                        memcpy(r->deviceid, body->data + off, 16);
+                        memcpy(r->deviceid, (const uint8_t *) body->data + off, 16);
                         r->has_deviceid = 1;
                     }
 
@@ -2691,7 +2697,7 @@ decode_resop(
                      * server. */
                     if (g_layout_type == V4_LAYOUT_FLEX &&
                         body->len >= V4_FF_DSFH_OFF + 4) {
-                        const uint8_t *q   = body->data + V4_FF_DSFH_OFF;
+                        const uint8_t *q   = (const uint8_t *) body->data + V4_FF_DSFH_OFF;
                         uint32_t       len = ((uint32_t) q[0] << 24) |
                             ((uint32_t) q[1] << 16) |
                             ((uint32_t) q[2] << 8) | q[3];
@@ -3625,10 +3631,10 @@ check_result(
 static double
 now_seconds(void)
 {
-    struct timeval tv;
+    struct timespec ts;
 
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec / 1e6;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
 } /* now_seconds */
 
 /* Fires only to break evpl_continue() out of its blocking wait; the loop that
@@ -4208,18 +4214,18 @@ report_divergence(
     fprintf(stderr, "step %d:\n", step);
     json_array_foreach(ops, i, e)
     {
-        dump = json_dumps(jf_val(e) ?: e, JSON_COMPACT | JSON_ENCODE_ANY);
+        dump = json_dumps(jf_val(e) ? jf_val(e) : e, JSON_COMPACT | JSON_ENCODE_ANY);
         fprintf(stderr, "    op[%zu] %s: %s\n", i, jf_tag(e),
-                dump ?: "<?>");
+                dump ? dump : "<?>");
         free(dump);
     }
     fprintf(stderr, "  expected status %" PRId64 "; expected results:\n",
             jf_i64(lab, "status"));
     json_array_foreach(results, i, e)
     {
-        dump = json_dumps(jf_val(e) ?: e, JSON_COMPACT | JSON_ENCODE_ANY);
+        dump = json_dumps(jf_val(e) ? jf_val(e) : e, JSON_COMPACT | JSON_ENCODE_ANY);
         fprintf(stderr, "    res[%zu] %s: %s\n", i, jf_tag(e),
-                dump ?: "<?>");
+                dump ? dump : "<?>");
         free(dump);
     }
     for (j = 0; j < m->n; j++) {
@@ -4863,7 +4869,7 @@ main(
     /* Neutralize the host umask so passthrough backends (linux/io_uring) apply
     * client-sent modes verbatim and the export root keeps its 0777 -- the
     * model's fresh share root.  Without this a host umask of 022 turns the
-    * root's mkdir(0777) into 0755, which the strict nfs4 replayer reports as a
+    * root's chimera_test_mkdir(0777) into 0755, which the strict nfs4 replayer reports as a
     * getattr.mode divergence on the very first GETATTR (the nfs3 replayer does
     * the same).  The mkfs backends store modes directly and are unaffected. */
     umask(0);

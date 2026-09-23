@@ -10,6 +10,9 @@
 
 /* XXX */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
 #include <string.h>
 
 #include "vfs/vfs.h"
@@ -338,7 +341,7 @@ chimera_nfs4_attr_append_uint32(
     uint32_t value)
 {
     *(uint32_t *) *attrs = chimera_nfs_hton32(value);
-    *attrs              += sizeof(uint32_t);
+    *attrs               = (char *) *attrs + sizeof(uint32_t);
 } /* chimera_nfs4_attr_append_uint32 */
 
 static void
@@ -347,7 +350,7 @@ chimera_nfs4_attr_append_uint64(
     uint64_t value)
 {
     *(uint64_t *) *attrs = chimera_nfs_hton64(value);
-    *attrs              += sizeof(uint64_t);
+    *attrs               = (char *) *attrs + sizeof(uint64_t);
 } /* chimera_nfs4_attr_append_uint64 */
 
 static void
@@ -364,9 +367,9 @@ chimera_nfs4_attr_append_utf8str(
     pad = (4 - (len % 4)) % 4;
 
     if (pad ) {
-        memset(*attrs + len, 0, pad);
+        memset((char *) *attrs + len, 0, pad);
     }
-    *attrs += len + pad;
+    *attrs = (char *) *attrs + len + pad;
 } /* chimera_nfs4_attr_append_utf8str */
 
 static void
@@ -531,23 +534,23 @@ chimera_nfs4_marshall_attrs(
                                             (1 << FATTR4_MAXWRITE));
 
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            (1UL << (FATTR4_MODE - 32)) |
-                                            (1UL << (FATTR4_NUMLINKS - 32)) |
-                                            (1UL << (FATTR4_OWNER - 32)) |
-                                            (1UL << (FATTR4_OWNER_GROUP - 32)) |
-                                            (1UL << (FATTR4_RAWDEV - 32)) |
-                                            (1UL << (FATTR4_SPACE_USED - 32)) |
-                                            (1UL << (FATTR4_TIME_ACCESS - 32)) |
-                                            (1UL << (FATTR4_TIME_ACCESS_SET - 32)) |
-                                            (1UL << (FATTR4_TIME_CREATE - 32)) |
-                                            (1UL << (FATTR4_TIME_MODIFY - 32)) |
-                                            (1UL << (FATTR4_TIME_MODIFY_SET - 32)) |
-                                            (1UL << (FATTR4_TIME_METADATA - 32)) |
-                                            (1UL << (FATTR4_MOUNTED_ON_FILEID - 32)) |
-                                            (1UL << (FATTR4_SPACE_AVAIL - 32)) |
-                                            (1UL << (FATTR4_SPACE_FREE - 32)) |
-                                            (1UL << (FATTR4_SPACE_TOTAL - 32)) |
-                                            (pnfs_layout_type ? (1UL << (FATTR4_FS_LAYOUT_TYPES - 32)) : 0));
+                                            (1ULL << (FATTR4_MODE - 32)) |
+                                            (1ULL << (FATTR4_NUMLINKS - 32)) |
+                                            (1ULL << (FATTR4_OWNER - 32)) |
+                                            (1ULL << (FATTR4_OWNER_GROUP - 32)) |
+                                            (1ULL << (FATTR4_RAWDEV - 32)) |
+                                            (1ULL << (FATTR4_SPACE_USED - 32)) |
+                                            (1ULL << (FATTR4_TIME_ACCESS - 32)) |
+                                            (1ULL << (FATTR4_TIME_ACCESS_SET - 32)) |
+                                            (1ULL << (FATTR4_TIME_CREATE - 32)) |
+                                            (1ULL << (FATTR4_TIME_MODIFY - 32)) |
+                                            (1ULL << (FATTR4_TIME_MODIFY_SET - 32)) |
+                                            (1ULL << (FATTR4_TIME_METADATA - 32)) |
+                                            (1ULL << (FATTR4_MOUNTED_ON_FILEID - 32)) |
+                                            (1ULL << (FATTR4_SPACE_AVAIL - 32)) |
+                                            (1ULL << (FATTR4_SPACE_FREE - 32)) |
+                                            (1ULL << (FATTR4_SPACE_TOTAL - 32)) |
+                                            (pnfs_layout_type ? (1ULL << (FATTR4_FS_LAYOUT_TYPES - 32)) : 0));
 
             if (minorversion >= 1) {
                 uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
@@ -794,12 +797,12 @@ chimera_nfs4_marshall_attrs(
 
             chimera_nfs4_attr_append_uint32(&attrs, fhl);
             memcpy(attrs, fhp, fhl);
-            attrs += fhl;
+            attrs = (char *) attrs + fhl;
 
             if (fhl & 0x3) {
                 uint32_t pad = 4 - (fhl & 0x3);
                 memset(attrs, 0, pad);
-                attrs += pad;
+                attrs = (char *) attrs + pad;
             }
         }
 
@@ -1022,8 +1025,8 @@ chimera_nfs4_marshall_attrs(
          * only when pNFS is enabled so it stays consistent with supported_attrs
          * and EXCHANGE_ID's USE_PNFS_MDS flag. */
         if (pnfs_layout_type &&
-            (req_mask[1] & (1UL << (FATTR4_FS_LAYOUT_TYPES - 32)))) {
-            rsp_mask[1]  |= (1UL << (FATTR4_FS_LAYOUT_TYPES - 32));
+            (req_mask[1] & (1ULL << (FATTR4_FS_LAYOUT_TYPES - 32)))) {
+            rsp_mask[1]  |= (1ULL << (FATTR4_FS_LAYOUT_TYPES - 32));
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_uint32(&attrs, 1); /* layouttype4<> count */
@@ -1140,7 +1143,7 @@ chimera_nfs4_marshall_attrs(
         }
     }
 
-    *attrvals_len = attrs - attrbase;
+    *attrvals_len = (char *) attrs - (char *) attrbase;
 
     return 0;
 } /* chimera_nfs4_marshall_attrs */
@@ -1155,7 +1158,7 @@ chimera_nfs4_unmarshall_attrs(
     struct chimera_acl       *acl_buf,
     unsigned                  acl_buf_max_aces)
 {
-    void    *attrsend = attrs + attrvals_len;
+    char    *attrsend = (char *) attrs + attrvals_len;
     uint32_t set_it;
 
     attr->va_set_mask = 0;
@@ -1163,12 +1166,12 @@ chimera_nfs4_unmarshall_attrs(
     if (num_req_mask >= 1) {
         if (req_mask[0] & (1 << FATTR4_SIZE)) {
 
-            if (unlikely(attrs + sizeof(uint64_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint64_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
             attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-            attrs             += sizeof(uint64_t);
+            attrs              = (char *) attrs + sizeof(uint64_t);
             attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         }
 
@@ -1176,11 +1179,11 @@ chimera_nfs4_unmarshall_attrs(
         if (req_mask[0] & (1 << FATTR4_ACL)) {
             uint32_t nace;
 
-            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
-            nace   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs += sizeof(uint32_t);
+            nace  = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attrs = (char *) attrs + sizeof(uint32_t);
 
             if (unlikely(!acl_buf || nace > acl_buf_max_aces)) {
                 return NFS4ERR_RESOURCE;
@@ -1190,20 +1193,20 @@ chimera_nfs4_unmarshall_attrs(
                 uint32_t type, flag, mask, wholen, padded;
                 int      is_group;
 
-                if (unlikely(attrs + 4 * sizeof(uint32_t) > attrsend)) {
+                if (unlikely((char *) attrs + 4 * sizeof(uint32_t) > attrsend)) {
                     return NFS4ERR_BADXDR;
                 }
                 type   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs += sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
                 flag   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs += sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
                 mask   = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs += sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
                 wholen = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs += sizeof(uint32_t);
+                attrs  = (char *) attrs + sizeof(uint32_t);
 
                 padded = (wholen + 3) & ~3u;
-                if (unlikely(attrs + padded > attrsend || wholen == 0)) {
+                if (unlikely((char *) attrs + padded > attrsend || wholen == 0)) {
                     return NFS4ERR_BADXDR;
                 }
 
@@ -1248,7 +1251,7 @@ chimera_nfs4_unmarshall_attrs(
                     return NFS4ERR_BADOWNER;
                 }
 
-                attrs += padded;
+                attrs = (char *) attrs + padded;
             }
 
             acl_buf->num_aces   = (uint16_t) nace;
@@ -1261,12 +1264,12 @@ chimera_nfs4_unmarshall_attrs(
     if (num_req_mask >= 2) {
         if (req_mask[1] & (1 << (FATTR4_MODE - 32))) {
 
-            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
             attr->va_mode      = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs             += sizeof(uint32_t);
+            attrs              = (char *) attrs + sizeof(uint32_t);
             attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
         }
 
@@ -1274,15 +1277,15 @@ chimera_nfs4_unmarshall_attrs(
             uint32_t owner_len;
             uint32_t owner_padded_len;
 
-            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
             owner_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs           += sizeof(uint32_t);
+            attrs            = (char *) attrs + sizeof(uint32_t);
             owner_padded_len = (owner_len + 3) & ~3;
 
-            if (unlikely(attrs + owner_padded_len > attrsend)) {
+            if (unlikely((char *) attrs + owner_padded_len > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
@@ -1293,7 +1296,7 @@ chimera_nfs4_unmarshall_attrs(
 
             /* Convert string to numeric uid */
             attr->va_uid       = strtoul(attrs, NULL, 10);
-            attrs             += owner_padded_len;
+            attrs              = (char *) attrs + owner_padded_len;
             attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         }
 
@@ -1301,15 +1304,15 @@ chimera_nfs4_unmarshall_attrs(
             uint32_t group_len;
             uint32_t group_padded_len;
 
-            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
             group_len        = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs           += sizeof(uint32_t);
+            attrs            = (char *) attrs + sizeof(uint32_t);
             group_padded_len = (group_len + 3) & ~3;
 
-            if (unlikely(attrs + group_padded_len > attrsend)) {
+            if (unlikely((char *) attrs + group_padded_len > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
@@ -1320,29 +1323,29 @@ chimera_nfs4_unmarshall_attrs(
 
             /* Convert string to numeric gid */
             attr->va_gid       = strtoul(attrs, NULL, 10);
-            attrs             += group_padded_len;
+            attrs              = (char *) attrs + group_padded_len;
             attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         }
 
         if (req_mask[1] & (1 << (FATTR4_TIME_ACCESS_SET - 32))) {
 
-            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
             set_it = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs += sizeof(uint32_t);
+            attrs  = (char *) attrs + sizeof(uint32_t);
 
             if (set_it) {
 
-                if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+                if (unlikely((char *) attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
                     return NFS4ERR_BADXDR;
                 }
 
                 attr->va_atime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-                attrs                 += sizeof(uint64_t);
+                attrs                  = (char *) attrs + sizeof(uint64_t);
                 attr->va_atime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs                 += sizeof(uint32_t);
+                attrs                  = (char *) attrs + sizeof(uint32_t);
 
                 /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
                 if (unlikely(attr->va_atime.tv_nsec >= 1000000000)) {
@@ -1358,23 +1361,23 @@ chimera_nfs4_unmarshall_attrs(
 
         if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) {
 
-            if (unlikely(attrs + sizeof(uint32_t) > attrsend)) {
+            if (unlikely((char *) attrs + sizeof(uint32_t) > attrsend)) {
                 return NFS4ERR_BADXDR;
             }
 
             set_it = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-            attrs += sizeof(uint32_t);
+            attrs  = (char *) attrs + sizeof(uint32_t);
 
             if (set_it) {
 
-                if (unlikely(attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+                if (unlikely((char *) attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
                     return NFS4ERR_BADXDR;
                 }
 
                 attr->va_mtime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
-                attrs                 += sizeof(uint64_t);
+                attrs                  = (char *) attrs + sizeof(uint64_t);
                 attr->va_mtime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
-                attrs                 += sizeof(uint32_t);
+                attrs                  = (char *) attrs + sizeof(uint32_t);
 
                 /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
                 if (unlikely(attr->va_mtime.tv_nsec >= 1000000000)) {

@@ -46,6 +46,7 @@
  * Release) before it can report anything, which is the point.
  */
 
+#include "common/compiler.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -106,7 +107,7 @@ static int     failures;
  * _FORTIFY_SOURCE.  Real callers pass a visibly-sized array and would abort;
  * here the goal is a full report of every band.
  */
-static void __attribute__((noinline))
+static void CHIMERA_NOINLINE
 copy_to_fixed_fh(
     void       *dst,
     const void *src,
