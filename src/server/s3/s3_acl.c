@@ -40,6 +40,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"

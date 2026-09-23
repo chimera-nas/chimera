@@ -2,25 +2,35 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <strings.h>
+#endif /* ifdef _WIN32 */
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
 #include <crypt.h>
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
-#include <pthread.h>
-#include <unistd.h>    /* crypt(3) */
+#include "common/thread.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
+#include <unistd.h>
+#endif    /* crypt(3) */
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
 
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/params.h>
-#include <openssl/core_names.h>
+#include "common/crypto.h"
 #include <jansson.h>
 
 #include "evpl/evpl.h"
@@ -140,49 +150,12 @@ hmac_sha256(
     unsigned char       *out,
     size_t              *out_len)
 {
-    EVP_MAC     *mac     = NULL;
-    EVP_MAC_CTX *mac_ctx = NULL;
-    int          rc      = -1;
-
-    OSSL_PARAM   params[] = {
-        OSSL_PARAM_construct_utf8_string(
-            OSSL_MAC_PARAM_DIGEST,                                                                      (char *)
-            "SHA256", 0),
-        OSSL_PARAM_construct_end()
-    };
-
-    mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-    if (!mac) {
-        goto done;
+    if (key_len < 0 || data_len < 0 || !chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA256,
+                                                            key, key_len, data, data_len, out, 32)) {
+        return -1;
     }
-
-    mac_ctx = EVP_MAC_CTX_new(mac);
-    if (!mac_ctx) {
-        goto done;
-    }
-
-    if (EVP_MAC_init(mac_ctx, key, key_len, params) != 1) {
-        goto done;
-    }
-
-    if (EVP_MAC_update(mac_ctx, data, data_len) != 1) {
-        goto done;
-    }
-
-    if (EVP_MAC_final(mac_ctx, out, out_len, 32) != 1) {
-        goto done;
-    }
-
-    rc = 0;
-
- done:
-    if (mac_ctx) {
-        EVP_MAC_CTX_free(mac_ctx);
-    }
-    if (mac) {
-        EVP_MAC_free(mac);
-    }
-    return rc;
+    *out_len = 32;
+    return 0;
 } /* hmac_sha256 */
 
 /* ========== Secret init ========== */
@@ -215,12 +188,12 @@ chimera_rest_auth_init_secret(
         chimera_rest_error("Short read of JWT secret %s; regenerating", path);
     }
 
-    /* RAND_bytes returns 1 on success; on 0/-1 it may not write the buffer at
+    /* chimera_crypto_random returns 1 on success; on 0/-1 it may not write the buffer at
      * all (CWE-252).  A zero/unseeded jwt_secret would let anyone forge a valid
      * JWT for any user -- a full control-plane authentication bypass -- so a
      * CSPRNG failure must abort startup rather than silently run with a known
      * key. */
-    if (RAND_bytes(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) != 1) {
+    if (chimera_crypto_random(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) != 1) {
         chimera_rest_abort("Failed to seed JWT signing secret from CSPRNG");
     }
 
@@ -252,28 +225,40 @@ chimera_rest_auth_init_secret(
  * crypt(3) is DES-only: without libxcrypt the $-scheme hashes ($6$ SHA-512
  * etc.) never match.
  */
+#ifdef _WIN32
+char * chimera_crypt_sha512(
+    const char *,
+    const char *,
+    char *);
+#endif /* ifdef _WIN32 */
+
 static int
 chimera_rest_crypt_match(
     const char *password,
     const char *hash)
 {
-#if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
-    struct crypt_data      cdata;
-    char                  *result;
+#ifdef _WIN32
+    char                output[128];
+    char               *result = chimera_crypt_sha512(password, hash, output);
+    return result == output && strlen(result) == strlen(hash) &&
+           chimera_crypto_compare(result, hash, strlen(hash)) == 0;
+#elif defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
+    struct crypt_data   cdata;
+    char               *result;
 
     memset(&cdata, 0, sizeof(cdata));
     result = crypt_r(password, hash, &cdata);
 
     return result && strcmp(result, hash) == 0;
 #else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
-    static pthread_mutex_t crypt_lock = PTHREAD_MUTEX_INITIALIZER;
-    char                  *result;
-    int                    match;
+    static evpl_mutex_t crypt_lock = EVPL_MUTEX_INITIALIZER;
+    char               *result;
+    int                 match;
 
-    pthread_mutex_lock(&crypt_lock);
+    evpl_mutex_lock(&crypt_lock);
     result = crypt(password, hash);
     match  = result && strcmp(result, hash) == 0;
-    pthread_mutex_unlock(&crypt_lock);
+    evpl_mutex_unlock(&crypt_lock);
 
     return match;
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
@@ -347,8 +332,8 @@ chimera_rest_jwt_create(
     int               h_len, p_len, s_len, si_len;
 
     snprintf(payload_json, sizeof(payload_json),
-             "{\"sub\":\"%s\",\"iat\":%ld,\"exp\":%ld}",
-             claims->sub, (long) claims->iat, (long) claims->exp);
+             "{\"sub\":\"%s\",\"iat\":%" PRId64 ",\"exp\":%" PRId64 "}",
+             claims->sub, (int64_t) claims->iat, (int64_t) claims->exp);
 
     h_len = base64url_encode((const unsigned char *) header_json,
                              strlen(header_json),
@@ -481,7 +466,7 @@ chimera_rest_jwt_verify(
     }
 
     /* Constant-time comparison */
-    if (CRYPTO_memcmp(expected_sig, actual_sig, expected_sig_len) != 0) {
+    if (chimera_crypto_compare(expected_sig, actual_sig, expected_sig_len) != 0) {
         return -1;
     }
 

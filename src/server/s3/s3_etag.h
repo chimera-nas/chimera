@@ -4,17 +4,24 @@
 
 #pragma once
 
+#include "common/compiler.h"
+#include "common/format.h"
 #include "vfs/vfs.h"
 
+#pragma pack(push, 1)
 struct chimera_s3_etag_key {
-    uint64_t        size;
-    struct timespec mtime;
-} __attribute__((packed));
+    uint64_t size;
+    int64_t  mtime_sec;
+    int64_t  mtime_nsec;
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct chimera_s3_etag_ctx {
     struct chimera_s3_etag_key key;
     uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 static inline void
 chimera_s3_compute_etag(
@@ -30,8 +37,12 @@ chimera_s3_compute_etag(
                         !(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME),
                         "etag: missing required attributes");
 
-    ctx.key.size  = attr->va_size;
-    ctx.key.mtime = attr->va_mtime;
+    /* Hash values, not timespec's object representation: Windows has a
+     * 32-bit tv_nsec followed by padding, whose bytes need not be initialized.
+     * Explicit 64-bit fields also retain the existing 64-bit Unix layout. */
+    ctx.key.size       = attr->va_size;
+    ctx.key.mtime_sec  = attr->va_mtime.tv_sec;
+    ctx.key.mtime_nsec = attr->va_mtime.tv_nsec;
     memcpy(ctx.fh, attr->va_fh, attr->va_fh_len);
     len = sizeof(ctx.key) + attr->va_fh_len;
 

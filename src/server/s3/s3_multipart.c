@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +10,7 @@
 #include <stdatomic.h>
 #include <ctype.h>
 #include <time.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
@@ -47,7 +48,7 @@ chimera_s3_multipart_table_create(int nbuckets)
     table           = calloc(1, sizeof(*table));
     table->nbuckets = nbuckets;
     table->buckets  = calloc(nbuckets, sizeof(*table->buckets));
-    pthread_rwlock_init(&table->lock, NULL);
+    evpl_rwlock_init(&table->lock, NULL);
 
     return table;
 } /* chimera_s3_multipart_table_create */
@@ -63,7 +64,7 @@ chimera_s3_multipart_upload_free_now(struct chimera_s3_multipart_upload *upload)
     free(upload->bucket_name);
     free(upload->object_key);
     free(upload->tagging);
-    pthread_mutex_destroy(&upload->lock);
+    evpl_mutex_destroy(&upload->lock);
     free(upload);
 } /* chimera_s3_multipart_upload_free_now */
 
@@ -93,7 +94,7 @@ chimera_s3_multipart_table_destroy(struct chimera_s3_multipart_table *table)
         }
     }
 
-    pthread_rwlock_destroy(&table->lock);
+    chimera_rwlock_destroy(&table->lock);
     free(table->buckets);
     free(table);
 } /* chimera_s3_multipart_table_destroy */
@@ -159,21 +160,21 @@ chimera_s3_multipart_table_insert(
     upload->bucket_fhlen = bucket_fhlen;
 
     clock_gettime(CLOCK_REALTIME, &upload->created);
-    pthread_mutex_init(&upload->lock, NULL);
+    evpl_mutex_init(&upload->lock, NULL);
     upload->refcount = 1; /* the table itself */
     upload->removed  = 0;
     upload->parts    = NULL;
 
     bucket_idx = chimera_s3_multipart_hash(upload->upload_id) % table->nbuckets;
 
-    pthread_rwlock_wrlock(&table->lock);
+    evpl_rwlock_wrlock(&table->lock);
     upload->prev = NULL;
     upload->next = table->buckets[bucket_idx];
     if (table->buckets[bucket_idx]) {
         table->buckets[bucket_idx]->prev = upload;
     }
     table->buckets[bucket_idx] = upload;
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     return upload;
 } /* chimera_s3_multipart_table_insert */
@@ -193,17 +194,17 @@ chimera_s3_multipart_table_lookup(
 
     bucket_idx = chimera_s3_multipart_hash(upload_id) % table->nbuckets;
 
-    pthread_rwlock_rdlock(&table->lock);
+    evpl_rwlock_rdlock(&table->lock);
     for (upload = table->buckets[bucket_idx]; upload; upload = upload->next) {
         if (memcmp(upload->upload_id, upload_id, CHIMERA_S3_UPLOAD_ID_LEN) == 0 &&
             !upload->removed) {
-            pthread_mutex_lock(&upload->lock);
+            evpl_mutex_lock(&upload->lock);
             upload->refcount++;
-            pthread_mutex_unlock(&upload->lock);
+            evpl_mutex_unlock(&upload->lock);
             break;
         }
     }
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     return upload;
 } /* chimera_s3_multipart_table_lookup */
@@ -215,12 +216,12 @@ chimera_s3_multipart_upload_release(
 {
     int free_now = 0;
 
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     upload->refcount--;
     if (upload->refcount == 0 && upload->removed) {
         free_now = 1;
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
 
     if (free_now) {
         struct chimera_s3_part *part, *next;
@@ -249,7 +250,7 @@ chimera_s3_multipart_table_detach(
 
     bucket_idx = chimera_s3_multipart_hash(upload_id) % table->nbuckets;
 
-    pthread_rwlock_wrlock(&table->lock);
+    evpl_rwlock_wrlock(&table->lock);
     for (upload = table->buckets[bucket_idx]; upload; upload = upload->next) {
         if (memcmp(upload->upload_id, upload_id, CHIMERA_S3_UPLOAD_ID_LEN) == 0 &&
             !upload->removed) {
@@ -267,7 +268,7 @@ chimera_s3_multipart_table_detach(
             break;
         }
     }
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     return upload;
 } /* chimera_s3_multipart_table_detach */
@@ -368,7 +369,7 @@ static inline void
 chimera_s3_mp_append(
     char      **p,
     const char *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static inline void
 chimera_s3_mp_append(
@@ -521,14 +522,16 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
      * tmp_name + dir_fh).  Cannot use chimera_s3_compute_etag because we
      * don't have the file's mtime attribute yet. */
     {
+        CHIMERA_PACK_BEGIN
         struct {
             int64_t size;
             int32_t part_number;
             int32_t tmp_name_len;
             uint8_t dir_fh[CHIMERA_VFS_FH_SIZE];
             char    tmp_name[64];
-        } __attribute__((packed)) seed;
-        XXH128_hash_t h;
+        } CHIMERA_PACKED seed;
+        CHIMERA_PACK_END
+        XXH128_hash_t    h;
 
         memset(&seed, 0, sizeof(seed));
         seed.size         = part->size;
@@ -544,7 +547,7 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
     }
 
     /* Insert sorted; replace if part_number already present. */
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     prev = NULL;
     cur  = upload->parts;
     while (cur && cur->part_number < part->part_number) {
@@ -568,7 +571,7 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
             upload->parts = part;
         }
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
 
     if (replaced) {
         chimera_s3_multipart_part_destroy_async(thread, replaced);
@@ -753,15 +756,14 @@ chimera_s3_upload_part_recv(
     goto again;
 } /* chimera_s3_upload_part_recv */
 
-static void
-chimera_s3_upload_part_create_unlinked_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_unlinked_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             struct chimera_vfs_attrs *set_attr,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, oh, set_attr, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -785,17 +787,16 @@ chimera_s3_upload_part_create_unlinked_callback(
     chimera_s3_upload_part_recv(evpl, request);
 } /* chimera_s3_upload_part_create_unlinked_callback */
 
-static void
-chimera_s3_upload_part_create_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_create_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             struct chimera_vfs_attrs *set_attr,
+                             struct chimera_vfs_attrs *attr,
+                             struct chimera_vfs_attrs *dir_pre_attr,
+                             struct chimera_vfs_attrs *dir_post_attr,
+                             void *private_data),
+                            (error_code, oh, set_attr, attr, dir_pre_attr, dir_post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -819,13 +820,12 @@ chimera_s3_upload_part_create_callback(
     chimera_s3_upload_part_recv(evpl, request);
 } /* chimera_s3_upload_part_create_callback */
 
-static void
-chimera_s3_upload_part_open_dir_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_open_dir_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_vfs_module       *module;
@@ -886,13 +886,12 @@ chimera_s3_upload_part_open_dir_callback(
     }
 } /* chimera_s3_upload_part_open_dir_callback */
 
-static void
-chimera_s3_upload_part_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_upload_part_lookup_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -959,7 +958,7 @@ chimera_s3_upload_part(
     request->multipart.upload  = upload;
     request->multipart.is_copy = 0;
 
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
 
     if (slash) {
         dirpathlen    = slash - request->path;
@@ -1509,7 +1508,7 @@ chimera_s3_upc_open_src_callback(
 
     ctx->src_handle = oh;
 
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
     if (slash) {
         dirpathlen    = slash - request->path;
         request->name = slash + 1;
@@ -1618,7 +1617,7 @@ chimera_s3_upload_part_copy(
     struct chimera_s3_upload_copy_ctx  *ctx;
     const char                         *copy_source, *copy_range;
     const struct s3_bucket             *src_bucket;
-    const char                         *src_path;
+    char                               *src_path;
 
     /* Validate part number first (cheap). */
     if (request->multipart.part_number < 1 ||
@@ -1686,7 +1685,12 @@ chimera_s3_upload_part_copy(
         return;
     }
 
-    src_path = chimera_s3_bucket_get_path(src_bucket);
+    src_path = strdup(chimera_s3_bucket_get_path(src_bucket));
+    chimera_s3_release_bucket(shared);
+    if (!src_path) {
+        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        return;
+    }
 
     chimera_vfs_lookup(thread->vfs,
                        &request->cred,
@@ -1699,7 +1703,7 @@ chimera_s3_upload_part_copy(
                        chimera_s3_upc_lookup_src_bucket_callback,
                        ctx);
 
-    chimera_s3_release_bucket(shared);
+    free(src_path);
 } /* chimera_s3_upload_part_copy */
 
 /* ----- CompleteMultipartUpload body accumulation + parser ----- */
@@ -2389,9 +2393,9 @@ chimera_s3_complete_finish_common(
             /* Drop the table's implicit (insert) ref now that it is unlinked. */
             chimera_s3_multipart_upload_release(thread, ctx->upload);
         } else {
-            pthread_mutex_lock(&ctx->upload->lock);
+            evpl_mutex_lock(&ctx->upload->lock);
             ctx->upload->completing = 0;
-            pthread_mutex_unlock(&ctx->upload->lock);
+            evpl_mutex_unlock(&ctx->upload->lock);
         }
         /* Drop our (ctx) ref. On success this is the last ref -> free + async
          * part cleanup. On failure the table's ref remains, keeping it alive. */
@@ -3006,7 +3010,7 @@ chimera_s3_complete_multipart_upload_body_done(
         return;
     }
 
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     err = chimera_s3_validate_complete_manifest(client_parts, n_client,
                                                 upload, &server_parts);
 
@@ -3017,7 +3021,7 @@ chimera_s3_complete_multipart_upload_body_done(
          * rather than assembling again. */
         uint64_t combined[2];
 
-        pthread_mutex_unlock(&upload->lock);
+        evpl_mutex_unlock(&upload->lock);
         free(server_parts);
         chimera_s3_multipart_upload_release(thread, upload);
 
@@ -3040,7 +3044,7 @@ chimera_s3_complete_multipart_upload_body_done(
          * retried Complete still resolves it) until assembly succeeds. */
         upload->completing = 1;
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
     free(client_parts);
 
     if (err != CHIMERA_S3_STATUS_OK) {
@@ -3094,7 +3098,7 @@ chimera_s3_complete_multipart_upload_body_done(
 
     /* Create the final object using the same dir-open + create pattern as
      * PUT. Compute parent dir from object key. */
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
     if (slash) {
         dirpathlen    = slash - request->path;
         request->name = slash + 1;
@@ -3200,7 +3204,7 @@ chimera_s3_list_parts(
     is_truncated = 0;
     next_marker  = 0;
 
-    pthread_mutex_lock(&upload->lock);
+    evpl_mutex_lock(&upload->lock);
     for (part = upload->parts; part; part = part->next) {
         if (part->part_number <= marker) {
             continue;
@@ -3249,11 +3253,11 @@ chimera_s3_list_parts(
         chimera_s3_mp_append(&bp, "    <PartNumber>%d</PartNumber>\n", part->part_number);
         chimera_s3_mp_append(&bp, "    <LastModified>%s</LastModified>\n", date_buf);
         chimera_s3_mp_append(&bp, "    <ETag>%s</ETag>\n", etag_hex);
-        chimera_s3_mp_append(&bp, "    <Size>%ld</Size>\n", (long) part->size);
+        chimera_s3_mp_append(&bp, "    <Size>%" PRId64 "</Size>\n", part->size);
         chimera_s3_mp_append(&bp, "  </Part>\n");
         emitted++;
     }
-    pthread_mutex_unlock(&upload->lock);
+    evpl_mutex_unlock(&upload->lock);
 
     /* Owner / Initiator. No per-user identity model exists yet, so emit a
      * stable placeholder identity. */
@@ -3326,7 +3330,7 @@ chimera_s3_list_multipart_uploads(
         request->multipart.upload_id_marker : NULL;
 
     /* Snapshot matching uploads out from under the table lock. */
-    pthread_rwlock_rdlock(&table->lock);
+    evpl_rwlock_rdlock(&table->lock);
     for (i = 0; i < table->nbuckets; i++) {
         for (upload = table->buckets[i]; upload; upload = upload->next) {
             if (upload->removed) {
@@ -3348,7 +3352,7 @@ chimera_s3_list_multipart_uploads(
             n++;
         }
     }
-    pthread_rwlock_unlock(&table->lock);
+    evpl_rwlock_unlock(&table->lock);
 
     /* Sort by (key, upload-id) so pagination markers are well-defined. */
     if (n > 1) {

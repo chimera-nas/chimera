@@ -366,33 +366,18 @@ chimera_s3_request_drop(struct chimera_s3_request *request)
     chimera_s3_request_put(request->thread, request);
 } /* chimera_s3_request_drop */
 
-static inline void
-chimera_s3_request_unref(struct chimera_s3_request **requestp)
-{
-    struct chimera_s3_request *request = *requestp;
-
-    chimera_s3_request_put(request->thread, request);
-} /* chimera_s3_request_unref */
-
-/*
- * Hold the reference an asynchronous handoff took, and drop it when the
- * callback returns -- by whichever of its exits it takes.
- *
- * Declared first in the body so that its cleanup runs last, after everything
- * the callback does with the request.  The alternative is a put before every
- * return in every completion callback, of which there are dozens: the one that
- * gets missed is a leak, and the one that gets duplicated is the
- * use-after-free this exists to prevent.  cleanup is a GNU extension, which
- * both compilers chimera builds with have long supported, and it makes neither
- * mistake expressible.
- *
- * The variable exists only for its cleanup, so it is never read; `unused`
- * keeps that from tripping -Wunused-variable, which Apple clang raises for
- * cleanup variables even though gcc does not.
- */
-#define CHIMERA_S3_HOLD_REQUEST(pd) \
-        struct chimera_s3_request *_s3_held \
-        __attribute__((cleanup(chimera_s3_request_unref), unused)) = (pd)
+/* The asynchronous handoff owns one reference. Always release it after the
+ * callback body returns, including its early-return paths. Keeping ownership
+ * in a wrapper avoids compiler-specific scope-exit attributes. The signature
+ * and argument list are parenthesized; the final argument is private_data. */
+#define CHIMERA_S3_REQUEST_CALLBACK(name, signature, arguments) \
+        static void name ## _body signature; \
+        static void name signature \
+        { \
+            name ## _body arguments; \
+            chimera_s3_request_drop(private_data); \
+        } \
+        static void name ## _body signature
 
 static inline struct chimera_s3_io *
 chimera_s3_io_alloc(

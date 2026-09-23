@@ -2,13 +2,21 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <strings.h>
+#endif /* ifdef _WIN32 */
 #include <time.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "common/format.h"
@@ -629,12 +637,11 @@ chimera_s3_list_cmp(
     return strcmp(ea->key, eb->key);
 } /* chimera_s3_list_cmp */
 
-static void
-chimera_s3_list_find_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_list_find_complete,
+                            (enum chimera_vfs_error error_code,
+                             void *private_data),
+                            (error_code, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -826,7 +833,7 @@ chimera_s3_list_find_complete(
             chimera_s3_out_append(&out, "  <IsLatest>true</IsLatest>\n");
             chimera_s3_out_append(&out, "  <LastModified>%s</LastModified>\n", date);
             chimera_s3_out_append(&out, "  <ETag>%s</ETag>\n", etag);
-            chimera_s3_out_append(&out, "  <Size>%lu</Size>\n", e->size);
+            chimera_s3_out_append(&out, "  <Size>%" PRIu64 "</Size>\n", e->size);
             chimera_s3_out_append(&out, "  <StorageClass>STANDARD</StorageClass>\n");
             chimera_s3_out_append(&out, " </Version>\n");
         } else {
@@ -834,7 +841,7 @@ chimera_s3_list_find_complete(
             chimera_s3_out_append(&out, "  <Key>%s</Key>\n", enc);
             chimera_s3_out_append(&out, "  <LastModified>%s</LastModified>\n", date);
             chimera_s3_out_append(&out, "  <ETag>%s</ETag>\n", etag);
-            chimera_s3_out_append(&out, "  <Size>%lu</Size>\n", e->size);
+            chimera_s3_out_append(&out, "  <Size>%" PRIu64 "</Size>\n", e->size);
             chimera_s3_out_append(&out, "  <StorageClass>STANDARD</StorageClass>\n");
             if (request->list.fetch_owner) {
                 /* V2 fetch-owner=true: same canonical owner as ListBuckets/ACL. */

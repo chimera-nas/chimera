@@ -31,10 +31,15 @@
 #ifndef CTL_MBT_COMMON_H
 #define CTL_MBT_COMMON_H
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <stdint.h>
 #include <inttypes.h>
 
@@ -155,7 +160,7 @@ ctl_env_open(
 static inline void
 ctl_env_close(struct ctl_env *env)
 {
-    char cmd[512];
+
 
     evpl_http_destroy(env->agent);
     evpl_destroy(env->evpl);
@@ -172,8 +177,7 @@ ctl_env_close(struct ctl_env *env)
     }
 
     if (!env->opts.state_dir) {
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-        if (system(cmd) != 0) {
+        if (chimera_test_remove_tree(env->session_dir) != 0) {
             fprintf(stderr, "warning: failed to remove %s\n",
                     env->session_dir);
         }

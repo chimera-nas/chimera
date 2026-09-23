@@ -22,7 +22,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <strings.h>
+#endif /* ifdef _WIN32 */
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
@@ -441,14 +445,13 @@ static void chimera_s3_tagging_remove_next(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
 
-static void
-chimera_s3_tagging_remove_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_remove_cb,
+                            (enum chimera_vfs_error error_code,
+                             const struct chimera_vfs_attrs *pre_attr,
+                             const struct chimera_vfs_attrs *post_attr,
+                             void *private_data),
+                            (error_code, pre_attr, post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request *request = private_data;
 
     /* Ignore per-name errors (ENOENT from a racing remove); keep going. */
@@ -487,17 +490,16 @@ chimera_s3_tagging_remove_next(
 
 /* ----- list existing tag xattrs (entry to the remove phase) ----- */
 
-static void
-chimera_s3_tagging_list_for_remove_cb(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_list_for_remove_cb,
+                            (enum chimera_vfs_error error_code,
+                             const char *names,
+                             uint32_t names_len,
+                             uint32_t count,
+                             uint32_t eof,
+                             uint64_t cookie,
+                             void *private_data),
+                            (error_code, names, names_len, count, eof, cookie, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request     *request = private_data;
     struct chimera_s3_tagging_ctx *ctx     = request->tagging;
 
@@ -552,14 +554,13 @@ static void chimera_s3_tagging_set_next(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
 
-static void
-chimera_s3_tagging_set_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_set_cb,
+                            (enum chimera_vfs_error error_code,
+                             const struct chimera_vfs_attrs *pre_attr,
+                             const struct chimera_vfs_attrs *post_attr,
+                             void *private_data),
+                            (error_code, pre_attr, post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request *request = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -607,13 +608,12 @@ static void chimera_s3_tagging_get_next(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
 
-static void
-chimera_s3_tagging_get_value_cb(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_get_value_cb,
+                            (enum chimera_vfs_error error_code,
+                             uint32_t value_len,
+                             void *private_data),
+                            (error_code, value_len, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request     *request = private_data;
     struct chimera_s3_tagging_ctx *ctx     = request->tagging;
     const char                    *name;
@@ -689,17 +689,16 @@ chimera_s3_tagging_get_next(
     chimera_s3_tagging_ctx_free(request);
 } /* chimera_s3_tagging_get_next */
 
-static void
-chimera_s3_tagging_get_list_cb(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_get_list_cb,
+                            (enum chimera_vfs_error error_code,
+                             const char *names,
+                             uint32_t names_len,
+                             uint32_t count,
+                             uint32_t eof,
+                             uint64_t cookie,
+                             void *private_data),
+                            (error_code, names, names_len, count, eof, cookie, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request     *request = private_data;
     struct chimera_s3_tagging_ctx *ctx     = request->tagging;
 
@@ -784,13 +783,12 @@ chimera_s3_tagging_begin_op(
 
 /* ----- shared lookup + open prelude ----- */
 
-static void
-chimera_s3_tagging_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_open_cb,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -804,13 +802,12 @@ chimera_s3_tagging_open_cb(
     chimera_s3_tagging_begin_op(thread->evpl, request);
 } /* chimera_s3_tagging_open_cb */
 
-static void
-chimera_s3_tagging_lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_lookup_cb,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -989,14 +986,13 @@ static void chimera_s3_tagging_store_set_next(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
 
-static void
-chimera_s3_tagging_store_set_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_store_set_cb,
+                            (enum chimera_vfs_error error_code,
+                             const struct chimera_vfs_attrs *pre_attr,
+                             const struct chimera_vfs_attrs *post_attr,
+                             void *private_data),
+                            (error_code, pre_attr, post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request *request = private_data;
 
     request->tagging->cur++;
@@ -1040,13 +1036,12 @@ chimera_s3_tagging_store_after_clear(
     chimera_s3_tagging_store_set_next(evpl, request);
 } /* chimera_s3_tagging_store_after_clear */
 
-static void
-chimera_s3_tagging_store_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_store_open_cb,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
@@ -1067,13 +1062,12 @@ chimera_s3_tagging_store_open_cb(
                                       chimera_s3_tagging_store_after_clear);
 } /* chimera_s3_tagging_store_open_cb */
 
-static void
-chimera_s3_tagging_store_lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_store_lookup_cb,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
@@ -1130,17 +1124,16 @@ chimera_s3_tagging_store_by_path(
 
 /* ----- HEAD object: x-amz-tagging-count ----- */
 
-static void
-chimera_s3_tagging_count_list_cb(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_count_list_cb,
+                            (enum chimera_vfs_error error_code,
+                             const char *names,
+                             uint32_t names_len,
+                             uint32_t count,
+                             uint32_t eof,
+                             uint64_t cookie,
+                             void *private_data),
+                            (error_code, names, names_len, count, eof, cookie, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
@@ -1177,13 +1170,12 @@ chimera_s3_tagging_count_list_cb(
     done(thread->evpl, request);
 } /* chimera_s3_tagging_count_list_cb */
 
-static void
-chimera_s3_tagging_count_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_count_open_cb,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_s3_tagging_ctx   *ctx     = request->tagging;

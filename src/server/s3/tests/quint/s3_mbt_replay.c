@@ -32,11 +32,16 @@
  * trace fails with a report of the step, the mismatches, and recent
  * history. */
 
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#include <getopt.h>
+#endif /* ifdef _WIN32 */
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "s3_mbt_common.h"
@@ -56,7 +61,7 @@ struct mism {
     char msg[MBT_MAX_MISM][MBT_MISM_LEN];
 };
 
-__attribute__((format(printf, 2, 3)))
+CHIMERA_PRINTF(2, 3)
 static void
 mism_add(
     struct mism *m,

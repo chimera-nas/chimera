@@ -27,13 +27,12 @@ chimera_s3_put_respond(
     }
 } /* chimera_s3_put_respond */
 
-static void
-chimera_s3_put_getattr_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_getattr_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -106,28 +105,27 @@ chimera_s3_put_finish_common(
                         request);
 } /* chimera_s3_put_finish_common */
 
-static void
-chimera_s3_put_rename_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *fromdir_pre_attr,
-    struct chimera_vfs_attrs *fromdir_post_attr,
-    struct chimera_vfs_attrs *todir_pre_attr,
-    struct chimera_vfs_attrs *todir_post_attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_rename_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *fromdir_pre_attr,
+                             struct chimera_vfs_attrs *fromdir_post_attr,
+                             struct chimera_vfs_attrs *todir_pre_attr,
+                             struct chimera_vfs_attrs *todir_post_attr,
+                             void *private_data),
+                            (error_code, fromdir_pre_attr, fromdir_post_attr, todir_pre_attr, todir_post_attr,
+                             private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     chimera_s3_put_finish_common(error_code, private_data);
 } /* chimera_s3_put_rename_callback */
 
-static void
-chimera_s3_put_link_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_pre_attr,
-    struct chimera_vfs_attrs *r_dir_post_attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_link_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *r_attr,
+                             struct chimera_vfs_attrs *r_dir_pre_attr,
+                             struct chimera_vfs_attrs *r_dir_post_attr,
+                             void *private_data),
+                            (error_code, r_attr, r_dir_pre_attr, r_dir_post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     chimera_s3_put_finish_common(error_code, private_data);
 } /* chimera_s3_put_link_callback */
 
@@ -362,15 +360,14 @@ chimera_s3_put_metadata_done(
     chimera_s3_put_recv(evpl, request);
 } /* chimera_s3_put_metadata_done */
 
-static void
-chimera_s3_put_create_unlinked_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_create_unlinked_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             struct chimera_vfs_attrs *set_attr,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, oh, set_attr, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -396,17 +393,16 @@ chimera_s3_put_create_unlinked_callback(
 
 } /* chimera_s3_put_create_unlinked_callback */
 
-static void
-chimera_s3_put_create_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_create_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             struct chimera_vfs_attrs *set_attr,
+                             struct chimera_vfs_attrs *attr,
+                             struct chimera_vfs_attrs *dir_pre_attr,
+                             struct chimera_vfs_attrs *dir_post_attr,
+                             void *private_data),
+                            (error_code, oh, set_attr, attr, dir_pre_attr, dir_post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -432,13 +428,12 @@ chimera_s3_put_create_callback(
 
 } /* chimera_s3_put_create_callback */
 
-static void
-chimera_s3_put_open_dir_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_open_dir_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_vfs_module       *module;
@@ -506,13 +501,12 @@ chimera_s3_put_open_dir_callback(
 
 } /* chimera_s3_put_open_dir_callback */
 
-static void
-chimera_s3_put_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_put_lookup_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -573,7 +567,7 @@ chimera_s3_put(
         }
     }
 
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
 
     if (slash) {
 
