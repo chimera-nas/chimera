@@ -450,7 +450,8 @@ chimera_vfs_io_try(
     if (request->io_recall_all) {
         if (chimera_vfs_claim_trigger_ns_full(state, file,
                                               request->io_handle,
-                                              request->io_recall_flush_only)) {
+                                              request->io_recall_flush_only,
+                                              request->io_owner_valid ? &request->io_owner : NULL)) {
             evpl_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;

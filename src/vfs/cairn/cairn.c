@@ -33,7 +33,7 @@ void rocksdb_flush_wal(
 #include <jansson.h>
 #include <limits.h>
 #include <utlist.h>
-#include "common/rcu.h"
+#include "common/chimera_rcu.h"
 
 
 #include "vfs/sdk/vfs_varint.h"
@@ -276,7 +276,7 @@ struct cairn_fs {
     uint32_t             root_fhlen;
     struct cairn_fs     *prev;
     struct cairn_fs     *next;
-    struct rcu_head      rcu;
+    chimera_rcu_head     rcu;
 };
 
 struct cairn_shared {
@@ -2974,9 +2974,9 @@ cairn_rmfs_delete_tree(
 } /* cairn_rmfs_delete_tree */
 
 static void
-cairn_fs_free_rcu(struct rcu_head *head)
+cairn_fs_free_rcu(chimera_rcu_head *head)
 {
-    struct cairn_fs *fs = caa_container_of(head, struct cairn_fs, rcu);
+    struct cairn_fs *fs = container_of(head, struct cairn_fs, rcu);
 
     free(fs->name);
     free(fs);
@@ -3038,7 +3038,7 @@ cairn_rmfs(
      * every handle on the mount is gone, so no new op can reach this
      * filesystem -- but an op that took mount_private just before its mount
      * was claimed may still be in flight. */
-    call_rcu(&fs->rcu, cairn_fs_free_rcu);
+    chimera_rcu_retire(&chimera_rcu_global, &fs->rcu, cairn_fs_free_rcu);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);

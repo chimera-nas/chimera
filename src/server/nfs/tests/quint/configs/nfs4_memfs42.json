@@ -1,6 +1,7 @@
 {
   "family": "nfs4",
   "description": "chimera at NFSv4.2 against a named in-engine backend. Every RFC 7862/8276 data operation is pinned supported, not explored: memfs and its on-disk siblings advertise CAP_XATTR and CAP_COPY_RANGE and serve ALLOCATE/DEALLOCATE/SEEK with no server knob to turn them off, so a silent regression in advertisement has to fail rather than skip. pNFS is off (the server is not configured as a metadata server) and delegations are off, because the reference implementation only grants once a CB_NULL probe confirms the back channel and the synchronous replay harness never answers one.",
+  "scenarios": [{"run": "typeCoverageRegression", "flavor": "stepTypes"}, {"run": "copyCoverageRegression", "flavor": "stepData42"}],
   "traceStem": "nfs4Memfs42",
 
   "features": {

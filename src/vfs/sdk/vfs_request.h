@@ -993,10 +993,10 @@ struct chimera_vfs_request {
              * existing one); lets the SMB server report OPENED vs CREATED.
              * Modules that don't set it leave it 0 (treated as "opened"). */
             uint8_t                          r_created;
-            /* pNFS truncates only after open authorization.  The backend sees
+            /* Size changes run only after open authorization. The backend sees
              * a private copy with truncate removed; preserve caller arguments. */
-            struct chimera_vfs_attrs        *pnfs_set_attr;
-            uint32_t                         pnfs_flags;
+            struct chimera_vfs_attrs        *deferred_set_attr;
+            uint32_t                         original_flags;
         } open_at;
 
         struct {

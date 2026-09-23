@@ -6,7 +6,7 @@ add_executable(rbtree_test rbtree_test.c)
 
 add_test(chimera/common/rbtree_test rbtree_test)
 
-if(CHIMERA_NATIVE_RCU)
+if(NOT URCU_ENABLED)
     add_executable(rcu_test rcu_test.c)
     target_link_libraries(rcu_test chimera_common)
     if(MSVC)

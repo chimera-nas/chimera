@@ -20,10 +20,11 @@ CMAKE_ARGS_COVERAGE := -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang
 # nproc is coreutils (Linux); macOS provides the same count via sysctl.
 CTEST_PARALLEL := $(shell n=$$(nproc 2>/dev/null || sysctl -n hw.ncpu); echo $$(( n < 64 ? n : 64 )))
 # Which tier the test targets run.  Empty selects the default (quick) tier --
-# the quint model-based tests -- matching a bare `ctest`.  `make check_extended`
-# sets this to `-C extended` for the full suite.  Overriding CTEST_ARGS wholesale
-# still works and drops the tier, which is what the coverage repro command in
-# scripts/ci_coverage_report.py relies on.
+# model replays, strict twins and supporting probes -- matching bare `ctest`.
+# `make check_extended` sets this to `-C extended` for the full suite.
+# Overriding CTEST_ARGS wholesale
+# still works and drops the tier; the coverage report reproduces quick without
+# a label filter.
 CTEST_TIER ?=
 CTEST_ARGS := $(CTEST_TIER) --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
 

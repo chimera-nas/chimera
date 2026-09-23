@@ -32,8 +32,6 @@ __lsan_default_suppressions(void)
         "leak:parse_options\n"
         "leak:log_io_piece\n"
         "leak:options_mem_dupe\n"
-        /* SMB compound/request free lists (per-thread caches) */
-        "leak:chimera_smb_compound_alloc\n"
         /* NFS proxy per-thread server state (connection, NFS4.1 session +
          * slot tables).  Repeated mount/umount cycles accumulate one block
          * per (thread, mount) that only thread destroy releases, and a

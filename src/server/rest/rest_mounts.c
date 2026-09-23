@@ -138,7 +138,7 @@ chimera_rest_handle_mounts_get(
  * REST thread's own VFS thread (thread->vfs_thread) rather than via the
  * blocking chimera_server_mount/unmount helpers, which spin up a throwaway
  * evpl and register a fresh VFS thread -- doing so from an already
- * RCU-registered REST worker aborts on a liburcu double-registration.  The
+ * RCU-registered REST worker aborts on a double registration.  The
  * HTTP reply is dispatched from the completion callback.
  */
 

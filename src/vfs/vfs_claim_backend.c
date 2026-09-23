@@ -498,7 +498,7 @@ chimera_vfs_bl_recall_drive(
     /* Recall the cache-class holders (delegations, oplocks, leases) via the
      * namespace-recall engine: full drain for a to-zero recall, flush-style
      * when the backend lets the node keep its read cover. */
-    chimera_vfs_claim_trigger_ns_full(state, file, NULL, flush_only);
+    chimera_vfs_claim_trigger_ns_full(state, file, NULL, flush_only, NULL);
 
     /* Drain the implicit claim when it holds bits beyond the floor. */
     evpl_mutex_lock(&file->lock);

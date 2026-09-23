@@ -775,6 +775,17 @@ foreach(image_spec ${KVM_IMAGES})
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/${dialect}/xfstests/${prog}_${backend}
                     PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                # A diskfs server has four SMB threads plus its journal and I/O
+                # workers, and the guest itself has four vCPUs.  Charging it as
+                # two processors lets two complete stacks run on a four-vCPU
+                # hosted runner; the resulting starvation has left CIFS tasks
+                # blocked until CTest's 300-second timeout.  Reserve the runner
+                # for diskfs xfstests while still allowing the lighter backends
+                # to retain their existing parallelism.
+                if(backend MATCHES "^diskfs_")
+                    set_property(TEST chimera/kvm/${IMAGE_NAME}/smb/${dialect}/xfstests/${prog}_${backend}
+                        PROPERTY PROCESSORS 4)
+                endif()
             endforeach()
         endforeach()
     endforeach()

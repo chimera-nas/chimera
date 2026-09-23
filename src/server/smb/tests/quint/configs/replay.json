@@ -24,6 +24,9 @@
   "deviations": [
   ],
 
+  "scenarios": [
+    { "run": "duplicateNondurableGuidRegression", "flavor": "stepReplay" }
+  ],
   "batches": [
     { "flavor": "stepReplay", "steps": 300, "traces": 8, "seed": "0x51" }
   ]

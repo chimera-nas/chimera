@@ -227,13 +227,17 @@ chimera_vfs_open_at_hdl_callback(
     }
 
     if (request->status == CHIMERA_VFS_OK && handle &&
-        request->open_at.pnfs_set_attr && !request->open_at.r_created) {
+        request->open_at.deferred_set_attr &&
+        (!request->open_at.r_created ||
+         ((request->open_at.deferred_set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+          request->open_at.deferred_set_attr->va_size != 0))) {
         struct chimera_vfs_attrs *trunc = &request->io_pnfs_sync_attr;
 
         request->io_handle = handle;
         memset(trunc, 0, sizeof(*trunc));
         trunc->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
-        trunc->va_size     = 0;
+        trunc->va_size     = (request->open_at.original_flags & CHIMERA_VFS_OPEN_TRUNCATE)
+            ? 0 : request->open_at.deferred_set_attr->va_size;
         chimera_vfs_fsetattr(thread, request->cred, handle, trunc, 0,
                              request->open_at.r_attr.va_req_mask,
                              chimera_vfs_open_at_truncate_complete, request);
@@ -326,9 +330,11 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_handle_state *hs = request->open_at.handle_state;
 
-    if (request->open_at.pnfs_set_attr) {
-        request->open_at.set_attr = request->open_at.pnfs_set_attr;
-        request->open_at.flags    = request->open_at.pnfs_flags;
+    if (request->open_at.deferred_set_attr) {
+        request->open_at.set_attr = request->open_at.deferred_set_attr;
+        /* Restore the deferred mutation, preserving a backend's metadata-only
+         * fallback classification for the returned descriptor. */
+        request->open_at.flags |= request->open_at.original_flags & CHIMERA_VFS_OPEN_TRUNCATE;
     }
 
     /* Backends that persist handle-state atomically (CAP_ATOMIC_HANDLE_STATE)
@@ -581,25 +587,27 @@ chimera_vfs_open_at_hs_dispatch(
         return;
     }
 
-    request->opcode                = CHIMERA_VFS_OP_OPEN_AT;
-    request->complete              = chimera_vfs_open_complete;
-    request->open_at.handle        = handle;
-    request->open_at.name          = name;
-    request->open_at.namelen       = namelen;
-    request->open_at.name_hash     = chimera_vfs_hash(name, namelen);
-    request->open_at.flags         = flags;
-    request->open_at.set_attr      = set_attr;
-    request->open_at.handle_state  = handle_state;
-    request->open_at.r_created     = 0;
-    request->open_at.pnfs_set_attr = NULL;
+    request->opcode                    = CHIMERA_VFS_OP_OPEN_AT;
+    request->complete                  = chimera_vfs_open_complete;
+    request->open_at.handle            = handle;
+    request->open_at.name              = name;
+    request->open_at.namelen           = namelen;
+    request->open_at.name_hash         = chimera_vfs_hash(name, namelen);
+    request->open_at.flags             = flags;
+    request->open_at.set_attr          = set_attr;
+    request->open_at.handle_state      = handle_state;
+    request->open_at.r_created         = 0;
+    request->open_at.deferred_set_attr = NULL;
 
-    if (chimera_vfs_pnfs_io_possible(thread, handle) &&
-        ((flags & CHIMERA_VFS_OPEN_TRUNCATE) ||
-         ((flags & CHIMERA_VFS_OPEN_CREATE) &&
-          (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
-          set_attr->va_size == 0))) {
-        request->open_at.pnfs_set_attr          = set_attr;
-        request->open_at.pnfs_flags             = flags;
+    /* CREATE's size is a mutation even for inferred/stateless opens. Defer it
+     * on every backend so the setattr gate authorizes the existing inode first.
+     * pNFS O_TRUNC additionally needs to resize the redirected backing file. */
+    if (((flags & CHIMERA_VFS_OPEN_CREATE) &&
+         (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) ||
+        (chimera_vfs_pnfs_io_possible(thread, handle) &&
+         (flags & CHIMERA_VFS_OPEN_TRUNCATE))) {
+        request->open_at.deferred_set_attr      = set_attr;
+        request->open_at.original_flags         = flags;
         request->io_pnfs_sync_attr              = *set_attr;
         request->io_pnfs_sync_attr.va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
         request->open_at.set_attr               = &request->io_pnfs_sync_attr;

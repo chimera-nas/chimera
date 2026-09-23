@@ -507,23 +507,13 @@ endforeach()
 #
 # Each cell above is registered with a STRICT_OUT_DIR, which generates a second
 # corpus from the SAME config with every configured deviation forced off.
-# These REPORTING tests measure model-configured conformance debt.  They use
-# the same replayer and retain its harness allowances, so inspect the allowance
-# summaries too; a green strict replay does not prove those exceptions retired.
-#
-# devliveness.py is the other half, and it IS a gate: it fails when a config
-# enables a deviation its corpus never records taking.  This verifies corpus
-# coverage of configured deviations; retiring an implementation allowance
-# still requires replay without that allowance.
+# Strict twins disable model-configured deviations and gate in quick. They
+# retain the replayer's harness allowances, so inspect those summaries too:
+# a passing strict replay does not prove the allowances have been retired.
+# Known conformance failures need narrow expectations, never a blanket
+# expected-failure property that could also accept unrelated failures.
 set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-
-# The strict replays are REPORTING, so they belong in the extended tier: the
-# quick tier is what the merge queue gates on and a known-open deviation must
-# not fail it.  The tier is decided by CHIMERA_TEST_TIER at the point of
-# add_test() (see the wrapper in the top-level CMakeLists.txt), so it is
-# flipped around these registrations and put back for the liveness gate below.
-set(CHIMERA_TEST_TIER extended)
 
 # name -> (strict trace dir, replay backend, config)
 foreach(cell "memfs|${posix_memfs_strict}|memfs"
@@ -541,13 +531,10 @@ foreach(cell "memfs|${posix_memfs_strict}|memfs"
                 --trace-dir ${sdir})
     set_tests_properties(chimera/posix/mbt/strict_${sname} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_strict_${sname}"
-        LABELS "quint;posix_mbt;strict;extended"
+        LABELS "quint;posix_mbt;strict"
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
 endforeach()
-
-# Back to the quick tier: the liveness gate IS a gate.
-set(CHIMERA_TEST_TIER quick)
 
 # The liveness gate, one per cell, over the NON-strict corpus each cell's
 # replay ctests actually run.

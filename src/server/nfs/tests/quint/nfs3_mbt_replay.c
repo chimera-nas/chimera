@@ -34,6 +34,7 @@
 #include <jansson.h>
 
 #include "nfs3_mbt_common.h"
+#include "vfs/vfs_pnfs.h"
 #include "common/mbt_trace_dir.h"
 #include "common/mbt_watchdog.h"
 
@@ -638,6 +639,59 @@ op_create(
 } /* op_create */
 
 static void
+op_create_truncate(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_fs,
+    struct mism   *m)
+{
+    const struct mbt_fh *dir  = real_fh(o, op_i64(op, "dir"), m);
+    struct CREATE3args   args = { 0 };
+    struct mbt_result   *res;
+    const char          *name = op_str(op, "name");
+
+    if (!dir) {
+        return;
+    }
+    mbt_call_begin(o->env);
+    args.where.dir.data.data = (void *) dir->data;
+    args.where.dir.data.len  = dir->len;
+    args.where.name.str      = (char *) name;
+    args.where.name.len      = strlen(name);
+    args.how.mode            = UNCHECKED;
+    mbt_sattr3_default(&args.how.obj_attributes);
+    args.how.obj_attributes.size.set_it = 1;
+    args.how.obj_attributes.size.size   = op_i64(op, "sizeBlocks") * o->block_size;
+    o->env->nfs_v3.send_call_NFSPROC3_CREATE(&o->env->nfs_v3.rpc2,
+                                             o->env->evpl, o->env->nfs_conn, &o->env->cred, &args,
+                                             0, 0, NULL, 0, 0, mbt_create_cb, o->env);
+    mbt_call_wait(o->env);
+    res = &o->env->res;
+    uint32_t status = res->status;
+    if (check_status(o, op, "OCreateTruncate", op_i64(op, "status"), res->status, m)) {
+        int64_t obj = op_i64(op, "obj");
+        if (res->status == NFS3_OK) {
+            learn_fh(o, obj, &res->obj_fh, m);
+            if (res->obj_attrs.has) {
+                check_attrs(o, obj, &res->obj_attrs, post_fs, m, "obj_attrs");
+            }
+        }
+        /* Observe denied requests too: a matching error must not hide a
+         * size or mode change that happened before authorization. */
+        const struct mbt_fh *fh = real_fh(o, obj, m);
+        if (fh) {
+            res = mbt_getattr(o->env, fh);
+            if (res->status != NFS3_OK) {
+                mism_add(m, "CREATE size observation: GETATTR returned %u", res->status);
+                return;
+            }
+            check_attrs(o, obj, &res->obj_attrs, post_fs, m, "GETATTR after CREATE");
+        }
+    }
+    o->env->res.status = status;
+} /* op_create_truncate */
+
+static void
 op_setattr(
     struct oracle *o,
     json_t        *op,
@@ -676,11 +730,21 @@ op_setattr(
                       size_blk < 0 ? -1
                                    : (int64_t) size_blk * o->block_size,
                       guardp);
-    if (check_status(o, op, "OSetattr", expected, res->status, m) &&
-        expected == NFS3_OK) {
-        check_attrs(o, op_i64(op, "obj"), &res->wcc_after, post_fs, m,
-                    "wcc.after");
+    uint32_t status = res->status;
+    if (check_status(o, op, "OSetattr", expected, res->status, m)) {
+        if (res->status == NFS3_OK && res->wcc_after.has) {
+            check_attrs(o, op_i64(op, "obj"), &res->wcc_after, post_fs, m,
+                        "wcc.after");
+        }
+        res = mbt_getattr(o->env, fh);
+        if (res->status != NFS3_OK) {
+            mism_add(m, "SETATTR observation: GETATTR returned %u", res->status);
+            return;
+        }
+        check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
+                    "GETATTR after SETATTR");
     }
+    o->env->res.status = status;
 } /* op_setattr */
 
 static void
@@ -1226,8 +1290,20 @@ op_write(
                      "%" PRId64, res->committed, stable);
         }
         check_verf(o, res->verf, "write", m);
-        check_attrs(o, op_i64(op, "file"), &res->wcc_after, post_fs, m,
-                    "wcc.after");
+        if (res->wcc_after.has) {
+            check_attrs(o, op_i64(op, "file"), &res->wcc_after, post_fs, m,
+                        "wcc.after");
+        } else {
+            /* Redirected writes may omit WCC attrs. Check the visible MDS
+            * state with a separate observation instead of skipping it. */
+            res = mbt_getattr(o->env, fh);
+            if (res->status != NFS3_OK) {
+                mism_add(m, "WRITE attribute observation: GETATTR returned %u", res->status);
+                return;
+            }
+            check_attrs(o, op_i64(op, "file"), &res->obj_attrs, post_fs, m,
+                        "GETATTR after WRITE");
+        }
     }
 } /* op_write */
 
@@ -1290,6 +1366,16 @@ op_read(
                              o->scratch[off], res->data[off]);
                     break;
                 }
+            }
+        }
+        /* READ's post-op attrs are optional. A redirected pNFS read omits
+         * them rather than returning the DS inode's identity. Observe the MDS
+         * explicitly, after checking data (the next RPC reuses res storage). */
+        if (!res->obj_attrs.has) {
+            res = mbt_getattr(o->env, fh);
+            if (res->status != NFS3_OK) {
+                mism_add(m, "READ attribute observation: GETATTR returned %u", res->status);
+                return;
             }
         }
         check_attrs(o, op_i64(op, "file"), &res->obj_attrs, post_fs, m,
@@ -1358,6 +1444,7 @@ static const struct {
     { "OSetattr",      op_setattr      },
     { "OAccess",       op_access       },
     { "OCreate",       op_create       },
+    { "OCreateTruncate", op_create_truncate },
     { "OMkdir",        op_mkdir        },
     { "OSymlink",      op_symlink      },
     { "OReadlink",     op_readlink     },
@@ -1790,6 +1877,8 @@ main(
           'R'                                                                           },
         { "sec",                required_argument,                0,
           'S'                                                                           },
+        { "pnfs",               required_argument,                0,
+          'F'                                                             },
         { "pnfs-proxy",         no_argument,                      0,
           'P'                                                                           },
         { 0,                    0,                                0,                               0 },
@@ -1804,6 +1893,7 @@ main(
     const char          *backend            = "memfs";
     int                  rdma               = 0;
     int                  pnfs_proxy         = 0;
+    const char          *pnfs               = NULL;
     int                  failures           = 0;
     int                  c;
     int                  i;
@@ -1833,7 +1923,7 @@ main(
      * error, and skips them here (the 't'/'D'/'X' cases). */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:RPS:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:RPS:F:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1866,6 +1956,14 @@ main(
                     mbt_free_traces(traces, ntraces);
                     return 2;
                 }
+                break;
+            case 'F':
+                if (strcmp(optarg, "local") && strcmp(optarg, "remote")) {
+                    fprintf(stderr, "--pnfs expects local or remote\n");
+                    mbt_free_traces(traces, ntraces);
+                    return 2;
+                }
+                pnfs = optarg;
                 break;
             case 'P':
                 /* Replay through the in-process pNFS PROXY tier (see the
@@ -1917,7 +2015,23 @@ main(
             opts.pnfs_ds_version        = 3;
             opts.pnfs_ds_advertise_rdma = 1;
         }
+        if (pnfs && strcmp(pnfs, "remote") == 0) {
+            opts.pnfs_num_ds     = 2;
+            opts.pnfs_ds_version = 3;
+        }
         mbt_env_open_opts(&env, &opts);
+        if (pnfs && strcmp(pnfs, "local") == 0) {
+            struct chimera_vfs *vfs = chimera_server_get_vfs(env.server);
+            mbt_env_fs_setup(&env, "localds");
+            chimera_vfs_pnfs_set_enabled(vfs, 1);
+            chimera_vfs_pnfs_add_device(vfs, "tcp", "127.0.0.1.8.1", NULL, "/localds", 3, 0);
+            if (chimera_server_pnfs_resolve(env.server) != 0) {
+                fprintf(stderr, "failed to resolve local pNFS fixture\n");
+                mbt_env_stop(&env);
+                mbt_free_traces(traces, ntraces);
+                return 1;
+            }
+        }
     }
 
     for (i = 0; i < ntraces; i++) {

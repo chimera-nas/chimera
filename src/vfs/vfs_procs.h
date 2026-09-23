@@ -362,6 +362,20 @@ chimera_vfs_fsetattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data);
 
+/* Descriptor mutation with an explicit cache owner; the actor is copied before
+* return and exempts that owner and its shared lease from namespace recalls. */
+void
+chimera_vfs_fsetattr_owned(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data,
+    const struct chimera_claim_actor *actor);
+
 void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,

@@ -11,7 +11,7 @@
 #include <string.h>
 #include "common/thread.h"
 #include <time.h>
-#include "common/rcu.h"
+#include "common/chimera_rcu.h"
 #include <xxhash.h>
 
 #include "vfs/sdk/vfs_cred.h"
@@ -37,7 +37,7 @@ struct chimera_s3_cred {
     uint32_t                gid;
     uint32_t                ngids;
     uint32_t                gids[CHIMERA_VFS_CRED_MAX_GIDS];
-    struct rcu_head         rcu;
+    chimera_rcu_head        rcu;
     struct chimera_s3_cred *next;
     /* Canonical user id and display name reported as the <Owner> of an object
      * or bucket.  S3 identifies principals by these opaque strings, which have
@@ -55,6 +55,7 @@ struct chimera_s3_cred_cache_bucket {
 };
 
 struct chimera_s3_cred_cache {
+    struct chimera_rcu_domain            rcu;
     int                                  num_buckets;
     int                                  ttl;
     int                                  num_credentials;
@@ -91,9 +92,9 @@ chimera_s3_cred_cache_hash(
 } // chimera_s3_cred_cache_hash
 
 static void
-chimera_s3_cred_cache_rcu_free(struct rcu_head *head)
+chimera_s3_cred_cache_rcu_free(chimera_rcu_head *head)
 {
-    struct chimera_s3_cred *cred = caa_container_of(
+    struct chimera_s3_cred *cred = container_of(
         head, struct chimera_s3_cred, rcu);
 
     free(cred);
@@ -110,20 +111,20 @@ chimera_s3_cred_cache_remove_locked(
     pp = &cache->buckets[bucket_idx].head;
     while (*pp) {
         if (*pp == cred) {
-            rcu_assign_pointer(*pp, cred->next);
+            chimera_rcu_assign(*pp, cred->next);
             chimera_atomic_sub_fetch(&cache->num_credentials, 1, CHIMERA_MEMORY_RELAXED);
             break;
         }
         pp = &(*pp)->next;
     }
 
-    call_rcu(&cred->rcu, chimera_s3_cred_cache_rcu_free);
+    chimera_rcu_pend(&cred->rcu, chimera_s3_cred_cache_rcu_free);
 } // chimera_s3_cred_cache_remove_locked
 
 /* One sweep pass: remove every unpinned cred whose expiration is at or
- * before the cache's (synthetic-offset-aware) now.  Pure writer
- * (rcu_assign + call_rcu) under the per-bucket locks; callable from the
- * expiry thread or synchronously from chimera_s3_cred_cache_advance(). */
+ * before the cache's (synthetic-offset-aware) now.  Pure writer, inside a
+ * publish region on the cache domain and under the per-bucket locks; callable
+ * from the expiry thread or synchronously from chimera_s3_cred_cache_advance(). */
 static inline void
 chimera_s3_cred_cache_sweep(struct chimera_s3_cred_cache *cache)
 {
@@ -134,6 +135,7 @@ chimera_s3_cred_cache_sweep(struct chimera_s3_cred_cache *cache)
     chimera_s3_cred_cache_now(cache, &ts);
 
     for (i = 0; i < cache->num_buckets; i++) {
+        chimera_rcu_publish_begin(&cache->rcu);
         evpl_mutex_lock(&cache->buckets[i].lock);
 
         cred = cache->buckets[i].head;
@@ -150,6 +152,7 @@ chimera_s3_cred_cache_sweep(struct chimera_s3_cred_cache *cache)
         }
 
         evpl_mutex_unlock(&cache->buckets[i].lock);
+        chimera_rcu_publish_end(&cache->rcu);
     }
 } // chimera_s3_cred_cache_sweep
 
@@ -213,6 +216,7 @@ chimera_s3_cred_cache_create(
         evpl_mutex_init(&cache->buckets[i].lock, NULL);
     }
 
+    chimera_rcu_domain_init(&cache->rcu);
     evpl_mutex_init(&cache->expiry_lock, NULL);
     evpl_cond_init(&cache->expiry_cond, NULL);
 
@@ -235,7 +239,7 @@ chimera_s3_cred_cache_destroy(struct chimera_s3_cred_cache *cache)
 
     evpl_native_thread_join(cache->expiry_thread, NULL);
 
-    urcu_qsbr_barrier();
+    chimera_rcu_barrier();
 
     for (i = 0; i < cache->num_buckets; i++) {
         cred = cache->buckets[i].head;
@@ -250,6 +254,7 @@ chimera_s3_cred_cache_destroy(struct chimera_s3_cred_cache *cache)
     free(cache->buckets);
 
     evpl_mutex_destroy(&cache->expiry_lock);
+    chimera_rcu_domain_destroy(&cache->rcu);
     evpl_cond_destroy(&cache->expiry_cond);
 
     free(cache);
@@ -309,6 +314,7 @@ chimera_s3_cred_cache_add(
         cred->expiration.tv_nsec = now.tv_nsec;
     }
 
+    chimera_rcu_publish_begin(&cache->rcu);
     evpl_mutex_lock(&cache->buckets[bucket_idx].lock);
 
     /* Check for existing entry with same access_key and remove it */
@@ -323,10 +329,11 @@ chimera_s3_cred_cache_add(
 
     /* Insert into chain */
     cred->next = cache->buckets[bucket_idx].head;
-    rcu_assign_pointer(cache->buckets[bucket_idx].head, cred);
+    chimera_rcu_assign(cache->buckets[bucket_idx].head, cred);
     chimera_atomic_add_fetch(&cache->num_credentials, 1, CHIMERA_MEMORY_RELAXED);
 
     evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
+    chimera_rcu_publish_end(&cache->rcu);
 
     return 0;
 } // chimera_s3_cred_cache_add
@@ -344,6 +351,7 @@ chimera_s3_cred_cache_remove(
     bucket_idx     = chimera_s3_cred_cache_hash(access_key, access_key_len,
                                                 cache->num_buckets);
 
+    chimera_rcu_publish_begin(&cache->rcu);
     evpl_mutex_lock(&cache->buckets[bucket_idx].lock);
 
     cred = cache->buckets[bucket_idx].head;
@@ -351,15 +359,21 @@ chimera_s3_cred_cache_remove(
         if (strcmp(cred->access_key, access_key) == 0) {
             chimera_s3_cred_cache_remove_locked(cache, cred, bucket_idx);
             evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
+            chimera_rcu_publish_end(&cache->rcu);
             return 0;
         }
         cred = cred->next;
     }
 
     evpl_mutex_unlock(&cache->buckets[bucket_idx].lock);
+    chimera_rcu_publish_end(&cache->rcu);
     return -1;
 } // chimera_s3_cred_cache_remove
 
+/*
+ * Caller must bracket this call, and any use of what it returns, with
+ * chimera_rcu_read_lock(&cache->rcu) / chimera_rcu_read_unlock(&cache->rcu).
+ */
 static inline const struct chimera_s3_cred *
 chimera_s3_cred_cache_lookup(
     struct chimera_s3_cred_cache *cache,
@@ -372,13 +386,13 @@ chimera_s3_cred_cache_lookup(
     bucket_idx = chimera_s3_cred_cache_hash(access_key, access_key_len,
                                             cache->num_buckets);
 
-    cred = rcu_dereference(cache->buckets[bucket_idx].head);
+    cred = chimera_rcu_deref(cache->buckets[bucket_idx].head);
     while (cred) {
         if (cred->access_key_len == access_key_len &&
             memcmp(cred->access_key, access_key, access_key_len) == 0) {
             return cred;
         }
-        cred = rcu_dereference(cred->next);
+        cred = chimera_rcu_deref(cred->next);
     }
 
     return NULL;

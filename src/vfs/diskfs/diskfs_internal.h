@@ -53,7 +53,7 @@
 
 #include <utlist.h>
 
-#include "common/rcu.h"
+#include "common/chimera_rcu.h"
 
 #include <xxhash.h>     /* XXH_INLINE_ALL set in CMakeLists; header-only */
 
@@ -1693,7 +1693,7 @@ struct diskfs_fs {
     uint32_t              root_fhlen;
     struct diskfs_fs     *prev;
     struct diskfs_fs     *next;
-    struct rcu_head       rcu;
+    chimera_rcu_head      rcu;
 };
 
 

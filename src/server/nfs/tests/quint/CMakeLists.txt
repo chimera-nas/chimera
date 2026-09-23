@@ -74,12 +74,10 @@ foreach(backend memfs diskfs cairn)
     if(backend STREQUAL "cairn" AND NOT CAIRN_ENABLED)
         continue()
     endif()
-    foreach(topology local remote)
-        add_test(NAME chimera/server/nfs/pnfs/io_${backend}_${topology}
-            COMMAND $<TARGET_FILE:nfs_pnfs_io_probe> ${backend} ${topology})
-        set_tests_properties(chimera/server/nfs/pnfs/io_${backend}_${topology} PROPERTIES
-            LABELS "quint;nfs3_mbt;pnfs;${backend}" TIMEOUT 90)
-    endforeach()
+    add_test(NAME chimera/server/nfs/pnfs/backing_failure_${backend}
+        COMMAND $<TARGET_FILE:nfs_pnfs_io_probe> ${backend})
+    set_tests_properties(chimera/server/nfs/pnfs/backing_failure_${backend} PROPERTIES
+        LABELS "functional;fault_injection;pnfs;${backend}" TIMEOUT 90)
 endforeach()
 
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
@@ -146,7 +144,7 @@ add_test(NAME chimera/server/nfs/mbt/deviation_probe_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b memfs)
 set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_deviation_probe_memfs"
-    LABELS "quint;nfs3_mbt;memfs"
+    LABELS "functional;probe;nfs3_mbt;memfs"
     TIMEOUT 60)
 
 # The same probe against the on-disk backends.  Most of what it guards is in
@@ -157,14 +155,14 @@ set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
 add_test(NAME chimera/server/nfs/mbt/deviation_probe_diskfs
     COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b diskfs)
 set_tests_properties(chimera/server/nfs/mbt/deviation_probe_diskfs PROPERTIES
-    LABELS "quint;nfs3_mbt;diskfs"
+    LABELS "functional;probe;nfs3_mbt;diskfs"
     TIMEOUT 60)
 
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt/deviation_probe_cairn
         COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b cairn)
     set_tests_properties(chimera/server/nfs/mbt/deviation_probe_cairn PROPERTIES
-        LABELS "quint;nfs3_mbt;cairn"
+        LABELS "functional;probe;nfs3_mbt;cairn"
         TIMEOUT 60)
 endif()
 
@@ -184,7 +182,7 @@ if(CHIMERA_LINUX)
         COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b linux)
     set_tests_properties(chimera/server/nfs/mbt/deviation_probe_linux PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_probe_linux"
-        LABELS "quint;nfs3_mbt;linux"
+        LABELS "functional;probe;nfs3_mbt;linux"
         SKIP_RETURN_CODE 77
         TIMEOUT 60)
 endif()
@@ -194,7 +192,7 @@ if(CHIMERA_VFS_IO_URING)
         COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b io_uring)
     set_tests_properties(chimera/server/nfs/mbt/deviation_probe_io_uring PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_probe_io_uring"
-        LABELS "quint;nfs3_mbt;io_uring"
+        LABELS "functional;probe;nfs3_mbt;io_uring"
         SKIP_RETURN_CODE 77
         TIMEOUT 60)
 endif()
@@ -206,7 +204,7 @@ add_test(NAME chimera/server/nfs/mbtaux/probe_memfs
     COMMAND $<TARGET_FILE:nfs_aux_probe>)
 set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs"
-    LABELS "quint;nfsaux_mbt;memfs"
+    LABELS "functional;probe;nfsaux_mbt;memfs"
     TIMEOUT 120)
 
 # Duplicate-request-cache ground truth: pins the properties the nfsdrc model
@@ -240,7 +238,7 @@ foreach(dback memfs diskfs cairn linux io_uring)
         COMMAND $<TARGET_FILE:nfs_drc_probe> ${_drc_probe_args})
     set_tests_properties(chimera/server/nfs/mbtdrc/probe_${dback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_${dback}"
-        LABELS "quint;nfsdrc_mbt;${dback}"
+        LABELS "functional;probe;nfsdrc_mbt;${dback}"
         SKIP_RETURN_CODE 77
         TIMEOUT 120)
 
@@ -255,7 +253,7 @@ foreach(dback memfs diskfs cairn linux io_uring)
         COMMAND $<TARGET_FILE:nfs_drc_probe> ${_drc_probe_args})
     set_tests_properties(chimera/server/nfs/mbtdrc/probe_${dback}_reclaim_race PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_${dback}_reclaim_race;CHIMERA_CLOSE_SWEEP_MIN_AGE_MS=0;CHIMERA_CLOSE_SWEEP_INTERVAL_MS=10"
-        LABELS "quint;nfsdrc_mbt;${dback}"
+        LABELS "functional;probe;nfsdrc_mbt;${dback}"
         SKIP_RETURN_CODE 77
         TIMEOUT 120)
 endforeach()
@@ -266,7 +264,7 @@ add_test(NAME chimera/server/nfs/mbt4/deleg_probe_memfs
     COMMAND $<TARGET_FILE:nfs4_deleg_probe>)
 set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs"
-    LABELS "quint;nfs4_mbt;multiproto;memfs"
+    LABELS "functional;probe;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
 
 # Named-attribute (OPENATTR) probe: pins the full NFSv4 named-attribute
@@ -278,7 +276,7 @@ add_test(NAME chimera/server/nfs/mbt4/named_attr_probe_memfs
     COMMAND $<TARGET_FILE:nfs4_named_attr_probe>)
 set_tests_properties(chimera/server/nfs/mbt4/named_attr_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_named_attr_probe_memfs"
-    LABELS "quint;nfs4_mbt;multiproto;memfs"
+    LABELS "functional;probe;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
 # OPEN authorization probe: pins the status of the OPEN operation itself for a
 # non-root caller.  A kernel NFS client defers write-open authorization to the
@@ -323,7 +321,7 @@ foreach(sec krb5 krb5i krb5p)
     set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs_${sec}
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_deviation_probe_memfs_${sec}"
-        LABELS "quint;nfs3_mbt;memfs;gss"
+        LABELS "functional;probe;nfs3_mbt;memfs;gss"
         SKIP_RETURN_CODE 77
         TIMEOUT 120)
 
@@ -333,7 +331,7 @@ foreach(sec krb5 krb5i krb5p)
     set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs_${sec}
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs_${sec}"
-        LABELS "quint;nfsaux_mbt;memfs;gss"
+        LABELS "functional;probe;nfsaux_mbt;memfs;gss"
         SKIP_RETURN_CODE 77
         TIMEOUT 180)
 
@@ -343,7 +341,7 @@ foreach(sec krb5 krb5i krb5p)
     set_tests_properties(chimera/server/nfs/mbtdrc/probe_memfs_${sec}
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_memfs_${sec}"
-        LABELS "quint;nfsdrc_mbt;memfs;gss"
+        LABELS "functional;probe;nfsdrc_mbt;memfs;gss"
         SKIP_RETURN_CODE 77
         TIMEOUT 180)
 
@@ -353,7 +351,7 @@ foreach(sec krb5 krb5i krb5p)
     set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs_${sec}
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs_${sec}"
-        LABELS "quint;nfs4_mbt;multiproto;memfs;gss"
+        LABELS "functional;probe;nfs4_mbt;multiproto;memfs;gss"
         SKIP_RETURN_CODE 77
         TIMEOUT 150)
 endforeach()
@@ -390,6 +388,22 @@ specs_corpus(NAME           nfs3/ref
              CONFIG         ${CMAKE_CURRENT_SOURCE_DIR}/configs/nfs3_ref.json
              OUT_DIR        NFS3_TRACES
              STRICT_OUT_DIR NFS3_STRICT_TRACES)
+
+# The same protocol model runs over direct storage, a local DS, and two
+# remote DS servers. Topology belongs to the fixture; all expected statuses,
+# data and attributes still come from the model.
+foreach(backend memfs diskfs cairn)
+    if(backend STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    foreach(topology local remote)
+        add_test(NAME chimera/server/nfs/mbt/pnfs_${backend}_${topology}
+            COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
+                    --backend ${backend} --pnfs ${topology})
+        set_tests_properties(chimera/server/nfs/mbt/pnfs_${backend}_${topology}
+            PROPERTIES LABELS "quint;nfs3_mbt;pnfs;${backend}" TIMEOUT 300)
+    endforeach()
+endforeach()
 
 # One batched replay per suite: a single replayer process opens the server +
 # rpc2 client once and replays every trace in the corpus back-to-back, standing
@@ -527,8 +541,7 @@ set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
 # deviation registry could never do: a registry entry keeps forgiving after the
 # bug is fixed, and forgives the same divergence somewhere it was never meant
 # to.
-# Reporting, not gating, so it goes in the extended tier.
-set(CHIMERA_TEST_TIER extended)
+# Strict replays run and gate in quick alongside the configured corpus.
 
 add_test(NAME chimera/server/nfs/mbt/strict_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_STRICT_TRACES})
@@ -536,8 +549,6 @@ set_tests_properties(chimera/server/nfs/mbt/strict_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_strict_memfs"
     LABELS "quint;nfs3_mbt;memfs;strict"
     TIMEOUT 300)
-
-set(CHIMERA_TEST_TIER quick)
 
 # The liveness gate: a cell may not enable a deviation its own corpus never
 # exercises.  Either the deviation is dead (retire it from the config and
@@ -1037,18 +1048,14 @@ endif()
 
 # ---- the NFSv4 deviation machinery ----------------------------------------
 #
-# The strict twins: each cell's config regenerated with DEVS = Set(), so every
-# expectation is the RFC-correct answer rather than chimera's.  These are
-# EXPECTED to fail, and their output is the conformance debt -- re-measured on
-# every run instead of remembered in a registry.  That is the whole point: a
-# registry entry keeps forgiving after the bug behind it is fixed, and keeps
-# forgiving the same divergence somewhere it was never meant to.  Reporting,
-# not gating, so they live in the extended tier.
+# The strict twins regenerate each cell with DEVS = Set(), so every
+# expectation is the RFC-correct answer. They run and gate in quick. A known
+# conformance failure needs an explicit, narrow expectation; it must not hide
+# the entire replay in extended or excuse unrelated failures.
 #
 # One test per cell rather than one over all of them, and deliberately so: the
 # order dependence documented above NFS4_TRACE_ARGS only bites when several
 # minor versions share a replayer process, and a per-cell test cannot hit it.
-set(CHIMERA_TEST_TIER extended)
 
 foreach(scell memfs40 memfs41 memfs41_root memfs42)
     string(TOUPPER ${scell} SCELL)
@@ -1085,8 +1092,6 @@ foreach(scell pnfs41 pnfs42)
         TIMEOUT 300)
 endforeach()
 
-set(CHIMERA_TEST_TIER quick)
-
 # The liveness gate, one per cell: a cell may not enable a deviation its own
 # corpus never exercises.  Either the deviation is dead -- retire it from the
 # config and delete its branch in the model -- or the generator quietly lost
@@ -1109,4 +1114,29 @@ if(Python3_FOUND)
     endforeach()
 else()
     message(STATUS "nfs4 MBT deviation-liveness gates skipped (no python3)")
+endif()
+
+# Generated behavior coverage is a separate gate from executing the corpus.
+# A generated trace alone is never evidence that the server passed it.
+if(Python3_FOUND)
+    add_test(NAME chimera/server/nfs/mbt/coverage_nfs3
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/ext/specs/quint/nfs/coverage.py
+                --glob "${NFS3_TRACES}/*.itf.json" --fail-on-starved)
+    foreach(family nfsaux nfsdrc)
+        add_test(NAME chimera/server/nfs/mbt/coverage_${family}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/ext/specs/quint/${family}/coverage.py
+                    ${SPECS_CORPUS_ROOT}/${family}/ref)
+    endforeach()
+    set_tests_properties(chimera/server/nfs/mbt/coverage_nfs3
+        chimera/server/nfs/mbt/coverage_nfsaux chimera/server/nfs/mbt/coverage_nfsdrc
+        PROPERTIES LABELS "quint;model_coverage" TIMEOUT 120)
+endif()
+
+if(Python3_FOUND)
+    add_test(NAME chimera/server/nfs/mbt/coverage_nfs4
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/ext/specs/quint/nfs/coverage.py
+            --proto 4 --glob "${SPECS_CORPUS_ROOT}/nfs4/*/*.itf.json"
+            --expect ${CMAKE_SOURCE_DIR}/ext/specs/quint/nfs/nfs4_coverage_baseline.txt)
+    set_tests_properties(chimera/server/nfs/mbt/coverage_nfs4 PROPERTIES
+        LABELS "quint;model_coverage" TIMEOUT 120)
 endif()

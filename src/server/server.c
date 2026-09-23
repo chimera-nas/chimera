@@ -431,7 +431,8 @@ chimera_server_config_init(void)
      * the root cause of the intermittent lockf/fcntl NFS3 test flakes.  Default
      * to a small cap (matching the chimera client default) so the common case
      * stays well clear of the thread-exhaustion abort; a real server with a
-     * heavy workload can raise it via common.rcu_reclaim_threads. */
+     * heavy workload can raise it via common.rcu_reclaim_threads.  Without
+     * liburcu there is no such pool and the setting is inert. */
     config->rcu_reclaim_threads = 4;
 
     /* Default NFSv4.1 fore-channel session slots (server cap on the number

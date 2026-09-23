@@ -41,7 +41,6 @@
  */
 
 #include "smb2_mbt_common.h"
-#include "smb2_mbt_deviations.h"
 #include "common/mbt_trace_dir.h"
 
 #include <stdarg.h>
@@ -79,6 +78,7 @@ static uint8_t           g_wire_fid[MAX_FID][16];
  * be byte-identical, which is the exactly-once oracle MS-SMB2 3.3.5.9.10 asks
  * for stated as an assertion rather than a status comparison. */
 static int               g_fid_known[MAX_FID];
+static size_t            g_state_index;
 /* Which connection owns each model FileId: a break notification for a handle
  * is pushed to the HOLDER's connection, and the acknowledgment must go back on
  * that same connection, so the fid -> conn binding is as load-bearing as the
@@ -111,11 +111,14 @@ static uint64_t    g_notify_cancelled[MAX_FID];
 static json_t     *g_post_sdb;
 static const char *g_trace;
 static int         g_nmismatch;
-/* Traces this replayer declined to drive, and why (smb2_mbt_trace_limits). */
-static int         g_nskipped;
 /* Set when the model and chimera have parted ways and the rest of this trace
  * would report consequences rather than findings. */
 static int         g_abort_trace;
+static int         g_isolated_fixture;
+static int         g_complete_create;
+static int64_t     g_request_tag;
+static int64_t     g_pending_create_tag;
+static int         g_create_outstanding;
 
 /* Settle every server thread so the break notifications a command owes have
  * been delivered -- and so that "no break was sent" is a fact rather than a
@@ -197,12 +200,13 @@ mism(
 {
     va_list ap;
 
-    printf("MISMATCH [%s] ", g_trace);
+    printf("MISMATCH [%s state %zu] ", g_trace, g_state_index);
     va_start(ap, fmt);
     vprintf(fmt, ap);
     va_end(ap);
     printf("\n");
     g_nmismatch++;
+    g_abort_trace = 1;
 } /* mism */
 
 /* Look one key up in an ITF map ({"#map": [[k, v], ...]}). */
@@ -472,17 +476,20 @@ jset(json_t *o)
     return o;
 } /* jset */
 
-/* Model lease key (a small int) -> the 16-byte wire LeaseKey.  Any injective
- * map will do; the server only ever compares keys for equality. */
+/* The model names leases by (client, symbol). Preserve that identity on the
+ * wire; a reconnect retains guid_tag. Deliberate equal-key cross-client
+ * interoperability cases remain covered by the lease-identity tests. */
 static void
 lease_key_wire(
-    int64_t  k,
-    uint8_t *out)
+    struct smb2_conn *c,
+    int64_t           k,
+    uint8_t          *out)
 {
     memset(out, 0, 16);
     out[0] = 'L';
     out[1] = 'K';
     out[2] = (uint8_t) k;
+    p64(out, 8, (uint64_t) c->guid_tag);
 } /* lease_key_wire */
 
 /* Model LeaseState record -> wire lease bits (R=0x01, H=0x02, W=0x04). */
@@ -524,6 +531,7 @@ oplock_level_wire(const char *tag)
  * corpus. */
 static const struct smb2_oplock_req *
 oplock_req_of(
+    struct smb2_conn       *c,
     json_t                 *opl,
     struct smb2_oplock_req *req)
 {
@@ -537,7 +545,7 @@ oplock_req_of(
         json_t *v = jval(opl);
 
         req->is_lease = 1;
-        lease_key_wire(jfield(v, "key"), req->lease_key);
+        lease_key_wire(c, jfield(v, "key"), req->lease_key);
         req->lease_state = (jbool(v, "r") ? SMB2_LEASE_READ : 0) |
             (jbool(v, "h") ? SMB2_LEASE_HANDLE : 0) |
             (jbool(v, "w") ? SMB2_LEASE_WRITE : 0);
@@ -681,7 +689,7 @@ check_breaks(
                  what, (long long) fid);
             continue;
         }
-        lease_key_wire(jfield(b, "key"), key);
+        lease_key_wire(hc, jfield(b, "key"), key);
 
         for (int k = 0; k < hc->nbrk; k++) {
             struct smb2_break *q = &hc->brk[k];
@@ -754,8 +762,11 @@ check_no_stray_breaks(const char *what)
         struct smb2_conn *c = g_env.conns[i];
 
         while (c->nbrk > 0) {
-            mism("%s: unpredicted %s break notification on connection %d", what,
-                 c->brk[0].is_lease ? "LEASE" : "OPLOCK", i);
+            mism("%s: unpredicted %s break notification on connection %d "
+                 "(state %u -> %u, level %u, epoch %u)", what,
+                 c->brk[0].is_lease ? "LEASE" : "OPLOCK", i,
+                 c->brk[0].cur_state, c->brk[0].new_state,
+                 c->brk[0].oplock_level, c->brk[0].new_epoch);
             for (int k = 1; k < c->nbrk; k++) {
                 c->brk[k - 1] = c->brk[k];
             }
@@ -1092,7 +1103,7 @@ do_create(
     struct smb2_create_out         out;
     struct smb2_oplock_req         oreq;
     const struct smb2_oplock_req  *reqp =
-        oplock_req_of(json_object_get(v, "oplock"), &oreq);
+        oplock_req_of(c, json_object_get(v, "oplock"), &oreq);
     struct smb2_durable_req        dreq;
     const struct smb2_durable_req *durp =
         durable_req_of(json_object_get(v, "durable"), &dreq);
@@ -1111,7 +1122,66 @@ do_create(
         opts |= MBT_FILE_DELETE_ON_CLOSE;
     }
 
-    smb2_create_dur_opts(c, name, disp, acc, shr, opts, reqp, durp, &out);
+    json_t  *rv         = jval(res);
+    uint32_t exp_st     = (uint32_t) jfield(rv, "st");
+    int      completing = g_complete_create;
+    g_complete_create = 0;
+
+    if (!completing) {
+        if (c->capture_create) {
+            mism("CREATE issued with another CREATE outstanding");
+            g_abort_trace = 1;
+            return;
+        }
+        if (!c->create_reply) {
+            c->create_reply = malloc(SMB2C_BUFSZ);
+            if (!c->create_reply) {
+                abort();
+            }
+        }
+        c->capture_create = 1;
+        c->create_mid     = c->msg_id;
+        c->create_pending = 0;
+        c->create_ready   = 0;
+        smb2_create_dur_post(c, name, disp, acc, shr, opts, reqp, durp);
+    } else if (!c->capture_create || g_request_tag != g_pending_create_tag) {
+        mism("CREATE completion names no outstanding request");
+        g_abort_trace = 1;
+        return;
+    }
+
+    uint64_t deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+    while (!c->create_ready &&
+           (completing && exp_st != ST_PENDING ? 1 : !c->create_pending)) {
+        smb2_pump(c->env);
+        if (c->disconnected) {
+            smb2c_dead(c);
+        }
+        if (smb2c_now_ms() >= deadline) {
+            smb2c_hang(c, "a CREATE response or interim");
+        }
+    }
+    if (exp_st == ST_PENDING) {
+        settle_breaks();
+        if (!c->create_pending || c->create_ready) {
+            mism("CREATE '%s': model pending, wire %s", name,
+                 c->create_ready ? "completed" : "sent no interim");
+            g_abort_trace = 1;
+        }
+        g_pending_create_tag = g_request_tag;
+        g_create_outstanding = 1;
+        return;
+    }
+    if (!c->create_ready) {
+        mism("CREATE '%s': unexpected pending request", name);
+        g_abort_trace = 1;
+        return;
+    }
+    memcpy(c->rbuf, c->create_reply, (size_t) c->create_len);
+    c->rlen              = c->create_len;
+    c->capture_create    = 0;
+    g_create_outstanding = 0;
+    smb2c_parse_create(c, &out);
     if (getenv("SMB2_MBT_DEBUG")) {
         fprintf(stderr, "DBG create '%s' disp=%u acc=%08x shr=%u opts=%08x "
                 "reqp=%p lvl=%u lease=%d -> st=%08x opl=%02x lease=%02x\n",
@@ -1119,9 +1189,6 @@ do_create(
                 reqp ? reqp->level : 0, reqp ? reqp->is_lease : 0,
                 out.status, out.oplock, out.lease_state);
     }
-
-    json_t  *rv     = jval(res);
-    uint32_t exp_st = (uint32_t) jfield(rv, "st");
 
     if (out.status != exp_st) {
         mism("CREATE '%s' status: model 0x%08x wire 0x%08x", name, exp_st,
@@ -1134,7 +1201,7 @@ do_create(
      * that condition, so assert it rather than tolerating either shape. */
     int exp_parked = jbool(rv, "parked");
     int got_parked = (c->ninterim > interim0);
-    if (exp_parked != got_parked) {
+    if (!completing && exp_parked != got_parked) {
         mism("CREATE '%s' park: model %s an async interim, wire %s one", name,
              exp_parked ? "expected" : "expected no",
              got_parked ? "sent" : "sent none");
@@ -1239,7 +1306,7 @@ do_break_ack(
     if (as_lease) {
         uint8_t key[16];
 
-        lease_key_wire(g_lease_key_for_fid[k], key);
+        lease_key_wire(c, g_lease_key_for_fid[k], key);
         st = smb2_lease_break_ack(c, key,
                                   lease_bits_wire(json_object_get(v,
                                                                   "ackState")));
@@ -1975,8 +2042,8 @@ dispatch_cmd(
 
     /* Name the step for the wedge diagnostic: a replay that parks forever must
      * say WHICH command of WHICH trace parked, not just that something did. */
-    snprintf(ctx, sizeof(ctx), "%s command %s (session %lld, tree %lld)",
-             g_trace ? g_trace : "?", tag ? tag : "?", (long long) sess,
+    snprintf(ctx, sizeof(ctx), "%s state %zu command %s (session %lld, tree %lld)",
+             g_trace ? g_trace : "?", g_state_index, tag ? tag : "?", (long long) sess,
              (long long) tree);
     smb2c_set_context(ctx);
 
@@ -2071,6 +2138,9 @@ dispatch_cmd(
             mism("RECONNECT status: model 0x%08x wire 0x%08x", exp_st, st);
         }
         bind_sess(jfield(jval(res), "sess"), nc);
+    } else if (!c) {
+        mism("%s: no live connection for session %lld", tag, (long long) sess);
+        return;
     } else if (strcmp(tag, "CDisconnect") == 0) {
         do_disconnect(c, sess);
     } else if (strcmp(tag, "CTreeConnect") == 0) {
@@ -2183,7 +2253,11 @@ do_message(json_t *lmsg_value)
             check_notify_notes(notes, "message");
         }
     }
-    check_no_stray_breaks("message");
+    /* ACK/CLOSE may resume a waiting CREATE and produce its next break.
+     * That notification belongs to the explicit completion transition. */
+    if (!g_create_outstanding) {
+        check_no_stray_breaks("message");
+    }
     check_no_stray_notifies("message");
 } /* do_message */
 
@@ -2251,22 +2325,6 @@ run_trace(
     const char *fsname,
     const char *path)
 {
-    /* The corpus is generated unconditionally, so it contains batches this
-     * replayer cannot drive against chimera.  Declining them HERE -- by name,
-     * with the chimera bug that would retire the entry -- keeps the gap
-     * visible and attributable, where declining to generate them made it
-     * invisible. */
-    const char                        *base = strrchr(path, '/');
-    const struct smb2_mbt_trace_limit *lim  =
-        smb2_mbt_trace_limit_find(base ? base + 1 : path);
-
-    if (lim) {
-        printf("SKIP %s [%s] %s\n", lim->id, base ? base + 1 : path,
-               lim->summary);
-        g_nskipped++;
-        return 0;
-    }
-
     json_error_t err;
     json_t      *root = json_load_file(path, 0, &err);
 
@@ -2337,10 +2395,14 @@ run_trace(
     for (size_t i = 1; i < ns; i++) {
         json_t *st_i = json_array_get(states, i);
         json_t *lo   = json_object_get(st_i, lokey);
-        if (!lo || strcmp(jtag(lo), "LMsg") != 0) {
+        if (!lo || (strcmp(jtag(lo), "LMsg") != 0 &&
+                    strcmp(jtag(lo), "LCreateComplete") != 0)) {
             continue;
         }
-        g_post_sdb = json_object_get(st_i, sdbkey);
+        g_complete_create = strcmp(jtag(lo), "LCreateComplete") == 0;
+        g_request_tag     = jfield(jval(lo), g_complete_create ? "request" : "tag");
+        g_state_index     = i;
+        g_post_sdb        = json_object_get(st_i, sdbkey);
         do_message(jval(lo));
         if (g_abort_trace) {
             /* A mismatch has already been reported, and it was one that leaves
@@ -2353,10 +2415,16 @@ run_trace(
             break;
         }
     }
-    g_post_sdb = NULL;
+    g_post_sdb           = NULL;
+    g_create_outstanding = 0;
 
     smb2_conn_reset(&g_env);
-    smb2_env_fs_teardown(&g_env, fsname);
+    /* A durable handle intentionally outlives its connection. Isolate these
+     * traces in a server fixture, whose shutdown drains parked handles, rather
+     * than treating a still-busy filesystem as a protocol divergence. */
+    if (!g_isolated_fixture) {
+        smb2_env_fs_teardown(&g_env, fsname);
+    }
 
     int nm = g_nmismatch;
     if (nm) {
@@ -2378,6 +2446,8 @@ main(
     char                          **traces  = mbt_collect_traces(argc, argv, &ntraces);
     const struct smb2_wire_profile *wire    = NULL;
     int                             a;
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
     /* --wire replays the whole corpus over a protected connection profile
      * (signed or encrypted, real NTLMv2 logon, a chosen dialect ceiling).  The
@@ -2419,14 +2489,16 @@ main(
         }
 
         smb2_env_open_wire(&g_env, &group, wire);
+        g_isolated_fixture = group.persistent_handles || group.leases;
 
         int first = i;
         do {
             char fsname[32];
             snprintf(fsname, sizeof(fsname), "fs_%d", i);
+            printf("TRACE %d/%d: %s\n", i + 1, ntraces, traces[i]);
             total += run_trace(fsname, traces[i]);
             i++;
-            if (i >= ntraces) {
+            if (i >= ntraces || g_isolated_fixture) {
                 break;
             }
             if (read_caps(traces[i], &opts) != 0) {
@@ -2446,22 +2518,12 @@ main(
 
     mbt_free_traces(traces, ntraces);
 
-    if (g_nskipped) {
-        printf("# %d of %d trace(s) skipped -- see smb2_mbt_deviations.h "
-               "(smb2_mbt_trace_limits)\n", g_nskipped, ntraces);
-    }
     if (total) {
         fprintf(stderr, "%d total mismatch(es) across %d trace(s)\n",
                 total, ntraces);
         return 1;
     }
-    if (g_nskipped == ntraces) {
-        /* Nothing was driven.  That is a ctest SKIP, not a pass: a batch this
-        * replayer cannot drive must not read as evidence about the server. */
-        printf("# nothing in this batch is replayable against chimera yet\n");
-        return 77;
-    }
     printf("ok: %d trace(s) replayed with no unrecorded divergence\n",
-           ntraces - g_nskipped);
+           ntraces);
     return 0;
 } /* main */
