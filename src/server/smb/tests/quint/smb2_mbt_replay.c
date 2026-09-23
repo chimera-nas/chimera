@@ -2447,7 +2447,9 @@ main(
     const struct smb2_wire_profile *wire    = NULL;
     int                             a;
 
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    /* MSVC treats _IOLBF as full buffering and rejects a zero buffer size.
+     * Keep replay progress visible immediately on every platform. */
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     /* --wire replays the whole corpus over a protected connection profile
      * (signed or encrypted, real NTLMv2 logon, a chosen dialect ceiling).  The
