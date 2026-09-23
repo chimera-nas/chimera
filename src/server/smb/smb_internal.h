@@ -3314,7 +3314,8 @@ chimera_smb_open_file_resolve_by_lease_key(
  * than (fh, fh_len) -- in which case the create must be rejected with
  * STATUS_INVALID_PARAMETER.  A re-open of the SAME file under the key (coalesce)
  * is not a conflict.  Scans the session's trees' open_files (lease creates are
- * rare relative to I/O, so the linear scan is acceptable).
+ * rare relative to I/O, so the linear scan is acceptable). A NULL fh asks
+ * whether the key is bound to any file, before name lookup/materialization.
  */
 static inline bool
 chimera_smb_session_lease_key_conflict(
@@ -3343,7 +3344,7 @@ chimera_smb_session_lease_key_conflict(
                     of->oplock_level == SMB2_OPLOCK_LEVEL_LEASE &&
                     of->handle &&
                     memcmp(of->lease_key, key, 16) == 0 &&
-                    (of->handle->fh_len != fh_len ||
+                    (!fh || of->handle->fh_len != fh_len ||
                      memcmp(of->handle->fh, fh, fh_len) != 0)) {
                     conflict = true;
                     break;
@@ -3405,6 +3406,7 @@ chimera_smb_open_file_release(
     struct chimera_smb_tree      *tree              = open_file->tree;
     struct chimera_smb_open_file *open_file_to_free = NULL;
     int                           open_file_bucket;
+    bool                          released_cache = false;
 
     chimera_smb_abort_if(!tree, "tree is NULL");
 
@@ -3423,6 +3425,7 @@ chimera_smb_open_file_release(
             chimera_smb_durable_forget(request->compound->thread->shared,
                                        open_file->file_id.pid);
         }
+        released_cache = open_file->grant != NULL;
         chimera_smb_open_file_drain_locks(request->compound->thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(request->compound->thread->vfs_thread, open_file->handle);
@@ -3435,6 +3438,9 @@ chimera_smb_open_file_release(
 
     if (open_file_to_free) {
         chimera_smb_open_file_free(request->compound->thread, open_file_to_free);
+    }
+    if (released_cache) {
+        chimera_smb_create_resume_parked_broadcast(request->compound->thread);
     }
 } // chimera_smb_open_file_release
 
@@ -3450,6 +3456,7 @@ chimera_smb_open_file_release_nr(
 {
     struct chimera_smb_open_file *open_file_to_free = NULL;
     int                           open_file_bucket;
+    bool                          released_cache = false;
 
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
@@ -3463,6 +3470,7 @@ chimera_smb_open_file_release_nr(
         if (open_file->durable_flags || open_file->resilient) {
             chimera_smb_durable_forget(thread->shared, open_file->file_id.pid);
         }
+        released_cache = open_file->grant != NULL;
         chimera_smb_open_file_drain_locks(thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(thread->vfs_thread, open_file->handle);
@@ -3475,6 +3483,9 @@ chimera_smb_open_file_release_nr(
 
     if (open_file_to_free) {
         chimera_smb_open_file_free(thread, open_file_to_free);
+    }
+    if (released_cache) {
+        chimera_smb_create_resume_parked_broadcast(thread);
     }
 } // chimera_smb_open_file_release_nr
 
