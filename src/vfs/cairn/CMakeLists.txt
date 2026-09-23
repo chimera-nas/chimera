@@ -15,11 +15,11 @@ check_symbol_exists(rocksdb_transaction_get_pinned "rocksdb/c.h" HAVE_ROCKSDB_TX
 check_symbol_exists(rocksdb_flush_wal "rocksdb/c.h" HAVE_ROCKSDB_FLUSH_WAL_DECL)
 check_function_exists(rocksdb_flush_wal HAVE_ROCKSDB_FLUSH_WAL_SYM)
 
-add_library(chimera_vfs_cairn SHARED
+add_library(chimera_vfs_cairn ${CHIMERA_LIBRARY_TYPE}
     cairn.c
 )
 
-target_link_libraries(chimera_vfs_cairn jansson rocksdb)
+target_link_libraries(chimera_vfs_cairn evpl jansson rocksdb)
 
 if (NOT HAVE_ROCKSDB_TXN_GET_PINNED)
     message(STATUS "RocksDB lacks rocksdb_transaction_get_pinned, using compat shim")

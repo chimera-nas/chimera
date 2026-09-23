@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_diskfs SHARED
+add_library(chimera_vfs_diskfs ${CHIMERA_LIBRARY_TYPE}
     diskfs.c
     diskfs_attr.c
     diskfs_block.c
@@ -27,12 +27,16 @@ if (NOT DISABLE_TESTS)
     target_sources(chimera_vfs_diskfs PRIVATE diskfs_test.c)
 endif()
 
-target_link_libraries(chimera_vfs_diskfs jansson)
+target_link_libraries(chimera_vfs_diskfs evpl jansson)
 
 target_compile_definitions(chimera_vfs_diskfs PRIVATE
     XXH_INLINE_ALL
     XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
+
+if(CHIMERA_LINUX AND VFIO_INCLUDE_DIR)
+    target_compile_definitions(chimera_vfs_diskfs PRIVATE CHIMERA_HAVE_VFIO=1)
+endif()
 
 install(TARGETS chimera_vfs_diskfs DESTINATION lib)
 

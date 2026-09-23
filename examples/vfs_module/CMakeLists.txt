@@ -7,8 +7,14 @@
 # path.  If a change makes the SDK reach into a chimera-internal header,
 # this target stops building -- that is the point of it.
 
-add_library(vfs_example MODULE vfs_example.c)
+if(WIN32)
+    # Keep proving header isolation; native static builds cannot load plugins.
+    add_library(vfs_example OBJECT vfs_example.c)
+else()
+    add_library(vfs_example MODULE vfs_example.c)
+endif()
 set_target_properties(vfs_example PROPERTIES PREFIX "")
+target_link_libraries(vfs_example PRIVATE xxhash)
 
 target_include_directories(vfs_example PRIVATE
     ${CMAKE_SOURCE_DIR}/src/vfs/sdk
@@ -24,6 +30,7 @@ if (APPLE)
     target_link_options(vfs_example PRIVATE -undefined dynamic_lookup)
 endif ()
 
+if(NOT WIN32)
 # Smoke test: dlopen the module the way chimera_vfs_init loads a
 # module_path share and verify the sdk_version handshake.
 add_executable(vfs_example_load_test vfs_example_load_test.c)
@@ -37,3 +44,5 @@ target_link_libraries(vfs_example_load_test chimera_vfs ${CHIMERA_DL_LIB})
 
 add_test(NAME chimera/vfs/example_module_load
          COMMAND vfs_example_load_test $<TARGET_FILE:vfs_example>)
+
+endif()

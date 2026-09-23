@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 
 include_directories(/fio)
-add_library(chimera_fio SHARED fio.c)
+add_library(chimera_fio ${CHIMERA_LIBRARY_TYPE} fio.c)
 
 target_link_libraries(chimera_fio chimera_client chimera_metrics)
 

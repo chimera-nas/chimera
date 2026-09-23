@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_posix SHARED
+add_library(chimera_posix ${CHIMERA_LIBRARY_TYPE}
             posix.c
             posix_mount.c
             posix_umount.c

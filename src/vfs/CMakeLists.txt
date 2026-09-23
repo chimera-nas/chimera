@@ -14,7 +14,7 @@
 # CHIMERA_HAVE_URCU in the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
 
-add_library(chimera_vfs SHARED vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
+add_library(chimera_vfs ${CHIMERA_LIBRARY_TYPE} vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c
             vfs_sid.c
             vfs_proc_mount.c vfs_proc_umount.c
@@ -96,6 +96,7 @@ find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
 find_library(SQLITE3_LIBRARY sqlite3)
 if (SQLITE3_INCLUDE_DIR AND SQLITE3_LIBRARY)
     set(SQLITE_ENABLED TRUE)
+    target_compile_definitions(chimera_vfs PRIVATE CHIMERA_HAVE_SQLITE_VFS=1)
     message(STATUS "sqlite3 found (${SQLITE3_LIBRARY}); building chimera_vfs_sqlite")
     add_subdirectory(sqlite)
 else ()

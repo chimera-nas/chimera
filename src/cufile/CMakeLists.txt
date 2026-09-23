@@ -9,7 +9,7 @@ include_directories(${CUDA_CUFILE_INCLUDE_DIR})
 get_filename_component(CUDA_LIBRARY_DIR ${CUDA_CUFILE_LIBRARY} DIRECTORY)
 link_directories(${CUDA_LIBRARY_DIR})
 
-add_library(chimera_cufile SHARED chimera_cufile.c)
+add_library(chimera_cufile ${CHIMERA_LIBRARY_TYPE} chimera_cufile.c)
 
 target_link_libraries(chimera_cufile chimera_client chimera_common)
 
