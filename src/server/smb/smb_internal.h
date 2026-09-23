@@ -2655,11 +2655,10 @@ chimera_smb_conn_free(
         chimera_smb_notify_drop(conn->parked_notifies);
     }
 
-    /* Unlink any requests pending an async-interim (their interim is already on
-     * the wire).  They are not freed here -- they remain owned by their
-     * compounds, which tear down through the normal path; a late VFS callback
-     * reaching chimera_smb_complete_request sees async.armed == 0 and skips the
-     * cancel. */
+    /* Drain requests pending an async-interim. CREATEs whose continuation can
+     * be cancelled are reclaimed here. Requests still owned by a VFS callback
+     * complete through the normal path; async.armed == 0 skips re-cancellation.
+     */
     chimera_smb_async_interim_drain(conn);
 
     /* Drain any lease-break notifications still queued for this connection and

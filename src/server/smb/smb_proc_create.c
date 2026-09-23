@@ -2291,6 +2291,9 @@ chimera_smb_create_abandon_share_park(struct chimera_smb_request *request)
         request->create.gen_parked_open = NULL;
     }
     chimera_smb_create_release_parent(request);
+    /* Cancellation succeeded, so no VFS callback owns the request anymore.
+     * Reclaim the compound without executing its remaining commands. */
+    chimera_smb_compound_free(thread, request->compound);
 } /* chimera_smb_create_abandon_share_park */
 
 static inline uint32_t
