@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+name: Crypto backends
+on:
+  push:
+    branches: [main, windows-native-crypto]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  vectors:
+    name: Crypto ${{ matrix.arch }} ${{ matrix.config }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, arch: x64, config: Debug, generator: "Visual Studio 17 2022"}
+          - {runner: windows-2022, arch: x64, config: Release, generator: "Visual Studio 17 2022"}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Debug, generator: "Visual Studio 18 2026"}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Release, generator: "Visual Studio 18 2026"}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test native crypto without third-party dependencies
+        shell: pwsh
+        run: |
+          cmake -S src/common/tests/crypto -B crypto -G "${{ matrix.generator }}" -A ${{ matrix.arch }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build crypto --config ${{ matrix.config }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir crypto -C ${{ matrix.config }} --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
