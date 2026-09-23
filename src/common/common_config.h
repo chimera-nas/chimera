@@ -153,6 +153,17 @@ chimera_apply_common_config(
         return;
     }
 
+    /* These settings apply to every libevpl TLS connection in the process.
+     * Preserve libevpl's peer-verification default unless explicitly configured. */
+    val = json_object_get(common, "tls_verify_peer");
+    if (json_is_boolean(val)) {
+        evpl_global_config_set_tls_verify_peer(cfg, json_boolean_value(val));
+    }
+    val = json_object_get(common, "tls_ca_file");
+    if (json_is_string(val)) {
+        evpl_global_config_set_tls_ca(cfg, json_string_value(val));
+    }
+
     val = json_object_get(common, "huge_pages");
     if (json_is_boolean(val)) {
         evpl_global_config_set_huge_pages(cfg, json_boolean_value(val));

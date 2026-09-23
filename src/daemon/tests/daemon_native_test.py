@@ -30,7 +30,8 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
     root = Path(scratch)
     http_port, https_port, metrics_port = ports(3)
     config = {
-        "common": {"huge_pages": False, "sync_delegation_threads": 2},
+        "common": {"huge_pages": False, "sync_delegation_threads": 2,
+                   "tls_verify_peer": False},
         "server": {
             "threads": 2, "nfs_enabled": False, "smb_enabled": False,
             "s3_enabled": False, "state_dir": root.as_posix(),
