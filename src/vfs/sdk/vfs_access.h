@@ -30,6 +30,10 @@ struct chimera_vfs_open_handle;
  * native ACL it is evaluated; otherwise the decision falls back to the POSIX
  * mode bits.  Callers test `(granted & requested) == requested` for a hard
  * allow, or inspect individual bits (e.g. for an NFS ACCESS reply).
+ *
+ * `attr` must carry mode, uid and gid: for any caller other than AUTH_NONE
+ * or root, attrs missing one of them grant nothing (see
+ * chimera_vfs_gate_attrs_missing).
  */
 uint32_t chimera_vfs_access_check(
     const struct chimera_vfs_attrs *attr,
