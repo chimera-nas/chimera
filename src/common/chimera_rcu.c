@@ -14,9 +14,9 @@
 
 #include "common/chimera_rcu.h"
 
-SYMBOL_EXPORT __thread struct chimera_rcu_pending chimera_rcu_pending;
+SYMBOL_EXPORT                           CHIMERA_THREAD_LOCAL struct chimera_rcu_pending chimera_rcu_pending;
 
-SYMBOL_EXPORT struct chimera_rcu_domain           chimera_rcu_global;
+SYMBOL_EXPORT struct chimera_rcu_domain chimera_rcu_global;
 
 #ifdef CHIMERA_HAVE_URCU
 
@@ -121,27 +121,31 @@ struct chimera_rcu_retired {
 };
 
 static struct {
-    pthread_mutex_t             lock;
-    pthread_cond_t              queued;   /* work arrived, or shutdown */
-    pthread_cond_t              drained;  /* a batch completed */
+    evpl_mutex_t                lock;
+    evpl_cond_t                 queued; /* work arrived, or shutdown */
+    evpl_cond_t                 drained; /* a batch completed */
     struct chimera_rcu_retired *head;
     struct chimera_rcu_retired *tail;
     uint64_t                    submitted;
     uint64_t                    completed;
-    pthread_t                   thread;
+    evpl_native_thread_t        thread;
     int                         running;
     int                         stopping;
 } chimera_rcu_reclaim = {
-    .lock    = PTHREAD_MUTEX_INITIALIZER,
-    .queued  = PTHREAD_COND_INITIALIZER,
-    .drained = PTHREAD_COND_INITIALIZER,
+    .lock = EVPL_MUTEX_INITIALIZER,
 };
 
-static __thread int chimera_rcu_is_online;
+static CHIMERA_THREAD_LOCAL int chimera_rcu_is_online;
 
 SYMBOL_EXPORT void
 chimera_rcu_domain_init(struct chimera_rcu_domain *domain)
 {
+#ifdef _WIN32
+    evpl_mutex_init(&domain->lock, NULL);
+    evpl_cond_init(&domain->changed, NULL);
+    domain->readers = domain->waiting_writers = 0;
+    domain->writer  = 0;
+#else  /* ifdef _WIN32 */
     pthread_rwlockattr_t attr;
 
     pthread_rwlockattr_init(&attr);
@@ -162,24 +166,36 @@ chimera_rcu_domain_init(struct chimera_rcu_domain *domain)
 
     pthread_rwlock_init(&domain->lock, &attr);
     pthread_rwlockattr_destroy(&attr);
+#endif /* ifdef _WIN32 */
 } /* chimera_rcu_domain_init */
 
 SYMBOL_EXPORT void
 chimera_rcu_domain_destroy(struct chimera_rcu_domain *domain)
 {
+#ifdef _WIN32
+    evpl_cond_destroy(&domain->changed);
+    evpl_mutex_destroy(&domain->lock);
+#else  /* ifdef _WIN32 */
     pthread_rwlock_destroy(&domain->lock);
+#endif /* ifdef _WIN32 */
 } /* chimera_rcu_domain_destroy */
 
-static void __attribute__((constructor))
+static evpl_once_t chimera_rcu_once = EVPL_ONCE_INIT;
+
+static void
 chimera_rcu_global_init(void)
 {
     chimera_rcu_domain_init(&chimera_rcu_global);
+    evpl_cond_init(&chimera_rcu_reclaim.queued, NULL);
+    evpl_cond_init(&chimera_rcu_reclaim.drained, NULL);
 } /* chimera_rcu_global_init */
 
 SYMBOL_EXPORT void
 chimera_rcu_synchronize(struct chimera_rcu_domain *domain)
 {
     int online = chimera_rcu_is_online;
+
+    evpl_once(&chimera_rcu_once, chimera_rcu_global_init);
 
     /*
      * Waiting for a grace period from inside one is a deadlock, exactly as it
@@ -196,8 +212,8 @@ chimera_rcu_synchronize(struct chimera_rcu_domain *domain)
      * that entered before this call has left, and none can enter until it is
      * released.
      */
-    pthread_rwlock_wrlock(&domain->lock);
-    pthread_rwlock_unlock(&domain->lock);
+    chimera_rcu_domain_wrlock(domain);
+    chimera_rcu_domain_wrunlock(domain);
 
     if (online) {
         chimera_rcu_thread_online();
@@ -214,15 +230,15 @@ chimera_rcu_reclaim_thread(void *arg)
 
     while (1) {
 
-        pthread_mutex_lock(&chimera_rcu_reclaim.lock);
+        evpl_mutex_lock(&chimera_rcu_reclaim.lock);
 
         while (!chimera_rcu_reclaim.head && !chimera_rcu_reclaim.stopping) {
-            pthread_cond_wait(&chimera_rcu_reclaim.queued,
-                              &chimera_rcu_reclaim.lock);
+            evpl_cond_wait(&chimera_rcu_reclaim.queued,
+                           &chimera_rcu_reclaim.lock);
         }
 
         if (!chimera_rcu_reclaim.head) {
-            pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+            evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
             break;
         }
 
@@ -230,7 +246,7 @@ chimera_rcu_reclaim_thread(void *arg)
         chimera_rcu_reclaim.head = NULL;
         chimera_rcu_reclaim.tail = NULL;
 
-        pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+        evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
 
         /*
          * One grace period per domain per batch, then the callbacks -- run
@@ -263,10 +279,10 @@ chimera_rcu_reclaim_thread(void *arg)
             done++;
         }
 
-        pthread_mutex_lock(&chimera_rcu_reclaim.lock);
+        evpl_mutex_lock(&chimera_rcu_reclaim.lock);
         chimera_rcu_reclaim.completed += done;
-        pthread_cond_broadcast(&chimera_rcu_reclaim.drained);
-        pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+        evpl_cond_broadcast(&chimera_rcu_reclaim.drained);
+        evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
     }
 
     return NULL;
@@ -279,6 +295,8 @@ chimera_rcu_retire(
     chimera_rcu_cb             func)
 {
     struct chimera_rcu_retired *item;
+
+    evpl_once(&chimera_rcu_once, chimera_rcu_global_init);
 
     item = malloc(sizeof(*item));
 
@@ -298,12 +316,12 @@ chimera_rcu_retire(
     item->head   = head;
     item->func   = func;
 
-    pthread_mutex_lock(&chimera_rcu_reclaim.lock);
+    evpl_mutex_lock(&chimera_rcu_reclaim.lock);
 
     if (!chimera_rcu_reclaim.running) {
         chimera_rcu_reclaim.running = 1;
-        pthread_create(&chimera_rcu_reclaim.thread, NULL,
-                       chimera_rcu_reclaim_thread, NULL);
+        evpl_native_thread_create(&chimera_rcu_reclaim.thread, NULL,
+                                  chimera_rcu_reclaim_thread, NULL);
     }
 
     if (chimera_rcu_reclaim.tail) {
@@ -314,8 +332,8 @@ chimera_rcu_retire(
     chimera_rcu_reclaim.tail = item;
     chimera_rcu_reclaim.submitted++;
 
-    pthread_cond_signal(&chimera_rcu_reclaim.queued);
-    pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+    evpl_cond_signal(&chimera_rcu_reclaim.queued);
+    evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
 } /* chimera_rcu_retire */
 
 SYMBOL_EXPORT void
@@ -324,23 +342,25 @@ chimera_rcu_barrier(void)
     uint64_t target;
     int      online = chimera_rcu_is_online;
 
+    evpl_once(&chimera_rcu_once, chimera_rcu_global_init);
+
     /* The reclaim thread needs the quiescence domain's write lock to finish
      * the batch we are waiting on; holding its read lock here would deadlock. */
     if (online) {
         chimera_rcu_thread_offline();
     }
 
-    pthread_mutex_lock(&chimera_rcu_reclaim.lock);
+    evpl_mutex_lock(&chimera_rcu_reclaim.lock);
 
     target = chimera_rcu_reclaim.submitted;
 
     while (chimera_rcu_reclaim.running &&
            chimera_rcu_reclaim.completed < target) {
-        pthread_cond_wait(&chimera_rcu_reclaim.drained,
-                          &chimera_rcu_reclaim.lock);
+        evpl_cond_wait(&chimera_rcu_reclaim.drained,
+                       &chimera_rcu_reclaim.lock);
     }
 
-    pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+    evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
 
     if (online) {
         chimera_rcu_thread_online();
@@ -350,20 +370,22 @@ chimera_rcu_barrier(void)
 SYMBOL_EXPORT void
 chimera_rcu_shutdown(void)
 {
-    pthread_t thread;
-    int       online = chimera_rcu_is_online;
+    evpl_native_thread_t thread;
+    int                  online = chimera_rcu_is_online;
 
-    pthread_mutex_lock(&chimera_rcu_reclaim.lock);
+    evpl_once(&chimera_rcu_once, chimera_rcu_global_init);
+
+    evpl_mutex_lock(&chimera_rcu_reclaim.lock);
 
     if (!chimera_rcu_reclaim.running) {
-        pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+        evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
         return;
     }
 
     thread                       = chimera_rcu_reclaim.thread;
     chimera_rcu_reclaim.stopping = 1;
-    pthread_cond_broadcast(&chimera_rcu_reclaim.queued);
-    pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+    evpl_cond_broadcast(&chimera_rcu_reclaim.queued);
+    evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
 
     /* The reclaim thread drains what is queued before it stops, and that drain
      * needs the quiescence domain's write lock.  A caller still holding its
@@ -373,16 +395,16 @@ chimera_rcu_shutdown(void)
         chimera_rcu_thread_offline();
     }
 
-    pthread_join(thread, NULL);
+    evpl_native_thread_join(thread, NULL);
 
     if (online) {
         chimera_rcu_thread_online();
     }
 
-    pthread_mutex_lock(&chimera_rcu_reclaim.lock);
+    evpl_mutex_lock(&chimera_rcu_reclaim.lock);
     chimera_rcu_reclaim.running  = 0;
     chimera_rcu_reclaim.stopping = 0;
-    pthread_mutex_unlock(&chimera_rcu_reclaim.lock);
+    evpl_mutex_unlock(&chimera_rcu_reclaim.lock);
 } /* chimera_rcu_shutdown */
 
 /*
@@ -396,10 +418,12 @@ chimera_rcu_shutdown(void)
 SYMBOL_EXPORT void
 chimera_rcu_thread_online(void)
 {
+    evpl_once(&chimera_rcu_once, chimera_rcu_global_init);
+
     if (chimera_rcu_is_online) {
         return;
     }
-    pthread_rwlock_rdlock(&chimera_rcu_global.lock);
+    chimera_rcu_domain_rdlock(&chimera_rcu_global);
     chimera_rcu_is_online = 1;
 } /* chimera_rcu_thread_online */
 
@@ -410,7 +434,7 @@ chimera_rcu_thread_offline(void)
         return;
     }
     chimera_rcu_is_online = 0;
-    pthread_rwlock_unlock(&chimera_rcu_global.lock);
+    chimera_rcu_domain_rdunlock(&chimera_rcu_global);
 } /* chimera_rcu_thread_offline */
 
 SYMBOL_EXPORT void
@@ -419,8 +443,8 @@ chimera_rcu_quiescent(void)
     if (!chimera_rcu_is_online) {
         return;
     }
-    pthread_rwlock_unlock(&chimera_rcu_global.lock);
-    pthread_rwlock_rdlock(&chimera_rcu_global.lock);
+    chimera_rcu_domain_rdunlock(&chimera_rcu_global);
+    chimera_rcu_domain_rdlock(&chimera_rcu_global);
 } /* chimera_rcu_quiescent */
 
 SYMBOL_EXPORT void
