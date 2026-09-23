@@ -105,8 +105,13 @@ namespaces, and external Unix Samba tools remain Unix test paths.
   libevpl's native implementation of its portable block backend. The Linux
   passthrough backend, io_uring, libaio, RDMA, XLIO, FUSE, and GPUDirect
   Storage are unavailable on Windows.
-* TLS and protocol cryptography use OpenSSL. Windows private-key files get
-  an owner-only protected DACL when created, before key bytes are written.
+* Windows TLS uses libevpl's Schannel backend. SMB signing/encryption, NTLM,
+  REST tokens, S3 authentication, and secure randomness use Windows CNG;
+  Base64 uses Crypt32. Linux and macOS retain OpenSSL. No OpenSSL package or
+  DLL is required on Windows. Without a supplied certificate/key pair, the
+  Windows daemon uses libevpl's self-signed identity without writing PEM files.
+  The daemon calls `evpl_cleanup()` after stopping its server and exporters,
+  before Windows unloads the crypto and RPC libraries.
 * The Windows authentication build supports Chimera-managed users and
   native password verification. MIT Kerberos/GSSAPI defaults off, and
   requests requiring that provider fail explicitly. NSS, Winbind, and an
@@ -128,3 +133,22 @@ The POSIX client preserves quota and stale-handle errors on Windows using
 `EDQUOT` (2001) and `ESTALE` (2002), defined by Chimera because the Windows
 CRT does not provide them. Compare these symbols when handling errors;
 the CRT `strerror()` does not supply descriptions for these two values.
+
+## Crypto backend validation
+
+`Crypto backends` runs fixed digest, HMAC, CMAC, GMAC, SP800-108 KDF, RC4,
+and AES-128/256 CCM/GCM vectors on x64 and ARM64 in Debug and Release,
+without downloading any third-party libraries. The tests include split MAC
+input, embedded NULs in KDF labels, multi-block KDF output, and rejection and
+clearing of unauthenticated plaintext. The same tests exercise OpenSSL in the
+normal Unix suite, and can run separately:
+
+```sh
+cmake -S src/common/tests/crypto -B crypto
+cmake --build crypto
+ctest --test-dir crypto --output-on-failure
+```
+
+SMB and S3 wire probes retain independent protocol encoders and use the shared
+primitive interface. Windows GMAC currently gathers scatter/gather input as
+contiguous AAD for CNG; the Unix backend continues streaming it to OpenSSL.

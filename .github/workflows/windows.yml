@@ -86,9 +86,6 @@ jobs:
           ref: ${{ steps.manifest.outputs.baseline }}
           path: _vcpkg
           persist-credentials: false
-      - name: Prepare the publisher's platform dependency recipes
-        shell: pwsh
-        run: ./etc/prepare-windows-vcpkg.ps1 -Triplet ('${{ matrix.arch }}'.ToLower() + '-windows')
       - name: Select the publisher's toolchain and bootstrap vcpkg
         shell: pwsh
         run: |
@@ -123,6 +120,11 @@ jobs:
           }
           $timer.Stop()
           "Prebuilt dependency restore ($triplet): $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds; no dependency source builds permitted." >> $env:GITHUB_STEP_SUMMARY
+      - name: Verify Windows dependencies do not include OpenSSL
+        shell: pwsh
+        run: |
+          $status = Get-Content build/vcpkg_installed/vcpkg/status -Raw
+          if ($status -match '(?m)^Package: openssl\r?$') { throw 'Windows must use native TLS and crypto' }
       - name: Install parser generators
         shell: pwsh
         run: |

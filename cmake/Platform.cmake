@@ -4,7 +4,6 @@
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-find_package(OpenSSL REQUIRED)
 
 if(WIN32)
     # Backends call the VFS core and protocol modules call the server core.
@@ -12,22 +11,6 @@ if(WIN32)
     # imports or a second copy of the process-wide state in each module.
     set(CHIMERA_LIBRARY_TYPE STATIC)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-    if(VCPKG_TARGET_TRIPLET)
-        # OpenSSL loads its legacy provider dynamically for SMB's MD4. It is
-        # absent from import tables, so vcpkg's app-local DLL scan misses it.
-        find_file(CHIMERA_OPENSSL_LEGACY_RELEASE legacy.dll
-            PATHS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
-            NO_DEFAULT_PATH REQUIRED)
-        find_file(CHIMERA_OPENSSL_LEGACY_DEBUG legacy.dll
-            PATHS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/bin"
-            NO_DEFAULT_PATH REQUIRED)
-        add_custom_target(chimera_openssl_legacy
-            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:evpl>"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<IF:$<CONFIG:Debug>,${CHIMERA_OPENSSL_LEGACY_DEBUG},${CHIMERA_OPENSSL_LEGACY_RELEASE}>"
-                "$<TARGET_FILE_DIR:evpl>"
-            VERBATIM)
-    endif()
     set(CHIMERA_RCU_LIB "")
     set(CHIMERA_RCU_COMMON_LIB "")
     set(CHIMERA_GSS_LIB "")

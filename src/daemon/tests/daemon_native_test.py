@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -67,9 +68,24 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
             with opener.open(f"http://127.0.0.1:{metrics_port}/metrics", timeout=5) as response:
                 assert response.status == 200
                 response.read()
-            certificate_dir = root if os.name == "nt" else Path("/tmp")
-            for suffix in ("crt", "key"):
-                assert (certificate_dir / f"chimera-rest-{proc.pid}.{suffix}").stat().st_size > 0
+            # Exercise HTTPS itself; the default identity is intentionally self-signed.
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            tls.check_hostname = False
+            tls.verify_mode = ssl.CERT_NONE
+            https = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=tls)
+            )
+            with https.open(
+                f"https://127.0.0.1:{https_port}/api/v1/exports", timeout=5
+            ) as response:
+                assert response.status == 200
+                json.load(response)
+            if os.name == "nt":
+                # The native libevpl identity never exports its private key to PEM.
+                assert not list(root.glob("chimera-rest-*"))
+            else:
+                for suffix in ("crt", "key"):
+                    assert Path(f"/tmp/chimera-rest-{proc.pid}.{suffix}").stat().st_size > 0
             proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
             assert proc.wait(timeout=30) == 0, "daemon shutdown failed"
         finally:

@@ -27,10 +27,12 @@
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
 #include <jansson.h>
+#ifndef _WIN32
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
+#endif /* ifndef _WIN32 */
 
 #include "evpl/evpl.h"
 
@@ -75,6 +77,7 @@ startup_validation_fail(void)
     _exit(1);
 } /* startup_validation_fail */
 
+#ifndef _WIN32
 static int
 generate_self_signed_cert(
     const char *cert_path,
@@ -216,6 +219,7 @@ generate_self_signed_cert(
     }
     return rc;
 } /* generate_self_signed_cert */
+#endif /* ifndef _WIN32 */
 
 /*
  * Translate a human-friendly pNFS data-server address into the RFC 5665
@@ -287,8 +291,11 @@ main(
     const char                          *rest_ssl_cert   = NULL;
     const char                          *rest_ssl_key    = NULL;
     int                                  rest_https_port = 0;
+
+#ifndef _WIN32
     static char                          auto_cert_path[PATH_MAX];
     static char                          auto_key_path[PATH_MAX];
+#endif /* ifndef _WIN32 */
 
     chimera_log_init();
 
@@ -394,7 +401,11 @@ main(
             evpl_global_config_set_tls_cert(evpl_global_config, rest_ssl_cert);
             evpl_global_config_set_tls_key(evpl_global_config, rest_ssl_key);
         } else {
-            /* Use the host temporary directory, including Windows' TEMP. */
+#ifdef _WIN32
+            /* With no supplied identity, libevpl creates a self-signed certificate
+             * and CNG key for Schannel. No PEM files or OpenSSL are required. */
+#else  /* ifdef _WIN32 */
+            /* Use the host temporary directory. */
             char temp_directory[PATH_MAX];
             if (chimera_host_temp_directory(temp_directory, sizeof(temp_directory)) ||
                 snprintf(auto_cert_path, sizeof(auto_cert_path),
@@ -416,6 +427,7 @@ main(
             evpl_global_config_set_tls_key(evpl_global_config, auto_key_path);
             rest_ssl_cert = auto_cert_path;
             rest_ssl_key  = auto_key_path;
+#endif /* ifdef _WIN32 */
         }
     }
 
@@ -1676,6 +1688,11 @@ main(
     }
 
     chimera_metrics_destroy(metrics);
+#ifdef _WIN32
+    /* Schannel/CNG cleanup must run before Windows unloads RPC and crypto DLLs.
+     * All server and exporter event loops have been joined above. */
+    evpl_cleanup();
+#endif /* ifdef _WIN32 */
 
     chimera_server_info("Server shutdown complete.");
 
