@@ -21,9 +21,6 @@ jobs:
         include:
           - {platform: linux-x64, runner: ubuntu-24.04, arch: x64}
           - {platform: linux-arm64, runner: ubuntu-24.04-arm, arch: ARM64}
-          - {platform: macos-arm64, runner: macos-14, arch: ARM64}
-          - {platform: windows-x64, runner: windows-2022, arch: x64, vs: '[17.0,18.0)', generator: 'Visual Studio 17 2022'}
-          - {platform: windows-arm64, runner: windows-11-vs2026-arm, arch: ARM64, vs: '[18.0,19.0)', generator: 'Visual Studio 18 2026'}
     env:
       CCACHE_DISABLE: '1'
       VCPKG_DISABLE_METRICS: '1'
@@ -43,7 +40,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ninja-build bison flex libjansson-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libcurl4-openssl-dev libssl-dev libxxhash-dev uthash-dev libsqlite3-dev libcrypt-dev libnghttp2-dev
+          sudo apt-get install -y ninja-build bison flex libjansson-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libcurl4-openssl-dev libssl-dev libxxhash-dev uthash-dev libsqlite3-dev libcrypt-dev libnghttp2-dev libnuma-dev
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: |
