@@ -1542,7 +1542,11 @@ memfs_thread_init(
     struct memfs_shared *shared = private_data;
     struct memfs_thread *thread = calloc(1, sizeof(*thread));
 
-    evpl_iovec_alloc(evpl, shared->block_size, 4096, 1, 0, &thread->zero);
+    /* Reads hand block references back to the requesting protocol thread.
+     * Data blocks are SHARED for that reason; sparse extents use this zero
+     * block and need the same lifetime/threading semantics. */
+    evpl_iovec_alloc(evpl, shared->block_size, 4096, 1,
+                     EVPL_IOVEC_FLAG_SHARED, &thread->zero);
     memset(thread->zero.data, 0, shared->block_size);
 
     thread->shared = shared;
