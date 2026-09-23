@@ -32,9 +32,9 @@
 static size_t
 smb_ntlm_utf16le(
     const char *in,
+    size_t      len,
     uint8_t    *out)
 {
-    size_t len = in ? strlen(in) : 0;
     size_t i;
 
     for (i = 0; i < len; i++) {
@@ -54,10 +54,11 @@ smb_ntlm_nt_hash(
     size_t  len;
     int     ok;
 
-    if (password && strlen(password) > sizeof(utf16) / 2) {
+    len = password ? strlen(password) : 0;
+    if (len > sizeof(utf16) / 2) {
         return -1;
     }
-    len = smb_ntlm_utf16le(password, utf16);
+    len = smb_ntlm_utf16le(password, len, utf16);
     ok  = chimera_crypto_digest(CHIMERA_CRYPTO_MD4, utf16, len, nt_hash, 16);
     chimera_crypto_clear(utf16, sizeof(utf16));
     return ok ? 0 : -1;
@@ -91,8 +92,8 @@ smb_ntlm_v2_hash(
     }
     user_upper[user_len] = '\0';
 
-    concat_len  = smb_ntlm_utf16le(user_upper, concat);
-    concat_len += smb_ntlm_utf16le(domain, concat + concat_len);
+    concat_len  = smb_ntlm_utf16le(user_upper, user_len, concat);
+    concat_len += smb_ntlm_utf16le(domain, domain ? strlen(domain) : 0, concat + concat_len);
 
     if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, nt_hash, 16, concat, concat_len, ntlmv2_hash, 16)) {
         return -1;
@@ -256,8 +257,8 @@ smb_ntlm_client_build_authenticate(
     /* NtChallengeResponse = NTProofStr(16) || client_blob. */
     nt_response_len = 16 + blob_len;
 
-    dom16_len  = smb_ntlm_utf16le(c->domain, dom16);
-    user16_len = smb_ntlm_utf16le(c->user, user16);
+    dom16_len  = smb_ntlm_utf16le(c->domain, strlen(c->domain), dom16);
+    user16_len = smb_ntlm_utf16le(c->user, strlen(c->user), user16);
 
     /* Lay out the AUTHENTICATE message.  Fixed header is 64 bytes (offsets the
      * server reads in validate_authenticate), followed by the payload. */
