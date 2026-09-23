@@ -211,7 +211,7 @@ set_tests_properties(chimera/server/smb/mbt/compress_probe_memfs PROPERTIES
 # rewrites an existing file's owner and trips the setattr chown gate.
 add_executable(smb2_sidseed_probe smb2_sidseed_probe.c)
 target_include_directories(smb2_sidseed_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_sidseed_probe chimera_server chimera_metrics crypto)
+target_link_libraries(smb2_sidseed_probe chimera_server chimera_metrics chimera_crypto)
 
 add_test(NAME chimera/server/smb/mbt/sidseed_probe_memfs
     COMMAND $<TARGET_FILE:smb2_sidseed_probe>)
