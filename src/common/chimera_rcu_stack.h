@@ -37,7 +37,7 @@ typedef struct cds_wfs_head *chimera_rcu_stack_batch;
 
 #else /* !CHIMERA_HAVE_URCU */
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stddef.h>
 
 struct chimera_rcu_stack_node {
@@ -46,7 +46,7 @@ struct chimera_rcu_stack_node {
 
 struct chimera_rcu_stack {
     struct chimera_rcu_stack_node *head;
-    pthread_mutex_t                lock;
+    evpl_mutex_t                   lock;
 };
 
 typedef struct chimera_rcu_stack_node *chimera_rcu_stack_batch;
@@ -55,13 +55,13 @@ static inline void
 chimera_rcu_stack_init(struct chimera_rcu_stack *stack)
 {
     stack->head = NULL;
-    pthread_mutex_init(&stack->lock, NULL);
+    evpl_mutex_init(&stack->lock, NULL);
 } /* chimera_rcu_stack_init */
 
 static inline void
 chimera_rcu_stack_destroy(struct chimera_rcu_stack *stack)
 {
-    pthread_mutex_destroy(&stack->lock);
+    evpl_mutex_destroy(&stack->lock);
 } /* chimera_rcu_stack_destroy */
 
 static inline void
@@ -75,10 +75,10 @@ chimera_rcu_stack_push(
     struct chimera_rcu_stack      *stack,
     struct chimera_rcu_stack_node *node)
 {
-    pthread_mutex_lock(&stack->lock);
+    evpl_mutex_lock(&stack->lock);
     node->next  = stack->head;
     stack->head = node;
-    pthread_mutex_unlock(&stack->lock);
+    evpl_mutex_unlock(&stack->lock);
 } /* chimera_rcu_stack_push */
 
 /*
@@ -89,13 +89,13 @@ chimera_rcu_stack_push(
 static inline void
 chimera_rcu_stack_pop_lock(struct chimera_rcu_stack *stack)
 {
-    pthread_mutex_lock(&stack->lock);
+    evpl_mutex_lock(&stack->lock);
 } /* chimera_rcu_stack_pop_lock */
 
 static inline void
 chimera_rcu_stack_pop_unlock(struct chimera_rcu_stack *stack)
 {
-    pthread_mutex_unlock(&stack->lock);
+    evpl_mutex_unlock(&stack->lock);
 } /* chimera_rcu_stack_pop_unlock */
 
 static inline struct chimera_rcu_stack_node *
@@ -115,10 +115,10 @@ chimera_rcu_stack_pop_all(struct chimera_rcu_stack *stack)
 {
     struct chimera_rcu_stack_node *batch;
 
-    pthread_mutex_lock(&stack->lock);
+    evpl_mutex_lock(&stack->lock);
     batch       = stack->head;
     stack->head = NULL;
-    pthread_mutex_unlock(&stack->lock);
+    evpl_mutex_unlock(&stack->lock);
 
     return batch;
 } /* chimera_rcu_stack_pop_all */

@@ -100,9 +100,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "common/macros.h"
+#include "common/atomic.h"
 
 #ifdef CHIMERA_HAVE_URCU
 
@@ -126,8 +127,75 @@ struct chimera_rcu_head {
 };
 
 struct chimera_rcu_domain {
+#ifdef _WIN32
+    evpl_mutex_t     lock;
+    evpl_cond_t      changed;
+    unsigned         readers;
+    unsigned         waiting_writers;
+    int              writer;
+#else // ifdef _WIN32
     pthread_rwlock_t lock;
+#endif // ifdef _WIN32
 };
+
+
+/* Windows SRW locks do not promise writer preference. Gate new readers while
+ * a writer is waiting, using native mutexes and condition variables. */
+static inline void
+chimera_rcu_domain_rdlock(struct chimera_rcu_domain *domain)
+{
+#ifdef _WIN32
+    evpl_mutex_lock(&domain->lock);
+    while (domain->writer || domain->waiting_writers) {
+        evpl_cond_wait(&domain->changed, &domain->lock);
+    }
+    domain->readers++;
+    evpl_mutex_unlock(&domain->lock);
+#else // ifdef _WIN32
+    pthread_rwlock_rdlock(&domain->lock);
+#endif // ifdef _WIN32
+} // chimera_rcu_domain_rdlock
+static inline void
+chimera_rcu_domain_rdunlock(struct chimera_rcu_domain *domain)
+{
+#ifdef _WIN32
+    evpl_mutex_lock(&domain->lock);
+    if (--domain->readers == 0) {
+        evpl_cond_broadcast(&domain->changed);
+    }
+    evpl_mutex_unlock(&domain->lock);
+#else // ifdef _WIN32
+    pthread_rwlock_unlock(&domain->lock);
+#endif // ifdef _WIN32
+} // chimera_rcu_domain_rdunlock
+static inline void
+chimera_rcu_domain_wrlock(struct chimera_rcu_domain *domain)
+{
+#ifdef _WIN32
+    evpl_mutex_lock(&domain->lock);
+    domain->waiting_writers++;
+    while (domain->writer || domain->readers) {
+        evpl_cond_wait(&domain->changed, &domain->lock);
+    }
+    domain->waiting_writers--;
+    domain->writer = 1;
+    evpl_mutex_unlock(&domain->lock);
+#else // ifdef _WIN32
+    pthread_rwlock_wrlock(&domain->lock);
+#endif // ifdef _WIN32
+} // chimera_rcu_domain_wrlock
+static inline void
+chimera_rcu_domain_wrunlock(struct chimera_rcu_domain *domain)
+{
+#ifdef _WIN32
+    evpl_mutex_lock(&domain->lock);
+    domain->writer = 0;
+    evpl_cond_broadcast(&domain->changed);
+    evpl_mutex_unlock(&domain->lock);
+#else // ifdef _WIN32
+    pthread_rwlock_unlock(&domain->lock);
+#endif // ifdef _WIN32
+} // chimera_rcu_domain_wrunlock
 
 #endif /* CHIMERA_HAVE_URCU */
 
@@ -196,7 +264,7 @@ struct chimera_rcu_pending {
     } entry[CHIMERA_RCU_PENDING_MAX];
 };
 
-extern SYMBOL_EXPORT __thread struct chimera_rcu_pending chimera_rcu_pending;
+extern SYMBOL_EXPORT CHIMERA_THREAD_LOCAL struct chimera_rcu_pending chimera_rcu_pending;
 
 SYMBOL_EXPORT void chimera_rcu_pending_flush(
     void);
@@ -275,31 +343,36 @@ chimera_rcu_publish_end(struct chimera_rcu_domain *domain)
 
 #else /* !CHIMERA_HAVE_URCU */
 
-#define chimera_rcu_deref(p)     __atomic_load_n(&(p), __ATOMIC_ACQUIRE)
-#define chimera_rcu_assign(p, v) __atomic_store_n(&(p), (v), __ATOMIC_RELEASE)
+#ifdef _WIN32
+#define chimera_rcu_deref(p)     ((__typeof__(p))InterlockedCompareExchangePointer((void *volatile *) &(p), NULL, NULL))
+#define chimera_rcu_assign(p, v) ((void) InterlockedExchangePointer((void *volatile *) &(p), (void *) (v)))
+#else // ifdef _WIN32
+#define chimera_rcu_deref(p)     chimera_atomic_load_n(&(p), CHIMERA_MEMORY_ACQUIRE)
+#define chimera_rcu_assign(p, v) chimera_atomic_store_n(&(p), (v), CHIMERA_MEMORY_RELEASE)
+#endif // ifdef _WIN32
 
 static inline void
 chimera_rcu_read_lock(struct chimera_rcu_domain *domain)
 {
-    pthread_rwlock_rdlock(&domain->lock);
+    chimera_rcu_domain_rdlock(domain);
 } /* chimera_rcu_read_lock */
 
 static inline void
 chimera_rcu_read_unlock(struct chimera_rcu_domain *domain)
 {
-    pthread_rwlock_unlock(&domain->lock);
+    chimera_rcu_domain_rdunlock(domain);
 } /* chimera_rcu_read_unlock */
 
 static inline void
 chimera_rcu_mutate_begin(struct chimera_rcu_domain *domain)
 {
-    pthread_rwlock_wrlock(&domain->lock);
+    chimera_rcu_domain_wrlock(domain);
 } /* chimera_rcu_mutate_begin */
 
 static inline void
 chimera_rcu_mutate_end(struct chimera_rcu_domain *domain)
 {
-    pthread_rwlock_unlock(&domain->lock);
+    chimera_rcu_domain_wrunlock(domain);
     if (chimera_rcu_pending.n) {
         chimera_rcu_pending_flush();
     }
@@ -308,13 +381,13 @@ chimera_rcu_mutate_end(struct chimera_rcu_domain *domain)
 static inline void
 chimera_rcu_publish_begin(struct chimera_rcu_domain *domain)
 {
-    pthread_rwlock_wrlock(&domain->lock);
+    chimera_rcu_domain_wrlock(domain);
 } /* chimera_rcu_publish_begin */
 
 static inline void
 chimera_rcu_publish_end(struct chimera_rcu_domain *domain)
 {
-    pthread_rwlock_unlock(&domain->lock);
+    chimera_rcu_domain_wrunlock(domain);
     if (chimera_rcu_pending.n) {
         chimera_rcu_pending_flush();
     }
