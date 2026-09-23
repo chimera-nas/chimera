@@ -5,6 +5,7 @@
 #pragma once
 #include <stdint.h>
 #include <time.h>
+#include <sys/stat.h>
 #include "vfs_sid.h"
 
 struct chimera_acl;
@@ -256,6 +257,61 @@ struct chimera_vfs_attrs {
      */
     uint8_t             va_fh[CHIMERA_VFS_FH_SIZE + 16];
 };
+
+/*
+ * A create's group SID companion (CHIMERA_VFS_ATTR_GROUP_SID on the create's
+ * set_attr) names the credential's primary group: the group the new object
+ * gets unless its parent is set-group-ID, in which case the object takes the
+ * parent's group instead.  Whoever forces the parent's gid -- the engine's
+ * gid pre-step for a CHIMERA_VFS_CAP_CREATE_GID_ENGINE backend, the backend
+ * itself otherwise -- calls this first, so the companion is never stored
+ * beside a gid it does not describe.  The algorithmic form the backend then
+ * falls back to follows the inherited gid.
+ */
+static inline void
+chimera_vfs_attrs_drop_group_sid(struct chimera_vfs_attrs *attr)
+{
+    if (!attr) {
+        return;
+    }
+    attr->va_group_sid = NULL;
+    attr->va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_GROUP_SID;
+    attr->va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_GROUP_SID;
+} /* chimera_vfs_attrs_drop_group_sid */
+
+/*
+ * The owner SID companion, likewise: it names the creator, and belongs only
+ * on the object a call brings into existence -- never on one that already
+ * had an owner when the call found it.
+ */
+static inline void
+chimera_vfs_attrs_drop_owner_sid(struct chimera_vfs_attrs *attr)
+{
+    if (!attr) {
+        return;
+    }
+    attr->va_owner_sid = NULL;
+    attr->va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_OWNER_SID;
+    attr->va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_OWNER_SID;
+} /* chimera_vfs_attrs_drop_owner_sid */
+
+/*
+ * Whether a create under a parent of `parent_mode` hands the new object the
+ * parent's group rather than the one its attrs describe: the parent is
+ * set-group-ID AND the caller named no group of its own.  A caller that did
+ * name one keeps it, together with any group SID companion it named beside
+ * it.  This is the test chimera_vfs_create_inherit_gid applies in the engine;
+ * a backend that applies set-group-ID itself conditions its drop of the
+ * companion on the same thing, not on the parent's bit alone.
+ */
+static inline int
+chimera_vfs_create_inherits_gid(
+    const struct chimera_vfs_attrs *set_attr,
+    uint32_t                        parent_mode)
+{
+    return (parent_mode & S_ISGID) &&
+           !(set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID);
+} /* chimera_vfs_create_inherits_gid */
 
 /* relatime: update atime on a read at most once per this period when the file
  * is otherwise idle (matches the Linux default). */

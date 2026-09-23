@@ -961,12 +961,13 @@ validate_authenticate(
      * context. */
     if (((negotiate_flags & NTLMSSP_NEGOTIATE_ANONYMOUS) && nt_response_len == 0) ||
         (username[0] == '\0' && nt_response_len == 0 && lm_response_len <= 1)) {
-        ctx->username[0] = '\0';
-        ctx->domain[0]   = '\0';
-        ctx->sid[0]      = '\0';
-        ctx->uid         = 65534;
-        ctx->gid         = 65534;
-        ctx->ngids       = 0;
+        ctx->username[0]  = '\0';
+        ctx->domain[0]    = '\0';
+        ctx->sid[0]       = '\0';
+        ctx->group_sid[0] = '\0';
+        ctx->uid          = 65534;
+        ctx->gid          = 65534;
+        ctx->ngids        = 0;
         memset(ctx->session_key, 0, sizeof(ctx->session_key));
         ctx->authenticated = 1;
         ctx->is_anonymous  = 1;
@@ -1023,6 +1024,7 @@ validate_authenticate(
                 &ctx->ngids,
                 ctx->gids,
                 ctx->sid,
+                ctx->group_sid,
                 ctx->session_key);
 
             if (result == 0) {
@@ -1196,6 +1198,12 @@ smb_ntlm_get_sid(struct smb_ntlm_ctx *ctx)
 {
     return ctx->sid[0] ? ctx->sid : NULL;
 } /* smb_ntlm_get_sid */
+
+const char *
+smb_ntlm_get_group_sid(struct smb_ntlm_ctx *ctx)
+{
+    return ctx->group_sid[0] ? ctx->group_sid : NULL;
+} /* smb_ntlm_get_group_sid */
 
 int
 smb_ntlm_is_winbind_user(struct smb_ntlm_ctx *ctx)

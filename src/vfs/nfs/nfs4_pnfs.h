@@ -50,37 +50,50 @@ enum chimera_nfs4_layout_acq_state {
     CHIMERA_NFS4_LAYOUT_ACQUIRING = 1,  /* a LAYOUTGET is in flight           */
     CHIMERA_NFS4_LAYOUT_VALID     = 2,  /* layout + device resolved, usable   */
     CHIMERA_NFS4_LAYOUT_UNAVAIL   = 3,  /* sticky: acquisition failed, use MDS */
+    CHIMERA_NFS4_LAYOUT_RECALLING = 4,  /* DS I/O fenced; commit+return pending */
 };
 
 /*
- * Per-open-file decoded layout, embedded in chimera_nfs4_open_state.  Embedded
+ * Per-file decoded layout, embedded in chimera_nfs4_open_file. Embedded
  * (not a pointer) so allocation never races across threads; the `state` field
  * gates concurrent first-touch with an atomic compare-exchange.
  */
 struct chimera_nfs4_layout {
-    atomic_int                        state;        /* enum ..._acq_state       */
-    uint32_t                          iomode;       /* LAYOUTIOMODE4 we hold    */
-    struct stateid4                   layout_stateid; /* from LAYOUTGET          */
-    uint32_t                          num_segments;
-    struct chimera_vfs_layout_segment segments[CHIMERA_NFS4_CLIENT_MAX_SEGMENTS];
-    int                               ds_server_index; /* resolved DS server slot */
-    int                               return_on_close;
-    int                               layoutcommit_needed;
+    atomic_int                         state;       /* enum ..._acq_state       */
+    uint32_t                           iomode;      /* LAYOUTIOMODE4 we hold    */
+    struct stateid4                    layout_stateid; /* from LAYOUTGET          */
+    uint32_t                           num_segments;
+    struct chimera_vfs_layout_segment  segments[CHIMERA_NFS4_CLIENT_MAX_SEGMENTS];
+    int                                ds_server_index; /* resolved DS server slot */
+    int                                return_on_close;
+    _Atomic int                        layoutcommit_needed;
+    /* A recall fences new DS I/O, then drains outstanding DS RPCs before
+     * reporting their combined high-water size to the MDS. */
+    evpl_mutex_t                    io_lock;
+    unsigned int                       io_active;
+    struct chimera_nfs4_recall_task   *recall_task;
+    struct chimera_nfs4_recall_waiter *recall_waiters;
+    struct chimera_vfs_request        *recall_close_request;
+    struct chimera_nfs_thread         *recall_close_thread;
+    struct chimera_nfs_shared         *recall_close_shared;
+    struct chimera_nfs4_open_state    *recall_close_open_state;
+    struct chimera_vfs_cred            recall_cred;
     /* Highest byte+1 written via the DS, reported to the MDS at LAYOUTCOMMIT.
      * Atomic because concurrent writes on a shared open handle each update it;
      * losing the max would truncate the file size the MDS records. */
-    _Atomic uint64_t                  last_write_offset;
+    _Atomic uint64_t                   last_write_offset;
+    _Atomic uint64_t                   write_generation;
 
     /* The file's own local handle, captured at LAYOUTGET, so close can PUTFH it
      * to the MDS for LAYOUTCOMMIT/LAYOUTRETURN (close carries no fh). */
-    uint8_t                           file_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                          file_fh_len;
+    uint8_t                            file_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                           file_fh_len;
 
     /* Membership in shared->pnfs_layouts (the layout registry), so the
      * back-channel CB_LAYOUTRECALL handler can find this layout by file handle
      * and fence its DS I/O.  Guarded by shared->pnfs_layout_lock. */
-    int                               registered;
-    struct chimera_nfs4_layout       *reg_next;
+    int                                registered;
+    struct chimera_nfs4_layout        *reg_next;
 
     /* While state == ACQUIRING, concurrent read/write requests for this file
      * are parked here (linked via request->next) instead of being sent to the
@@ -89,11 +102,11 @@ struct chimera_nfs4_layout {
      * out-of-order seqid (NFS4ERR_SEQ_MISORDERED).  They are replayed once
      * acquisition resolves.  acq_thread/shared/private are the dispatch context
      * captured when acquisition started, used to replay parked requests. */
-    evpl_mutex_t                      acq_lock;
-    struct chimera_vfs_request       *acq_waiters;
-    struct chimera_nfs_thread        *acq_thread;
-    struct chimera_nfs_shared        *acq_shared;
-    void                             *acq_private;
+    evpl_mutex_t                    acq_lock;
+    struct chimera_vfs_request        *acq_waiters;
+    struct chimera_nfs_thread         *acq_thread;
+    struct chimera_nfs_shared         *acq_shared;
+    void                              *acq_private;
 };
 
 struct chimera_nfs_thread;
@@ -149,15 +162,10 @@ int chimera_nfs4_pnfs_commit(
     struct chimera_nfs4_open_state *open_state);
 
 /*
- * Layout registry (shared->pnfs_layouts).  register publishes a now-VALID
- * layout so a back-channel CB_LAYOUTRECALL can find it; unregister removes it
- * before the owning open state is freed.  Both are idempotent and safe to call
- * for layouts that were never registered.
+ * Layout registry (shared->pnfs_layouts). Acquisition publishes a VALID layout
+ * under the registry lock so CB_LAYOUTRECALL can find it. Unregister removes it
+ * before the owning open file is freed; it is safe for unregistered layouts.
  */
-void chimera_nfs4_pnfs_layout_register(
-    struct chimera_nfs_shared  *shared,
-    struct chimera_nfs4_layout *layout);
-
 void chimera_nfs4_pnfs_layout_unregister(
     struct chimera_nfs_shared  *shared,
     struct chimera_nfs4_layout *layout);

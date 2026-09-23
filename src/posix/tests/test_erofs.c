@@ -203,24 +203,20 @@ main(
                      chimera_posix_utimensat(AT_FDCWD, "/test_ro/file", ts, 0));
     }
 
-    /* Over NFS there is no server-side OPEN that mutates for an existing file
-     * (NFS3 has none; the posix client resolves the handle via LOOKUP), so a
-     * writable open() succeeds locally and the read-only enforcement surfaces
-     * on the first actual mutating op issued against the handle.  Open the
-     * fixture for writing (allowed -- no mutation yet) and confirm that both
-     * write() and ftruncate() through that handle return EROFS. */
-    EXPECT_OK("open O_WRONLY for mutation attempts (ro)",
-              (fd = chimera_posix_open("/test_ro/file", O_WRONLY, 0)));
-    if (fd >= 0) {
+    /* NFSv3 has no wire OPEN, so it rejects mutations through the local
+     * descriptor.  NFSv4 may reject a WRITE-share OPEN immediately.  If an
+     * open is granted, each mutation must still fail with EROFS. */
+    errno = 0;
+    fd    = chimera_posix_open("/test_ro/file", O_WRONLY, 0);
+    if (fd < 0) {
+        tap(errno == EROFS, "open O_WRONLY denied with EROFS (ro)");
+    } else {
+        tap(1, "open O_WRONLY allowed; mutations must fail (ro)");
         EXPECT_EROFS("write", chimera_posix_write(fd, "x", 1));
         EXPECT_EROFS("ftruncate", chimera_posix_ftruncate(fd, 0));
         struct timespec ts2[2] = { { 0, 0 }, { 0, 0 } };
         EXPECT_EROFS("futimens", chimera_posix_futimens(fd, ts2));
         chimera_posix_close(fd);
-    } else {
-        tap(0, "write");
-        tap(0, "ftruncate");
-        tap(0, "futimens");
     }
 
     /* Confirm the fixtures are intact (no mutation slipped through): the file

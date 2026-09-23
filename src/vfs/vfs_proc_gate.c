@@ -370,6 +370,10 @@ chimera_vfs_create_inherit_gid(
 
     create_attr->va_gid       = parent_attr->va_gid;
     create_attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+
+    /* The object no longer gets the creator's group, so a group SID seeded
+     * for that group must not ride along (chimera_vfs_attrs_drop_group_sid). */
+    chimera_vfs_attrs_drop_group_sid(create_attr);
 } /* chimera_vfs_create_inherit_gid */
 
 SYMBOL_EXPORT void

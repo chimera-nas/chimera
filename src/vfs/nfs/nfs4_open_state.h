@@ -22,40 +22,29 @@
  * 2. Dirty tracking - to issue COMMIT on close if unstable writes were performed
  * 3. Silly rename - when removing an open file, rename to .nfs<hex(fh)> instead
  *
- * One of these belongs to each VFS handle, and everything in it is that
- * handle's own -- the layout above all.  A layout is a per-handle thing here:
- * only the handle that did the LAYOUTGET drives its I/O to the data server,
- * while a handle without one writes to the MDS and the file size follows as a
- * matter of course.  Give two handles on a file one layout between them and
- * every write goes to the DS, leaving the size to reach the MDS only via a
- * LAYOUTCOMMIT that is issued lazily -- and a recall can fence the layout with
- * the writes still unpublished.
- *
- * What is *not* per handle is the open on the server, which is why the CLOSE
- * that ends it is counted separately in chimera_nfs4_open_file.
+ * One belongs to each VFS handle. The server OPEN and pNFS layout belong to
+ * the shared chimera_nfs4_open_file, because the server coalesces opens from
+ * this client's single open owner and the layout covers the file as a whole.
  */
 
 struct chimera_nfs4_open_state {
-    uint8_t                    server_index; /* NFS server index for dispatch routing */
-    struct stateid4            stateid;    /* NFS4 stateid for this open */
-    uint32_t                   seqid;      /* Sequence ID for state operations */
-    uint32_t                   access;     /* Share access mode */
-    atomic_int                 dirty;      /* Count of uncommitted unstable writes */
-    int                        silly_renamed; /* File has been silly renamed */
-    uint8_t                    dir_fh_len; /* Directory fh for silly remove on close */
-    uint8_t                    dir_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                        server_index; /* NFS server index for dispatch routing */
+    struct stateid4                stateid; /* NFS4 stateid for this open */
+    uint32_t                       seqid;  /* Sequence ID for state operations */
+    uint32_t                       access; /* Share access mode */
+    atomic_int                     dirty;  /* Count of uncommitted unstable writes */
+    int                            silly_renamed; /* File has been silly renamed */
+    uint8_t                        dir_fh_len; /* Directory fh for silly remove on close */
+    uint8_t                        dir_fh[CHIMERA_VFS_FH_SIZE];
 
     /*
      * Credentials for silly remove on close.
      */
-    struct chimera_vfs_cred    silly_remove_cred;
+    struct chimera_vfs_cred        silly_remove_cred;
 
-    /*
-     * pNFS (flex-files) per-handle layout.  Zero-initialized by calloc means
-     * layout.state == CHIMERA_NFS4_LAYOUT_NONE (no layout yet); only touched
-     * when pNFS is enabled and the MDS is pNFS-capable.
-     */
-    struct chimera_nfs4_layout layout;
+    /* Shared server OPEN and pNFS layout for this file. */
+    struct chimera_nfs4_open_file *open_file;
+    struct stateid4                close_stateid;
 };
 
 _Static_assert(offsetof(struct chimera_nfs4_open_state, server_index) == 0,
@@ -73,8 +62,8 @@ _Static_assert(offsetof(struct chimera_nfs4_open_state, server_index) == 0,
  * done; sending one per handle destroys state the others are still reading and
  * writing through.
  *
- * Counting that here, rather than sharing the whole open state, is what keeps
- * the layout per handle: this holds only what the wire CLOSE needs.
+ * The shared layout also keeps DS writes from different handles under one
+ * high-water mark and one recall fence.
  *
  * Each OPEN requests its caller's access with SHARE_DENY_NONE.  The server
  * unions access on upgrades; this client retains that union until the last
@@ -84,18 +73,21 @@ struct chimera_nfs4_open_file {
     /* All guarded by server->open_state_lock, hash linkage included: the count
     * reaching zero and the unhashing that retires the entry have to be one
     * step, or a concurrent open could revive one already bound for a CLOSE. */
-    int             refcnt;
+    int                        refcnt;
     /* Wire CLOSEs in flight for this file.  The entry stays hashed while one
      * is outstanding so a concurrent OPEN of the same file can see it: the
      * server keys state on (owner, fh) and this client uses one owner, so an
      * OPEN that lands before an in-flight CLOSE coalesces into the very
      * state that CLOSE then destroys.  chimera_nfs4_open_file_get detects
-     * that (see the seqid rule there) and the opener re-sends. */
-    int             closing;
-    struct stateid4 stateid;
-    uint8_t         fh_len;
-    uint8_t         fh[CHIMERA_VFS_FH_SIZE];
-    UT_hash_handle  hh;
+     * that (see the seqid rule there) and the opener re-sends.  A fresh OPEN
+     * may replace this entry in the hash before the CLOSE reply arrives;
+     * the old close retains its pointer and owns its layout until completion. */
+    int                        closing;
+    struct stateid4            stateid;
+    uint8_t                    fh_len;
+    uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
+    struct chimera_nfs4_layout layout;
+    UT_hash_handle             hh;
 };
 
 /*
@@ -110,7 +102,6 @@ chimera_nfs4_open_state_alloc(void)
     if (state) {
         atomic_init(&state->dirty, 0);
         state->seqid = 1;
-        evpl_mutex_init(&state->layout.acq_lock, NULL);
     }
 
     return state;
@@ -139,7 +130,6 @@ chimera_nfs4_stateid_is_open(const struct stateid4 *stateid)
 static inline void
 chimera_nfs4_open_state_free(struct chimera_nfs4_open_state *state)
 {
-    evpl_mutex_destroy(&state->layout.acq_lock);
     free(state);
 } /* chimera_nfs4_open_state_free */
 

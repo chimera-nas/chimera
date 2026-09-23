@@ -13,6 +13,48 @@
 #include "vfs/vfs.h"
 
 // Process NTLM authentication
+/*
+ * Record the session's native owner/group SIDs, from the authority that
+ * answered the logon.  A SID winbind named is taken as it is; otherwise the
+ * user and group records are probed once, now, so a local account registered
+ * with a SID (chimera_server_add_user / chimera_server_add_group) is an
+ * authority too.  Anything absent stays absent (len 0): a CREATE then stores
+ * nothing native for that half and the backend keeps its algorithmic form.
+ *
+ * chimera_sid_from_str zeroes the target on failure, so a malformed string
+ * degrades to "absent" rather than to a partial SID.
+ */
+static void
+chimera_smb_session_capture_identity(
+    struct chimera_vfs         *vfs,
+    struct chimera_smb_session *session,
+    const char                 *owner_sid,
+    const char                 *group_sid,
+    uint32_t                    uid,
+    uint32_t                    gid)
+{
+    char sidstr[SMB_WBCLIENT_SID_MAX_LEN];
+
+    memset(&session->owner_sid, 0, sizeof(session->owner_sid));
+    memset(&session->group_sid, 0, sizeof(session->group_sid));
+
+    if (!owner_sid && vfs &&
+        chimera_vfs_identity_uid_to_sid(vfs, uid, sidstr, sizeof(sidstr)) > 0) {
+        owner_sid = sidstr;
+    }
+    if (owner_sid) {
+        chimera_sid_from_str(&session->owner_sid, owner_sid);
+    }
+
+    if (!group_sid && vfs &&
+        chimera_vfs_identity_gid_to_sid(vfs, gid, sidstr, sizeof(sidstr)) > 0) {
+        group_sid = sidstr;
+    }
+    if (group_sid) {
+        chimera_sid_from_str(&session->group_sid, group_sid);
+    }
+} /* chimera_smb_session_capture_identity */
+
 static int
 process_ntlm_auth(
     struct chimera_smb_request       *request,
@@ -424,9 +466,11 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         // Get session key and set credentials based on mechanism
         const char *sid        = NULL;
+        const char *group_sid  = NULL;
         const char *username   = NULL;
         int         is_ad_user = 0;
         char        sid_buf[SMB_WBCLIENT_SID_MAX_LEN];
+        char        group_sid_buf[SMB_WBCLIENT_SID_MAX_LEN];
 
         /* Raw session key saved for SMB3 encryption key derivation below; an
          * anonymous/guest (null) session has no usable key and is never
@@ -522,6 +566,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             ngids      = conn->ntlm_ctx.ngids;
             username   = smb_ntlm_get_username(&conn->ntlm_ctx);
             sid        = smb_ntlm_get_sid(&conn->ntlm_ctx);
+            group_sid  = smb_ntlm_get_group_sid(&conn->ntlm_ctx);
             is_ad_user = smb_ntlm_is_winbind_user(&conn->ntlm_ctx);
 
             if (ngids > 32) {
@@ -571,7 +616,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                            "session gids and Kerberos identity gids must match");
             memcpy(gids, krb_ident.gids, ngids * sizeof(uint32_t));
             memcpy(sid_buf, krb_ident.sid, sizeof(sid_buf));
-            sid        = sid_buf;
+            sid = sid_buf;
+            memcpy(group_sid_buf, krb_ident.group_sid, sizeof(group_sid_buf));
+            group_sid  = group_sid_buf[0] ? group_sid_buf : NULL;
             is_ad_user = krb_ident.is_ad_user;
 
             chimera_smb_info("Kerberos auth complete: principal=%s uid=%u gid=%u sid=%s",
@@ -604,6 +651,12 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
          * identity.  Re-authentication does refresh the security context. */
         if (!is_binding) {
             chimera_vfs_cred_init_attr(&session->cred, uid, gid, ngids, gids);
+            /* A synthesized S-1-22 unix SID is not a native identity; only a
+             * SID an authority named is captured.  The local user and group
+             * records are that authority for a local account. */
+            chimera_smb_session_capture_identity(shared->vfs, session,
+                                                 is_ad_user ? sid : NULL,
+                                                 group_sid, uid, gid);
         }
 
         /* SMB3 transport encryption: derive per-session keys from the raw

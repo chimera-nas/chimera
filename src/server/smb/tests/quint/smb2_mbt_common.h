@@ -2274,8 +2274,14 @@ smb2c_arm_protection(
     c->nonce_counter = 1;
 } /* smb2c_arm_protection */
 
+/* SESSION_SETUP as a NAMED account.  The probes that care about identity (who
+ * owns what a CREATE just made) need more than one logon against one server,
+ * so the credentials are a parameter rather than the harness-wide pair. */
 static inline uint32_t
-smb2_session_setup(struct smb2_conn *c)
+smb2_session_setup_as(
+    struct smb2_conn *c,
+    const char       *user,
+    const char       *password)
 {
     const struct smb2_wire_profile *w = c->wire;
     uint8_t                         blob[2048];
@@ -2304,7 +2310,7 @@ smb2_session_setup(struct smb2_conn *c)
         uint16_t       slen  = g16(rbody, 6);
         const uint8_t *chal  = c->rbuf + 4 + soff;
 
-        n = smb2w_ntlm_auth_ntlmv2(chal, slen, SMB2W_USER, SMB2W_PASSWORD,
+        n = smb2w_ntlm_auth_ntlmv2(chal, slen, user, password,
                                    SMB2W_DOMAIN, blob, c->session_key);
     }
 
@@ -2317,6 +2323,12 @@ smb2_session_setup(struct smb2_conn *c)
         smb2c_arm_protection(c, preauth_at_auth);
     }
     return st;
+} /* smb2_session_setup_as */
+
+static inline uint32_t
+smb2_session_setup(struct smb2_conn *c)
+{
+    return smb2_session_setup_as(c, SMB2W_USER, SMB2W_PASSWORD);
 } /* smb2_session_setup */
 
 /* ---- TREE_CONNECT ------------------------------------------------------- */
@@ -3849,6 +3861,32 @@ smb2_handshake(struct smb2_conn *c)
         exit(1);
     }
 } /* smb2_handshake */
+
+/* The same bring-up as a named account. */
+static inline void
+smb2_handshake_as(
+    struct smb2_conn *c,
+    const char       *user,
+    const char       *password)
+{
+    uint32_t st;
+
+    st = smb2_negotiate(c);
+    if (st != ST_SUCCESS) {
+        fprintf(stderr, "NEGOTIATE failed: 0x%08x\n", st);
+        exit(1);
+    }
+    st = smb2_session_setup_as(c, user, password);
+    if (st != ST_SUCCESS) {
+        fprintf(stderr, "SESSION_SETUP as %s failed: 0x%08x\n", user, st);
+        exit(1);
+    }
+    st = smb2_tree_connect(c, "\\\\server\\share");
+    if (st != ST_SUCCESS) {
+        fprintf(stderr, "TREE_CONNECT failed: 0x%08x\n", st);
+        exit(1);
+    }
+} /* smb2_handshake_as */
 
 /* ---- transport drop and reconnect ---------------------------------------
  *

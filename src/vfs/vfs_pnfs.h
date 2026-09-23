@@ -6,8 +6,11 @@
 
 #include <stdint.h>
 #include <stdatomic.h>
+#include <stdio.h>      /* snprintf, for chimera_vfs_pnfs_backing_name */
+#include <inttypes.h>   /* PRIx64 */
 
 #include "sdk/vfs_attrs.h"          /* CHIMERA_VFS_FH_SIZE */
+#include "sdk/vfs_error.h"          /* enum chimera_vfs_error */
 #include "sdk/vfs_pnfs_layout.h"  /* layout segment/device descriptors */
 
 /*
@@ -115,6 +118,135 @@ struct chimera_vfs_ds * chimera_vfs_pnfs_get_device(
 const struct chimera_vfs_ds * chimera_vfs_pnfs_find_device(
     const struct chimera_vfs *vfs,
     const uint8_t            *deviceid);
+
+struct chimera_vfs_thread;
+struct chimera_vfs_cred;
+struct chimera_vfs_open_handle;
+
+/*
+ * Resolve which handle a data operation on `handle` must actually be issued
+ * against.  `io_handle` is the DS backing file when the file is DS-resident
+ * (redirected = 1, and the caller owns a reference it must chimera_vfs_release)
+ * or `handle` itself otherwise (redirected = 0, no reference taken).
+ *
+ * Resolved lazily on the first data operation rather than at open, so a pure
+ * pNFS client -- which does its I/O on the data server and never issues an
+ * MDS-path data operation -- pays nothing for a fallback it does not use.  The
+ * callback may fire synchronously on the fast path.
+ */
+typedef void (*chimera_vfs_pnfs_io_callback_t)(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *io_handle,
+    int                             redirected,
+    void                           *private_data);
+
+/* Cheap predicate: could a data op on this handle need redirecting at all?
+ * False for every handle when no data server is configured, and for anything
+ * inside a data server's own backing mount.  Lets the caller skip allocating
+ * an async context on the common path. */
+int chimera_vfs_pnfs_io_possible(
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_open_handle *handle);
+
+struct chimera_vfs_request;
+struct chimera_vfs_attrs;
+
+typedef void (*chimera_vfs_pnfs_sync_callback_t)(
+    struct chimera_vfs_request *request);
+
+/* Drop-in replacement for chimera_vfs_dispatch() in a data op: sends the op to
+ * wherever the file's bytes live.  required_cap is the backend capability the
+ * caller gated on (0 if none), re-checked after a redirect because the data
+ * server's backend may not implement it. */
+void chimera_vfs_pnfs_dispatch(
+    struct chimera_vfs_request *request,
+    int                         for_write,
+    uint64_t                    required_cap);
+
+/* Push the size/mtime a redirected op produced on the backing file back onto
+ * the MDS inode, then continue to `next`.  A no-op (straight to `next`) when the
+ * op was not redirected or did not succeed. */
+void chimera_vfs_pnfs_sync_mds(
+    struct chimera_vfs_request      *request,
+    const struct chimera_vfs_attrs  *backing_post,
+    uint64_t                         end_offset,
+    chimera_vfs_pnfs_sync_callback_t next);
+
+void chimera_vfs_pnfs_resolve_io(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    int                             for_write,
+    chimera_vfs_pnfs_io_callback_t  callback,
+    void                           *private_data);
+
+/*
+ * Pack/unpack the opaque per-file layout blob the backend persists as
+ * CHIMERA_VFS_ATTR_PNFS_LAYOUT: [deviceid:16][fhlen:1][backing-fh].  The
+ * backing handle is stored as the MDS holds it, so it can be passed directly to
+ * chimera_vfs_open_fh; the client-facing form is derived from it by the NFS
+ * server.  unpack returns 0 and points the out-params into `blob` (no copy), or
+ * -1 if the blob is malformed or truncated.
+ */
+uint32_t chimera_vfs_pnfs_blob_pack(
+    uint8_t       *blob,
+    const uint8_t *deviceid,
+    const uint8_t *backing_fh,
+    uint32_t       backing_fh_len);
+
+int chimera_vfs_pnfs_blob_unpack(
+    const uint8_t  *blob,
+    uint32_t        blob_len,
+    const uint8_t **r_deviceid,
+    const uint8_t **r_backing_fh,
+    uint32_t       *r_backing_fh_len);
+
+/* Buffer size for chimera_vfs_pnfs_backing_name: <mountid hex> '_' <fileid hex>. */
+#define CHIMERA_VFS_PNFS_BACKING_NAME_MAX (CHIMERA_VFS_MOUNTID_SIZE * 2 + 1 + 16 + 1)
+
+/*
+ * Name of the data-server file backing an MDS file, written into `name` (at
+ * least CHIMERA_VFS_PNFS_BACKING_NAME_MAX bytes).  Backing files live flat in a
+ * single directory on the data server, so the name has to identify the MDS file
+ * globally.
+ *
+ * A fileid is unique only within one filesystem, so it cannot do that alone:
+ * every MDS filesystem sharing a data server would collide in that flat
+ * namespace -- two unrelated files, one backing file.  Qualifying it with the
+ * MDS mount id (the leading CHIMERA_VFS_MOUNTID_SIZE bytes every handle carries)
+ * makes the pair unique.  TRUNCATE at create time does NOT cover this: it
+ * "resolves" a collision by destroying the other file's data.
+ *
+ * Both paths that can create a backing file -- LAYOUTGET (nfs4_pnfs.c) and the
+ * non-pNFS write redirect (vfs_pnfs_io.c) -- must agree on it, or a file
+ * materialized by one is invisible to the other.  Hence one shared helper.
+ */
+static inline void
+chimera_vfs_pnfs_backing_name(
+    char          *name,
+    const uint8_t *mds_fh,
+    uint64_t       fileid)
+{
+    int i, n = 0;
+
+    for (i = 0; i < CHIMERA_VFS_MOUNTID_SIZE; i++) {
+        n += snprintf(name + n, CHIMERA_VFS_PNFS_BACKING_NAME_MAX - n, "%02x",
+                      mds_fh[i]);
+    }
+    snprintf(name + n, CHIMERA_VFS_PNFS_BACKING_NAME_MAX - n, "_%016" PRIx64,
+             fileid);
+} /* chimera_vfs_pnfs_backing_name */
+
+/*
+ * True when fh names an object inside a data-server backing mount, i.e. one of
+ * the mounts named by chimera_vfs_ds.backing_path.  Such a mount is the storage
+ * behind other files' layouts, so nothing under it is ever itself DS-resident;
+ * the data redirect uses this to avoid re-entering itself.
+ */
+int chimera_vfs_pnfs_fh_is_ds_backing(
+    const struct chimera_vfs *vfs,
+    const void               *fh,
+    int                       fhlen);
 
 /*
  * Choose a data server for a newly created file.  Returns the chosen device,

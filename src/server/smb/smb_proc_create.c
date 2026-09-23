@@ -2216,12 +2216,24 @@ chimera_smb_create_issue_truncate(struct chimera_smb_request *request)
      * file being CREATED (MS-SMB2 2.2.13.2), and this path only runs when the
      * file already existed -- carrying it here would rewrite an existing
      * object's DACL on an overwrite, which Windows does not do, and would put
-     * WRITE_ACL into a requirement the opener never had to hold. */
+     * WRITE_ACL into a requirement the opener never had to hold.
+     *
+     * The creator's owner and group SIDs go the same way, and for the same
+     * reason: the file has an owner and a group already, and neither is this
+     * opener's.  Carrying the owner would also make every overwrite by a
+     * non-owner fail -- an owner SID in the mask puts WRITE_OWNER into
+     * chimera_vfs_setattr_required, which defeats the descriptor's rights
+     * retention and sends the whole setattr through the chown gate, where a
+     * caller who does not own the file is refused (ACCESS_DENIED) even holding
+     * an explicit WRITE_OWNER ACE. */
     request->create.trunc_attr = request->create.set_attr;
 
     request->create.trunc_attr.va_acl       = NULL;
     request->create.trunc_attr.va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_ACL;
     request->create.trunc_attr.va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_ACL;
+
+    chimera_vfs_attrs_drop_owner_sid(&request->create.trunc_attr);
+    chimera_vfs_attrs_drop_group_sid(&request->create.trunc_attr);
 
     request->create.trunc_attr.va_size      = 0;
     request->create.trunc_attr.va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
@@ -2782,6 +2794,15 @@ chimera_smb_create_open_stream_chain(
     } /* switch */
 
     request->create.base_oh = base_oh;
+
+    /* The base is open and, if this create brought it into existence, already
+     * carries the creator's SID companions from the base open.  The stream
+     * open applies the create's set_attr to the BASE again, through the open
+     * path where no chown gate runs, so the companions must not ride along:
+     * on a base another user made they would hand that user's ownership --
+     * the SID half of it -- to whoever creates a stream on it. */
+    chimera_vfs_attrs_drop_owner_sid(&request->create.set_attr);
+    chimera_vfs_attrs_drop_group_sid(&request->create.set_attr);
 
     chimera_vfs_open_stream(
         vfs_thread,
@@ -4384,6 +4405,65 @@ chimera_smb_create_persist_prepare(
     return request->create.persist_hs.value_len > 0;
 } /* chimera_smb_create_persist_prepare */
 
+/*
+ * Stamp the creator's native owner and group SIDs on the create's set_attr.
+ *
+ * They come from the session, which captured them at SESSION_SETUP from the
+ * authority that answered the logon (chimera_smb_session_capture_identity) --
+ * not from a per-create probe of the identity cache.  The cache's entries
+ * expire (cache_ttl, 60 s by default) while a session lives on for hours, so
+ * a probe alone stops answering on every session older than the TTL; and the
+ * group half never answered at all, because nothing at logon warms the group
+ * cache.  A session that captured no SID stamps nothing for that half, and
+ * the backend keeps its algorithmic fallback.
+ *
+ * The group SID names the creator's own group, which is the group a new
+ * object gets EXCEPT under a set-group-ID parent, where the engine hands down
+ * the parent's.  chimera_vfs_create_inherit_gid drops the companion when it
+ * does that, so the SID never sits beside a gid it does not describe.
+ */
+static void
+chimera_smb_seed_creator_sids(struct chimera_smb_request *request)
+{
+    struct chimera_smb_session *session;
+
+    /* An SD create context describes the security the CLIENT asked for, and
+     * that description wins whole: stamping the session's SID over it would
+     * store an owner SID the descriptor never named, and QUERY SECURITY
+     * prefers the stored SID -- so the file would report an owner that
+     * contradicts both the descriptor and the uid derived from it.
+     *
+     * The context is what is tested, not the uid it produced.  An owner SID
+     * from a domain this server has no authority for resolves to no uid at all
+     * (chimera_smb_parse_sd_to_acl keeps it as an opaque principal), so a
+     * va_uid test would miss exactly the foreign-principal case the native-SID
+     * work exists to carry. */
+    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_SECD) {
+        return;
+    }
+
+    if (request->create.set_attr.va_set_mask & CHIMERA_VFS_ATTR_UID) {
+        return;
+    }
+
+    session = request->session_handle->session;
+
+    if (chimera_sid_present(&session->owner_sid)) {
+        request->create.owner_sid             = session->owner_sid;
+        request->create.set_attr.va_owner_sid = &request->create.owner_sid;
+        request->create.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_OWNER_SID;
+    }
+
+    /* A caller that named a group of its own owns that choice; the seed only
+     * speaks for the group the session would give the object by default. */
+    if (!(request->create.set_attr.va_set_mask & CHIMERA_VFS_ATTR_GID) &&
+        chimera_sid_present(&session->group_sid)) {
+        request->create.group_sid             = session->group_sid;
+        request->create.set_attr.va_group_sid = &request->create.group_sid;
+        request->create.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
+    }
+} /* chimera_smb_seed_creator_sids */
+
 /* Issue the open_at against the (already opened) parent handle in
  * request->create.parent_handle.  Shared by the plain path and the
  * post-overwrite-check path. */
@@ -4502,6 +4582,40 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         }
     }
 
+    /* Seed the owner and group SID companions from the creator's identity.
+     *
+     * A CREATE carries no security descriptor unless the client sends an SD
+     * create context, so without this the backend is handed nothing but a
+     * uid/gid and stores the algorithmic modefromsid form -- every file made
+     * over SMB then holds S-1-5-88-* on disk, readable only by something that
+     * can map it back, which is what native-SID storage exists to avoid.
+     *
+     * The guard is NOT the ARCHIVE one above.  ARCHIVE is stamped again when
+     * an overwrite replaces an existing file's contents; an owner is not.  A
+     * create-capable open is the only place this belongs: OPEN_CREATE alone,
+     * because the backend applies set_attr only when it actually creates the
+     * inode, so an OVERWRITE_IF that finds the file already there stamps
+     * nothing.  (The deferred truncate that replaces its contents strips the
+     * companions outright -- see chimera_smb_create_issue_truncate.)
+     *
+     * That holds for the base open of a named-stream create too: it carries
+     * OPEN_CREATE when the disposition can create, and stamps the base only
+     * if this open is what brings it into existence -- an ordinary create
+     * that happens to open a stream next.  It is the STREAM open that must
+     * not carry the companions, because the backends apply a stream create's
+     * set_attr to the BASE file through the open path, where no chown gate
+     * runs, and an existing base belongs to whoever made it.
+     * chimera_smb_create_open_stream_chain strips them before that open.
+     *
+     * Never a resolve: the SIDs were captured on the session at logon, so the
+     * seed is two struct copies and a create never waits on the identity
+     * authority.  A session with nothing captured (a local user with no SID,
+     * a winbind outage at logon) leaves the companions unstamped and the
+     * backend falls back to modefromsid exactly as before. */
+    if (flags & CHIMERA_VFS_OPEN_CREATE) {
+        chimera_smb_seed_creator_sids(request);
+    }
+
     /* Persistent-handle grants are keyed by the base file name; skip them for
      * stream opens this phase. */
     if (!request->create.has_stream &&
@@ -4611,6 +4725,13 @@ chimera_smb_create_open_parent_callback(
     if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
         (request->create.create_disposition == SMB2_FILE_CREATE ||
          request->create.create_disposition == SMB2_FILE_OPEN_IF)) {
+
+        /* A directory create does not go through chimera_smb_create_issue_open,
+         * so it needs the seed of its own -- without it an ordinary Windows
+         * CreateDirectory stores no native SIDs at all.  OPEN_IF on a directory
+         * that already exists stamps nothing, the same as the open path: the
+         * backend applies set_attr only when it creates the inode. */
+        chimera_smb_seed_creator_sids(request);
 
         chimera_vfs_mkdir_at(
             vfs_thread,

@@ -52,7 +52,15 @@ chimera_nfs4_open_at_callback(
     struct nfs_resop4               *getattr_res;
     xdr_opaque                      *remote_fh;
     struct chimera_nfs4_open_state  *state;
+    struct chimera_nfs4_open_file   *open_file;
+    int                              open_file_status;
     int                              path_open;
+    /* A creating OPEN mutates the parent, so the OPEN shape brackets itself
+     * with the parent's change attribute (ops 2 and 6) and everything after
+     * the OPEN sits one slot later.  A path open is a LOOKUP, which cannot
+     * change the directory and is the hottest path in the module, so it is
+     * left at the original five ops -- hence the shift. */
+    int                              shift;
 
     path_open = ((request->open_at.flags & CHIMERA_VFS_OPEN_PATH) &&
                  !(request->open_at.flags & CHIMERA_VFS_OPEN_CREATE)) ||
@@ -134,13 +142,21 @@ chimera_nfs4_open_at_callback(
         return;
     }
 
+    shift = path_open ? 0 : 1;
+
+    if (!path_open) {
+        /* The parent's pre-mutation snapshot (op 2), taken before the OPEN
+         * status check so it is recorded even when the open itself failed. */
+        chimera_nfs4_unmarshall_dir_attr(res, 2, &request->open_at.r_dir_pre_attr);
+    }
+
     /* Check OPEN / LOOKUP result */
-    if (res->num_resarray < 3) {
+    if (res->num_resarray < (uint32_t) (3 + shift)) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    open_res = &res->resarray[2];
+    open_res = &res->resarray[2 + shift];
     if (path_open) {
         if (open_res->oplookup.status != NFS4_OK) {
             request->status = chimera_nfs4_status_to_errno(open_res->oplookup.status);
@@ -154,12 +170,12 @@ chimera_nfs4_open_at_callback(
     }
 
     /* Check GETFH result */
-    if (res->num_resarray < 4) {
+    if (res->num_resarray < (uint32_t) (4 + shift)) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    getfh_res = &res->resarray[3];
+    getfh_res = &res->resarray[3 + shift];
     if (getfh_res->opgetfh.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(getfh_res->opgetfh.status);
         request->complete(request);
@@ -176,18 +192,25 @@ chimera_nfs4_open_at_callback(
     }
 
     /* Get GETATTR result */
-    if (res->num_resarray >= 5) {
-        getattr_res = &res->resarray[4];
+    if (res->num_resarray >= (uint32_t) (5 + shift)) {
+        getattr_res = &res->resarray[4 + shift];
         if (getattr_res->opgetattr.status == NFS4_OK) {
             chimera_nfs4_unmarshall_fattr(&getattr_res->opgetattr.resok4.obj_attributes,
                                           &request->open_at.r_attr);
         }
     }
 
-    /* Allocate and store open state with stateid.  Skip for inferred opens
-     * (synthetic handles which don't call close) and for path opens (resolved
-     * via LOOKUP, so there is no OPEN stateid). */
-    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED) && !path_open) {
+    if (!path_open) {
+        /* The parent's post-mutation snapshot (op 7, after the PUTFH that put
+         * the current filehandle back on the parent -- OPEN left it on the
+         * opened object). */
+        chimera_nfs4_unmarshall_dir_attr(res, 7, &request->open_at.r_dir_post_attr);
+    }
+
+    /* Every wire OPEN needs a counted state, including inferred data opens.
+     * Otherwise a later CLAIM_FH upgrades an untracked state forever.
+     * Path opens use LOOKUP and have no stateid to retain. */
+    if (!path_open) {
         /* Count this handle against the file's open on the server, which every
          * handle on the file shares.  Keyed on the handle OPEN just returned
          * (unmarshalled into r_attr above), not request->fh, which still names
@@ -196,10 +219,17 @@ chimera_nfs4_open_at_callback(
          * CLOSE destroys (see chimera_nfs4_open_file_get) -- the returned
          * stateid is dead on arrival, so re-send the OPEN; once the CLOSE has
          * landed the retry receives a fresh state. */
-        if (chimera_nfs4_open_file_get(ctx->server,
-                                       request->open_at.r_attr.va_fh,
-                                       request->open_at.r_attr.va_fh_len,
-                                       &open_res->opopen.resok4.stateid) != 0) {
+        open_file_status = chimera_nfs4_open_file_get(ctx->server,
+                                                      request->open_at.r_attr.va_fh,
+                                                      request->open_at.r_attr.va_fh_len,
+                                                      &open_res->opopen.resok4.stateid,
+                                                      &open_file);
+        if (open_file_status == -2) {
+            request->status = CHIMERA_VFS_EFAULT;
+            request->complete(request);
+            return;
+        }
+        if (open_file_status != 0) {
             chimera_nfs4_open_at_send(ctx->thread, ctx->shared, request,
                                       ctx->dispatch_private);
             return;
@@ -216,6 +246,7 @@ chimera_nfs4_open_at_callback(
         /* Store the stateid from OPEN response */
         state->server_index = ctx->server->index;
         state->stateid      = open_res->opopen.resok4.stateid;
+        state->open_file    = open_file;
 
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
@@ -248,7 +279,7 @@ chimera_nfs4_open_at_send(
     struct chimera_nfs_client_server        *server;
     struct chimera_nfs4_client_session      *session;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[5];
+    struct nfs_argop4                        argarray[8];
     uint32_t                                 attr_request[2];
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
@@ -256,6 +287,9 @@ chimera_nfs4_open_at_send(
     struct chimera_nfs4_open_at_ctx         *ctx;
     struct OPEN4args                        *open_args;
     int                                      path_open;
+    /* Slot offset of everything after op 2: the OPEN shape inserts the
+     * parent's pre-mutation GETATTR there, the LOOKUP shape does not. */
+    int                                      shift;
 
     ctx = request->plugin_data;
 
@@ -272,6 +306,7 @@ chimera_nfs4_open_at_send(
     path_open = ((request->open_at.flags & CHIMERA_VFS_OPEN_PATH) &&
                  !(request->open_at.flags & CHIMERA_VFS_OPEN_CREATE)) ||
         ctx->lookup_fallback;
+    shift = path_open ? 0 : 1;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -300,15 +335,19 @@ chimera_nfs4_open_at_send(
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 5;
+    /* A path open resolves with LOOKUP and cannot change the directory, so it
+     * keeps the original five ops.  A real OPEN can create, and the protocol
+     * server answers it with a change_info4, so that shape brackets itself with
+     * the parent's change attribute: SEQUENCE + PUTFH + GETATTR(dir pre) +
+     * OPEN + GETFH + GETATTR(obj) + PUTFH + GETATTR(dir post).  See
+     * chimera_nfs4_dir_getattr_op. */
+    args.num_argarray = path_open ? 5 : 8;
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
 
     /* Op 1: PUTFH - set current file handle to parent directory */
-    argarray[1].argop               = OP_PUTFH;
-    argarray[1].opputfh.object.data = fh;
-    argarray[1].opputfh.object.len  = fhlen;
+    chimera_nfs4_putfh_op(&argarray[1], fh, fhlen);
 
     /* Op 2: LOOKUP for a path open, OPEN otherwise. */
     if (path_open) {
@@ -318,9 +357,12 @@ chimera_nfs4_open_at_send(
         goto emit_getfh;
     }
 
-    /* Op 2: OPEN - open/create the file */
-    argarray[2].argop = OP_OPEN;
-    open_args         = &argarray[2].opopen;
+    /* Op 2: GETATTR - the parent's change attribute before the open */
+    chimera_nfs4_dir_getattr_op(&argarray[2], attr_request);
+
+    /* Op 3: OPEN - open/create the file */
+    argarray[3].argop = OP_OPEN;
+    open_args         = &argarray[3].opopen;
 
     open_args->seqid = 0; /* Sequence ID for open state - 0 for new opens */
 
@@ -387,17 +429,26 @@ chimera_nfs4_open_at_send(
 
  emit_getfh:
 
-    /* Op 3: GETFH - get file handle for the opened/looked-up object */
-    argarray[3].argop = OP_GETFH;
+    /* GETFH - get file handle for the opened/looked-up object */
+    argarray[3 + shift].argop = OP_GETFH;
 
-    /* Op 4: GETATTR - get attributes for opened file.  OWNER/OWNER_GROUP are
+    /* GETATTR - get attributes for opened file.  OWNER/OWNER_GROUP are
      * required: the engine's open gate authorizes a non-created open from
      * these attributes, and without ownership it would evaluate the caller
      * against the file's "other" mode bits. */
-    argarray[4].argop = OP_GETATTR;
+    argarray[4 + shift].argop = OP_GETATTR;
     chimera_nfs4_attr_request_stat(attr_request);
-    argarray[4].opgetattr.attr_request     = attr_request;
-    argarray[4].opgetattr.num_attr_request = 2;
+    argarray[4 + shift].opgetattr.attr_request     = attr_request;
+    argarray[4 + shift].opgetattr.num_attr_request = 2;
+
+    if (!path_open) {
+        /* Op 6: PUTFH - OPEN left the current filehandle on the opened object,
+         * so put it back on the parent before snapshotting it again. */
+        chimera_nfs4_putfh_op(&argarray[6], fh, fhlen);
+
+        /* Op 7: GETATTR - the parent's change attribute after the open */
+        chimera_nfs4_dir_getattr_op(&argarray[7], attr_request);
+    }
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

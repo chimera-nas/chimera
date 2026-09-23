@@ -579,6 +579,28 @@ int
 chimera_server_config_get_nfs_nsm_port(
     const struct chimera_server_config *config);
 
+/* The MOUNT and portmap service numbers (default 20048 / 111).  Configurable
+ * so two NFS servers can share one address space -- the in-process pNFS proxy
+ * suite runs a metadata server and the proxy in front of it in one test
+ * process, and the second server to bind a well-known number would abort. */
+void
+chimera_server_config_set_nfs_mount_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_mount_port(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs_portmap_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_portmap_port(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_state_dir(
     struct chimera_server_config *config,
@@ -938,6 +960,22 @@ int
 chimera_server_remove_user(
     struct chimera_server *server,
     const char            *username);
+
+/* A group the server knows natively, with the SID a native-SID backend stores
+ * for it.  Mirrors chimera_server_add_user for the group half of an identity;
+ * the same pinning rules apply. */
+int
+chimera_server_add_group(
+    struct chimera_server *server,
+    const char            *groupname,
+    const char            *sid,
+    uint32_t               gid,
+    int                    pinned);
+
+int
+chimera_server_remove_group(
+    struct chimera_server *server,
+    const char            *groupname);
 
 const struct chimera_vfs_user *
 chimera_server_get_user(

@@ -2993,9 +2993,18 @@ memfs_mkdir_at(
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
 
-    /* POSIX: a set-group-ID parent directory forces the new node's group. */
-    if (parent_inode->mode & S_ISGID) {
-        inode->gid = parent_inode->gid;
+    /* POSIX: a set-group-ID parent directory forces the new node's group --
+     * unless the caller named a group of its own, which memfs_apply_attrs
+     * above has already stored and which stays.  The attrs were applied
+     * before the parent was in hand, so when the parent's group does win, a
+     * group SID companion seeded for the creator's group is already stored:
+     * un-store it, it no longer describes the object's group (the rule
+     * chimera_vfs_attrs_drop_group_sid applies ahead of the store on the
+     * other create paths). */
+    if (chimera_vfs_create_inherits_gid(request->mkdir_at.set_attr,
+                                        parent_inode->mode)) {
+        inode->gid           = parent_inode->gid;
+        inode->group_sid.len = 0;
     }
 
     /* Inherit the parent's inheritable ACEs (or seed a Windows default DACL for
@@ -3149,9 +3158,12 @@ memfs_mknod_at(
         return;
     }
 
-    /* POSIX: a set-group-ID parent directory forces the new node's group. */
-    if (parent_inode->mode & S_ISGID) {
-        inode->gid = parent_inode->gid;
+    /* POSIX: a set-group-ID parent directory forces the new node's group,
+     * unless the caller named one of its own (as in mkdir_at above). */
+    if (chimera_vfs_create_inherits_gid(request->mknod_at.set_attr,
+                                        parent_inode->mode)) {
+        inode->gid           = parent_inode->gid;
+        inode->group_sid.len = 0;   /* as in mkdir: the companion no longer applies */
         memfs_map_attrs(fs, r_attr, inode, request->fh);
     }
 
@@ -3737,6 +3749,11 @@ memfs_open_at(
         inode->file.blocks     = NULL;
         inode->file.max_blocks = 0;
         inode->file.num_blocks = 0;
+
+        if (chimera_vfs_create_inherits_gid(request->open_at.set_attr,
+                                            parent_inode->mode)) {
+            chimera_vfs_attrs_drop_group_sid(request->open_at.set_attr);
+        }
 
         memfs_apply_attrs(inode, request->open_at.set_attr);
 

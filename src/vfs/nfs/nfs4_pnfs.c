@@ -626,20 +626,6 @@ chimera_nfs4_pnfs_conn_failed(struct chimera_nfs_client_server_thread *server_th
 /* ----------------------------------------------------------------------- */
 
 void
-chimera_nfs4_pnfs_layout_register(
-    struct chimera_nfs_shared  *shared,
-    struct chimera_nfs4_layout *layout)
-{
-    evpl_mutex_lock(&shared->pnfs_layout_lock);
-    if (!layout->registered) {
-        layout->registered   = 1;
-        layout->reg_next     = shared->pnfs_layouts;
-        shared->pnfs_layouts = layout;
-    }
-    evpl_mutex_unlock(&shared->pnfs_layout_lock);
-} /* chimera_nfs4_pnfs_layout_register */
-
-void
 chimera_nfs4_pnfs_layout_unregister(
     struct chimera_nfs_shared  *shared,
     struct chimera_nfs4_layout *layout)
@@ -660,27 +646,223 @@ chimera_nfs4_pnfs_layout_unregister(
     evpl_mutex_unlock(&shared->pnfs_layout_lock);
 } /* chimera_nfs4_pnfs_layout_unregister */
 
-/*
- * Fence a recalled layout: stop the client using it for DS I/O.  Storing
- * UNAVAIL makes subsequent reads/writes fall back to the MDS, and makes close
- * skip the (now invalid) LAYOUTCOMMIT/LAYOUTRETURN -- the MDS drops the layout
- * on our recall reply, so there is nothing to commit or return to.  Caller holds
- * shared->pnfs_layout_lock, so the layout cannot be unregistered/freed under us.
- */
+struct chimera_nfs4_recall_task {
+    struct evpl_timer                        timer;
+    struct chimera_nfs4_layout              *layout;
+    struct chimera_nfs_shared               *shared;
+    struct chimera_nfs_thread               *thread;
+    struct chimera_nfs_client_server_thread *mds_thread;
+    int                                      returning;
+};
+
+struct chimera_nfs4_recall_waiter {
+    struct chimera_nfs_thread         *thread;
+    struct chimera_nfs_shared         *shared;
+    struct chimera_vfs_request        *request;
+    void                              *private_data;
+    struct chimera_nfs4_recall_waiter *next;
+};
+
+static void chimera_nfs4_recall_send(
+    struct chimera_nfs4_recall_task *task);
+static void chimera_nfs4_recall_tick(
+    struct evpl       *evpl,
+    struct evpl_timer *timer);
+
 static void
-chimera_nfs4_cb_fence_layout(struct chimera_nfs4_layout *layout)
+chimera_nfs4_recall_resume_waiter(void *arg)
 {
-    atomic_store(&layout->state, CHIMERA_NFS4_LAYOUT_UNAVAIL);
-} /* chimera_nfs4_cb_fence_layout */
+    struct chimera_nfs4_recall_waiter *waiter = arg;
+
+    if (waiter->request->opcode == CHIMERA_VFS_OP_READ) {
+        chimera_vfs_nfs4_read(waiter->thread, waiter->shared,
+                          waiter->request, waiter->private_data);
+    } else if (waiter->request->opcode == CHIMERA_VFS_OP_WRITE) {
+        chimera_vfs_nfs4_write(waiter->thread, waiter->shared,
+                           waiter->request, waiter->private_data);
+    } else {
+        waiter->request->status = CHIMERA_VFS_OK;
+        waiter->request->complete(waiter->request);
+    }
+    free(waiter);
+} /* chimera_nfs4_recall_resume_waiter */
+
+static void
+chimera_nfs4_recall_resume_close(void *arg)
+{
+    struct chimera_nfs4_layout     *layout     = arg;
+    struct chimera_vfs_request     *request    = layout->recall_close_request;
+    struct chimera_nfs_thread      *thread     = layout->recall_close_thread;
+    struct chimera_nfs_shared      *shared     = layout->recall_close_shared;
+    struct chimera_nfs4_open_state *open_state = layout->recall_close_open_state;
+
+    layout->recall_close_request = NULL;
+    chimera_nfs4_close_send(thread, shared, request, open_state);
+} /* chimera_nfs4_recall_resume_close */
+
+static void
+chimera_nfs4_recall_finish(struct chimera_nfs4_recall_task *task)
+{
+    struct chimera_nfs4_layout        *layout = task->layout;
+    struct chimera_nfs4_recall_waiter *waiters, *waiter;
+    struct chimera_nfs_thread         *close_thread;
+
+    chimera_nfs4_pnfs_layout_unregister(task->shared, layout);
+    evpl_mutex_lock(&layout->io_lock);
+    atomic_store(&layout->last_write_offset, 0);
+    atomic_store(&layout->layoutcommit_needed, 0);
+    layout->recall_task    = NULL;
+    waiters                = layout->recall_waiters;
+    layout->recall_waiters = NULL;
+    close_thread           = layout->recall_close_thread;
+    atomic_store(&layout->state, CHIMERA_NFS4_LAYOUT_NONE);
+    evpl_mutex_unlock(&layout->io_lock);
+
+    while (waiters) {
+        waiter  = waiters;
+        waiters = waiters->next;
+        chimera_nfs4_cb_resume_on_thread(waiter->thread,
+                                         chimera_nfs4_recall_resume_waiter, waiter);
+    }
+    if (close_thread) {
+        chimera_nfs4_cb_resume_on_thread(close_thread,
+                                         chimera_nfs4_recall_resume_close, layout);
+    }
+    free(task);
+} /* chimera_nfs4_recall_finish */
+
+static void
+chimera_nfs4_recall_retry(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *ctx)
+{
+    (void) shared;
+    (void) request;
+    if (!thread) {
+        struct chimera_nfs4_recall_task *task = ctx;
+        evpl_add_oneshot_timer(task->thread->evpl, &task->timer,
+                               chimera_nfs4_recall_tick, 10000);
+        return;
+    }
+    chimera_nfs4_recall_send(ctx);
+} /* chimera_nfs4_recall_retry */
+
+static void
+chimera_nfs4_recall_reply(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct COMPOUND4res         *res,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_nfs4_recall_task *task = private_data;
+
+    (void) evpl;
+    (void) verf;
+    if (status != 0 || !res || res->status != NFS4_OK) {
+        chimera_nfsclient_error("pNFS recall %s failed: rpc=%d nfs=%d; retrying",
+                                task->returning ? "LAYOUTRETURN" : "LAYOUTCOMMIT",
+                                status, res ? res->status : -1);
+        evpl_add_oneshot_timer(task->thread->evpl, &task->timer,
+                               chimera_nfs4_recall_tick, 10000);
+        return;
+    }
+    if (task->returning) {
+        chimera_nfs4_recall_finish(task);
+    } else {
+        atomic_store(&task->layout->layoutcommit_needed, 0);
+        task->returning = 1;
+        chimera_nfs4_recall_send(task);
+    }
+} /* chimera_nfs4_recall_reply */
+
+static void
+chimera_nfs4_recall_send(struct chimera_nfs4_recall_task *task)
+{
+    struct chimera_nfs4_layout *layout = task->layout;
+    struct chimera_nfs_shared  *shared = task->shared;
+    struct COMPOUND4args        args   = { 0 };
+    struct nfs_argop4           ops[3] = { 0 };
+    struct evpl_rpc2_cred       cred;
+    uint8_t                    *fh;
+    int                         fhlen;
+    uint64_t                    high;
+
+    /* Revisit the connection on every attempt: a recall can outlive an MDS
+     * disconnect, and a cached server thread may no longer have a socket. */
+    task->mds_thread = chimera_nfs_thread_get_server_thread(task->thread,
+                                                            layout->file_fh, layout->file_fh_len);
+    if (!task->mds_thread || !task->mds_thread->nfs_conn ||
+        !task->mds_thread->server->nfs4_session) {
+        chimera_nfsclient_error("pNFS recall: MDS connection unavailable");
+        evpl_add_oneshot_timer(task->thread->evpl, &task->timer,
+                               chimera_nfs4_recall_tick, 10000);
+        return;
+    }
+
+    chimera_nfs4_map_fh(layout->file_fh, layout->file_fh_len, &fh, &fhlen);
+    args.minorversion          = 1;
+    args.argarray              = ops;
+    args.num_argarray          = 3;
+    ops[0].argop               = OP_SEQUENCE;
+    ops[1].argop               = OP_PUTFH;
+    ops[1].opputfh.object.data = fh;
+    ops[1].opputfh.object.len  = fhlen;
+    high                       = atomic_load(&layout->last_write_offset);
+    if (task->returning) {
+        ops[2].argop                                                  = OP_LAYOUTRETURN;
+        ops[2].oplayoutreturn.lora_reclaim                            = 0;
+        ops[2].oplayoutreturn.lora_layout_type                        = CHIMERA_NFS4_LAYOUT4_FLEX_FILES;
+        ops[2].oplayoutreturn.lora_iomode                             = LAYOUTIOMODE4_ANY;
+        ops[2].oplayoutreturn.lora_layoutreturn.lr_returntype         = LAYOUTRETURN4_FILE;
+        ops[2].oplayoutreturn.lora_layoutreturn.lr_layout.lrf_offset  = 0;
+        ops[2].oplayoutreturn.lora_layoutreturn.lr_layout.lrf_length  = UINT64_MAX;
+        ops[2].oplayoutreturn.lora_layoutreturn.lr_layout.lrf_stateid = layout->layout_stateid;
+    } else {
+        ops[2].argop                                              = OP_LAYOUTCOMMIT;
+        ops[2].oplayoutcommit.loca_offset                         = 0;
+        ops[2].oplayoutcommit.loca_length                         = UINT64_MAX;
+        ops[2].oplayoutcommit.loca_stateid                        = layout->layout_stateid;
+        ops[2].oplayoutcommit.loca_last_write_offset.no_newoffset = 1;
+        ops[2].oplayoutcommit.loca_last_write_offset.no_offset    = high ? high - 1 : 0;
+        ops[2].oplayoutcommit.loca_layoutupdate.lou_type          = CHIMERA_NFS4_LAYOUT4_FLEX_FILES;
+    }
+    chimera_nfs_init_rpc2_cred(&cred, &layout->recall_cred, "chimera", 7);
+    chimera_nfs4_compound_call(task->thread, shared, task->mds_thread, NULL,
+                               &args, &cred, 0, 0, NULL, 0, 0,
+                               chimera_nfs4_recall_reply, task,
+                               chimera_nfs4_recall_retry, task);
+} /* chimera_nfs4_recall_send */
+
+static void
+chimera_nfs4_recall_tick(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_nfs4_recall_task *task =
+        container_of(timer, struct chimera_nfs4_recall_task, timer);
+    struct chimera_nfs4_layout      *layout = task->layout;
+    unsigned int                     active;
+
+    evpl_mutex_lock(&layout->io_lock);
+    active = layout->io_active;
+    evpl_mutex_unlock(&layout->io_lock);
+    if (active) {
+        evpl_add_oneshot_timer(evpl, timer, chimera_nfs4_recall_tick, 1000);
+        return;
+    }
+    task->returning = !atomic_load(&layout->layoutcommit_needed);
+    chimera_nfs4_recall_send(task);
+} /* chimera_nfs4_recall_tick */
 
 /*
  * Strong CB_LAYOUTRECALL handler (overrides the weak default in nfs4_cb.c).
  * Runs on the back-channel control thread.  Find the recalled layout(s) for this
- * MDS in the registry and fence them, then answer NFS4ERR_NOMATCHING_LAYOUT: the
- * chimera MDS drops the layout and resumes the conflicting operation on any
- * non-OK reply (NFS4_OK would make it block waiting for a LAYOUTRETURN we are
- * not in a position to issue from here).  Fencing first guarantees the client
- * has already stopped using the layout the MDS is about to drop.
+ * MDS in the registry and fence them, then acknowledge the callback.  The MDS
+ * waits for LAYOUTRETURN.  A control-thread task drains outstanding DS I/O,
+ * reports the high-water size with LAYOUTCOMMIT, and finally returns the layout.
  */
 nfsstat4
 chimera_nfs4_cb_layoutrecall(
@@ -725,17 +907,28 @@ chimera_nfs4_cb_layoutrecall(
         /* LAYOUTRECALL4_FSID / _ALL: chimera's MDS only issues FILE recalls,
          * but fence every layout for this server as a safe superset. */
 
-        chimera_nfs4_cb_fence_layout(layout);
-        fenced++;
+        evpl_mutex_lock(&layout->io_lock);
+        if (atomic_load(&layout->state) == CHIMERA_NFS4_LAYOUT_VALID) {
+            struct chimera_nfs4_recall_task *task = calloc(1, sizeof(*task));
+            task->layout        = layout;
+            task->shared        = shared;
+            task->thread        = shared->cb_nfs_thread;
+            layout->recall_task = task;
+            atomic_store(&layout->state, CHIMERA_NFS4_LAYOUT_RECALLING);
+            evpl_add_oneshot_timer(shared->cb_evpl, &task->timer,
+                                   chimera_nfs4_recall_tick, 1);
+            fenced++;
+        } else if (atomic_load(&layout->state) == CHIMERA_NFS4_LAYOUT_RECALLING) {
+            fenced++;
+        }
+        evpl_mutex_unlock(&layout->io_lock);
     }
     evpl_mutex_unlock(&shared->pnfs_layout_lock);
 
     chimera_nfsclient_info("pNFS CB_LAYOUTRECALL type=%u fenced=%d layout(s) for server %d",
                            rtype, fenced, server->index);
 
-    /* Whether or not we held it, tell the MDS to drop it (we are not returning
-     * it from the back channel); fencing already stopped our DS I/O. */
-    return NFS4ERR_NOMATCHING_LAYOUT;
+    return fenced ? NFS4_OK : NFS4ERR_NOMATCHING_LAYOUT;
 } /* chimera_nfs4_cb_layoutrecall */
 
 static void
@@ -745,20 +938,28 @@ chimera_nfs4_acquire_finish(
     int                              valid)
 {
     struct chimera_nfs4_open_state *open_state = actx->open_state;
-    struct chimera_nfs4_layout     *layout     = &open_state->layout;
+    struct chimera_nfs4_layout     *layout     = &open_state->open_file->layout;
     struct chimera_vfs_request     *waiters, *w, *next;
 
-    /* A now-usable layout joins the registry so a back-channel CB_LAYOUTRECALL
-     * can find and fence it; do this before publishing VALID so a recall that
-     * races the first DS I/O always sees it. */
+    /* Publish registry membership and VALID under the same registry lock used
+     * by CB_LAYOUTRECALL. A callback must not observe an ACQUIRING layout in
+     * the registry and answer NOMATCHING just before it becomes usable. */
     if (valid) {
-        chimera_nfs4_pnfs_layout_register(actx->shared, layout);
+        evpl_mutex_lock(&actx->shared->pnfs_layout_lock);
+        evpl_mutex_lock(&layout->io_lock);
+        if (!layout->registered) {
+            layout->registered         = 1;
+            layout->reg_next           = actx->shared->pnfs_layouts;
+            actx->shared->pnfs_layouts = layout;
+        }
+        atomic_store(&layout->state, CHIMERA_NFS4_LAYOUT_VALID);
+        evpl_mutex_unlock(&layout->io_lock);
+        evpl_mutex_unlock(&actx->shared->pnfs_layout_lock);
+    } else {
+        atomic_store(&layout->state, CHIMERA_NFS4_LAYOUT_UNAVAIL);
     }
 
-    /* Publish the resolved state, then drain any requests that parked while we
-     * were ACQUIRING.  The lock orders against late parkers in the read/write
-     * path, which re-check the state under the same lock. */
-    atomic_store(&layout->state, valid ? CHIMERA_NFS4_LAYOUT_VALID : CHIMERA_NFS4_LAYOUT_UNAVAIL);
+    /* Drain requests that parked while the layout was ACQUIRING. */
 
     evpl_mutex_lock(&layout->acq_lock);
     waiters             = layout->acq_waiters;
@@ -855,7 +1056,7 @@ chimera_nfs4_getdeviceinfo_callback(
 
     chimera_nfs4_devcache_put(&actx->shared->pnfs_devcache, &dev, server_index);
 
-    actx->open_state->layout.ds_server_index = server_index;
+    actx->open_state->open_file->layout.ds_server_index = server_index;
     chimera_nfs4_acquire_finish(request, actx, 1);
 } /* chimera_nfs4_getdeviceinfo_callback */
 
@@ -937,28 +1138,28 @@ chimera_nfs4_layoutget_callback(
 
     if (chimera_nfs4_decode_ff_layout(lo->lo_content.loc_body.data,
                                       lo->lo_content.loc_body.len,
-                                      &open_state->layout.segments[0]) != 0) {
+                                      &open_state->open_file->layout.segments[0]) != 0) {
         chimera_nfsclient_error("pNFS LAYOUTGET ff_layout decode failed (body_len=%u)",
                                 lo->lo_content.loc_body.len);
         chimera_nfs4_acquire_finish(request, actx, 0);
         return;
     }
     chimera_nfsclient_info("pNFS LAYOUTGET ok: iomode=%u ds_fh_len=%u",
-                           lo->lo_iomode, open_state->layout.segments[0].ds_fh_len);
+                           lo->lo_iomode, open_state->open_file->layout.segments[0].ds_fh_len);
 
-    open_state->layout.segments[0].offset = lo->lo_offset;
-    open_state->layout.segments[0].length = lo->lo_length;
-    open_state->layout.segments[0].iomode = lo->lo_iomode;
-    open_state->layout.num_segments       = 1;
-    open_state->layout.iomode             = lo->lo_iomode;
-    open_state->layout.layout_stateid     = lg->logr_resok4.logr_stateid;
-    open_state->layout.return_on_close    = lg->logr_resok4.logr_return_on_close;
+    open_state->open_file->layout.segments[0].offset = lo->lo_offset;
+    open_state->open_file->layout.segments[0].length = lo->lo_length;
+    open_state->open_file->layout.segments[0].iomode = lo->lo_iomode;
+    open_state->open_file->layout.num_segments       = 1;
+    open_state->open_file->layout.iomode             = lo->lo_iomode;
+    open_state->open_file->layout.layout_stateid     = lg->logr_resok4.logr_stateid;
+    open_state->open_file->layout.return_on_close    = lg->logr_resok4.logr_return_on_close;
 
-    memcpy(actx->deviceid, open_state->layout.segments[0].deviceid, CHIMERA_VFS_DEVICEID_SIZE);
+    memcpy(actx->deviceid, open_state->open_file->layout.segments[0].deviceid, CHIMERA_VFS_DEVICEID_SIZE);
 
     /* Device already resolved?  Reuse the cached DS server slot. */
     if (chimera_nfs4_devcache_find(&actx->shared->pnfs_devcache, actx->deviceid, &server_index)) {
-        open_state->layout.ds_server_index = server_index;
+        open_state->open_file->layout.ds_server_index = server_index;
         chimera_nfs4_acquire_finish(request, actx, 1);
         return;
     }
@@ -983,8 +1184,9 @@ chimera_nfs4_layoutget(
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
     /* Stash the file's own local handle so close can address it to the MDS. */
-    memcpy(actx->open_state->layout.file_fh, request->fh, request->fh_len);
-    actx->open_state->layout.file_fh_len = request->fh_len;
+    memcpy(actx->open_state->open_file->layout.file_fh, request->fh, request->fh_len);
+    actx->open_state->open_file->layout.file_fh_len = request->fh_len;
+    actx->open_state->open_file->layout.recall_cred = *request->cred;
 
     memset(&args, 0, sizeof(args));
     args.minorversion = 1;
@@ -1050,9 +1252,9 @@ chimera_nfs4_layout_acquire(
     actx->redispatch   = redispatch;
 
     /* Replay context for any requests that park while this acquisition runs. */
-    open_state->layout.acq_thread  = thread;
-    open_state->layout.acq_shared  = shared;
-    open_state->layout.acq_private = private_data;
+    open_state->open_file->layout.acq_thread  = thread;
+    open_state->open_file->layout.acq_shared  = shared;
+    open_state->open_file->layout.acq_private = private_data;
 
     chimera_nfs4_layoutget(request, actx);
 } /* chimera_nfs4_layout_acquire */
@@ -1116,6 +1318,32 @@ chimera_nfs4_build_ds_fh(
 * DS READ (NFSv3).
 * ------------------------------------------------------------------------- */
 
+static int
+chimera_nfs4_layout_io_enter(struct chimera_nfs4_layout *layout)
+{
+    int valid;
+
+    evpl_mutex_lock(&layout->io_lock);
+    valid = atomic_load(&layout->state) == CHIMERA_NFS4_LAYOUT_VALID;
+    if (valid) {
+        layout->io_active++;
+    }
+    evpl_mutex_unlock(&layout->io_lock);
+    return valid;
+} /* chimera_nfs4_layout_io_enter */
+
+static void
+chimera_nfs4_layout_io_done(struct chimera_nfs4_layout *layout)
+{
+    evpl_mutex_lock(&layout->io_lock);
+    layout->io_active--;
+    evpl_mutex_unlock(&layout->io_lock);
+} /* chimera_nfs4_layout_io_done */
+
+struct chimera_nfs4_pnfs_ds_read_ctx {
+    struct chimera_nfs4_layout *layout;
+};
+
 static void
 chimera_nfs4_pnfs_ds_read_callback(
     struct evpl                 *evpl,
@@ -1124,7 +1352,10 @@ chimera_nfs4_pnfs_ds_read_callback(
     int                          status,
     void                        *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_request           *request = private_data;
+    struct chimera_nfs4_pnfs_ds_read_ctx *ctx     = request->plugin_data;
+
+    chimera_nfs4_layout_io_done(ctx->layout);
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -1151,6 +1382,7 @@ chimera_nfs4_pnfs_ds_read(
     struct chimera_nfs_thread         *thread,
     struct chimera_nfs_shared         *shared,
     struct chimera_vfs_request        *request,
+    struct chimera_nfs4_layout        *layout,
     struct chimera_vfs_layout_segment *seg,
     int                                ds_server_index)
 {
@@ -1176,6 +1408,12 @@ chimera_nfs4_pnfs_ds_read(
         ds_thread->conn_waiters = request;
         return 1;
     }
+
+    if (!chimera_nfs4_layout_io_enter(layout)) {
+        return 0;
+    }
+
+    ((struct chimera_nfs4_pnfs_ds_read_ctx *) request->plugin_data)->layout = layout;
 
     args.file.data.data = seg->ds_fh;
     args.file.data.len  = seg->ds_fh_len;
@@ -1204,6 +1442,15 @@ chimera_nfs4_pnfs_ds_read(
 * DS WRITE (NFSv3).
 * ------------------------------------------------------------------------- */
 
+struct chimera_nfs4_pnfs_close_ctx {
+    struct chimera_nfs_thread               *thread;
+    struct chimera_nfs_shared               *shared;
+    struct chimera_nfs_client_server_thread *mds_thread;
+    struct chimera_nfs4_open_state          *open_state;
+    int                                      commit_active;
+    uint64_t                                 commit_generation;
+};
+
 struct chimera_nfs4_pnfs_ds_write_ctx {
     struct chimera_nfs4_open_state *open_state;
     uint64_t                        end_offset;   /* offset + length */
@@ -1219,11 +1466,13 @@ chimera_nfs4_pnfs_ds_write_callback(
 {
     struct chimera_vfs_request            *request = private_data;
     struct chimera_nfs4_pnfs_ds_write_ctx *ctx     = request->plugin_data;
-    struct chimera_nfs4_layout            *layout  = &ctx->open_state->layout;
+    struct chimera_nfs4_layout            *layout  = &ctx->open_state->open_file->layout;
     uint64_t                               cur;
+
 
     if (unlikely(status)) {
         chimera_nfsclient_error("pNFS DS write rpc failed: status=%d", status);
+        chimera_nfs4_layout_io_done(layout);
         request->status = CHIMERA_VFS_EFAULT;
         request->complete(request);
         return;
@@ -1231,6 +1480,7 @@ chimera_nfs4_pnfs_ds_write_callback(
 
     if (res->status != NFS3_OK) {
         chimera_nfsclient_error("pNFS DS write NFS3 error: status=%d", res->status);
+        chimera_nfs4_layout_io_done(layout);
         request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
         request->complete(request);
         return;
@@ -1247,6 +1497,7 @@ chimera_nfs4_pnfs_ds_write_callback(
          * larger or the swap wins. */
     }
     layout->layoutcommit_needed = 1;
+    atomic_fetch_add(&layout->write_generation, 1);
 
     /* Report UNSTABLE regardless of the DS's committed level: the data is on the
      * DS, but the MDS only learns the new file size from a LAYOUTCOMMIT, which
@@ -1257,7 +1508,8 @@ chimera_nfs4_pnfs_ds_write_callback(
      * and read back a stale (often zero) size, breaking close-to-open. */
     request->write.r_sync   = CHIMERA_VFS_WRITE_UNSTABLE;
     request->write.r_length = res->resok.count;
-    request->status         = CHIMERA_VFS_OK;
+    chimera_nfs4_layout_io_done(layout);
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_pnfs_ds_write_callback */
 
@@ -1292,6 +1544,10 @@ chimera_nfs4_pnfs_ds_write(
         request->next           = ds_thread->conn_waiters;
         ds_thread->conn_waiters = request;
         return 1;
+    }
+
+    if (!chimera_nfs4_layout_io_enter(&open_state->open_file->layout)) {
+        return 0;
     }
 
     chimera_nfsclient_debug("pNFS DS write -> server %d off=%lu len=%u",
@@ -1366,6 +1622,32 @@ chimera_nfs4_pnfs_try_park(
     return parked;
 } /* chimera_nfs4_pnfs_try_park */
 
+static int
+chimera_nfs4_pnfs_park_recall(
+    struct chimera_nfs4_layout *layout,
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_nfs4_recall_waiter *waiter;
+
+    evpl_mutex_lock(&layout->io_lock);
+    if (atomic_load(&layout->state) != CHIMERA_NFS4_LAYOUT_RECALLING) {
+        evpl_mutex_unlock(&layout->io_lock);
+        return 0;
+    }
+    waiter                 = calloc(1, sizeof(*waiter));
+    waiter->thread         = thread;
+    waiter->shared         = shared;
+    waiter->request        = request;
+    waiter->private_data   = private_data;
+    waiter->next           = layout->recall_waiters;
+    layout->recall_waiters = waiter;
+    evpl_mutex_unlock(&layout->io_lock);
+    return 1;
+} /* chimera_nfs4_pnfs_park_recall */
+
 int
 chimera_nfs4_pnfs_read(
     struct chimera_nfs_thread               *thread,
@@ -1375,7 +1657,7 @@ chimera_nfs4_pnfs_read(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_nfs4_open_state          *open_state)
 {
-    struct chimera_nfs4_layout        *layout = &open_state->layout;
+    struct chimera_nfs4_layout        *layout = &open_state->open_file->layout;
     struct chimera_vfs_layout_segment *seg;
     int                                expected;
 
@@ -1390,7 +1672,7 @@ chimera_nfs4_pnfs_read(
                 if (!seg || layout->ds_server_index < 0) {
                     return 0;
                 }
-                return chimera_nfs4_pnfs_ds_read(thread, shared, request, seg, layout->ds_server_index);
+                return chimera_nfs4_pnfs_ds_read(thread, shared, request, layout, seg, layout->ds_server_index);
 
             case CHIMERA_NFS4_LAYOUT_NONE:
                 expected = CHIMERA_NFS4_LAYOUT_NONE;
@@ -1407,6 +1689,13 @@ chimera_nfs4_pnfs_read(
                 }
                 continue;       /* acquisition just resolved; re-evaluate. */
 
+            case CHIMERA_NFS4_LAYOUT_RECALLING:
+                if (chimera_nfs4_pnfs_park_recall(layout, thread, shared,
+                                                  request, private_data)) {
+                    return 1;
+                }
+                continue;
+
             default:            /* UNAVAIL */
                 return 0;
         } /* switch */
@@ -1422,7 +1711,7 @@ chimera_nfs4_pnfs_write(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_nfs4_open_state          *open_state)
 {
-    struct chimera_nfs4_layout        *layout = &open_state->layout;
+    struct chimera_nfs4_layout        *layout = &open_state->open_file->layout;
     struct chimera_vfs_layout_segment *seg;
     int                                expected;
 
@@ -1457,6 +1746,13 @@ chimera_nfs4_pnfs_write(
                 }
                 continue;
 
+            case CHIMERA_NFS4_LAYOUT_RECALLING:
+                if (chimera_nfs4_pnfs_park_recall(layout, thread, shared,
+                                                  request, private_data)) {
+                    return 1;
+                }
+                continue;
+
             default:            /* UNAVAIL */
                 return 0;
         } /* switch */
@@ -1466,13 +1762,6 @@ chimera_nfs4_pnfs_write(
 /* ---------------------------------------------------------------------------
 * Close-time LAYOUTCOMMIT + LAYOUTRETURN.
 * ------------------------------------------------------------------------- */
-
-struct chimera_nfs4_pnfs_close_ctx {
-    struct chimera_nfs_thread               *thread;
-    struct chimera_nfs_shared               *shared;
-    struct chimera_nfs_client_server_thread *mds_thread;
-    struct chimera_nfs4_open_state          *open_state;
-};
 
 static void chimera_nfs4_pnfs_layoutreturn(
     struct chimera_vfs_request *request);
@@ -1524,7 +1813,7 @@ chimera_nfs4_pnfs_layoutreturn(struct chimera_vfs_request *request)
     struct chimera_nfs_shared               *shared        = cctx->shared;
     struct chimera_nfs_client_server_thread *server_thread = cctx->mds_thread;
     struct chimera_nfs4_client_session      *session       = server_thread->server->nfs4_session;
-    struct chimera_nfs4_layout              *layout        = &cctx->open_state->layout;
+    struct chimera_nfs4_layout              *layout        = &cctx->open_state->open_file->layout;
     struct COMPOUND4args                     args;
     struct nfs_argop4                        argarray[3];
     struct evpl_rpc2_cred                    rpc2_cred;
@@ -1583,7 +1872,7 @@ chimera_nfs4_pnfs_layoutcommit(struct chimera_vfs_request *request)
     struct chimera_nfs_shared               *shared        = cctx->shared;
     struct chimera_nfs_client_server_thread *server_thread = cctx->mds_thread;
     struct chimera_nfs4_client_session      *session       = server_thread->server->nfs4_session;
-    struct chimera_nfs4_layout              *layout        = &cctx->open_state->layout;
+    struct chimera_nfs4_layout              *layout        = &cctx->open_state->open_file->layout;
     struct COMPOUND4args                     args;
     struct nfs_argop4                        argarray[3];
     struct evpl_rpc2_cred                    rpc2_cred;
@@ -1638,9 +1927,20 @@ chimera_nfs4_pnfs_close(
     struct chimera_vfs_request     *request,
     struct chimera_nfs4_open_state *open_state)
 {
-    struct chimera_nfs4_layout              *layout = &open_state->layout;
+    struct chimera_nfs4_layout              *layout = &open_state->open_file->layout;
     struct chimera_nfs_client_server_thread *mds_thread;
     struct chimera_nfs4_pnfs_close_ctx      *cctx;
+
+    evpl_mutex_lock(&layout->io_lock);
+    if (atomic_load(&layout->state) == CHIMERA_NFS4_LAYOUT_RECALLING) {
+        layout->recall_close_request    = request;
+        layout->recall_close_thread     = thread;
+        layout->recall_close_shared     = shared;
+        layout->recall_close_open_state = open_state;
+        evpl_mutex_unlock(&layout->io_lock);
+        return 1;
+    }
+    evpl_mutex_unlock(&layout->io_lock);
 
     if (atomic_load(&layout->state) != CHIMERA_NFS4_LAYOUT_VALID ||
         layout->file_fh_len == 0) {
@@ -1706,11 +2006,18 @@ chimera_nfs4_pnfs_commit_callback(
     /* On success the MDS now reflects the high-water size, so a later
      * close/commit with no new writes can skip the round-trip.  On error leave
      * layoutcommit_needed set so close-time LAYOUTCOMMIT retries the flush. */
-    if (status == 0 && res && res->status == NFS4_OK) {
-        cctx->open_state->layout.layoutcommit_needed = 0;
+    if (status == 0 && res && res->status == NFS4_OK &&
+        atomic_load(&cctx->open_state->open_file->layout.write_generation) ==
+        cctx->commit_generation) {
+        cctx->open_state->open_file->layout.layoutcommit_needed = 0;
     }
 
-    request->status = CHIMERA_VFS_OK;
+    if (cctx->commit_active) {
+        chimera_nfs4_layout_io_done(&cctx->open_state->open_file->layout);
+    }
+
+    request->status = (status == 0 && res && res->status == NFS4_OK) ?
+        CHIMERA_VFS_OK : CHIMERA_VFS_EIO;
     request->complete(request);
 } /* chimera_nfs4_pnfs_commit_callback */
 
@@ -1720,7 +2027,7 @@ chimera_nfs4_pnfs_commit_send(struct chimera_vfs_request *request)
     struct chimera_nfs4_pnfs_close_ctx      *cctx          = request->plugin_data;
     struct chimera_nfs_shared               *shared        = cctx->shared;
     struct chimera_nfs_client_server_thread *server_thread = cctx->mds_thread;
-    struct chimera_nfs4_layout              *layout        = &cctx->open_state->layout;
+    struct chimera_nfs4_layout              *layout        = &cctx->open_state->open_file->layout;
     struct COMPOUND4args                     args;
     struct nfs_argop4                        argarray[3];
     struct evpl_rpc2_cred                    rpc2_cred;
@@ -1772,25 +2079,41 @@ chimera_nfs4_pnfs_commit(
     struct chimera_vfs_request     *request,
     struct chimera_nfs4_open_state *open_state)
 {
-    struct chimera_nfs4_layout              *layout = &open_state->layout;
+    struct chimera_nfs4_layout              *layout = &open_state->open_file->layout;
     struct chimera_nfs_client_server_thread *mds_thread;
     struct chimera_nfs4_pnfs_close_ctx      *cctx;
 
+    if (atomic_load(&layout->state) == CHIMERA_NFS4_LAYOUT_RECALLING &&
+        chimera_nfs4_pnfs_park_recall(layout, thread, shared, request, NULL)) {
+        return 1;
+    }
+
+    evpl_mutex_lock(&layout->io_lock);
     if (atomic_load(&layout->state) != CHIMERA_NFS4_LAYOUT_VALID ||
-        layout->file_fh_len == 0 || !layout->layoutcommit_needed) {
+        layout->file_fh_len == 0 || !atomic_load(&layout->layoutcommit_needed)) {
+        evpl_mutex_unlock(&layout->io_lock);
+        if (atomic_load(&layout->state) == CHIMERA_NFS4_LAYOUT_RECALLING &&
+            chimera_nfs4_pnfs_park_recall(layout, thread, shared, request, NULL)) {
+            return 1;
+        }
         return 0;       /* nothing to flush: caller completes the commit OK. */
     }
+    layout->io_active++;
+    evpl_mutex_unlock(&layout->io_lock);
 
     mds_thread = chimera_nfs_thread_get_server_thread(thread, layout->file_fh, layout->file_fh_len);
     if (!mds_thread || !mds_thread->nfs_conn || !mds_thread->server->nfs4_session) {
+        chimera_nfs4_layout_io_done(layout);
         return 0;
     }
 
-    cctx             = request->plugin_data;
-    cctx->thread     = thread;
-    cctx->shared     = shared;
-    cctx->mds_thread = mds_thread;
-    cctx->open_state = open_state;
+    cctx                    = request->plugin_data;
+    cctx->thread            = thread;
+    cctx->shared            = shared;
+    cctx->mds_thread        = mds_thread;
+    cctx->open_state        = open_state;
+    cctx->commit_active     = 1;
+    cctx->commit_generation = atomic_load(&layout->write_generation);
 
     chimera_nfs4_pnfs_commit_send(request);
     return 1;

@@ -108,6 +108,12 @@ struct chimera_server_config {
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
     int                                   nfs_nsm_port;
+    /* The MOUNT and portmap services.  Configurable for the same reason the
+     * two above are: their well-known numbers are only a default, and two NFS
+     * servers in one address space (a pNFS metadata server and an NFS proxy in
+     * front of it, say) need distinct ones or the second one's listen fails. */
+    int                                   nfs_mount_port;
+    int                                   nfs_portmap_port;
     int                                   nfs_port;
     int                                   s3_port;
     /* Identity an S3 access key acts as when its configuration binds it to no
@@ -468,6 +474,11 @@ chimera_server_config_init(void)
     config->nfs_rdma_port    = 20049;
     config->nfs_lockmgr_port = 32803;
     config->nfs_nsm_port     = 32765;
+    /* The well-known MOUNT and portmap numbers (NFS_MOUNT_PORT /
+     * NFS_PORTMAP_PORT in nfs_external_portmap.h), spelled out here like the
+     * two ports above rather than pulling an NFS header into this file. */
+    config->nfs_mount_port   = 20048;
+    config->nfs_portmap_port = 111;
 
     snprintf(config->state_dir, sizeof(config->state_dir), "%s", CHIMERA_STATE_DIR);
 
@@ -1250,6 +1261,34 @@ chimera_server_config_get_nfs_lockmgr_port(const struct chimera_server_config *c
 {
     return config->nfs_lockmgr_port;
 } /* chimera_server_config_get_nfs_lockmgr_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_mount_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_mount_port = port;
+} /* chimera_server_config_set_nfs_mount_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_mount_port(const struct chimera_server_config *config)
+{
+    return config->nfs_mount_port;
+} /* chimera_server_config_get_nfs_mount_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_portmap_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_portmap_port = port;
+} /* chimera_server_config_set_nfs_portmap_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_portmap_port(const struct chimera_server_config *config)
+{
+    return config->nfs_portmap_port;
+} /* chimera_server_config_get_nfs_portmap_port */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_nsm_port(
@@ -3026,6 +3065,25 @@ chimera_server_remove_user(
 {
     return chimera_vfs_remove_user(server->vfs, username);
 } /* chimera_server_remove_user */
+
+SYMBOL_EXPORT int
+chimera_server_add_group(
+    struct chimera_server *server,
+    const char            *groupname,
+    const char            *sid,
+    uint32_t               gid,
+    int                    pinned)
+{
+    return chimera_vfs_add_group(server->vfs, groupname, sid, gid, pinned);
+} /* chimera_server_add_group */
+
+SYMBOL_EXPORT int
+chimera_server_remove_group(
+    struct chimera_server *server,
+    const char            *groupname)
+{
+    return chimera_vfs_remove_group(server->vfs, groupname);
+} /* chimera_server_remove_group */
 
 SYMBOL_EXPORT const struct chimera_vfs_user *
 chimera_server_get_user(

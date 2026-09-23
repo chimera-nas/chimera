@@ -39,21 +39,23 @@ chimera_nfs4_open_file_get(
     struct chimera_nfs_client_server *server,
     const uint8_t                    *fh,
     int                               fh_len,
-    const struct stateid4            *stateid)
+    const struct stateid4            *stateid,
+    struct chimera_nfs4_open_file   **r_file)
 {
     struct chimera_nfs4_open_file *file;
+    struct chimera_nfs4_open_file *retired = NULL;
     uint8_t                       *wire_fh;
     int                            wire_fh_len;
     int                            coalesced = stateid && stateid->seqid >= 2;
 
     if (!server) {
-        return 0;
+        return -2;
     }
 
     chimera_nfs4_map_fh(fh, fh_len, &wire_fh, &wire_fh_len);
 
     if (wire_fh_len <= 0 || wire_fh_len > CHIMERA_VFS_FH_SIZE) {
-        return 0;
+        return -2;
     }
 
     evpl_mutex_lock(&server->open_state_lock);
@@ -65,7 +67,8 @@ chimera_nfs4_open_file_get(
             memcmp(file->stateid.other, stateid->other,
                    sizeof(stateid->other)) == 0;
 
-        if (coalesced && (!same_state || file->closing)) {
+        if ((file->closing && (same_state || !stateid)) ||
+            (coalesced && (!same_state || file->closing))) {
             /* An upgrade of a doomed state: either one other than the entry
              * tracks (its CLOSE already retired it, or a fresh open already
              * replaced it and this reply raced past both), or the tracked
@@ -74,17 +77,28 @@ chimera_nfs4_open_file_get(
             return -1;
         }
 
-        file->refcnt++;
+        if (file->closing) {
+            /* A fresh state proves the server already processed the old
+            * CLOSE, whose reply has not reached us yet.  Its layout still
+            * belongs to that pending close; give the new OPEN a new entry.
+            * Rejecting this seqid-1 reply would lose the state forever:
+            * every retry would coalesce into it and be rejected too. */
+            retired = file;
+        } else {
+            file->refcnt++;
 
-        if (stateid &&
-            (!same_state || stateid->seqid >= file->stateid.seqid)) {
-            /* Take the newest view of the state; a late reply of an older
-             * upgrade must not roll the recorded seqid back. */
-            file->stateid = *stateid;
+            if (stateid &&
+                (!same_state || stateid->seqid >= file->stateid.seqid)) {
+                /* Take the newest view of the state; a late reply of an older
+                 * upgrade must not roll the recorded seqid back. */
+                file->stateid = *stateid;
+            }
+
+            *r_file = file;
+
+            evpl_mutex_unlock(&server->open_state_lock);
+            return 0;
         }
-
-        evpl_mutex_unlock(&server->open_state_lock);
-        return 0;
     }
 
     if (coalesced) {
@@ -99,10 +113,12 @@ chimera_nfs4_open_file_get(
 
     if (!file) {
         evpl_mutex_unlock(&server->open_state_lock);
-        return 0;
+        return -2;
     }
 
     file->refcnt = 1;
+    evpl_mutex_init(&file->layout.acq_lock, NULL);
+    evpl_mutex_init(&file->layout.io_lock, NULL);
     file->fh_len = wire_fh_len;
     memcpy(file->fh, wire_fh, wire_fh_len);
 
@@ -110,7 +126,12 @@ chimera_nfs4_open_file_get(
         file->stateid = *stateid;
     }
 
+    if (retired) {
+        HASH_DEL(server->open_files, retired);
+    }
     HASH_ADD_KEYPTR(hh, server->open_files, file->fh, file->fh_len, file);
+
+    *r_file = file;
 
     evpl_mutex_unlock(&server->open_state_lock);
     return 0;
@@ -168,45 +189,28 @@ chimera_nfs4_open_file_put(
     return 1;
 } /* chimera_nfs4_open_file_put */
 
-/*
- * The wire CLOSE consuming a put's reference has completed (or was never
- * needed).  Drop the closing mark and retire the entry once nothing else
- * holds it -- a fresh OPEN may have revived it in the meantime (refcnt > 0,
- * with the fresh state's stateid already recorded), in which case it lives
- * on for that opener.
- */
+/* Retire precisely the entry whose CLOSE completed.  A fresh OPEN may
+ * already have installed another entry for this same wire filehandle. */
 void
 chimera_nfs4_open_file_close_done(
     struct chimera_nfs_client_server *server,
-    const uint8_t                    *fh,
-    int                               fh_len)
+    struct chimera_nfs4_open_file    *file)
 {
-    struct chimera_nfs4_open_file *file;
-    uint8_t                       *wire_fh;
-    int                            wire_fh_len;
+    struct chimera_nfs4_open_file *current;
 
-    if (!server) {
-        return;
-    }
-
-    chimera_nfs4_map_fh(fh, fh_len, &wire_fh, &wire_fh_len);
-
-    if (wire_fh_len <= 0 || wire_fh_len > CHIMERA_VFS_FH_SIZE) {
+    if (!server || !file) {
         return;
     }
 
     evpl_mutex_lock(&server->open_state_lock);
-
-    HASH_FIND(hh, server->open_files, wire_fh, wire_fh_len, file);
-
-    if (file && --file->closing == 0 && file->refcnt == 0) {
+    HASH_FIND(hh, server->open_files, file->fh, file->fh_len, current);
+    if (current == file) {
         HASH_DEL(server->open_files, file);
-        evpl_mutex_unlock(&server->open_state_lock);
-        free(file);
-        return;
     }
-
     evpl_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_destroy(&file->layout.acq_lock);
+    evpl_mutex_destroy(&file->layout.io_lock);
+    free(file);
 } /* chimera_nfs4_open_file_close_done */
 
 /*
@@ -236,6 +240,8 @@ chimera_nfs4_open_file_drain(struct chimera_nfs_client_server *server)
 
     while (file) {
         next = file->hh.next;
+        evpl_mutex_destroy(&file->layout.acq_lock);
+        evpl_mutex_destroy(&file->layout.io_lock);
         free(file);
         file = next;
     }

@@ -2,15 +2,27 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
 #include "common/macros.h"
 static void
 chimera_vfs_seek_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_seek_callback_t callback = request->proto_callback;
 
+
     chimera_vfs_complete(request);
+
+    /* Drop the pNFS backing-file reference the redirect took (no-op when the
+     * op was not redirected). */
+    if (request->io_pnfs_backing) {
+        chimera_vfs_release(request->thread, request->io_pnfs_backing);
+        request->io_pnfs_backing = NULL;
+    }
 
     callback(request->status,
              request->seek.r_eof,
@@ -49,6 +61,6 @@ chimera_vfs_seek(
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
-    chimera_vfs_dispatch(request);
+    chimera_vfs_pnfs_dispatch(request, 0, 0);
 
 } /* chimera_vfs_seek */

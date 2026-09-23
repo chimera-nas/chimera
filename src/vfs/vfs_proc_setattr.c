@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -10,7 +11,9 @@
 #endif /* ifdef _WIN32 */
 #include "vfs_procs.h"
 #include "vfs_claim.h"
+#include "vfs/vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
 #include "vfs_attr_cache.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
@@ -291,6 +294,11 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_complete(request);
 
+    if (request->io_pnfs_backing) {
+        chimera_vfs_release(thread, request->io_pnfs_backing);
+        request->io_pnfs_backing = NULL;
+    }
+
     callback(request->status,
              &request->setattr.r_pre_attr,
              request->setattr.set_attr,
@@ -299,6 +307,69 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_request_free(thread, request);
 } /* chimera_vfs_setattr_complete */
+
+/* Only entered after the MDS permission gate and cache recall.  Mutate the
+ * backing file first; an error must leave the MDS size unchanged. */
+static void
+chimera_vfs_setattr_pnfs_trunc_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        request->status = error_code;
+        request->complete(request);
+        return;
+    }
+    chimera_vfs_dispatch(request);
+} /* chimera_vfs_setattr_pnfs_trunc_cb */
+
+static void
+chimera_vfs_setattr_pnfs_resolved(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *io_handle,
+    int                             redirected,
+    void                           *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_attrs   *trunc   = &request->io_pnfs_sync_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        request->status = error_code;
+        request->complete(request);
+        return;
+    }
+    if (!redirected) {
+        chimera_vfs_dispatch(request);
+        return;
+    }
+
+    request->io_pnfs_backing = io_handle;
+    memset(trunc, 0, sizeof(*trunc));
+    trunc->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+    trunc->va_size     = request->setattr.set_attr->va_size;
+    chimera_vfs_fsetattr(request->thread, request->cred, io_handle, trunc,
+                         0, 0, chimera_vfs_setattr_pnfs_trunc_cb, request);
+} /* chimera_vfs_setattr_pnfs_resolved */
+
+static void
+chimera_vfs_setattr_pnfs_dispatch(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_attrs *attr = request->setattr.set_attr;
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        chimera_vfs_pnfs_io_possible(request->thread, request->setattr.handle)) {
+        chimera_vfs_pnfs_resolve_io(request->thread, request->cred,
+                                    request->setattr.handle, attr->va_size > 0,
+                                    chimera_vfs_setattr_pnfs_resolved, request);
+        return;
+    }
+    chimera_vfs_dispatch(request);
+} /* chimera_vfs_setattr_pnfs_dispatch */
 
 static void
 chimera_vfs_setattr_dispatch(
@@ -309,7 +380,8 @@ chimera_vfs_setattr_dispatch(
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     chimera_vfs_setattr_callback_t  callback,
-    void                           *private_data)
+    void                           *private_data,
+    int                             after_write)
 {
     struct chimera_vfs_request *request;
 
@@ -335,6 +407,11 @@ chimera_vfs_setattr_dispatch(
     request->proto_callback                  = callback;
     request->proto_private_data              = private_data;
 
+    if (after_write) {
+        chimera_vfs_dispatch(request);
+        return;
+    }
+
     /* Recall flavor depends on whether this setattr changes file *data*:
      *
      *   - A SIZE change (truncate/extend) alters the bytes, so a holder's cached
@@ -353,7 +430,7 @@ chimera_vfs_setattr_dispatch(
 
     chimera_vfs_io_recall(request, request->fh, request->fh_len,
                           request->fh_hash, flush_only,
-                          chimera_vfs_dispatch);
+                          chimera_vfs_setattr_pnfs_dispatch);
 } /* chimera_vfs_setattr_dispatch */
 
 /*
@@ -560,7 +637,7 @@ chimera_vfs_setattr_gate_complete(
     chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->handle,
                                  gate->set_attr, gate->pre_attr_mask,
                                  gate->post_attr_mask, gate->callback,
-                                 gate->private_data);
+                                 gate->private_data, 0);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_setattr_gate_complete */
 
@@ -631,7 +708,7 @@ chimera_vfs_setattr_common(
 
     chimera_vfs_setattr_dispatch(thread, cred, handle, set_attr,
                                  pre_attr_mask, post_attr_mask,
-                                 callback, private_data);
+                                 callback, private_data, 0);
 } /* chimera_vfs_setattr_common */
 
 SYMBOL_EXPORT void
@@ -669,3 +746,21 @@ chimera_vfs_fsetattr(
                                pre_attr_mask, post_attr_mask, 1,
                                callback, private_data);
 } /* chimera_vfs_fsetattr */
+/* Publish metadata for an already authorized data mutation.  The original
+ * operation owns its MDS claim until this finishes: do not re-authorize an
+ * explicit mtime as a client SETATTR, recall that claim, or truncate the DS. */
+SYMBOL_EXPORT void
+chimera_vfs_setattr_after_write(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_setattr_dispatch(thread, cred, handle, set_attr,
+                                 pre_attr_mask, post_attr_mask,
+                                 callback, private_data, 1);
+} /* chimera_vfs_setattr_after_write */

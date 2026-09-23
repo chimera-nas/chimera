@@ -19,6 +19,8 @@ struct smb_kerberos_identity {
     uint32_t ngids;
     uint32_t gids[SMB_WBCLIENT_MAX_GROUPS];
     char     sid[SMB_WBCLIENT_SID_MAX_LEN];
+    /* The primary group's SID, empty when winbind named none for gid. */
+    char     group_sid[SMB_WBCLIENT_SID_MAX_LEN];
     /* 1 when winbind resolved the principal: sid is the real domain SID and the
      * caller caches the user in the VFS user cache.  0 for the synthesized
      * nobody identity. */

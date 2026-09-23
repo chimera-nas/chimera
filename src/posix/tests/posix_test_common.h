@@ -673,6 +673,29 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     } else if (strcmp(nfs_backend_name, "cairn") == 0) {
         posix_test_configure_cairn(env->session_dir, config_data, sizeof(config_data));
         chimera_server_config_add_module(server_config, "cairn", NULL, config_data);
+    } else if (posix_test_is_ext_module(nfs_backend_name)) {
+        /* External module served over NFS.  The client path takes the same .so
+         * and config text from the environment (posix_test_emit_ext_module_config);
+         * here they are registered on the server instead, because the client
+         * speaks NFS to this in-process server rather than loading the module
+         * itself.  Must precede chimera_server_init(). */
+        const char *ext_so = getenv("CHIMERA_TEST_EXT_MODULE_SO");
+
+        if (!ext_so) {
+            fprintf(stderr,
+                    "NFS backend '%s' uses the external-module mechanism "
+                    "but CHIMERA_TEST_EXT_MODULE_SO is not set\n",
+                    nfs_backend_name);
+            exit(EXIT_FAILURE);
+        }
+
+        /* The config text is optional; chimera_server_config_add_module()
+         * snprintf("%s")s it with no NULL guard, and the client path defaults
+         * it to "" for the same reason. */
+        const char *ext_cfg = getenv("CHIMERA_TEST_EXT_MODULE_CONFIG");
+
+        chimera_server_config_add_module(server_config, nfs_backend_name,
+                                         ext_so, ext_cfg ? ext_cfg : "");
     }
 
     if (use_nfs_rdma) {
@@ -693,6 +716,16 @@ posix_test_start_nfs_server(struct posix_test_env *env)
         share_module_path = env->session_dir;
     } else if (posix_test_is_diskfs(nfs_backend_name)) {
         share_module = "diskfs";
+    } else if (posix_test_is_ext_module(nfs_backend_name)) {
+        /* An external module names its own root rather than taking "/" --
+         * typically an identifier for a store its own test runner has already
+         * provisioned.  Same value the client path passes to
+         * chimera_posix_mount.  posix_test_backend_has_mkfs() does not list
+         * external modules, so the harness correctly does not try to create a
+         * filesystem that already exists. */
+        const char *ext_path = getenv("CHIMERA_TEST_EXT_MODULE_MOUNTPATH");
+
+        share_module_path = ext_path ? ext_path : "/";
     } else if (strcmp(nfs_backend_name, "memfs") != 0 &&
                strcmp(nfs_backend_name, "cairn") != 0) {
         fprintf(stderr, "Unknown NFS backend: %s\n", nfs_backend_name);

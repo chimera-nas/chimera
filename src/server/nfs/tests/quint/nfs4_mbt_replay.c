@@ -41,6 +41,7 @@
 #endif /* ifdef _WIN32 */
 
 #include "nfs3_mbt_common.h"
+#include "vfs/vfs_pnfs.h"
 #include "common/mbt_trace_dir.h"
 #include "common/mbt_watchdog.h"
 
@@ -497,6 +498,7 @@ struct oracle {
     /* Per-model-client connections (a model client
     * owns its own connection, like a real one). */
     struct evpl_rpc2_conn *conns[V4_MAX_CLIENTS];
+    struct evpl_rpc2_conn *ds_conns[MBT_MAX_DS];
 
     /* CB_RECALL observations (stateid others seen on any backchannel). */
     uint8_t                recalls[64][12];
@@ -920,16 +922,15 @@ conn_for(
     }
     if (!o->conns[model_client]) {
         cb_programs[0] = &o->env->nfs_v4_cb.rpc2;
-        /* Follow the env's transport.  These per-model-client connections
-         * carry every stateful compound the trace issues -- conn_for() only
-         * falls back to env->nfs_conn for a compound with no client -- so
-         * leaving them on the stream endpoint would put most of an --rdma run
-         * back on plain RPC. */
+        /* Follow the env's transport AND its target.  These per-model-client
+         * connections carry every stateful compound the trace issues --
+         * conn_for() only falls back to env->nfs_conn for a compound with no
+         * client -- so leaving them on the stream endpoint would put most of an
+         * --rdma run back on plain RPC, and leaving them on a literal 2049
+         * would put a --pnfs-proxy run back on the metadata server. */
         ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
                                                 "127.0.0.1",
-                                                o->env->rdma
-                                                ? MBT_NFS_RDMA_PORT
-                                                : 2049);
+                                                o->env->client_nfs_port);
         o->conns[model_client] =
             evpl_rpc2_client_connect(o->env->rpc2_thread,
                                      o->env->rdma ? EVPL_DATAGRAM_INPROC
@@ -3708,6 +3709,117 @@ await_recalls(
     }
 } /* await_recalls */
 
+/* The model's LAYOUTCOMMIT folds an implicit DS size extension into the
+ * operation.  Materialize that side effect on the backing file before sending
+ * the metadata RPC.  Sparse extension preserves both existing symbols and the
+ * model's zero/hole blocks; writing zeroes would change SEEK semantics.
+ *
+ * Only successful, non-replayed model operations have this precondition.
+ * MDS size, commit status, and subsequent READ/SEEK results remain checked by
+ * the normal oracle.  In particular, do not SETATTR the MDS: that would hide a
+ * broken LAYOUTCOMMIT implementation. */
+static int
+prepare_layoutcommits(
+    struct oracle *o,
+    json_t        *ops,
+    json_t        *results,
+    struct mism   *m)
+{
+    int64_t cur = -1, saved = -1;
+    size_t  i;
+    json_t *result;
+
+    if (!o->env->num_ds) {
+        return 0;
+    }
+
+    json_array_foreach(results, i, result)
+    {
+        json_t     *v    = jf_val(result);
+        json_t     *op   = json_array_get(ops, i);
+        const char *tag  = jf_tag(op);
+        const char *rtag = jf_tag(result);
+
+        if (jf_i64(v, "st") != NFS4_OK) {
+            break;
+        }
+        if (strcmp(rtag, "SSequence") == 0 && jf_bool(v, "replay")) {
+            return 0;
+        }
+        if (strcmp(tag, "RPutfh") == 0) {
+            cur = itf_i64(jf_val(op));
+        } else if (strcmp(tag, "RPutrootfh") == 0) {
+            cur = 0;
+        } else if (strcmp(tag, "RSavefh") == 0) {
+            saved = cur;
+        } else if (strcmp(tag, "RRestorefh") == 0) {
+            cur = saved;
+        } else if (strcmp(rtag, "SGetfh") == 0 || strcmp(rtag, "SCreate") == 0) {
+            cur = jf_i64(v, "ino");
+        } else if (strcmp(rtag, "SLookup") == 0) {
+            cur = jf_i64(v, "child");
+        } else if (strcmp(rtag, "SLookupp") == 0) {
+            cur = jf_i64(v, "parent");
+        } else if (strcmp(tag, "RSecinfo") == 0) {
+            cur = -1;
+        } else if (strcmp(tag, "RLayoutcommit") == 0) {
+            struct mbt_env        *env = o->env;
+            struct v4_layout_loc  *loc;
+            struct evpl_rpc2_conn *mds_conn;
+            struct evpl_rpc2_cred  mds_cred;
+            struct mbt_result     *r;
+            uint64_t               size = (uint64_t) jf_i64(jf_val(op), "hi") * V4_BLOCK_SIZE;
+            int                    ds;
+
+            if (cur < 0 || cur >= V4_MAX_INOS || !o->layout_loc[cur].fh.len) {
+                mism_add(m, "layoutcommit setup: no backing location for inode %" PRId64, cur);
+                return -1;
+            }
+            loc = &o->layout_loc[cur];
+            for (ds = 0; ds < env->num_ds; ds++) {
+                const struct chimera_vfs_ds *device = chimera_vfs_pnfs_get_device(
+                    chimera_server_get_vfs(env->server), ds);
+
+                if (device && memcmp(device->deviceid, loc->deviceid, 16) == 0) {
+                    break;
+                }
+            }
+            if (ds == env->num_ds) {
+                mism_add(m, "layoutcommit setup: unknown data server");
+                return -1;
+            }
+            if (!o->ds_conns[ds]) {
+                struct evpl_endpoint *ep = chimera_tcp_flavor_endpoint_create(
+                    CHIMERA_TCP_FLAVOR_INPROC, "127.0.0.1", MBT_DS_PORT_BASE + ds);
+
+                o->ds_conns[ds] = evpl_rpc2_client_connect(env->rpc2_thread,
+                                                           EVPL_STREAM_INPROC, ep, NULL, 0, NULL);
+                if (!o->ds_conns[ds]) {
+                    mism_add(m, "layoutcommit setup: data server connection failed");
+                    return -1;
+                }
+            }
+            /* The fixture DS exports support v3 even when the layout
+             * advertises v4.1.  Use root AUTH_SYS for this model side effect. */
+            mds_conn      = env->nfs_conn;
+            mds_cred      = env->cred;
+            env->nfs_conn = o->ds_conns[ds];
+            env->cred     = env->aux_cred;
+            r             = mbt_getattr(env, &loc->fh);
+            if (r->status == NFS3_OK && r->obj_attrs.a.size < size) {
+                r = mbt_setattr(env, &loc->fh, -1, size, NULL);
+            }
+            env->nfs_conn = mds_conn;
+            env->cred     = mds_cred;
+            if (r->status != NFS3_OK) {
+                mism_add(m, "layoutcommit setup: DS extension failed: %u", r->status);
+                return -1;
+            }
+        }
+    }
+    return 0;
+} /* prepare_layoutcommits */
+
 static int
 run_compound(
     struct oracle *o,
@@ -3789,6 +3901,10 @@ run_compound(
                 cd_wchunk = (int) argarray[i].opread.count;
             }
         }
+    }
+
+    if (prepare_layoutcommits(o, ops, results, m) < 0) {
+        return -1;
     }
 
     memset(&args, 0, sizeof(args));
@@ -4689,6 +4805,11 @@ run_trace(
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);
         }
     }
+    for (c = 0; c < MBT_MAX_DS; c++) {
+        if (o->ds_conns[c]) {
+            evpl_rpc2_client_disconnect(env->rpc2_thread, o->ds_conns[c]);
+        }
+    }
     mbt_env_fs_teardown(env, fsname);
     free(o->arena);
     free(o->scratch);
@@ -4714,6 +4835,7 @@ main(
         { "mandatory",      required_argument, 0, 'M' },
         { "backend",        required_argument, 0, 'b' },
         { "pnfs",           required_argument, 0, 'p' },
+        { "pnfs-proxy",     no_argument,       0, 'P' },
         { "delegations",    no_argument,       0, 'g' },
         { "rdma",           no_argument,       0, 'R' },
         { "sec",            required_argument, 0, 'S' },
@@ -4756,7 +4878,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnvRS:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:PgnvRS:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -4796,6 +4918,26 @@ main(
                     return 2;
                 }
                 break;
+            case 'P':
+                /* Replay through the pNFS PROXY tier: the corpus is driven at a
+                 * plain NFSv4 server whose backing store is chimera's own pNFS
+                 * client, so every WRITE/READ the corpus makes travels the
+                 * layout path (LAYOUTGET, GETDEVICEINFO, direct DS I/O,
+                 * LAYOUTCOMMIT, LAYOUTRETURN) on its way to the data servers.
+                 * The proxy needs a metadata server to front, so this implies
+                 * the pNFS cluster; --pnfs still chooses how many DS. */
+                opts.pnfs_proxy      = 1;
+                opts.client_at_proxy = 1;
+                /* chimera's pNFS client only drives NFSv3 data servers, so pin
+                 * every DS to v3: the default alternates 3 / 4.1, and a 4.1 DS
+                 * would send half the corpus's I/O back to the MDS and leave
+                 * the DS path barely exercised. */
+                opts.pnfs_ds_version = 3;
+                /* Advertise an rdma netaddr alongside the tcp one so the
+                 * client's transport-preference decode has both to choose
+                 * between; mounted over TCP it must pick tcp. */
+                opts.pnfs_ds_advertise_rdma = 1;
+                break;
             case 'R':
                 opts.rdma = 1;
                 break;
@@ -4816,7 +4958,7 @@ main(
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
-                        "[--pnfs N] [--delegations] [--rdma] "
+                        "[--pnfs N] [--pnfs-proxy] [--delegations] [--rdma] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);
@@ -4829,6 +4971,13 @@ main(
                 argv[0]);
         mbt_free_traces(traces, ntraces);
         return 2;
+    }
+
+    /* The proxy has to have a metadata server to front.  Two data servers by
+    * default, so the MDS's round-robin steering spreads the corpus's files
+    * over more than one device and the client resolves (and caches) each. */
+    if (opts.pnfs_proxy && opts.pnfs_num_ds == 0) {
+        opts.pnfs_num_ds = 2;
     }
 
     /* Open the server + client once and amortize that (dominant) cost across
