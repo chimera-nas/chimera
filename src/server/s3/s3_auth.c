@@ -11,7 +11,7 @@
 #include <openssl/hmac.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/chimera_rcu.h"
 
 #include "evpl/evpl_http.h"
 #include "s3_auth.h"
@@ -538,10 +538,10 @@ verify_signature_v2(
     chimera_s3_debug("V2 Header Host: %s", hdr ? hdr : "(null)");
 
     /* Look up credentials */
-    rcu_read_lock();
+    chimera_rcu_read_lock(&cred_cache->rcu);
     cred = chimera_s3_cred_cache_lookup(cred_cache, access_key, strlen(access_key));
     if (!cred) {
-        rcu_read_unlock();
+        chimera_rcu_read_unlock(&cred_cache->rcu);
         chimera_s3_debug("Unknown access key: %s", access_key);
         return CHIMERA_S3_AUTH_UNKNOWN_ACCESS_KEY;
     }
@@ -561,7 +561,7 @@ verify_signature_v2(
     /* Build string to sign */
     sts_len = build_string_to_sign_v2(request, string_to_sign, sizeof(string_to_sign));
     if (sts_len < 0) {
-        rcu_read_unlock();
+        chimera_rcu_read_unlock(&cred_cache->rcu);
         chimera_s3_debug("Failed to build string to sign");
         return CHIMERA_S3_AUTH_INVALID_AUTH_HEADER;
     }
@@ -572,7 +572,7 @@ verify_signature_v2(
     hmac_sha1((unsigned char *) cred->secret_key, strlen(cred->secret_key),
               (unsigned char *) string_to_sign, sts_len, sig_bytes);
 
-    rcu_read_unlock();
+    chimera_rcu_read_unlock(&cred_cache->rcu);
 
     /* Base64 encode the result */
     base64_encode(sig_bytes, SHA1_DIGEST_LENGTH,
@@ -1029,10 +1029,10 @@ verify_signature_v4(
     }
 
     /* Look up credentials */
-    rcu_read_lock();
+    chimera_rcu_read_lock(&cred_cache->rcu);
     cred = chimera_s3_cred_cache_lookup(cred_cache, access_key, strlen(access_key));
     if (!cred) {
-        rcu_read_unlock();
+        chimera_rcu_read_unlock(&cred_cache->rcu);
         chimera_s3_debug("Unknown access key: %s", access_key);
         return CHIMERA_S3_AUTH_UNKNOWN_ACCESS_KEY;
     }
@@ -1053,7 +1053,7 @@ verify_signature_v4(
     cr_len = build_canonical_request_v4(request, signed_headers,
                                         canonical_request, sizeof(canonical_request));
     if (cr_len < 0) {
-        rcu_read_unlock();
+        chimera_rcu_read_unlock(&cred_cache->rcu);
         return CHIMERA_S3_AUTH_INVALID_AUTH_HEADER;
     }
 
@@ -1075,7 +1075,7 @@ verify_signature_v4(
     /* Derive signing key */
     derive_signing_key_v4(cred->secret_key, date_stamp, region, service, signing_key);
 
-    rcu_read_unlock();
+    chimera_rcu_read_unlock(&cred_cache->rcu);
 
     /* Calculate expected signature */
     hmac_sha256(signing_key, SHA256_DIGEST_LENGTH,

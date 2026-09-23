@@ -307,6 +307,10 @@ chimera_common_metrics_file(json_t *root)
  * (0 == one worker per CPU, the default reclaim parallelism; a positive value
  * caps the count) or -1 when the section or key is absent, meaning "unset" so
  * the caller leaves its own default in place.  `root` may be NULL.
+ *
+ * Ignored in a build without liburcu: the rwlock fallback has no such worker
+ * pool (see src/common/chimera_rcu.h).  The key is still parsed and carried,
+ * so a config file is portable between the two builds.
  */
 static inline int
 chimera_common_rcu_reclaim_threads(json_t *root)

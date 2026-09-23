@@ -32,10 +32,10 @@ chimera_vfs_pathonly_rebase(
     uint32_t                              i;
     int                                   offset = -1;
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&table->rcu);
 
     for (i = 0; i < table->num_buckets && offset < 0; i++) {
-        entry = rcu_dereference(table->buckets[i]);
+        entry = chimera_rcu_deref(table->buckets[i]);
         while (entry) {
             struct chimera_vfs_mount *mount = entry->mount;
 
@@ -54,11 +54,11 @@ chimera_vfs_pathonly_rebase(
                 }
                 break;
             }
-            entry = rcu_dereference(entry->next);
+            entry = chimera_rcu_deref(entry->next);
         }
     }
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&table->rcu);
 
     return offset;
 } /* chimera_vfs_pathonly_rebase */

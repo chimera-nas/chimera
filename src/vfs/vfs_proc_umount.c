@@ -34,10 +34,10 @@ chimera_vfs_umount_wake(struct chimera_vfs_thread *thread)
 /*
  * Reclaim a torn-down mount after an RCU grace period.
  *
- * Mount-table readers run chimera_vfs_mount_table_lookup() under
- * urcu_qsbr_read_lock() and dereference entry->mount->root_fh to match the
+ * Mount-table readers run chimera_vfs_mount_table_lookup() under the mount
+ * table's read side and dereference entry->mount->root_fh to match the
  * mount id.  chimera_vfs_mount_table_remove() unlinks the entry and gives the
- * ENTRY a grace period (call_rcu) before freeing it -- but the mount it points
+ * ENTRY a grace period before freeing it -- but the mount it points
  * at used to be freed the instant the backend's UMOUNT completed, with no
  * grace period at all.  A reader that entered the lookup before the unlink
  * still walks that entry and follows the now-dangling entry->mount.
@@ -47,16 +47,19 @@ chimera_vfs_umount_wake(struct chimera_vfs_thread *thread)
  * thread while a per-trace filesystem recycle unmounted it on another.  Give
  * the mount the same grace period its entry gets.
  *
- * struct chimera_vfs_mount cannot carry the rcu_head itself: vfs.h is
- * deliberately urcu-free, so the head lives in this wrapper instead.
+ * struct chimera_vfs_mount cannot carry the rcu head itself: vfs.h is
+ * deliberately free of the RCU shim, so the head lives in this wrapper
+ * instead.  There is no accompanying store to hang the retire off -- the entry
+ * that referenced this mount was unlinked earlier -- so this is a bare
+ * chimera_rcu_retire() rather than a replace.
  */
 struct chimera_vfs_mount_reclaim {
-    struct rcu_head           rcu;
+    chimera_rcu_head          rcu;
     struct chimera_vfs_mount *mount;
 };
 
 static void
-chimera_vfs_mount_reclaim_rcu(struct rcu_head *head)
+chimera_vfs_mount_reclaim_rcu(chimera_rcu_head *head)
 {
     struct chimera_vfs_mount_reclaim *reclaim =
         container_of(head, struct chimera_vfs_mount_reclaim, rcu);
@@ -92,7 +95,8 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 
     if (likely(reclaim)) {
         reclaim->mount = mount;
-        call_rcu(&reclaim->rcu, chimera_vfs_mount_reclaim_rcu);
+        chimera_rcu_retire(&thread->vfs->mount_table->rcu, &reclaim->rcu,
+                           chimera_vfs_mount_reclaim_rcu);
     }
     /* Out of memory: leak the mount rather than free it early.  It is one
      * small allocation on a path that only runs at umount, and the alternative

@@ -8,7 +8,7 @@
 #undef NDEBUG
 #include <assert.h>
 #include <unistd.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/chimera_rcu.h"
 
 #include "vfs/vfs_user_cache.h"
 
@@ -22,7 +22,7 @@ test_empty_lookups(void)
 
     cache = chimera_vfs_user_cache_create(64, 600);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "nonexistent");
     assert(user == NULL);
@@ -32,7 +32,7 @@ test_empty_lookups(void)
 
     assert(chimera_vfs_user_cache_is_member(cache, 9999, 9999) == 0);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -51,7 +51,7 @@ test_add_and_lookup(void)
     chimera_vfs_user_cache_add(cache, "alice", "$6$salt$hash",
                                "cleartext", NULL, 1000, 1000, 2, gids, 1);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "alice");
     assert(user != NULL);
@@ -68,7 +68,7 @@ test_add_and_lookup(void)
     assert(user != NULL);
     assert(strcmp(user->username, "alice") == 0);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -91,7 +91,7 @@ test_gid_lookup(void)
     chimera_vfs_user_cache_add(cache, "bob", NULL, NULL, NULL,
                                1001, 1001, 2, bob_gids, 1);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     /* Both alice and bob are in group 100 */
     count = chimera_vfs_user_cache_lookup_by_gid(cache, 100, results, 16);
@@ -112,7 +112,7 @@ test_gid_lookup(void)
     assert(count == 1);
     assert(strcmp(results[0]->username, "alice") == 0);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -135,9 +135,9 @@ test_remove(void)
     assert(rc == 0);
 
     /* Wait for RCU grace period */
-    urcu_qsbr_synchronize_rcu();
+    chimera_rcu_barrier();
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     user = chimera_vfs_user_cache_lookup_by_name(cache, "alice");
     assert(user == NULL);
@@ -145,7 +145,7 @@ test_remove(void)
     user = chimera_vfs_user_cache_lookup_by_uid(cache, 1000);
     assert(user == NULL);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* Removing non-existent user should return -1 */
     rc = chimera_vfs_user_cache_remove(cache, "alice");
@@ -168,17 +168,17 @@ test_ttl_expiration(void)
     chimera_vfs_user_cache_add(cache, "temp_user", NULL, NULL, NULL,
                                2000, 2000, 0, NULL, 0);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
     user = chimera_vfs_user_cache_lookup_by_name(cache, "temp_user");
     assert(user != NULL);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* Sleep long enough for TTL to expire and expiry thread to run.
      * The expiry thread sleeps up to 60s, so we manually trigger
      * expiration by destroying and checking. Instead, we just verify
      * the expiration field is set correctly. */
 #ifndef __clang_analyzer__
-    /* Suppress: clang analyzer falsely thinks urcu read lock is held */
+    /* Suppress: clang analyzer falsely thinks the read lock is held */
     sleep(2);
 #endif /* ifndef __clang_analyzer__ */
 
@@ -191,12 +191,12 @@ test_ttl_expiration(void)
     usleep(100000);
 
     /* Wait for RCU grace period */
-    urcu_qsbr_synchronize_rcu();
+    chimera_rcu_barrier();
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
     user = chimera_vfs_user_cache_lookup_by_name(cache, "temp_user");
     assert(user == NULL);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -217,7 +217,7 @@ test_pinned_no_expire(void)
                                3000, 3000, 0, NULL, 1);
 
 #ifndef __clang_analyzer__
-    /* Suppress: clang analyzer falsely thinks urcu read lock is held */
+    /* Suppress: clang analyzer falsely thinks the read lock is held */
     sleep(2);
 #endif /* ifndef __clang_analyzer__ */
 
@@ -228,11 +228,11 @@ test_pinned_no_expire(void)
 
     usleep(100000);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
     user = chimera_vfs_user_cache_lookup_by_name(cache, "pinned_user");
     assert(user != NULL);
     assert(user->pinned == 1);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -250,7 +250,7 @@ test_is_member(void)
     chimera_vfs_user_cache_add(cache, "alice", NULL, NULL, NULL,
                                1000, 1000, 3, gids, 1);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     /* Primary group */
     assert(chimera_vfs_user_cache_is_member(cache, 1000, 1000) == 1);
@@ -266,7 +266,7 @@ test_is_member(void)
     /* Non-existent user */
     assert(chimera_vfs_user_cache_is_member(cache, 8888, 1000) == 0);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -290,7 +290,7 @@ test_sid_index(void)
     chimera_vfs_user_cache_add(cache, "bob", NULL, NULL, NULL,
                                1001, 1001, 0, NULL, 1);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     user = chimera_vfs_user_cache_lookup_by_sid(cache, "S-1-5-21-111-222-333-1105");
     assert(user != NULL);
@@ -305,15 +305,15 @@ test_sid_index(void)
     assert(chimera_vfs_user_cache_lookup_by_sid(cache, "S-1-5-21-9-9-9-9") == NULL);
     assert(chimera_vfs_user_cache_lookup_by_sid(cache, "") == NULL);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* Removing the user also unindexes its SID. */
     chimera_vfs_user_cache_remove(cache, "alice");
-    urcu_qsbr_synchronize_rcu();
-    urcu_qsbr_read_lock();
+    chimera_rcu_barrier();
+    chimera_rcu_read_lock(&cache->rcu);
     assert(chimera_vfs_user_cache_lookup_by_sid(cache,
                                                 "S-1-5-21-111-222-333-1105") == NULL);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -334,7 +334,7 @@ test_group_index(void)
     chimera_vfs_group_cache_add(cache, "Domain Users",
                                 "S-1-5-21-111-222-333-513", 513, 0);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     group = chimera_vfs_group_cache_lookup_by_gid(cache, 513);
     assert(group != NULL);
@@ -353,20 +353,20 @@ test_group_index(void)
     assert(chimera_vfs_group_cache_lookup_by_sid(cache, "") == NULL);
     assert(chimera_vfs_group_cache_lookup_by_sid(cache, NULL) == NULL);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* A group with no SID resolves by gid but is not SID-indexed. */
     chimera_vfs_group_cache_add(cache, "localgrp", NULL, 27, 0);
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
     group = chimera_vfs_group_cache_lookup_by_gid(cache, 27);
     assert(group != NULL && group->sid[0] == '\0');
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* Re-adding the same gid replaces the record and unindexes the old SID. */
     chimera_vfs_group_cache_add(cache, "Domain Users",
                                 "S-1-5-21-999-888-777-513", 513, 0);
-    urcu_qsbr_synchronize_rcu();
-    urcu_qsbr_read_lock();
+    chimera_rcu_barrier();
+    chimera_rcu_read_lock(&cache->rcu);
     assert(chimera_vfs_group_cache_lookup_by_sid(cache,
                                                  "S-1-5-21-111-222-333-513") == NULL);
     group = chimera_vfs_group_cache_lookup_by_sid(cache,
@@ -376,7 +376,7 @@ test_group_index(void)
     group = chimera_vfs_group_cache_lookup_by_gid(cache, 513);
     assert(group != NULL);
     assert(strcmp(group->sid, "S-1-5-21-999-888-777-513") == 0);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -404,7 +404,7 @@ test_group_user_isolation(void)
     chimera_vfs_group_cache_add(cache, "shared",
                                 "S-1-5-21-111-222-333-513", 1000, 0);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
 
     /* The user survives intact: no eviction by the group's name, no clobber. */
     user = chimera_vfs_user_cache_lookup_by_name(cache, "shared");
@@ -426,7 +426,7 @@ test_group_user_isolation(void)
     assert(chimera_vfs_group_cache_lookup_by_sid(cache,
                                                  "S-1-5-21-111-222-333-1105") == NULL);
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -446,9 +446,9 @@ test_group_ttl_expiration(void)
     chimera_vfs_group_cache_add(cache, "permanent",
                                 "S-1-5-21-111-222-333-515", 515, 1);
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
     assert(chimera_vfs_group_cache_lookup_by_gid(cache, 514) != NULL);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* Drive the sweep directly rather than waiting out its 60s period. */
     pthread_mutex_lock(&cache->write_lock);
@@ -474,14 +474,14 @@ test_group_ttl_expiration(void)
     }
     pthread_mutex_unlock(&cache->write_lock);
 
-    urcu_qsbr_synchronize_rcu();
-    urcu_qsbr_read_lock();
+    chimera_rcu_barrier();
+    chimera_rcu_read_lock(&cache->rcu);
     assert(chimera_vfs_group_cache_lookup_by_gid(cache, 514) == NULL);
     assert(chimera_vfs_group_cache_lookup_by_sid(cache,
                                                  "S-1-5-21-111-222-333-514") == NULL);
     /* Pinned groups survive the sweep. */
     assert(chimera_vfs_group_cache_lookup_by_gid(cache, 515) != NULL);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     chimera_vfs_user_cache_destroy(cache);
 
@@ -508,15 +508,15 @@ test_group_remove(void)
     assert(chimera_vfs_group_cache_remove(cache, "nobody") == -1);
 
     assert(chimera_vfs_group_cache_remove(cache, "eng") == 0);
-    urcu_qsbr_synchronize_rcu();
+    chimera_rcu_barrier();
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&cache->rcu);
     assert(chimera_vfs_group_cache_lookup_by_gid(cache, 100) == NULL);
     assert(chimera_vfs_group_cache_lookup_by_gid(cache, 200) == NULL);
     assert(chimera_vfs_group_cache_lookup_by_sid(cache, "S-1-5-21-1-2-3-100") == NULL);
     assert(chimera_vfs_group_cache_lookup_by_sid(cache, "S-1-5-21-1-2-3-200") == NULL);
     assert(chimera_vfs_group_cache_lookup_by_gid(cache, 300) != NULL);
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&cache->rcu);
 
     /* Nothing left by that name. */
     assert(chimera_vfs_group_cache_remove(cache, "eng") == -1);
@@ -529,7 +529,7 @@ test_group_remove(void)
 int
 main(void)
 {
-    urcu_qsbr_register_thread();
+    chimera_rcu_register_thread();
 
     fprintf(stderr, "Running vfs_user_cache tests:\n");
 
@@ -548,7 +548,7 @@ main(void)
 
     fprintf(stderr, "All tests passed.\n");
 
-    urcu_qsbr_unregister_thread();
+    chimera_rcu_unregister_thread();
 
     return 0;
 } /* main */

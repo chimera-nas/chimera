@@ -5,7 +5,7 @@
 #pragma once
 
 #include <utlist.h>
-#include <urcu/urcu-qsbr.h>
+#include "common/chimera_rcu.h"
 
 #include "nfs.h"
 #include "nfs_fh_wrap.h"
@@ -285,7 +285,7 @@ struct chimera_nfs_export {
     /* Deferred-reclaim head: request threads reach an export locklessly via
      * exports_by_id[], so a removal must wait out a grace period before the
      * struct is freed. */
-    struct rcu_head            rcu;
+    chimera_rcu_head           rcu;
     struct chimera_nfs_export *prev;
     struct chimera_nfs_export *next;
 };

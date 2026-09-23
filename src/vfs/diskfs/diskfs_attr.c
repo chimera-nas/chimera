@@ -1950,9 +1950,9 @@ diskfs_rmfs_sb_written(
 
 
 static void
-diskfs_fs_free_rcu(struct rcu_head *head)
+diskfs_fs_free_rcu(chimera_rcu_head *head)
 {
-    struct diskfs_fs *fs = caa_container_of(head, struct diskfs_fs, rcu);
+    struct diskfs_fs *fs = container_of(head, struct diskfs_fs, rcu);
 
     free(fs->name);
     free(fs);
@@ -2029,7 +2029,7 @@ diskfs_rmfs(
      * every handle on the mount is gone, so no new op can reach this
      * filesystem -- but an op that took mount_private just before its mount
      * was claimed may still be in flight. */
-    call_rcu(&fs->rcu, diskfs_fs_free_rcu);
+    chimera_rcu_retire(&chimera_rcu_global, &fs->rcu, diskfs_fs_free_rcu);
 
     diskfs_sb_write_submit(thread, sw);
 } /* diskfs_rmfs */

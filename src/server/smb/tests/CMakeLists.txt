@@ -8,7 +8,7 @@ add_subdirectory(quint)
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
-target_link_libraries(smb_auth_test chimera_server chimera_smb chimera_vfs urcu-cds)
+target_link_libraries(smb_auth_test chimera_server chimera_smb chimera_vfs ${CHIMERA_RCU_LIBS})
 target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_test(NAME chimera/server/smb/auth_test
