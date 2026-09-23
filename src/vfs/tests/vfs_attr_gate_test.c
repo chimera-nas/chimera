@@ -291,6 +291,43 @@ open_at_as(
     return ctx->status;
 } /* open_at_as */
 
+static void
+open_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->handle = oh;
+    ctx->done   = 1;
+} /* open_cb */
+
+/* chimera_vfs_open `path` relative to `fh` as `cred` with `flags`; an empty
+ * path opens `fh` itself (the NFSv4 CLAIM_FH shape).  Return the status. */
+static enum chimera_vfs_error
+open_as(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *fh,
+    uint32_t                       fh_len,
+    const char                    *path,
+    unsigned int                   flags)
+{
+    struct chimera_vfs_attrs sattr;
+
+    memset(&sattr, 0, sizeof(sattr));
+    chimera_vfs_open(ctx->vfs_thread, cred, fh, fh_len, path, strlen(path),
+                     flags, &sattr, CHIMERA_VFS_ATTR_FH, open_cb, ctx);
+    wait_done(ctx);
+    if (ctx->status == CHIMERA_VFS_OK && ctx->handle) {
+        chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+    }
+    return ctx->status;
+} /* open_as */
+
 static int
 check_cell(
     const char             *what,
@@ -461,6 +498,57 @@ main(
 
         assert(failures == 0);
         TEST_PASS("open_at: a reply without gate attrs is refused, never granted");
+    }
+
+    /*
+     * chimera_vfs_open by path: the attrs come from the final LOOKUP_AT.
+     * chimera_vfs_open of a bare fh: the attrs come from a GETATTR on it.
+     */
+    {
+        /* *INDENT-OFF* */
+        static const struct open_cell path_cells[] = {
+            { "p_ctl_0600",  0600, ACTOR_OTHER, CHIMERA_VFS_OPEN_WRITE_ONLY, 0, 0, CHIMERA_VFS_EACCES },
+            { "p_mode_0600", 0600, ACTOR_OTHER, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OP_LOOKUP_AT, CHIMERA_VFS_ATTR_MODE, CHIMERA_VFS_EIO },
+            { "p_uid_0066",  0066, ACTOR_OWNER, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OP_LOOKUP_AT, CHIMERA_VFS_ATTR_UID,  CHIMERA_VFS_EIO },
+            { "p_acl_0666",  0666, ACTOR_OTHER, CHIMERA_VFS_OPEN_READ_ONLY,  CHIMERA_VFS_OP_LOOKUP_AT, CHIMERA_VFS_ATTR_ACL,  CHIMERA_VFS_EIO },
+            { "p_root_0600", 0600, ACTOR_ROOT,  CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OP_LOOKUP_AT, CHIMERA_VFS_ATTR_MODE, CHIMERA_VFS_OK  },
+        };
+        static const struct open_cell fh_cells[] = {
+            { "h_ctl_0600",  0600, ACTOR_OTHER, CHIMERA_VFS_OPEN_WRITE_ONLY, 0, 0, CHIMERA_VFS_EACCES },
+            { "h_mode_0600", 0600, ACTOR_OTHER, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OP_GETATTR, CHIMERA_VFS_ATTR_MODE, CHIMERA_VFS_EIO },
+            { "h_gid_0060",  0060, ACTOR_WHEEL, CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OP_GETATTR, CHIMERA_VFS_ATTR_GID,  CHIMERA_VFS_EIO },
+            { "h_root_0600", 0600, ACTOR_ROOT,  CHIMERA_VFS_OPEN_WRITE_ONLY, CHIMERA_VFS_OP_GETATTR, CHIMERA_VFS_ATTR_MODE, CHIMERA_VFS_OK  },
+        };
+        /* *INDENT-ON* */
+        uint8_t  file_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t file_fh_len;
+
+        for (i = 0; i < sizeof(path_cells) / sizeof(path_cells[0]); i++) {
+            const struct open_cell *c = &path_cells[i];
+
+            make_file(&ctx, &creds[ACTOR_ROOT], dir, c->name, c->mode);
+            strip_set(c->strip_op, c->strip);
+            st = open_as(&ctx, &creds[c->actor], dir_fh, dir_fh_len, c->name,
+                         c->flags);
+            strip_set(0, 0);
+            failures += check_cell("open (path)", c, st);
+        }
+
+        for (i = 0; i < sizeof(fh_cells) / sizeof(fh_cells[0]); i++) {
+            const struct open_cell *c = &fh_cells[i];
+
+            make_file(&ctx, &creds[ACTOR_ROOT], dir, c->name, c->mode);
+            memcpy(file_fh, ctx.fh, ctx.fh_len);
+            file_fh_len = ctx.fh_len;
+            strip_set(c->strip_op, c->strip);
+            st = open_as(&ctx, &creds[c->actor], file_fh, file_fh_len, "",
+                         c->flags);
+            strip_set(0, 0);
+            failures += check_cell("open (fh)", c, st);
+        }
+
+        assert(failures == 0);
+        TEST_PASS("open: lookup and by-handle opens refuse a short reply");
     }
 
     chimera_vfs_release(ctx.vfs_thread, dir);

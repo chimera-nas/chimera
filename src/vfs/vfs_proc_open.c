@@ -359,6 +359,31 @@ chimera_vfs_open_lookup_complete(
         return;
     }
 
+    /* Fail closed on under-filled attrs, as chimera_vfs_open_at_hdl_callback
+     * does: without MODE the block below is skipped outright, and without
+     * uid/gid (or a native ACL) the gate would evaluate the object as if
+     * owned by root:root.  Opens by an exempt credential, and opens
+     * requesting no data access, are not the gate's to decide and pass. */
+    if (chimera_vfs_open_required_access(request->open.flags) &&
+        chimera_vfs_open_gate_needed(request->module->capabilities,
+                                     request->cred)) {
+        uint64_t missing = chimera_vfs_gate_attrs_missing(
+            attr, request->module->capabilities);
+
+        if (missing) {
+            chimera_vfs_open_callback_t callback = request->open.callback;
+            void                       *priv     = request->open.private_data;
+
+            chimera_vfs_error("open: module %s replied without attrs 0x%llx "
+                              "the access gate needs; refusing the open",
+                              request->module->name,
+                              (unsigned long long) missing);
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_EIO, NULL, NULL, priv);
+            return;
+        }
+    }
+
     /* POSIX open(2) semantics on the resolved final object: */
     if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         chimera_vfs_open_callback_t callback = request->open.callback;
