@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 # SPDX-License-Identifier: Unlicense
-name: Temporary Windows durable crash check
+name: Temporary Windows durable ASan check
 on:
   push:
-    branches: [windows-durable-crash-check]
+    branches: [windows-durable-asan-check]
 permissions:
   contents: read
 jobs:
   test:
-    name: Durable probe Windows x64 Release
+    name: Durable probe Windows x64 ASan
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -99,13 +99,16 @@ jobs:
       - name: Configure native Windows with symbols
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DCHIMERA_MBT_CORPUS=OFF "-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Zi" "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF /MAP" "-DCMAKE_SHARED_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF /MAP"
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DCHIMERA_MBT_CORPUS=OFF "-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Zi /fsanitize=address" "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF /MAP" "-DCMAKE_SHARED_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF /MAP"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build durable probe
         run: cmake --build build --target smb2_durable_probe --config Release --parallel 4
       - name: Repeat durable probe
         shell: pwsh
         run: |
+          $tools = (Get-Content "$env:VCPKG_VISUAL_STUDIO_PATH/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
+          $env:PATH = "$env:VCPKG_VISUAL_STUDIO_PATH/VC/Tools/MSVC/$tools/bin/Hostx64/x64;$env:PATH"
+          $env:ASAN_OPTIONS = 'abort_on_error=1:halt_on_error=1'
           New-Item -ItemType Directory -Force ctest-results | Out-Null
           ctest --test-dir build -C Release -R '^chimera/server/smb/mbt/durable_probe_memfs$' --repeat until-fail:100 --output-on-failure --no-tests=error --timeout 120 --test-output-size-failed 131072 --output-junit "$pwd/ctest-results/results.xml"
           exit $LASTEXITCODE
@@ -113,7 +116,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: durable-crash-check
+          name: durable-asan-check
           path: |
             ctest-results/
             build/Testing/Temporary/
@@ -122,7 +125,7 @@ jobs:
             build/bin/Release/smb2_durable_probe.pdb
             build/bin/Release/evpl.dll
             build/bin/Release/evpl.pdb
-            build/**/smb2_durable_probe_memfs/**
+            build/**/*.debug.log
           if-no-files-found: warn
           retention-days: 14
       - name: Remove temporary package credentials
