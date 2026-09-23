@@ -622,7 +622,9 @@ smb2w_ntlm_auth_ntlmv2(
 
     /* EncryptedRandomSessionKey = RC4(kxkey, session key) */
     {
-        if (!chimera_crypto_rc4(kxkey, 16, session_key16, o + off, 16)) {
+        /* Independent wire fixture for MS-NLMP 3.4.5.1 key exchange. */
+        // codeql[cpp/weak-cryptographic-algorithm]
+        if (!chimera_crypto_ntlm_key_exchange(kxkey, session_key16, o + off)) {
             smb2w_die("RC4 key exchange");
         }
     }

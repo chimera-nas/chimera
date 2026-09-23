@@ -308,32 +308,31 @@ chimera_crypto_aead_crypt(
 } /* chimera_crypto_aead_crypt */
 
 int
-chimera_crypto_rc4(
-    const void *key,
-    size_t      key_len,
-    const void *input,
-    void       *output,
-    size_t      len)
+chimera_crypto_ntlm_key_exchange(
+    const uint8_t key[16],
+    const uint8_t input[16],
+    uint8_t       output[16])
 {
     EVP_CIPHER_CTX *ctx;
     int             outl, ok;
 
-    if (!key || (!input && len) || (!output && len) || key_len != 16 || len > INT_MAX || !CRYPTO_THREAD_run_once(&
-                                                                                                                 legacy_once,
-                                                                                                                 load_legacy)
-        || !legacy_provider || !
-        default_provider) {
+    if (!key || !input || !output) {
+        return 0;
+    }
+    if (!CRYPTO_THREAD_run_once(&legacy_once, load_legacy) || !legacy_provider || !default_provider) {
         return 0;
     }
     ctx = EVP_CIPHER_CTX_new();
     if (!ctx) {
         return 0;
     }
+    /* MS-NLMP 3.4.5.1 mandates RC4 for this existing NTLMv2 wire operation. */
+    // codeql[cpp/weak-cryptographic-algorithm]
     ok = EVP_EncryptInit_ex(ctx, EVP_rc4(), NULL, key, NULL) == 1 &&
-        EVP_EncryptUpdate(ctx, output, &outl, input, (int) len) == 1 && outl == (int) len;
+        EVP_EncryptUpdate(ctx, output, &outl, input, 16) == 1 && outl == 16;
     EVP_CIPHER_CTX_free(ctx);
     return ok;
-} /* chimera_crypto_rc4 */
+} /* chimera_crypto_ntlm_key_exchange */
 
 int
 chimera_crypto_random(

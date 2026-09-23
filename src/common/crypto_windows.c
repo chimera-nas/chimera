@@ -331,30 +331,28 @@ chimera_crypto_aead_crypt(
 } /* chimera_crypto_aead_crypt */
 
 int
-chimera_crypto_rc4(
-    const void *key,
-    size_t      key_len,
-    const void *input,
-    void       *output,
-    size_t      len)
+chimera_crypto_ntlm_key_exchange(
+    const uint8_t key[16],
+    const uint8_t input[16],
+    uint8_t       output[16])
 {
     BCRYPT_ALG_HANDLE provider;
     BCRYPT_KEY_HANDLE handle = NULL;
     ULONG             written;
     int               ok;
 
-    if (!key || (!input && len) || (!output && len) || key_len != 16 || len > ULONG_MAX) {
+    if (!key || !input || !output) {
         return 0;
     }
     provider = provider_get(&rc4_provider);
-    if (!provider || BCryptGenerateSymmetricKey(provider, &handle, NULL, 0, (PUCHAR) key, (ULONG) key_len, 0) < 0) {
+    if (!provider || BCryptGenerateSymmetricKey(provider, &handle, NULL, 0, (PUCHAR) key, 16, 0) < 0) {
         return 0;
     }
-    ok = BCryptEncrypt(handle, (PUCHAR) input, (ULONG) len, NULL, NULL, 0,
-                       output, (ULONG) len, &written, 0) >= 0 && written == len;
+    ok = BCryptEncrypt(handle, (PUCHAR) input, 16, NULL, NULL, 0,
+                       output, 16, &written, 0) >= 0 && written == 16;
     BCryptDestroyKey(handle);
     return ok;
-} /* chimera_crypto_rc4 */
+} /* chimera_crypto_ntlm_key_exchange */
 
 int
 chimera_crypto_random(

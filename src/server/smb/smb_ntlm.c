@@ -721,7 +721,9 @@ validate_local_user(
     if ((negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) &&
         enc_session_key_len == 16) {
         uint8_t exported_key[16];
-        if (!chimera_crypto_rc4(ctx->session_key, 16, enc_session_key, exported_key, 16)) {
+        /* Preserve MS-NLMP 3.4.5.1 key exchange; SMB payload encryption uses AES. */
+        // codeql[cpp/weak-cryptographic-algorithm]
+        if (!chimera_crypto_ntlm_key_exchange(ctx->session_key, enc_session_key, exported_key)) {
             smb_ntlm_error("NTLM: Failed to unwrap exported session key");
             return -1;
         }

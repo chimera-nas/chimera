@@ -77,12 +77,12 @@ SYMBOL_EXPORT int chimera_crypto_aead_crypt(
     void                       *data,
     size_t                      data_len,
     void                       *tag);
-SYMBOL_EXPORT int chimera_crypto_rc4(
-    const void *key,
-    size_t      key_len,
-    const void *input,
-    void       *output,
-    size_t      len);
+/* MS-NLMP key exchange requires RC4 on a 16-byte exported session key.
+ * This compatibility operation is deliberately restricted to that use. */
+SYMBOL_EXPORT int chimera_crypto_ntlm_key_exchange(
+    const uint8_t key[16],
+    const uint8_t input[16],
+    uint8_t       output[16]);
 SYMBOL_EXPORT int chimera_crypto_random(
     void  *out,
     size_t len);
