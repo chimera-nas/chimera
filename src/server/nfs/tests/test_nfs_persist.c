@@ -14,7 +14,7 @@
  * essence of NFSv4.1 cross-reboot exactly-once semantics.
  */
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -505,10 +505,10 @@ test_grace_survives_sweep_during_load(void)
     /* Mimic kickoff: claim the load, then force the window open with the scan
      * still outstanding and nothing counted yet. */
     atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
-    pthread_mutex_lock(&rec.lock);
+    evpl_mutex_lock(&rec.lock);
     rec.in_grace     = true;
     rec.grace_end_ns = nfs_lease_now_ns() + 180ULL * 1000000000ULL;
-    pthread_mutex_unlock(&rec.lock);
+    evpl_mutex_unlock(&rec.lock);
     CHECK(rec.pending_reclaim == 0);
 
     /* A sweep tick lands here.  The window must survive it. */
@@ -529,10 +529,10 @@ test_grace_survives_sweep_during_load(void)
      * regardless, so a load that never settles is an outage either way.) */
     CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
     atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
-    pthread_mutex_lock(&rec.lock);
+    evpl_mutex_lock(&rec.lock);
     rec.in_grace     = true;
     rec.grace_end_ns = 0;          /* deadline already in the past */
-    pthread_mutex_unlock(&rec.lock);
+    evpl_mutex_unlock(&rec.lock);
     nfs_recovery_sweep_once(&rec);
     CHECK(!rec.in_grace);
 
@@ -552,10 +552,10 @@ recovery_add_record(
     r->owner_len = (uint16_t) strlen(owner);
     memcpy(r->owner_string,owner,r->owner_len);
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     HASH_ADD_KEYPTR(hh,rec->to_reclaim,r->owner_string,r->owner_len,r);
     rec->pending_reclaim++;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 } /* recovery_add_record */
 
 /* The unified client record the recovery gates key on; only the owner
@@ -600,10 +600,10 @@ test_grace_survives_reclaim_complete_during_load(void)
 
     /* kickoff: load claimed, window forced open, scan outstanding */
     atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
-    pthread_mutex_lock(&rec.lock);
+    evpl_mutex_lock(&rec.lock);
     rec.in_grace     = true;
     rec.grace_end_ns = nfs_lease_now_ns() + 180ULL * 1000000000ULL;
-    pthread_mutex_unlock(&rec.lock);
+    evpl_mutex_unlock(&rec.lock);
 
     /* A reclaim that races its own record load is admitted, not refused. */
     CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4_OK);

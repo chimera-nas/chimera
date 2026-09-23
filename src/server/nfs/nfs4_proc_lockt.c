@@ -4,6 +4,9 @@
 
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <xxhash.h>
 
 #include "nfs4_procs.h"

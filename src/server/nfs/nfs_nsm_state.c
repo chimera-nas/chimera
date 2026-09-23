@@ -2,9 +2,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #include "nfs_nsm_state.h"
 #include "nfs_kv_keys.h"
@@ -17,7 +22,7 @@ nsm_state_init(
 {
     const char *kvname = (vfs && vfs->kv_module) ? vfs->kv_module->name : "";
 
-    pthread_mutex_init(&state->mutex, NULL);
+    evpl_mutex_init(&state->mutex, NULL);
     state->monitors             = NULL;
     state->state_number         = 1;  /* odd == up; refined by the cold-start load */
     state->persistence_disabled = (strcmp(kvname, "memkv") == 0);
@@ -51,7 +56,7 @@ nsm_state_destroy(struct nsm_state *state)
 
 #endif /* ifndef __clang_analyzer__ */
 
-    pthread_mutex_destroy(&state->mutex);
+    evpl_mutex_destroy(&state->mutex);
 } /* nsm_state_destroy */
 
 uint32_t
@@ -59,9 +64,9 @@ nsm_state_current(struct nsm_state *state)
 {
     uint32_t n;
 
-    pthread_mutex_lock(&state->mutex);
+    evpl_mutex_lock(&state->mutex);
     n = state->state_number;
-    pthread_mutex_unlock(&state->mutex);
+    evpl_mutex_unlock(&state->mutex);
     return n;
 } /* nsm_state_current */
 

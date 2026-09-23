@@ -12,6 +12,9 @@
 #include "evpl/evpl.h"
 #include "common/evpl_iovec_cursor.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 
 /*
  * READ_PLUS (RFC 7862 15.10) is a sparse-aware READ: the server may report the

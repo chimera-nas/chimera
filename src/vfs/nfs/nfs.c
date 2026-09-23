@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "vfs/vfs.h"
 #include "nfs.h"
@@ -86,12 +86,12 @@ chimera_nfs_init(
     (void) metrics;
     struct chimera_nfs_shared *shared = calloc(1, sizeof(*shared));
 
-    pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->cb_lock, NULL);
-    pthread_mutex_init(&shared->pnfs_devcache.lock, NULL);
-    pthread_mutex_init(&shared->pnfs_layout_lock, NULL);
-    pthread_mutex_init(&shared->nlm_range_lock, NULL);
-    pthread_mutex_init(&shared->nfs3_open_lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->cb_lock, NULL);
+    evpl_mutex_init(&shared->pnfs_devcache.lock, NULL);
+    evpl_mutex_init(&shared->pnfs_layout_lock, NULL);
+    evpl_mutex_init(&shared->nlm_range_lock, NULL);
+    evpl_mutex_init(&shared->nfs3_open_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -125,12 +125,12 @@ chimera_nfs_destroy(void *private_data)
     * disconnects every cb_conn, which fires chimera_nfs4_cb_control_notify and
     * walks shared->servers.  It must finish before those servers are freed. */
     chimera_nfs4_cb_control_stop(shared);
-    pthread_mutex_destroy(&shared->cb_lock);
+    evpl_mutex_destroy(&shared->cb_lock);
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
             chimera_nfs4_open_file_drain(shared->servers[i]);
-            pthread_mutex_destroy(&shared->servers[i]->open_state_lock);
+            evpl_mutex_destroy(&shared->servers[i]->open_state_lock);
 
             /* Release the server's reference on any session still published.
              * Reaching here with one means the module is going away with mounts
@@ -167,10 +167,10 @@ chimera_nfs_destroy(void *private_data)
         free(range);
     }
 
-    pthread_mutex_destroy(&shared->nlm_range_lock);
-    pthread_mutex_destroy(&shared->nfs3_open_lock);
-    pthread_mutex_destroy(&shared->pnfs_devcache.lock);
-    pthread_mutex_destroy(&shared->pnfs_layout_lock);
+    evpl_mutex_destroy(&shared->nlm_range_lock);
+    evpl_mutex_destroy(&shared->nfs3_open_lock);
+    evpl_mutex_destroy(&shared->pnfs_devcache.lock);
+    evpl_mutex_destroy(&shared->pnfs_layout_lock);
 
     free(shared);
 } /* chimera_nfs_destroy */
@@ -408,10 +408,10 @@ chimera_nfs_dispatch(
 
     switch (nfsvers) {
         case 3:
-            chimera_nfs3_dispatch(thread, shared, request, private_data);
+            chimera_vfs_nfs3_dispatch(thread, shared, request, private_data);
             break;
         case 4:
-            chimera_nfs4_dispatch(thread, shared, request, private_data);
+            chimera_vfs_nfs4_dispatch(thread, shared, request, private_data);
             break;
         default:
             request->status = CHIMERA_VFS_EFAULT;

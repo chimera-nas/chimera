@@ -2,13 +2,20 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <utlist.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include "common/platform.h"
 
 #include "nfs.h"
@@ -218,7 +225,9 @@ nfs_server_init(
      * Per-thread provider registration happens in nfs_server_thread_init. */
     shared->gss_enabled = chimera_server_config_get_nfs_kerberos_enabled(config);
     if (shared->gss_enabled) {
-        chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config));
+        chimera_nfs_abort_if(
+            chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config)) != 0,
+            "Unable to initialize the requested Kerberos provider");
         chimera_nfs_gss_set_principal_map(config);
         chimera_nfs_info("RPCSEC_GSS: Kerberos authentication enabled");
     }
@@ -425,7 +434,7 @@ nfs_server_init(
      * NFS4ERR_EXIST.  server.nfs4_drc gates NFSv4.1 reply-cache persistence and
      * has no bearing here. */
     nfs4_v40_drc_install(shared);
-    pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
+    evpl_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
     shared->nfs4_pnfs_devcache.count = 0;
 
     /* Phase 3: lease defaults.  Per RFC 7530 §10.2.3, the lease_time
@@ -545,8 +554,8 @@ nfs_server_init(
                          NLM_GRACE_PERIOD_SECS);
     }
 
-    pthread_mutex_init(&shared->exports_lock, NULL);
-    pthread_mutex_init(&shared->mount_entries_lock, NULL);
+    evpl_mutex_init(&shared->exports_lock, NULL);
+    evpl_mutex_init(&shared->mount_entries_lock, NULL);
     return shared;
 } /* nfs_server_init */
 
@@ -721,7 +730,7 @@ nfs_server_destroy(void *data)
      * this just frees the shard arrays and per-shard locks. */
     nfs_state_table_free(&shared->nfs4_state_table, NULL);
     nfs_layout_table_destroy(&shared->nfs4_layout_table);
-    pthread_mutex_destroy(&shared->nfs4_pnfs_devcache.lock);
+    evpl_mutex_destroy(&shared->nfs4_pnfs_devcache.lock);
 
     nfs_recovery_free(&shared->nfs4_recovery);
 
@@ -871,14 +880,14 @@ chimera_nfs_server_notify(
                 chimera_vfs_cred_init_anonymous(&anon_cred,
                                                 CHIMERA_VFS_ANON_UID,
                                                 CHIMERA_VFS_ANON_GID);
-                pthread_mutex_lock(&shared->nlm_state.mutex);
+                evpl_mutex_lock(&shared->nlm_state.mutex);
                 if (nlm_cli->conn_count > 0) {
                     nlm_cli->conn_count--;
                 }
                 if (nlm_cli->conn_count == 0) {
                     release_locks = true;
                 }
-                pthread_mutex_unlock(&shared->nlm_state.mutex);
+                evpl_mutex_unlock(&shared->nlm_state.mutex);
                 /* Last connection for this hostname -- release its locks.  Done
                  * outside the mutex: release_all takes state->mutex itself and
                  * pumps the VFS pending queue (which can re-enter the NLM
@@ -1129,7 +1138,7 @@ chimera_nfs_add_export(
         }
     }
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
 
     /* Name uniqueness must be decided here, under the same lock as the
      * insert: a caller-side check-then-create is a race in which two
@@ -1139,7 +1148,7 @@ chimera_nfs_add_export(
     LL_FOREACH(shared->exports, existing)
     {
         if (strcmp(existing->name, name) == 0) {
-            pthread_mutex_unlock(&shared->exports_lock);
+            evpl_mutex_unlock(&shared->exports_lock);
             chimera_nfs_error("Export '%s' already exists", name);
             free(export);
             return -EEXIST;
@@ -1149,7 +1158,7 @@ chimera_nfs_add_export(
     /* Enforce the configured concurrent-export count cap (nfs_max_exports)
      * before either id path, so explicitly-pinned ids are bounded too. */
     if ((uint32_t) shared->num_exports >= shared->max_exports) {
-        pthread_mutex_unlock(&shared->exports_lock);
+        evpl_mutex_unlock(&shared->exports_lock);
         chimera_nfs_error("Export limit reached (%u); cannot create export '%s'",
                           shared->max_exports, name);
         free(export);
@@ -1168,7 +1177,7 @@ chimera_nfs_add_export(
             chimera_nfs_error("Export '%s' id %u already in use by export '%s'",
                               name, export_id,
                               shared->exports_by_id[export_id]->name);
-            pthread_mutex_unlock(&shared->exports_lock);
+            evpl_mutex_unlock(&shared->exports_lock);
             free(export);
             return -EADDRINUSE;
         }
@@ -1190,7 +1199,7 @@ chimera_nfs_add_export(
         if (shared->exports_by_id[id]) {
             /* Unreachable while max_exports <= the id space (asserted for the
              * default, validated for configured values); kept as a backstop. */
-            pthread_mutex_unlock(&shared->exports_lock);
+            evpl_mutex_unlock(&shared->exports_lock);
             chimera_nfs_error("Export id space exhausted (max %u); cannot "
                               "create export '%s'",
                               CHIMERA_NFS_EXPORT_ID_MAX, name);
@@ -1212,7 +1221,7 @@ chimera_nfs_add_export(
         shared->root_export_id = export->id;
     }
 
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return 0;
 } /* chimera_nfs_add_export */
@@ -1230,7 +1239,7 @@ chimera_nfs_export_set_options(
     struct chimera_nfs_export        *export;
     int                               found = 0;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
@@ -1242,7 +1251,7 @@ chimera_nfs_export_set_options(
             break;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return found ? 0 : -1;
 } /* chimera_nfs_export_set_options */
@@ -1257,7 +1266,7 @@ chimera_nfs_export_set_sec(
     struct chimera_nfs_export        *export;
     int                               found = 0;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
@@ -1266,7 +1275,7 @@ chimera_nfs_export_set_sec(
             break;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return found ? 0 : -1;
 } /* chimera_nfs_export_set_sec */
@@ -1304,7 +1313,7 @@ chimera_nfs_remove_export(
     struct chimera_nfs_export        *export;
     int                               found = 0;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
@@ -1332,7 +1341,7 @@ chimera_nfs_remove_export(
             break;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return found ? 0 : -1;
 } /* chimera_nfs_remove_export */
@@ -1343,9 +1352,9 @@ chimera_nfs_export_count(void *nfs_shared)
     struct chimera_server_nfs_shared *shared = nfs_shared;
     int                               count;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     count = shared->num_exports;
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return count;
 } /* chimera_nfs_export_counts */
@@ -1374,7 +1383,7 @@ chimera_nfs_find_export_path(
     } else {
         missing_leading_slash = 0;
     }
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, cur_export)
     {
         /* The root ("/") export matches every path with the entire path as the
@@ -1442,7 +1451,7 @@ chimera_nfs_find_export_path(
         }
         suffix = suffix_offset < path_len ? path + suffix_offset : NULL;
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
     if (!export) {
         *out_full_path = NULL;
         if (out_export) {
@@ -1498,15 +1507,15 @@ chimera_nfs_get_export(
     struct chimera_server_nfs_shared *shared = nfs_shared;
     struct chimera_nfs_export        *export;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
-            pthread_mutex_unlock(&shared->exports_lock);
+            evpl_mutex_unlock(&shared->exports_lock);
             return export;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return NULL;
 } /* chimera_nfs_get_export */
@@ -1520,18 +1529,18 @@ chimera_nfs_get_export_copy(
     struct chimera_server_nfs_shared *shared = nfs_shared;
     struct chimera_nfs_export        *export;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
             *out      = *export;
             out->prev = NULL;
             out->next = NULL;
-            pthread_mutex_unlock(&shared->exports_lock);
+            evpl_mutex_unlock(&shared->exports_lock);
             return 0;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return -1;
 } /* chimera_nfs_get_export_copy */
@@ -1547,7 +1556,7 @@ chimera_nfs_get_export_by_component(
     struct chimera_nfs_export        *export;
     const char                       *export_name;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         export_name = export->name;
@@ -1567,11 +1576,11 @@ chimera_nfs_get_export_by_component(
             *out      = *export;
             out->prev = NULL;
             out->next = NULL;
-            pthread_mutex_unlock(&shared->exports_lock);
+            evpl_mutex_unlock(&shared->exports_lock);
             return 0;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return -1;
 } /* chimera_nfs_get_export_by_component */
@@ -1585,14 +1594,14 @@ chimera_nfs_iterate_exports(
     struct chimera_server_nfs_shared *shared = nfs_shared;
     struct chimera_nfs_export        *export;
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, export)
     {
         if (callback(export, data) != 0) {
             break;
         }
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 } /* chimera_nfs_iterate_exports */
 
 SYMBOL_EXPORT const char *

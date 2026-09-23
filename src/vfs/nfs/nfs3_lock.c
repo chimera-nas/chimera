@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs_internal.h"
 #include "nfs_common/nfs3_status.h"
 
@@ -95,9 +96,9 @@ chimera_nfs3_range_mint(struct chimera_nfs_shared *shared)
 {
     uint64_t token;
 
-    pthread_mutex_lock(&shared->nlm_range_lock);
+    evpl_mutex_lock(&shared->nlm_range_lock);
     token = ++shared->nlm_next_token;
-    pthread_mutex_unlock(&shared->nlm_range_lock);
+    evpl_mutex_unlock(&shared->nlm_range_lock);
 
     return token;
 } /* chimera_nfs3_range_mint */
@@ -119,10 +120,10 @@ chimera_nfs3_range_insert(
     range->length = request->claim_acquire.length;
     memcpy(range->oh, oh, CHIMERA_NFS3_LOCK_OH_SIZE);
 
-    pthread_mutex_lock(&shared->nlm_range_lock);
+    evpl_mutex_lock(&shared->nlm_range_lock);
     range->token = ++shared->nlm_next_token;
     DL_APPEND(shared->nlm_ranges, range);
-    pthread_mutex_unlock(&shared->nlm_range_lock);
+    evpl_mutex_unlock(&shared->nlm_range_lock);
 
     return range->token;
 } /* chimera_nfs3_range_insert */
@@ -135,7 +136,7 @@ chimera_nfs3_range_take(
 {
     struct chimera_nfs3_range *range;
 
-    pthread_mutex_lock(&shared->nlm_range_lock);
+    evpl_mutex_lock(&shared->nlm_range_lock);
 
     for (range = shared->nlm_ranges; range; range = range->next) {
         if (range->token == token) {
@@ -144,7 +145,7 @@ chimera_nfs3_range_take(
         }
     }
 
-    pthread_mutex_unlock(&shared->nlm_range_lock);
+    evpl_mutex_unlock(&shared->nlm_range_lock);
 
     return range;
 } /* chimera_nfs3_range_take */
@@ -161,7 +162,7 @@ chimera_nfs3_range_owner_holds(
     struct chimera_nfs3_range *range;
     int                        held = 0;
 
-    pthread_mutex_lock(&shared->nlm_range_lock);
+    evpl_mutex_lock(&shared->nlm_range_lock);
 
     DL_FOREACH(shared->nlm_ranges, range)
     {
@@ -173,7 +174,7 @@ chimera_nfs3_range_owner_holds(
         }
     }
 
-    pthread_mutex_unlock(&shared->nlm_range_lock);
+    evpl_mutex_unlock(&shared->nlm_range_lock);
 
     return held;
 } /* chimera_nfs3_range_owner_holds */
@@ -199,7 +200,7 @@ chimera_nfs3_range_take_overlapping(
      * consumed from the head, so it needs no tail or prev links. */
     struct chimera_nfs3_range *matched = NULL;
 
-    pthread_mutex_lock(&shared->nlm_range_lock);
+    evpl_mutex_lock(&shared->nlm_range_lock);
 
     DL_FOREACH_SAFE(shared->nlm_ranges, range, tmp)
     {
@@ -226,7 +227,7 @@ chimera_nfs3_range_take_overlapping(
         matched     = range;
     }
 
-    pthread_mutex_unlock(&shared->nlm_range_lock);
+    evpl_mutex_unlock(&shared->nlm_range_lock);
 
     return matched;
 } /* chimera_nfs3_range_take_overlapping */
@@ -474,7 +475,7 @@ chimera_nfs3_lock_getattr_callback(
 } /* chimera_nfs3_lock_getattr_callback */
 
 void
-chimera_nfs3_claim_acquire(
+chimera_vfs_nfs3_claim_acquire(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -554,7 +555,7 @@ chimera_nfs3_claim_acquire(
     } else {
         chimera_nfs3_do_lock(thread, shared, server_thread, request);
     }
-} /* chimera_nfs3_claim_acquire */
+} /* chimera_vfs_nfs3_claim_acquire */
 
 static void
 chimera_nfs3_unlock_ranged_callback(
@@ -782,7 +783,7 @@ chimera_nfs3_claim_release_ranged(
 } /* chimera_nfs3_claim_release_ranged */
 
 void
-chimera_nfs3_claim_release(
+chimera_vfs_nfs3_claim_release(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -855,4 +856,4 @@ chimera_nfs3_claim_release(
                                              server_thread->nlm_conn, &rpc2_cred,
                                              &args, 0, 0, NULL, 0, 0,
                                              chimera_nfs3_unlock_callback, request);
-} /* chimera_nfs3_claim_release */
+} /* chimera_vfs_nfs3_claim_release */

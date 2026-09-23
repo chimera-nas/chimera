@@ -29,7 +29,8 @@
  * from the same generator.
  */
 
-#include <getopt.h>
+#include "common/compiler.h"
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "nfs3_mbt_common.h"
@@ -65,7 +66,7 @@ static void
 mism_add(
     struct mism *m,
     const char  *fmt,
-    ...) __attribute__((format(printf, 2, 3)));
+    ...) CHIMERA_PRINTF(2, 3);
 
 static void
 mism_add(
@@ -129,8 +130,10 @@ itf_i64(json_t *v)
             return strtoll(json_string_value(big), NULL, 10);
         }
     }
+    char *dump = json_dumps(v, JSON_ENCODE_ANY);
     fprintf(stderr, "trace format error: expected integer, got %s\n",
-            json_dumps(v, JSON_ENCODE_ANY) ?: "<null>");
+            dump ? dump : "<null>");
+    free(dump);
     exit(2);
 } /* itf_i64 */
 
@@ -1669,7 +1672,7 @@ report_divergence(
     fprintf(stderr, "\n=== DIVERGENCE in %s ===\n", trace_path);
     dump = json_dumps(op, JSON_COMPACT | JSON_ENCODE_ANY);
     fprintf(stderr, "step %d: %s args/expectation: %s\n",
-            step, tag, dump ?: "<?>");
+            step, tag, dump ? dump : "<?>");
     free(dump);
     for (i = 0; i < m->n; i++) {
         fprintf(stderr, "  MISMATCH: %s\n", m->msg[i]);
@@ -1677,7 +1680,7 @@ report_divergence(
     fprintf(stderr, "\nlast operations before failure:\n");
     for (i = 0; i < o->nhist; i++) {
         fprintf(stderr, "  [%4d] %s %s -> %u\n", o->history[i].idx,
-                o->history[i].tag, o->history[i].op_dump ?: "<?>",
+                o->history[i].tag, o->history[i].op_dump ? o->history[i].op_dump : "<?>",
                 o->history[i].status);
     }
     fprintf(stderr, "\nfid -> file handle map:\n");
@@ -1783,10 +1786,10 @@ run_trace(
         }
         tag = json_string_value(json_object_get(last_op, "tag"));
         op  = json_object_get(last_op, "value");
-        fn  = find_handler(tag ?: "");
+        fn  = find_handler(tag ? tag : "");
         if (!fn) {
             fprintf(stderr, "%s: step %zu: no handler for %s\n",
-                    trace_path, idx, tag ?: "<?>");
+                    trace_path, idx, tag ? tag : "<?>");
             failed = 1;
             goto out;
         }
@@ -1907,7 +1910,11 @@ main(
      * boundary, including the line naming the trace that was executing and
      * the fatal log message itself.  That is exactly what made a CI abort
      * here undiagnosable from its artifacts. */
-    setvbuf(stdout, NULL, _IOLBF, 0);
+#ifdef _WIN32
+    setvbuf(stdout, NULL, _IONBF, 0);
+#else  /* ifdef _WIN32 */
+    setvbuf(stdout, NULL, _IONBF, 0);
+#endif /* ifdef _WIN32 */
 
     umask(0);
 

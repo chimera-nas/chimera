@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
@@ -48,9 +49,9 @@ chimera_nfs4_renew(
                                      memory_order_acquire) == NFS4_CB_DOWN) {
                 bool has_deleg;
 
-                pthread_mutex_lock(&client->lock);
+                evpl_mutex_lock(&client->lock);
                 has_deleg = (client->delegations != NULL);
-                pthread_mutex_unlock(&client->lock);
+                evpl_mutex_unlock(&client->lock);
 
                 if (has_deleg) {
                     res->status = NFS4ERR_CB_PATH_DOWN;

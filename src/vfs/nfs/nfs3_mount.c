@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <utlist.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "nfs_internal.h"
 #include "evpl/evpl_rpc2.h"
@@ -175,8 +175,9 @@ chimera_mount_mountd_mnt_callback(
 
     request->mount.r_mount_private = mount;
 
+    evpl_mutex_lock(&shared->lock);
     mount->status = CHIMERA_NFS_CLIENT_MOUNT_STATE_MOUNTED;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -217,9 +218,9 @@ chimera_nfs3_mount_process_mount(
 
     memcpy(mount->path, path, strlen(path) + 1);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     DL_APPEND(shared->mounts, mount);
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     mount_arg.path.str = mount->path;
     mount_arg.path.len = strlen(mount->path);
@@ -244,9 +245,9 @@ chimera_nfs3_mount_discover_callback(
     evpl_rpc2_client_disconnect(server_thread->thread->rpc2_thread, server_thread->portmap_conn);
     server_thread->portmap_conn = NULL;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     server->state = CHIMERA_NFS_CLIENT_SERVER_STATE_DISCOVERED;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     chimera_nfs3_mount_process_mount(server_thread, server->pending_mounts);
 
@@ -472,7 +473,7 @@ chimera_portmap_null_callback(
 } /* chimera_portmap_null_callback */
 
 void
-chimera_nfs3_mount(
+chimera_vfs_nfs3_mount(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -501,7 +502,7 @@ chimera_nfs3_mount(
         return;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i] &&
@@ -561,14 +562,14 @@ chimera_nfs3_mount(
 
         server->index = idx;
 
-        pthread_mutex_init(&server->open_state_lock, NULL);
+        evpl_mutex_init(&server->open_state_lock, NULL);
 
         need_discover = 1;
 
         DL_APPEND(server->pending_mounts, request);
     }
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     server_thread         = calloc(1, sizeof(*server_thread));
     server_thread->thread = thread;
@@ -608,4 +609,4 @@ chimera_nfs3_mount(
                                                    0, 0, NULL, 0, 0,
                                                    chimera_portmap_null_callback, server_thread);
     }
-} /* chimera_nfs3_mount */
+} /* chimera_vfs_nfs3_mount */

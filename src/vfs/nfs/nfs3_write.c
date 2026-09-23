@@ -52,7 +52,7 @@ chimera_nfs3_write_callback(
 } /* chimera_nfs3_write_callback */
 
 void
-chimera_nfs3_write(
+chimera_vfs_nfs3_write(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -124,4 +124,4 @@ chimera_nfs3_write(
 
     /* The marshaller moved (and invalidated) the clones; free only the array. */
     free(ds_iov);
-} /* chimera_nfs3_write */
+} /* chimera_vfs_nfs3_write */

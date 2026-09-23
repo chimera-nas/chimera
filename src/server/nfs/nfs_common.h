@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include <utlist.h>
 #include "common/chimera_rcu.h"
 
@@ -70,7 +71,7 @@ struct nfs_pnfs_devcache_entry {
 };
 
 struct nfs_pnfs_devcache {
-    pthread_mutex_t                lock;
+    evpl_mutex_t                   lock;
     uint32_t                       count;
     struct nfs_pnfs_devcache_entry entries[NFS_PNFS_DEVCACHE_MAX];
 };
@@ -354,7 +355,7 @@ struct chimera_server_nfs_shared {
     struct nlm_granter                 *nlm_granter;
 
     struct chimera_nfs_export          *exports;
-    pthread_mutex_t                     exports_lock;
+    evpl_mutex_t                        exports_lock;
     int                                 num_exports;
     /* Concurrent-export count cap, snapshotted from the server config
      * (nfs_max_exports) at init; enforced in chimera_nfs_add_export(). */
@@ -401,7 +402,7 @@ struct chimera_server_nfs_shared {
     int                                 gss_enabled;
 
     struct chimera_nfs_mount_entry     *mount_entries;
-    pthread_mutex_t                     mount_entries_lock;
+    evpl_mutex_t                        mount_entries_lock;
     int                                 num_mount_entries;
     struct evpl_endpoint               *nfs_endpoint;
     struct evpl_endpoint               *mount_endpoint;
@@ -446,7 +447,7 @@ struct chimera_server_nfs_shared {
 
     /* Dedup / negative-cache for in-flight lazy 4.1 session hydrates, keyed by
      * sessionid (see nfs4_drc_session_hydrate). */
-    pthread_mutex_t                     nfs4_drc_hydra_lock;
+    evpl_mutex_t                        nfs4_drc_hydra_lock;
     struct nfs4_drc_hydra              *nfs4_drc_hydra;
 };
 
@@ -477,7 +478,7 @@ struct chimera_server_nfs_thread {
      * cb_recall_lock) and rings cb_doorbell; the owner thread drains the
      * queue and sends CB_RECALL.  See nfs4_callback.c. */
     struct evpl_doorbell              cb_doorbell;
-    pthread_mutex_t                   cb_recall_lock;
+    evpl_mutex_t                      cb_recall_lock;
     struct nfs_delegation            *cb_recall_queue; /* via deleg->recall_qnext */
     /* Cross-thread pNFS CB_LAYOUTRECALL marshalling (same rationale as
      * cb_recall_queue, but for layout holders).  Via layout->recall_qnext. */
@@ -507,7 +508,7 @@ struct chimera_server_nfs_thread {
      * cb_doorbell, so NLM does not pull the NFSv4 callback machinery into
      * targets that link one without the other.  See nfs_nlm.c. */
     struct evpl_doorbell              nlm_doorbell;
-    pthread_mutex_t                   nlm_resume_lock;
+    evpl_mutex_t                      nlm_resume_lock;
     struct nlm_lock_resume           *nlm_resume_queue;
     uint8_t                           nlm_doorbell_armed;
 };

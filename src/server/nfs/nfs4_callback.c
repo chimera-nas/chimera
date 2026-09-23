@@ -2,24 +2,36 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/socket.h>
+#endif /* ifdef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <netinet/in.h>
+#endif /* ifdef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <arpa/inet.h>
+#endif /* ifdef _WIN32 */
 #include <xxhash.h>
 
-/* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC
- * protocol constants, colliding with <netinet/in.h>'s IPPROTO_* enum-macros.
- * This file does not use them, so drop the system macros before the XDR
- * headers redefine them. */
-#undef IPPROTO_TCP
-#undef IPPROTO_UDP
+#include "common/socket.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
@@ -93,9 +105,8 @@ nfs4_cb_addr_reachable(
     int         port)
 {
     struct sockaddr_in sin;
-    int                fd;
+    chimera_socket_t   fd;
     int                rc;
-    int                flags;
     bool               ok = false;
 
     memset(&sin, 0, sizeof(sin));
@@ -106,32 +117,31 @@ nfs4_cb_addr_reachable(
     }
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    if (fd == CHIMERA_INVALID_SOCKET) {
         return false;
     }
 
     /* Non-blocking so the probe below never stalls the caller.  SOCK_NONBLOCK
      * as a socket() type flag is a Linux extension, so set O_NONBLOCK
      * explicitly instead. */
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
+    if (chimera_socket_nonblocking(fd) < 0) {
+        chimera_socket_close(fd);
         return false;
     }
 
     do {
         rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
-    } while (rc < 0 && errno == EINTR);
+    } while (rc < 0 && chimera_socket_interrupted());
 
     if (rc == 0) {
         ok = true;
-    } else if (errno == EINPROGRESS || errno == EALREADY) {
+    } else if (chimera_socket_connect_pending()) {
         /* Connection underway; treat as reachable.  evpl will redo its own
          * connect immediately after, which the listening peer accepts. */
         ok = true;
     }
 
-    close(fd);
+    chimera_socket_close(fd);
     return ok;
 } /* nfs4_cb_addr_reachable */
 
@@ -945,10 +955,10 @@ nfs4_cb_getattr_deliver(struct nfs4_cb_getattr *w)
     r->got_size         = w->got_size;
     r->size             = w->size;
 
-    pthread_mutex_lock(&x->cb_recall_lock);
+    evpl_mutex_lock(&x->cb_recall_lock);
     r->next             = x->cb_getattr_queue;
     x->cb_getattr_queue = r;
-    pthread_mutex_unlock(&x->cb_recall_lock);
+    evpl_mutex_unlock(&x->cb_recall_lock);
 
     evpl_ring_doorbell(&x->cb_doorbell);
 } /* nfs4_cb_getattr_deliver */
@@ -1150,7 +1160,7 @@ nfs4_find_conflicting_write_deleg(
         return NULL;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
         struct nfs_delegation *d;
 
@@ -1171,7 +1181,7 @@ nfs4_find_conflicting_write_deleg(
         deleg = d;
         break;
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     chimera_vfs_state_put(vfs_state, file);
     return deleg;
@@ -1206,10 +1216,10 @@ nfs4_cb_getattr(
     w->priv             = priv;
     w->resume           = resume;
 
-    pthread_mutex_lock(&holder->cb_recall_lock);
+    evpl_mutex_lock(&holder->cb_recall_lock);
     w->next                  = holder->cb_getattr_queue;
     holder->cb_getattr_queue = w;
-    pthread_mutex_unlock(&holder->cb_recall_lock);
+    evpl_mutex_unlock(&holder->cb_recall_lock);
 
     evpl_ring_doorbell(&holder->cb_doorbell);
 } /* nfs4_cb_getattr */
@@ -1230,7 +1240,7 @@ nfs4_cb_doorbell_drain(
 
     (void) evpl;
 
-    pthread_mutex_lock(&thread->cb_recall_lock);
+    evpl_mutex_lock(&thread->cb_recall_lock);
     queue                         = thread->cb_recall_queue;
     thread->cb_recall_queue       = NULL;
     lrq                           = thread->cb_layoutrecall_queue;
@@ -1239,7 +1249,7 @@ nfs4_cb_doorbell_drain(
     thread->cb_getattr_queue      = NULL;
     tq                            = thread->cb_teardown_queue;
     thread->cb_teardown_queue     = NULL;
-    pthread_mutex_unlock(&thread->cb_recall_lock);
+    evpl_mutex_unlock(&thread->cb_recall_lock);
 
     while (queue) {
         struct nfs_delegation *deleg = queue;
@@ -1331,10 +1341,10 @@ nfs4_cb_recall_enqueue(struct nfs_delegation *deleg)
 
     atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
 
-    pthread_mutex_lock(&owner->cb_recall_lock);
+    evpl_mutex_lock(&owner->cb_recall_lock);
     deleg->recall_qnext    = owner->cb_recall_queue;
     owner->cb_recall_queue = deleg;
-    pthread_mutex_unlock(&owner->cb_recall_lock);
+    evpl_mutex_unlock(&owner->cb_recall_lock);
 
     evpl_ring_doorbell(&owner->cb_doorbell);
 } /* nfs4_cb_recall_enqueue */
@@ -1390,7 +1400,7 @@ nfs4_cb_resend_recalls_on_rebind(
      * race.  (Reading claim.break_state under client->lock, without the file
      * lock, matches the existing nfs_deleg_recall_timeout_check pattern -- a
      * benign racy read of an enum used only to decide whether to retry.) */
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
     LL_FOREACH2(client->delegations, deleg, next_in_client)
     {
         if (atomic_load_explicit(&deleg->cb_recall_state,
@@ -1413,7 +1423,7 @@ nfs4_cb_resend_recalls_on_rebind(
         atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
         pending[count++] = deleg;
     }
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 
     /* The stale callback channel still references the destroyed session (whose
      * backchannel_conn is now NULL), so it cannot carry a recall.  Tear it down
@@ -1521,10 +1531,10 @@ nfs4_cb_path_teardown(
         } else {
             struct chimera_server_nfs_thread *owner = chan->owner_thread;
 
-            pthread_mutex_lock(&owner->cb_recall_lock);
+            evpl_mutex_lock(&owner->cb_recall_lock);
             chan->teardown_next      = owner->cb_teardown_queue;
             owner->cb_teardown_queue = chan;
-            pthread_mutex_unlock(&owner->cb_recall_lock);
+            evpl_mutex_unlock(&owner->cb_recall_lock);
 
             evpl_ring_doorbell(&owner->cb_doorbell);
         }
@@ -1538,7 +1548,7 @@ nfs4_cb_path_teardown(
 void
 nfs4_cb_thread_init(struct chimera_server_nfs_thread *thread)
 {
-    pthread_mutex_init(&thread->cb_recall_lock, NULL);
+    evpl_mutex_init(&thread->cb_recall_lock, NULL);
     thread->cb_recall_queue   = NULL;
     thread->cb_getattr_queue  = NULL;
     thread->cb_teardown_queue = NULL;
@@ -1553,5 +1563,5 @@ nfs4_cb_thread_destroy(struct chimera_server_nfs_thread *thread)
         evpl_remove_doorbell(thread->evpl, &thread->cb_doorbell);
         thread->cb_doorbell_armed = 0;
     }
-    pthread_mutex_destroy(&thread->cb_recall_lock);
+    evpl_mutex_destroy(&thread->cb_recall_lock);
 } /* nfs4_cb_thread_destroy */

@@ -24,7 +24,7 @@ main(void)
     struct stateid4                  closing_sid;
     struct chimera_nfs4_open_file   *old_file, *new_file, *alias;
 
-    pthread_mutex_init(&server.open_state_lock, NULL);
+    evpl_mutex_init(&server.open_state_lock, NULL);
     CHECK(chimera_nfs4_open_file_get(&server, fh, sizeof(fh), &old_sid, &old_file) == 0);
     old_file->layout.last_write_offset = 8192;
     CHECK(chimera_nfs4_open_file_put(&server, fh, sizeof(fh), &closing_sid) == 1);
@@ -52,6 +52,6 @@ main(void)
     CHECK(memcmp(closing_sid.other, new_sid.other, sizeof(new_sid.other)) == 0);
     chimera_nfs4_open_file_close_done(&server, new_file);
     CHECK(server.open_files == NULL);
-    pthread_mutex_destroy(&server.open_state_lock);
+    evpl_mutex_destroy(&server.open_state_lock);
     return 0;
 } /* main */

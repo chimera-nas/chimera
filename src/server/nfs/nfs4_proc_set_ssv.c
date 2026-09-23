@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "evpl/evpl_rpc2.h"
@@ -47,13 +48,13 @@ chimera_nfs4_set_ssv(
     {
         struct nfs4_client *c;
 
-        pthread_mutex_lock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+        evpl_mutex_lock(&shared->nfs4_shared_clients.nfs4_ct_lock);
         HASH_FIND(nfs4_client_hh_by_id,
                   shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
                   &req->session->nfs4_session_clientid,
                   sizeof(req->session->nfs4_session_clientid), c);
         ssv_negotiated = c && c->nfs4_client_sp_how == SP4_SSV;
-        pthread_mutex_unlock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+        evpl_mutex_unlock(&shared->nfs4_shared_clients.nfs4_ct_lock);
     }
 
     if (!ssv_negotiated) {

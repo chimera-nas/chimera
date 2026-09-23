@@ -55,7 +55,7 @@ chimera_nfs4_allocate_callback(
 } /* chimera_nfs4_allocate_callback */
 
 void
-chimera_nfs4_allocate(
+chimera_vfs_nfs4_allocate(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -148,5 +148,5 @@ chimera_nfs4_allocate(
         0, 0, NULL, 0, 0,
         chimera_nfs4_allocate_callback,
         request,
-        chimera_nfs4_dispatch, private_data);
-} /* chimera_nfs4_allocate */
+        chimera_vfs_nfs4_dispatch, private_data);
+} /* chimera_vfs_nfs4_allocate */

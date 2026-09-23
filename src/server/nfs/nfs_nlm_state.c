@@ -2,54 +2,22 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <dirent.h>
+#include "common/dirent.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <time.h>
-
-/*
- * Recursively create path components, equivalent to mkdir -p.
- * Returns 0 on success, -1 on error (errno set).  EEXIST is not an error.
- */
-static int
-mkdir_p(
-    const char *path,
-    mode_t      mode)
-{
-    size_t plen = strlen(path) + 1;
-    char  *tmp  = malloc(plen);
-    char  *p;
-    size_t len;
-
-    if (!tmp) {
-        return -1;
-    }
-    memcpy(tmp, path, plen);
-    len = plen - 1;
-    if (len > 0 && tmp[len - 1] == '/') {
-        tmp[len - 1] = '\0';
-    }
-    for (p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-                free(tmp);
-                return -1;
-            }
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-        free(tmp);
-        return -1;
-    }
-    free(tmp);
-    return 0;
-} /* mkdir_p */
 
 #include "nfs_nlm_state.h"
 #include "vfs/vfs_release.h"
@@ -100,7 +68,7 @@ nlm_state_init(
     struct nlm_state *state,
     const char       *state_dir)
 {
-    pthread_mutex_init(&state->mutex, NULL);
+    evpl_mutex_init(&state->mutex, NULL);
     state->clients   = NULL;
     state->in_grace  = 0;
     state->grace_end = 0;
@@ -132,7 +100,7 @@ nlm_state_destroy(struct nlm_state *state)
 
 #endif /* ifndef __clang_analyzer__ */
 
-    pthread_mutex_destroy(&state->mutex);
+    evpl_mutex_destroy(&state->mutex);
 } /* nlm_state_destroy */
 
 void
@@ -228,7 +196,7 @@ nlm_state_persist_client_disabled(
 
     /* Phase 1: snapshot the client's lock list under the mutex so that
      * the file I/O in Phase 2 does not hold the mutex. */
-    pthread_mutex_lock(&state->mutex);
+    evpl_mutex_lock(&state->mutex);
 
     snprintf(hostname, sizeof(hostname), "%s", client->hostname);
 
@@ -241,7 +209,7 @@ nlm_state_persist_client_disabled(
     }
 
     if (count == 0) {
-        pthread_mutex_unlock(&state->mutex);
+        evpl_mutex_unlock(&state->mutex);
         nlm_state_client_file_path(state, hostname, path, sizeof(path));
         chimera_nfs_debug("NLM persist: '%s' has no confirmed locks, removing state file",
                           hostname);
@@ -251,7 +219,7 @@ nlm_state_persist_client_disabled(
 
     snapshot = calloc(count, sizeof(*snapshot));
     if (!snapshot) {
-        pthread_mutex_unlock(&state->mutex);
+        evpl_mutex_unlock(&state->mutex);
         chimera_nfs_debug("NLM persist: out of memory for snapshot of '%s'", hostname);
         return;
     }
@@ -273,7 +241,7 @@ nlm_state_persist_client_disabled(
         i++;
     }
 
-    pthread_mutex_unlock(&state->mutex);
+    evpl_mutex_unlock(&state->mutex);
 
     /* Phase 2: write snapshot to disk without holding the mutex. */
     nlm_state_client_file_path(state, hostname, path, sizeof(path));
@@ -369,7 +337,7 @@ nlm_client_release_all_locks(
      * entry we own onto a private `reap` list.  Entries whose acquire callback
      * is firing concurrently (cancel lost the race) are left on client->locks
      * for that callback to remove and free. */
-    pthread_mutex_lock(&state->mutex);
+    evpl_mutex_lock(&state->mutex);
 
     DL_FOREACH(client->locks, entry)
     {
@@ -419,7 +387,7 @@ nlm_client_release_all_locks(
     }
 #endif /* ifndef __clang_analyzer__ */
 
-    pthread_mutex_unlock(&state->mutex);
+    evpl_mutex_unlock(&state->mutex);
 
     /* Phase 2 (no lock held): release claims (which may pump and fire other
      * waiters' callbacks), drop file_state refs, close handles, free. */

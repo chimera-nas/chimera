@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 
 #include "common/logging.h"
@@ -12,7 +13,7 @@ static inline uint32_t
 chimera_nfs_hton32(uint32_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap32(value);
+    return chimera_bswap32(value);
 #else  /* if __BYTE_ORDER == __LITTLE_ENDIAN */
     return value;
 #endif /* if __BYTE_ORDER == __LITTLE_ENDIAN */
@@ -22,7 +23,7 @@ static inline uint32_t
 chimera_nfs_ntoh32(uint32_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap32(value);
+    return chimera_bswap32(value);
 #else  /* if __BYTE_ORDER == __LITTLE_ENDIAN */
     return value;
 #endif /* if __BYTE_ORDER == __LITTLE_ENDIAN */
@@ -32,7 +33,7 @@ static inline uint64_t
 chimera_nfs_hton64(uint64_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap64(value);
+    return chimera_bswap64(value);
 #else  /* if __BYTE_ORDER == __LITTLE_ENDIAN */
     return value;
 #endif /* if __BYTE_ORDER == __LITTLE_ENDIAN */
@@ -42,7 +43,7 @@ static inline uint64_t
 chimera_nfs_ntoh64(uint64_t value)
 {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-    return __builtin_bswap64(value);
+    return chimera_bswap64(value);
 #else  /* if __BYTE_ORDER == __LITTLE_ENDIAN */
     return value;
 #endif /* if __BYTE_ORDER == __LITTLE_ENDIAN */

@@ -5,6 +5,7 @@
 /* Fault injection: failed backing-file truncate must preserve MDS state.
 * Ordinary authorization and I/O are covered by the NFS3 model corpus. */
 #include "nfs3_mbt_common.h"
+#include "common/mbt_watchdog.h"
 #include "vfs/vfs_pnfs.h"
 
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); exit(1); \
@@ -22,7 +23,7 @@ main(
     unsigned char       data[4096];
     char                name[MBT_NAME_MAX] = { 0 };
 
-    alarm(60);
+    mbt_watchdog_arm(60);
     opts.module          = argc > 1 ? argv[1] : "memfs";
     opts.pnfs_ds_version = 3;
     mbt_env_start_opts(env, &opts);

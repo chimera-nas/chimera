@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
@@ -39,20 +40,20 @@ chimera_nfs4_release_lockowner(
      * renews all of the client's leases. */
     nfs_client_touch(client);
 
-    pthread_mutex_lock(&client->lock);
+    evpl_mutex_lock(&client->lock);
 
     HASH_FIND(hh, client->lock_owners_by_str,
               args->lock_owner.owner.data, args->lock_owner.owner.len, lo);
 
     if (lo) {
-        pthread_mutex_lock(&lo->lock);
+        evpl_mutex_lock(&lo->lock);
         for (ls = lo->states; ls; ls = ls->next_in_owner) {
             if (ls->range_leases != NULL) {
                 held = true;
                 break;
             }
         }
-        pthread_mutex_unlock(&lo->lock);
+        evpl_mutex_unlock(&lo->lock);
 
         /* RFC 7530 §16.37: on success the server discards the lock-owner and
          * all state it anchors, so the client may reuse the owner string for a
@@ -66,16 +67,16 @@ chimera_nfs4_release_lockowner(
         }
     }
 
-    pthread_mutex_unlock(&client->lock);
+    evpl_mutex_unlock(&client->lock);
 
     if (release) {
         /* Drain the (now rangeless) lock stateids.  nfs_lock_state_destroy
          * unlinks each entry under lo->lock, so re-read the head each pass
          * rather than iterate a list being mutated underneath us. */
         for ( ; ;) {
-            pthread_mutex_lock(&lo->lock);
+            evpl_mutex_lock(&lo->lock);
             ls = lo->states;
-            pthread_mutex_unlock(&lo->lock);
+            evpl_mutex_unlock(&lo->lock);
             if (!ls) {
                 break;
             }

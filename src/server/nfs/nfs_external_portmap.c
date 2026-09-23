@@ -4,17 +4,24 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#include <pthread.h>
+#endif /* ifdef _WIN32 */
+#include "common/thread.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/socket.h>
+#endif /* ifdef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <netinet/in.h>
+#endif /* ifdef _WIN32 */
 
-/* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC
- * protocol constants, colliding with <netinet/in.h>'s IPPROTO_* enum-macros.
- * This file does not use them, so drop the system macros before the XDR
- * headers redefine them. */
-#undef IPPROTO_TCP
-#undef IPPROTO_UDP
+#include "common/socket.h"
 
 #include "nfs_internal.h"
 #include "nfs_common.h"
@@ -92,10 +99,11 @@ static int
 portmap_reachable(void)
 {
     struct sockaddr_in sin;
-    int                fd, rc;
+    chimera_socket_t   fd;
+    int                rc;
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    if (fd == CHIMERA_INVALID_SOCKET) {
         return 0;
     }
 
@@ -105,7 +113,7 @@ portmap_reachable(void)
     sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
-    close(fd);
+    chimera_socket_close(fd);
 
     return rc == 0;
 } /* portmap_reachable */

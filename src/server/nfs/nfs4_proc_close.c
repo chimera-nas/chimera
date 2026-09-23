@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_session.h"
@@ -60,7 +61,7 @@ chimera_nfs4_close(
     struct nfs_open_owner *owner      = open_state->owner;
 
     if (is_v40 && owner) {
-        pthread_mutex_lock(&owner->lock);
+        evpl_mutex_lock(&owner->lock);
 
         int seqid_class = nfs4_owner_seqid_classify(owner->seqid,
                                                     &owner->replay,
@@ -73,7 +74,7 @@ chimera_nfs4_close(
              * effects we must avoid). */
             res->status       = owner->replay.status;
             res->open_stateid = owner->replay.stateid;
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             chimera_nfs4_compound_complete(req, res->status);
@@ -81,7 +82,7 @@ chimera_nfs4_close(
         }
 
         if (seqid_class != NFS4_SEQID_NEW) {
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = NFS4ERR_BAD_SEQID;
@@ -92,7 +93,7 @@ chimera_nfs4_close(
         status = nfs4_stateid_check_seqid(open_state->seqid,
                                           args->open_stateid.seqid);
         if (status != NFS4_OK) {
-            pthread_mutex_unlock(&owner->lock);
+            evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
             res->status = status;
@@ -100,7 +101,7 @@ chimera_nfs4_close(
             return;
         }
 
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
     }
 
     /* Bump stateid.seqid per RFC 7530 §16.2.4, then encode the returned
@@ -118,11 +119,11 @@ chimera_nfs4_close(
      * persists until DESTROY_CLIENTID / expiry, so recording here keeps
      * the cached stateid available for any retransmit. */
     if (is_v40 && owner) {
-        pthread_mutex_lock(&owner->lock);
+        evpl_mutex_lock(&owner->lock);
         owner->seqid = args->seqid;
         nfs4_replay_record(&owner->replay, args->seqid, OP_CLOSE,
                            NFS4_OK, &res->open_stateid);
-        pthread_mutex_unlock(&owner->lock);
+        evpl_mutex_unlock(&owner->lock);
     }
 
     /* Destroy while we still hold the acquire-ref, then drop the ref.  The

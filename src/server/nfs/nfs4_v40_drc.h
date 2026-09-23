@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -111,7 +111,7 @@ struct nfs4_v40_drc_conn {
 };
 
 struct nfs4_v40_drc {
-    pthread_mutex_t           lock;
+    evpl_mutex_t              lock;
     struct nfs4_v40_drc_conn *conns;   /* uthash, keyed by connection pointer */
     uint64_t                  bytes;   /* summed across all connections */
     /* The generated dispatcher we wrap; NULL until installed. */

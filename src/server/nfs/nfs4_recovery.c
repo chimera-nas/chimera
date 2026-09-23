@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,7 +145,7 @@ nfs_recovery_load(
 {
     const char *kvname;
 
-    pthread_mutex_init(&rec->lock, NULL);
+    evpl_mutex_init(&rec->lock, NULL);
     rec->to_reclaim      = NULL;
     rec->pending_reclaim = 0;
     rec->current_boot_id = nfs_recovery_fresh_boot_id();
@@ -175,15 +176,15 @@ nfs_recovery_free(struct nfs_recovery *rec)
 #ifndef __clang_analyzer__
     struct nfs_recovery_record *r, *tmp;
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     HASH_ITER(hh, rec->to_reclaim, r, tmp)
     {
         HASH_DEL(rec->to_reclaim, r);
         free(r);
     }
     rec->pending_reclaim = 0;
-    pthread_mutex_unlock(&rec->lock);
-    pthread_mutex_destroy(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
+    evpl_mutex_destroy(&rec->lock);
 #endif /* ifndef __clang_analyzer__ */
 } /* nfs_recovery_free */
 
@@ -196,7 +197,7 @@ nfs_recovery_begin_grace(
     struct nfs_recovery *rec,
     uint32_t             grace_time_s)
 {
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     if (rec->to_reclaim == NULL) {
         /* No clients to reclaim -- skip the grace window entirely so
          * normal traffic is accepted immediately. */
@@ -207,7 +208,7 @@ nfs_recovery_begin_grace(
         rec->grace_end_ns = nfs_lease_now_ns() +
             (uint64_t) grace_time_s * 1000000000ULL;
     }
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_begin_grace */
 
 /* Unconditionally open the grace window for the configured duration.  Used at
@@ -216,20 +217,20 @@ nfs_recovery_begin_grace(
 static void
 nfs_recovery_begin_grace_forced(struct nfs_recovery *rec)
 {
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     rec->in_grace     = true;
     rec->grace_end_ns = nfs_lease_now_ns() +
         (uint64_t) rec->grace_time_s * 1000000000ULL;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_begin_grace_forced */
 
 void
 nfs_recovery_end_grace(struct nfs_recovery *rec)
 {
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     rec->in_grace     = false;
     rec->grace_end_ns = 0;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_end_grace */
 
 bool
@@ -237,9 +238,9 @@ nfs_recovery_in_grace(struct nfs_recovery *rec)
 {
     bool in_grace;
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     in_grace = rec->in_grace;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 
     return in_grace;
 } /* nfs_recovery_in_grace */
@@ -303,7 +304,7 @@ nfs_recovery_forget(
 
     /* Drop any matching in-memory reclaim record so a destroyed client stops
      * being reclaim-eligible (and the grace window can end). */
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     HASH_FIND(hh, rec->to_reclaim, owner, owner_len, r);
     if (r) {
         HASH_DEL(rec->to_reclaim, r);
@@ -312,7 +313,7 @@ nfs_recovery_forget(
         }
         free(r);
     }
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 
     if (rec->persistence_disabled) {
         return;
@@ -343,7 +344,7 @@ nfs_recovery_finalize_load(struct nfs_recovery *rec)
     uint32_t loaded;
     bool     in_grace;
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     loaded = HASH_COUNT(rec->to_reclaim);
     if (rec->to_reclaim == NULL) {
         /* Nothing was persisted -- drop the forced grace window so normal
@@ -352,7 +353,7 @@ nfs_recovery_finalize_load(struct nfs_recovery *rec)
         rec->grace_end_ns = 0;
     }
     in_grace = rec->in_grace;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 
     /* Assertable marker for cross-reboot tests + operational visibility. */
     chimera_nfs_info(
@@ -390,16 +391,16 @@ nfs_recovery_scan_cb(
         return 0;
     }
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     HASH_FIND(hh, rec->to_reclaim, r->owner_string, r->owner_len, existing);
     if (existing) {
-        pthread_mutex_unlock(&rec->lock);
+        evpl_mutex_unlock(&rec->lock);
         free(r);
         return 0;
     }
     HASH_ADD_KEYPTR(hh, rec->to_reclaim, r->owner_string, r->owner_len, r);
     rec->pending_reclaim++;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 
     return 0;
 } /* nfs_recovery_scan_cb */
@@ -535,9 +536,9 @@ nfs_recovery_open_check(
 
     ls = atomic_load_explicit(&rec->load_state, memory_order_acquire);
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     in_grace = rec->in_grace;
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 
     /* While the cold-start load is still in flight, behave as in-grace so a
      * reclaim that races its record load is not refused. */
@@ -569,11 +570,11 @@ nfs_recovery_open_check(
         struct nfs_recovery_record *r;
         bool                        reclaimed;
 
-        pthread_mutex_lock(&rec->lock);
+        evpl_mutex_lock(&rec->lock);
         HASH_FIND(hh, rec->to_reclaim, client->owner_string,
                   client->owner_len, r);
         reclaimed = r && r->reclaimed;
-        pthread_mutex_unlock(&rec->lock);
+        evpl_mutex_unlock(&rec->lock);
 
         if (!r) {
             return NFS4ERR_RECLAIM_BAD;
@@ -632,7 +633,7 @@ nfs_recovery_reclaim_complete(
      * or the first sweep tick after READY, ends the window. */
     loading = nfs_recovery_loading(rec);
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     HASH_FIND(hh, rec->to_reclaim, client->owner_string, client->owner_len, r);
     if (r && !r->reclaimed) {
         r->reclaimed = true;
@@ -644,7 +645,7 @@ nfs_recovery_reclaim_complete(
             rec->grace_end_ns = 0;
         }
     }
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_reclaim_complete */
 
 void
@@ -668,9 +669,9 @@ nfs_recovery_sweep_once(struct nfs_recovery *rec)
      * anyway. */
     loading = nfs_recovery_loading(rec);
 
-    pthread_mutex_lock(&rec->lock);
+    evpl_mutex_lock(&rec->lock);
     if (!rec->in_grace) {
-        pthread_mutex_unlock(&rec->lock);
+        evpl_mutex_unlock(&rec->lock);
         return;
     }
     now = nfs_lease_now_ns();
@@ -681,5 +682,5 @@ nfs_recovery_sweep_once(struct nfs_recovery *rec)
         rec->in_grace     = false;
         rec->grace_end_ns = 0;
     }
-    pthread_mutex_unlock(&rec->lock);
+    evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_sweep_once */

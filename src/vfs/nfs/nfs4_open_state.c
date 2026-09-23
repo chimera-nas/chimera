@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "nfs_internal.h"
 #include "nfs4_open_state.h"
 
@@ -57,7 +58,7 @@ chimera_nfs4_open_file_get(
         return -2;
     }
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     HASH_FIND(hh, server->open_files, wire_fh, wire_fh_len, file);
 
@@ -72,7 +73,7 @@ chimera_nfs4_open_file_get(
              * tracks (its CLOSE already retired it, or a fresh open already
              * replaced it and this reply raced past both), or the tracked
              * state itself while its CLOSE is in flight.  Dead either way. */
-            pthread_mutex_unlock(&server->open_state_lock);
+            evpl_mutex_unlock(&server->open_state_lock);
             return -1;
         }
 
@@ -95,7 +96,7 @@ chimera_nfs4_open_file_get(
 
             *r_file = file;
 
-            pthread_mutex_unlock(&server->open_state_lock);
+            evpl_mutex_unlock(&server->open_state_lock);
             return 0;
         }
     }
@@ -104,20 +105,20 @@ chimera_nfs4_open_file_get(
         /* An upgrade of a state this client no longer tracks: the file's
          * CLOSE completed between our OPEN's transmit and the server
          * processing it, so the state we coalesced into is gone. */
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return -1;
     }
 
     file = calloc(1, sizeof(*file));
 
     if (!file) {
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return -2;
     }
 
     file->refcnt = 1;
-    pthread_mutex_init(&file->layout.acq_lock, NULL);
-    pthread_mutex_init(&file->layout.io_lock, NULL);
+    evpl_mutex_init(&file->layout.acq_lock, NULL);
+    evpl_mutex_init(&file->layout.io_lock, NULL);
     file->fh_len = wire_fh_len;
     memcpy(file->fh, wire_fh, wire_fh_len);
 
@@ -132,7 +133,7 @@ chimera_nfs4_open_file_get(
 
     *r_file = file;
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
     return 0;
 } /* chimera_nfs4_open_file_get */
 
@@ -166,12 +167,12 @@ chimera_nfs4_open_file_put(
         return 0;
     }
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     HASH_FIND(hh, server->open_files, wire_fh, wire_fh_len, file);
 
     if (!file || --file->refcnt > 0) {
-        pthread_mutex_unlock(&server->open_state_lock);
+        evpl_mutex_unlock(&server->open_state_lock);
         return 0;
     }
 
@@ -183,7 +184,7 @@ chimera_nfs4_open_file_put(
 
     *r_stateid = file->stateid;
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
 
     return 1;
 } /* chimera_nfs4_open_file_put */
@@ -201,14 +202,14 @@ chimera_nfs4_open_file_close_done(
         return;
     }
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
     HASH_FIND(hh, server->open_files, file->fh, file->fh_len, current);
     if (current == file) {
         HASH_DEL(server->open_files, file);
     }
-    pthread_mutex_unlock(&server->open_state_lock);
-    pthread_mutex_destroy(&file->layout.acq_lock);
-    pthread_mutex_destroy(&file->layout.io_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_destroy(&file->layout.acq_lock);
+    evpl_mutex_destroy(&file->layout.io_lock);
     free(file);
 } /* chimera_nfs4_open_file_close_done */
 
@@ -225,7 +226,7 @@ chimera_nfs4_open_file_drain(struct chimera_nfs_client_server *server)
 {
     struct chimera_nfs4_open_file *file, *next;
 
-    pthread_mutex_lock(&server->open_state_lock);
+    evpl_mutex_lock(&server->open_state_lock);
 
     /* Take the chain, drop uthash's table in one step, and only then free the
      * entries, walking the insertion-order links with each read taken before
@@ -239,11 +240,11 @@ chimera_nfs4_open_file_drain(struct chimera_nfs_client_server *server)
 
     while (file) {
         next = file->hh.next;
-        pthread_mutex_destroy(&file->layout.acq_lock);
-        pthread_mutex_destroy(&file->layout.io_lock);
+        evpl_mutex_destroy(&file->layout.acq_lock);
+        evpl_mutex_destroy(&file->layout.io_lock);
         free(file);
         file = next;
     }
 
-    pthread_mutex_unlock(&server->open_state_lock);
+    evpl_mutex_unlock(&server->open_state_lock);
 } /* chimera_nfs4_open_file_drain */
