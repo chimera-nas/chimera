@@ -73,7 +73,7 @@ struct chimera_vfs_open_handle;
  * session_id fallback); such owners never coalesce across nodes. */
 #define CHIMERA_CLAIM_OWNER_UNSTABLE 0x01
 
-/* 128-bit-safe half-open range overlap shared by the core and CAP_LEASE
+/* Overflow-safe half-open range overlap shared by the core and CAP_LEASE
  * arbiters (UINT64_MAX = to-EOF, 0 = genuine zero-byte range). */
 static inline bool
 chimera_vfs_claim_range_overlap_i(
@@ -82,12 +82,12 @@ chimera_vfs_claim_range_overlap_i(
     uint64_t b_off,
     uint64_t b_len)
 {
-    __uint128_t a_end = (a_len == UINT64_MAX)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
-    __uint128_t b_end = (b_len == UINT64_MAX)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
+    /* Compare against exclusive ends by subtraction, avoiding overflow and
+     * compiler-specific 128-bit types. Preserve zero-byte interior points. */
+    bool before_b_end = b_len == UINT64_MAX || a_off < b_off || a_off - b_off < b_len;
+    bool before_a_end = a_len == UINT64_MAX || b_off < a_off || b_off - a_off < a_len;
 
-    return a_off < b_end && b_off < a_end;
+    return before_b_end && before_a_end;
 } /* chimera_vfs_claim_range_overlap_i */
 
 /* Backend claim wire shapes (CHIMERA_VFS_OP_CLAIM_ACQUIRE/_RELEASE): the

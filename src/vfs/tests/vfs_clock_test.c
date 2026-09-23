@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <pthread.h>
+#include "common/platform.h"
+#include "common/thread.h"
 #include <stdio.h>
 #include <time.h>
 #undef NDEBUG
@@ -52,18 +53,17 @@ check_realtime(void *arg)
 int
 main(void)
 {
-    pthread_t       readers[4];
-    struct timespec delay = { .tv_sec = 1, .tv_nsec = 100000000 };
+    evpl_native_thread_t readers[4];
 
     check_realtime(NULL);
     chimera_vfs_clock_init();
     check_realtime(NULL);
-    assert(nanosleep(&delay, NULL) == 0);
+    chimera_thread_sleep_us(1100000);
     for (int i = 0; i < 4; i++) {
-        assert(pthread_create(&readers[i], NULL, check_realtime, NULL) == 0);
+        assert(evpl_native_thread_create(&readers[i], NULL, check_realtime, NULL) == 0);
     }
     for (int i = 0; i < 4; i++) {
-        assert(pthread_join(readers[i], NULL) == 0);
+        assert(evpl_native_thread_join(readers[i], NULL) == 0);
     }
     chimera_vfs_clock_shutdown();
     check_realtime(NULL);

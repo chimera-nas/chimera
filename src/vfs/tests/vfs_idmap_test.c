@@ -4,7 +4,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
 #include <grp.h>
+#endif /* ifndef _WIN32 */
 #undef NDEBUG
 #include <assert.h>
 
@@ -145,8 +147,11 @@ static void
 test_principal_fully_defined(void)
 {
     struct chimera_principal q, want;
+
+#ifndef _WIN32
     struct group            *gr = getgrgid(0);
     char                     gname[CHIMERA_IDMAP_WHO_MAX];
+#endif /* ifndef _WIN32 */
 
     /* Special who. */
     memset(&q, 0xa5, sizeof(q));
@@ -175,6 +180,7 @@ test_principal_fully_defined(void)
     want = chimera_idmap_gid_principal(2000);
     assert(memcmp(&q, &want, sizeof(q)) == 0);
 
+#ifndef _WIN32
     /* name@domain through nsswitch: root is uid 0 everywhere; the group
      * named for gid 0 is looked up so the test does not assume its name. */
     memset(&q, 0xa5, sizeof(q));
@@ -193,6 +199,8 @@ test_principal_fully_defined(void)
         want = chimera_idmap_gid_principal(0);
         assert(memcmp(&q, &want, sizeof(q)) == 0);
     }
+
+#endif /* ifndef _WIN32 */
 
     /* Failure leaves nothing of the caller's storage either. */
     memset(&q, 0xa5, sizeof(q));

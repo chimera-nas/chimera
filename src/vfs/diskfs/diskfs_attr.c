@@ -9,6 +9,9 @@
  * and pNFS block layouts.
  */
 
+#include "common/atomic.h"
+#include "common/thread.h"
+#include "common/compiler.h"
 #include "diskfs_internal.h"
 
 /* Forward declarations (definitions below, in call-graph order) */
@@ -310,9 +313,9 @@ diskfs_acl_decode_into(
     int                       len,
     uint32_t                  mode)
 {
-    static __thread uint8_t scratch[sizeof(struct chimera_acl) +
-                                    CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
-    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+    static CHIMERA_THREAD_LOCAL uint8_t scratch[sizeof(struct chimera_acl) +
+                                                CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace)];
+    struct chimera_acl                 *dst = (struct chimera_acl *) scratch;
 
     if (len < 0 ||
         chimera_acl_deserialize((const char *) serial, len, dst,
@@ -403,8 +406,8 @@ diskfs_sid_decode_into(
     const uint8_t            *serial,
     uint32_t                  len)
 {
-    static __thread struct chimera_sid owner;
-    static __thread struct chimera_sid group;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid owner;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid group;
 
     chimera_sid_pair_decode(serial, (int) len, &owner, &group);
 
@@ -446,17 +449,17 @@ diskfs_inherit_acl_async(
     diskfs_bt_cb_t            cb,
     void                     *private_data)
 {
-    int                       is_dir = S_ISDIR(child->mode);
-    uint16_t                  want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+    int                                 is_dir = S_ISDIR(child->mode);
+    uint16_t                            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
     /* Per-thread scratch: an ACE now carries an inline SID, so these are
      * too large to keep on the stack. */
-    static __thread uint8_t   abuf[sizeof(struct chimera_acl) +
-                                   DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-    static __thread uint8_t   pbuf[sizeof(struct chimera_acl) +
-                                   DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-    const struct chimera_acl *store       = NULL;
-    int                       derive_mode = 0;
+    static CHIMERA_THREAD_LOCAL uint8_t abuf[sizeof(struct chimera_acl) +
+                                             DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    static CHIMERA_THREAD_LOCAL uint8_t pbuf[sizeof(struct chimera_acl) +
+                                             DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+    const struct chimera_acl           *store       = NULL;
+    int                                 derive_mode = 0;
 
     if (new_acl && new_acl->num_aces) {
         store       = new_acl;
@@ -1076,14 +1079,14 @@ diskfs_setattr_acl(struct chimera_vfs_request *request)
         }
         return;
     } else if ((mask & CHIMERA_VFS_ATTR_MODE) && inode->acl_serial) {
-        static __thread uint8_t obuf[sizeof(struct chimera_acl) +
-                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        static __thread uint8_t nbuf[sizeof(struct chimera_acl) +
-                                     DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
-        struct chimera_acl     *old_acl = (struct chimera_acl *) obuf;
-        struct chimera_acl     *new_acl = (struct chimera_acl *) nbuf;
-        uint8_t                 sbuf[DISKFS_ACL_REC_MAX];
-        int                     slen;
+        static CHIMERA_THREAD_LOCAL uint8_t obuf[sizeof(struct chimera_acl) +
+                                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        static CHIMERA_THREAD_LOCAL uint8_t nbuf[sizeof(struct chimera_acl) +
+                                                 DISKFS_ACL_REC_MAX_ACES * sizeof(struct chimera_ace)];
+        struct chimera_acl                 *old_acl = (struct chimera_acl *) obuf;
+        struct chimera_acl                 *new_acl = (struct chimera_acl *) nbuf;
+        uint8_t                             sbuf[DISKFS_ACL_REC_MAX];
+        int                                 slen;
 
         if (chimera_acl_deserialize((const char *) inode->acl_serial,
                                     inode->acl_serial_len, old_acl,
@@ -1371,9 +1374,9 @@ diskfs_mount_fail(
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_shared          *shared = p->thread->shared;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     p->fs->mount_count--;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     diskfs_op_fail(request, p->txn, status);
 } /* diskfs_mount_fail */
@@ -1508,13 +1511,13 @@ diskfs_mount(
         path    = path_end;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs = namelen ? diskfs_fs_find(shared, name, namelen) : NULL;
 
     /* root_fhlen == 0 marks an MKFS-in-progress placeholder. */
     if (unlikely(!fs || fs->root_fhlen == 0)) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -1522,7 +1525,7 @@ diskfs_mount(
 
     fs->mount_count++;
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     p->fs         = fs;
     p->thread     = thread;
@@ -1550,9 +1553,9 @@ diskfs_umount(
     (void) private_data;
 
     if (fs) {
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         fs->mount_count--;
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
     }
 
     p->thread = thread;
@@ -1599,16 +1602,16 @@ diskfs_sb_write_complete(
 {
     struct diskfs_sb_write *sw     = private_data;
     struct diskfs_shared   *shared = sw->thread->shared;
-    uint64_t                floor  = __atomic_load_n(&shared->gen_floor,
-                                                     __ATOMIC_ACQUIRE);
+    uint64_t                floor  = chimera_atomic_load_n(&shared->gen_floor,
+                                                           CHIMERA_MEMORY_ACQUIRE);
 
     chimera_diskfs_abort_if(status != 0,
                             "fs-table superblock write failed: %d", status);
 
     while (floor < sw->new_floor &&
-           !__atomic_compare_exchange_n(&shared->gen_floor, &floor,
-                                        sw->new_floor, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+           !chimera_atomic_compare_exchange_n(&shared->gen_floor, &floor,
+                                              sw->new_floor, 0,
+                                              CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
         /* retry against the freshly-loaded floor */
     }
 
@@ -1633,7 +1636,7 @@ diskfs_sb_write_prepare(
     sw->thread    = thread;
     sw->cb        = cb;
     sw->arg       = arg;
-    sw->new_floor = __atomic_load_n(&shared->gen_next, __ATOMIC_RELAXED) +
+    sw->new_floor = chimera_atomic_load_n(&shared->gen_next, CHIMERA_MEMORY_RELAXED) +
         DISKFS_GEN_RESERVE;
 
     evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,
@@ -1693,7 +1696,7 @@ diskfs_mkfs_committed_cb(
 
     memcpy(fsid_buf, &fs->fsid, sizeof(fs->fsid));
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
                                                       fs->root_inum,
@@ -1717,7 +1720,7 @@ diskfs_mkfs_committed_cb(
 
     sw = diskfs_sb_write_prepare(thread, diskfs_mkfs_sb_written, request);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     diskfs_sb_write_submit(thread, sw);
 } /* diskfs_mkfs_committed_cb */
@@ -1737,9 +1740,9 @@ diskfs_mkfs_alloc_cb(
     struct timespec                now;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         DL_DELETE(shared->fs_list, fs);
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         free(fs->name);
         free(fs);
         p->fs = NULL;
@@ -1819,10 +1822,10 @@ diskfs_mkfs(
         fsid = chimera_rand64();
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     if (diskfs_fs_find(shared, request->mkfs.name, request->mkfs.namelen)) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         return;
@@ -1834,7 +1837,7 @@ diskfs_mkfs(
         count++;
     }
     if (count >= SM_FS_TABLE_MAX) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOSPC;
         request->complete(request);
         return;
@@ -1849,7 +1852,7 @@ diskfs_mkfs(
     fs->fsid   = fsid;
     DL_APPEND(shared->fs_list, fs);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     p->fs     = fs;
     p->thread = thread;
@@ -1980,21 +1983,21 @@ diskfs_rmfs(
         return;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs = diskfs_fs_find(shared, request->rmfs.name, request->rmfs.namelen);
 
     /* An MKFS-in-progress placeholder (root_fhlen == 0) is not yet a
      * filesystem. */
     if (!fs || fs->root_fhlen == 0) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
 
     if (fs->mount_count > 0) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_EBUSY;
         request->complete(request);
         return;
@@ -2022,7 +2025,7 @@ diskfs_rmfs(
 
     sw = diskfs_sb_write_prepare(thread, diskfs_rmfs_sb_written, rc);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     /* Defer the in-memory teardown through an RCU grace period.  RMFS
      * requires that nothing is mounted, and umount does not return until
@@ -2080,7 +2083,7 @@ diskfs_put_key(
     shard_idx = hash % shared->num_kv_shards;
     shard     = &shared->kv_shards[shard_idx];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->entries, hash, hash, existing);
 
@@ -2098,7 +2101,7 @@ diskfs_put_key(
         rb_tree_insert(&shard->entries, hash, entry);
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_op_ok(request, p->txn);
 } /* diskfs_put_key */
@@ -2126,12 +2129,12 @@ diskfs_get_key(
     shard_idx = hash % shared->num_kv_shards;
     shard     = &shared->kv_shards[shard_idx];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->entries, hash, hash, entry);
 
     if (!entry) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
@@ -2139,7 +2142,7 @@ diskfs_get_key(
     request->get_key.r_value     = entry->value;
     request->get_key.r_value_len = entry->value_len;
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_op_ok(request, p->txn);
 } /* diskfs_get_key */
@@ -2167,18 +2170,18 @@ diskfs_delete_key(
     shard_idx = hash % shared->num_kv_shards;
     shard     = &shared->kv_shards[shard_idx];
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->entries, hash, hash, entry);
 
     if (!entry) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
     rb_tree_remove(&shard->entries, &entry->node);
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_kv_entry_free(thread, entry);
 
@@ -2277,7 +2280,7 @@ diskfs_search_keys(
     for (i = 0; i < shared->num_kv_shards; i++) {
         shard = &shared->kv_shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
 
         rb_tree_first(&shard->entries, entry);
 
@@ -2295,7 +2298,7 @@ diskfs_search_keys(
                     cap   = cap ? cap * 2 : 16;
                     grown = realloc(items, cap * sizeof(*items));
                     if (!grown) {
-                        pthread_mutex_unlock(&shard->lock);
+                        evpl_mutex_unlock(&shard->lock);
                         goto enomem;
                     }
                     items = grown;
@@ -2310,7 +2313,7 @@ diskfs_search_keys(
                 if (!item->key || (entry->value_len && !item->value)) {
                     free(item->key);
                     free(item->value);
-                    pthread_mutex_unlock(&shard->lock);
+                    evpl_mutex_unlock(&shard->lock);
                     goto enomem;
                 }
 
@@ -2324,7 +2327,7 @@ diskfs_search_keys(
             entry = rb_tree_next(&shard->entries, entry);
         }
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
     }
 
     if (n > 1) {

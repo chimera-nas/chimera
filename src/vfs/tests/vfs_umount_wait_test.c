@@ -28,7 +28,11 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <signal.h>
 #include <stdlib.h>
 #undef NDEBUG
@@ -42,6 +46,7 @@
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
 #include "common/logging.h"
+#include "common/mbt_watchdog.h"
 #include "prometheus-c.h"
 
 #define TEST_PASS(name) fprintf(stderr, "  PASS: %s\n", name)
@@ -59,17 +64,6 @@ struct test_ctx {
     uint32_t                        fh_len;
     struct chimera_vfs_open_handle *handle;
 };
-
-static void
-watchdog(int sig)
-{
-    (void) sig;
-    fprintf(stderr,
-            "FAIL: timed out -- umount completed but its caller never woke.\n"
-            "      evpl_continue() ran the timer that finished the umount and\n"
-            "      then blocked waiting for an fd event that never came.\n");
-    _exit(1);
-} /* watchdog */
 
 static void
 wait_done(struct test_ctx *ctx)
@@ -148,8 +142,8 @@ main(
 
     chimera_log_init();
 
-    signal(SIGALRM, watchdog);
-    alarm(TEST_WATCHDOG_SECS);
+    mbt_watchdog_arm(TEST_WATCHDOG_SECS);
+    mbt_watchdog_at("umount completion", 0, "caller must wake after timer");
 
     chimera_vfs_cred_init_unix(&cred, 0, 0, 0, NULL);
 
@@ -217,7 +211,7 @@ main(
     assert(ctx.status == CHIMERA_VFS_OK);
     TEST_PASS("filesystem is removable immediately after umount returns");
 
-    alarm(0);
+    mbt_watchdog_disarm();
 
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(vfs);

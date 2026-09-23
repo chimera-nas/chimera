@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/atomic.h"
 #include <stdint.h>
 #include <time.h>
 #include "stopwatch.h"

@@ -5,7 +5,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "common/rbtree.h"
 
@@ -442,7 +442,7 @@ struct sm_ag {
     struct sm_extent *free_by_size[SM_SIZE_CLASSES];      /* same extents, by size class */
     uint32_t          size_nonempty;  /* bitmask of non-empty classes */
     struct sm_claim  *claims;         /* outstanding reservation claims (protected by lock) */
-    pthread_mutex_t   lock;
+    evpl_mutex_t      lock;
 
     /* On-disk allocation-log state (protected by lock). */
     uint32_t          log_slot;       /* active slot index (0 or 1) */
@@ -514,7 +514,7 @@ struct space_map {
                                         * the per-device free_bytes counters (see
                                         * space_map_free_bytes), maintained
                                         * incrementally on the alloc/free path. */
-    pthread_mutex_t   lock;           /* protects rotors and journaled writes */
+    evpl_mutex_t      lock;        /* protects rotors and journaled writes */
 
     /* Relocated remote-AG-log region on device 0 (block mode); zero if no
      * remote devices.  Deterministic from the device cfg, recomputed on mount

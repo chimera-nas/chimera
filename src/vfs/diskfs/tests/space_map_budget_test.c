@@ -9,7 +9,7 @@
 #undef NDEBUG
 #endif /* ifdef NDEBUG */
 #include <assert.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdio.h>
 #include "space_map.h"
 #include "common/logging.h"
@@ -17,9 +17,9 @@
 #define OWNERS 4
 
 struct gate {
-    pthread_mutex_t lock;
-    pthread_cond_t  cond;
-    int             ready;
+    evpl_mutex_t lock;
+    evpl_cond_t  cond;
+    int          ready;
 };
 
 struct owner {
@@ -37,14 +37,14 @@ allocate(void *arg)
     struct owner *owner = arg;
     struct gate  *gate  = owner->gate;
 
-    pthread_mutex_lock(&gate->lock);
+    evpl_mutex_lock(&gate->lock);
     if (++gate->ready == OWNERS) {
-        pthread_cond_broadcast(&gate->cond);
+        evpl_cond_broadcast(&gate->cond);
     }
     while (gate->ready < OWNERS) {
-        pthread_cond_wait(&gate->cond, &gate->lock);
+        evpl_cond_wait(&gate->cond, &gate->lock);
     }
-    pthread_mutex_unlock(&gate->lock);
+    evpl_mutex_unlock(&gate->lock);
     owner->status = space_map_bump_alloc(&owner->claim, NULL, SM_BLOCK_SIZE,
                                          owner->floor, &owner->device, &owner->offset);
     return NULL;
@@ -57,14 +57,15 @@ main(void)
     struct space_map     *sm;
     struct owner          owners[OWNERS] = { 0 };
     struct sm_reservation metadata       = { 0 };
-    struct gate           gate           = { .lock = PTHREAD_MUTEX_INITIALIZER,
-                                             .cond = PTHREAD_COND_INITIALIZER };
-    pthread_t             threads[OWNERS];
+    struct gate           gate           = { 0 };
+    evpl_native_thread_t  threads[OWNERS];
     uint64_t              initial, offset, available;
     uint32_t              device;
     int                   successes = 0;
 
     chimera_log_disable();
+    assert(evpl_mutex_init(&gate.lock, NULL) == 0);
+    assert(evpl_cond_init(&gate.cond, NULL) == 0);
     sm      = space_map_create(&cfg, 1, 4ULL << 20);
     initial = sm->available_bytes;
     assert(initial == space_map_free_bytes(sm));
@@ -77,10 +78,10 @@ main(void)
     /* A speculative claim is not a data allocation. */
     assert(sm->available_bytes == initial);
     for (int i = 0; i < OWNERS; i++) {
-        assert(pthread_create(&threads[i], NULL, allocate, &owners[i]) == 0);
+        assert(evpl_native_thread_create(&threads[i], NULL, allocate, &owners[i]) == 0);
     }
     for (int i = 0; i < OWNERS; i++) {
-        assert(pthread_join(threads[i], NULL) == 0);
+        assert(evpl_native_thread_join(threads[i], NULL) == 0);
         assert(owners[i].status == 0 || owners[i].status == -1);
         successes += owners[i].status == 0;
     }
@@ -125,8 +126,8 @@ main(void)
     assert(space_map_free_bytes(sm) == initial);
     space_map_release_reservation(sm, &metadata);
     space_map_destroy(sm);
-    pthread_cond_destroy(&gate.cond);
-    pthread_mutex_destroy(&gate.lock);
+    evpl_cond_destroy(&gate.cond);
+    evpl_mutex_destroy(&gate.lock);
     puts("PASS: pending allocations, concurrent admission, metadata reserve, commit and abort");
     return 0;
 } /* main */

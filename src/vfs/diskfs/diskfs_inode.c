@@ -9,6 +9,8 @@
  * against stale file handles.
  */
 
+#include "common/atomic.h"
+#include "common/thread.h"
 #include "diskfs_internal.h"
 
 /* Forward declarations (definitions below, in call-graph order) */
@@ -131,7 +133,7 @@ diskfs_dispatch_grant(struct diskfs_inode_waiter *w)
 
     w->dispatched_ns = diskfs_diag_now_ns();
 
-    pthread_mutex_lock(&worker->grant_lock);
+    evpl_mutex_lock(&worker->grant_lock);
     w->next = NULL;
     if (worker->grant_tail) {
         worker->grant_tail->next = w;
@@ -139,8 +141,8 @@ diskfs_dispatch_grant(struct diskfs_inode_waiter *w)
         worker->grant_head = w;
     }
     worker->grant_tail = w;
-    __atomic_store_n(&worker->grant_pending, 1, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&worker->grant_lock);
+    chimera_atomic_store_n(&worker->grant_pending, 1, CHIMERA_MEMORY_RELEASE);
+    evpl_mutex_unlock(&worker->grant_lock);
 
     evpl_ring_doorbell(&worker->grant_doorbell);
 } /* diskfs_dispatch_grant */
@@ -161,7 +163,7 @@ diskfs_inode_release_one(
     struct diskfs_inode_waiter *granted = NULL;
     struct diskfs_inode_waiter *w;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     if (mode != DISKFS_INODE_LOCK_READ) {     /* WRITE and WRITE_NOPIN are exclusive */
         inode->writer = 0;
@@ -213,7 +215,7 @@ diskfs_inode_release_one(
         diskfs_inode_lru_push_tail(shard, inode);
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     while (granted) {
         w       = granted;
@@ -248,7 +250,7 @@ diskfs_inode_grant_locked(
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
         diskfs_inode_lock_grant(inode, mode);
         diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         diskfs_txn_add_slot(txn, inode, mode);
         /* The grant no longer eager-faults the home block: a b+tree modify links
         * its inode's root in the descent, attr-only modifiers fault it at
@@ -292,7 +294,7 @@ diskfs_inode_grant_locked(
         }
     }
 
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 } /* diskfs_inode_grant_locked */
 
 
@@ -324,14 +326,14 @@ diskfs_inode_acquire(
     }
 
     shard = diskfs_inode_shard(thread->shared, inum);
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
 
     if (unlikely(inode && inode->gen != gen)) {
         /* Cached under a different generation: the handle is stale. */
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_STALE);
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         cb(NULL, CHIMERA_VFS_ESTALE, private_data);
         return;
     }
@@ -344,7 +346,7 @@ diskfs_inode_acquire(
          * (This must not gate on `mounted` -- a freshly-formatted FS evicts
          * too, so a miss is not necessarily ENOENT.) */
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_MISS);
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         if (sm_inum_valid(thread->shared->space_map, inum)) {
             diskfs_inode_load(thread, txn, fs, inum, gen, mode, cb, private_data);
         } else {
@@ -387,7 +389,7 @@ diskfs_inode_acquire_pinned(
     }
 
     shard = diskfs_inode_shard(thread->shared, inode->inum);
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     diskfs_inode_grant_locked(thread, txn, shard, inode, inode->gen, mode, cb,
                               private_data);
 } /* diskfs_inode_acquire_pinned */
@@ -417,15 +419,15 @@ diskfs_inode_load_sync(
 
     /* Already resident (e.g. a freshly-bootstrapped root/orphan inode, or a
      * prior fault): return it without touching disk. */
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
     if (inode) {
         int ok = (inode->gen == gen && (inode->nlink != 0 || allow_orphan));
 
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return ok ? inode : NULL;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* Not cached: read the dinode block from disk through the mount-time pump
      * (VFIO-safe).  Safe to read the on-disk image directly -- an inode whose
@@ -441,7 +443,7 @@ diskfs_inode_load_sync(
         return NULL;
     }
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
     if (!inode) {
         created = 1;
@@ -477,7 +479,7 @@ diskfs_inode_load_sync(
         shard->ninodes++;
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_LOAD);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* Mirror the singleton ACL/pNFS records onto the freshly-constructed
      * inode (the runtime fault path does the same through the async b+tree
@@ -534,17 +536,17 @@ diskfs_gen_extend_complete(
                             "generation-floor superblock write failed: %d",
                             status);
 
-    __atomic_store_n(&shared->gen_floor, ge->new_floor, __ATOMIC_RELEASE);
-    __atomic_store_n(&shared->gen_extend_inflight, 0, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->gen_floor, ge->new_floor, CHIMERA_MEMORY_RELEASE);
+    chimera_atomic_store_n(&shared->gen_extend_inflight, 0, CHIMERA_MEMORY_RELEASE);
 
     evpl_iovec_release(evpl, &ge->iov);
     free(ge);
 
     /* Resume any allocations that caught up to the old floor. */
-    pthread_mutex_lock(&shared->gen_lock);
+    evpl_mutex_lock(&shared->gen_lock);
     waiters          = shared->gen_wait;
     shared->gen_wait = NULL;
-    pthread_mutex_unlock(&shared->gen_lock);
+    evpl_mutex_unlock(&shared->gen_lock);
 
     while (waiters) {
         w       = waiters;
@@ -564,14 +566,14 @@ diskfs_gen_extend(struct diskfs_thread *thread)
     struct diskfs_gen_extend *ge;
     int                       expect = 0;
 
-    if (!__atomic_compare_exchange_n(&shared->gen_extend_inflight, &expect, 1,
-                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (!chimera_atomic_compare_exchange_n(&shared->gen_extend_inflight, &expect, 1,
+                                           0, CHIMERA_MEMORY_ACQ_REL, CHIMERA_MEMORY_ACQUIRE)) {
         return;     /* one extension in flight at a time */
     }
 
     ge            = malloc(sizeof(*ge));
     ge->thread    = thread;
-    ge->new_floor = __atomic_load_n(&shared->gen_next, __ATOMIC_RELAXED) +
+    ge->new_floor = chimera_atomic_load_n(&shared->gen_next, CHIMERA_MEMORY_RELAXED) +
         DISKFS_GEN_RESERVE;
 
     evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,
@@ -603,14 +605,14 @@ diskfs_gen_alloc(
     void                 *arg)
 {
     struct diskfs_shared *shared = thread->shared;
-    uint64_t              g      = __atomic_fetch_add(&shared->gen_next, 1,
-                                                      __ATOMIC_RELAXED);
+    uint64_t              g      = chimera_atomic_fetch_add(&shared->gen_next, 1,
+                                                            CHIMERA_MEMORY_RELAXED);
     uint64_t              floor;
 
     chimera_diskfs_abort_if(g >= UINT32_MAX,
                             "inode generation space exhausted");
 
-    floor = __atomic_load_n(&shared->gen_floor, __ATOMIC_ACQUIRE);
+    floor = chimera_atomic_load_n(&shared->gen_floor, CHIMERA_MEMORY_ACQUIRE);
 
     if (g + DISKFS_GEN_RESERVE / 2 >= floor) {
         diskfs_gen_extend(thread);
@@ -624,17 +626,17 @@ diskfs_gen_alloc(
             w->resume = resume;
             w->arg    = arg;
 
-            pthread_mutex_lock(&shared->gen_lock);
+            evpl_mutex_lock(&shared->gen_lock);
             /* The extension may have landed while we took the lock. */
-            if (__atomic_load_n(&shared->gen_floor, __ATOMIC_ACQUIRE) > g) {
-                pthread_mutex_unlock(&shared->gen_lock);
+            if (chimera_atomic_load_n(&shared->gen_floor, CHIMERA_MEMORY_ACQUIRE) > g) {
+                evpl_mutex_unlock(&shared->gen_lock);
                 diskfs_block_waiter_free(thread, w);
                 *r_gen = (uint32_t) g;
                 return 0;
             }
             w->next          = shared->gen_wait;
             shared->gen_wait = w;
-            pthread_mutex_unlock(&shared->gen_lock);
+            evpl_mutex_unlock(&shared->gen_lock);
             return SM_AGAIN;
         }
     }
@@ -656,16 +658,16 @@ diskfs_grant_drain(struct diskfs_thread *thread)
     struct diskfs_inode_waiter *list, *w;
     int                         drained = 0;
 
-    if (!__atomic_load_n(&thread->grant_pending, __ATOMIC_ACQUIRE)) {
+    if (!chimera_atomic_load_n(&thread->grant_pending, CHIMERA_MEMORY_ACQUIRE)) {
         return 0;
     }
 
-    pthread_mutex_lock(&thread->grant_lock);
+    evpl_mutex_lock(&thread->grant_lock);
     list               = thread->grant_head;
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
-    __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&thread->grant_lock);
+    chimera_atomic_store_n(&thread->grant_pending, 0, CHIMERA_MEMORY_RELEASE);
+    evpl_mutex_unlock(&thread->grant_lock);
 
     while (list) {
         diskfs_inode_cb_t    cb;
@@ -802,14 +804,14 @@ diskfs_mtime_flush_pick(struct diskfs_thread *thread)
         }
 
         shard = &shared->inode_cache->shards[s];
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
         if (shard->mdirty_head &&
             (thread->mtime_flush_all ||
              now_ns - shard->mdirty_head->mtime_dirty_since >= period_ns)) {
             inode = shard->mdirty_head;
             diskfs_inode_mtime_unlink_locked(shard, inode);   /* keeps the pin */
         }
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
 
         if (inode) {
             return inode;

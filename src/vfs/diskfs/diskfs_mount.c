@@ -9,6 +9,9 @@
  * metrics registration.
  */
 
+#include <inttypes.h>
+#include "common/atomic.h"
+#include "common/thread.h"
 #include "diskfs_internal.h"
 
 
@@ -945,7 +948,7 @@ diskfs_device_open_complete(
     device->size             = evpl_block_size(bdev);
     device->max_request_size = evpl_block_max_request_size(bdev);
 
-    chimera_diskfs_info("Device %s size %lu max_request_size %lu",
+    chimera_diskfs_info("Device %s size %" PRIu64 " max_request_size %" PRIu64,
                         device->name, device->size, device->max_request_size);
 } /* diskfs_device_open_complete */
 
@@ -1206,8 +1209,8 @@ diskfs_init(
     json_decref(cfg);
 
 
-    pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->gen_lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->gen_lock, NULL);
     diskfs_metrics_init(shared, metrics);
 
     /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
@@ -1409,7 +1412,7 @@ diskfs_init(
     }
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
         rb_tree_init(&shared->inode_cache->shards[i].inodes);
-        pthread_mutex_init(&shared->inode_cache->shards[i].lock, NULL);
+        evpl_mutex_init(&shared->inode_cache->shards[i].lock, NULL);
     }
 
     /* Block cache: sharded RCU hash of 4 KiB device blocks. */
@@ -1421,7 +1424,7 @@ diskfs_init(
 
     for (i = 0; i < shared->num_kv_shards; i++) {
         rb_tree_init(&shared->kv_shards[i].entries);
-        pthread_mutex_init(&shared->kv_shards[i].lock, NULL);
+        evpl_mutex_init(&shared->kv_shards[i].lock, NULL);
     }
 
     /* Bring up the intent log thread.  Spin until its init has registered
@@ -1437,7 +1440,7 @@ diskfs_init(
     shared->intent_log.ctx_pool     = NULL;
     shared->intent_log.apply_ready  = 0;      /* Stage B: apply thread */
     shared->intent_log.applied_seq  = 0;
-    pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
+    evpl_mutex_init(&shared->intent_log.registration_lock, NULL);
 
     /* Commit thread first: it allocates the cross-thread hand-off ring the
      * push thread consumes, and opens the intent-log device queue. */
@@ -1445,7 +1448,7 @@ diskfs_init(
                                                    diskfs_intent_log_thread_init,
                                                    diskfs_intent_log_thread_shutdown,
                                                    &shared->intent_log);
-    while (!__atomic_load_n(&shared->intent_log.ready, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&shared->intent_log.ready, CHIMERA_MEMORY_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1457,7 +1460,7 @@ diskfs_init(
                                                          diskfs_il_apply_thread_init,
                                                          diskfs_il_apply_thread_shutdown,
                                                          &shared->intent_log);
-    while (!__atomic_load_n(&shared->intent_log.apply_ready, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&shared->intent_log.apply_ready, CHIMERA_MEMORY_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1465,7 +1468,7 @@ diskfs_init(
                                                         diskfs_il_push_thread_init,
                                                         diskfs_il_push_thread_shutdown,
                                                         &shared->intent_log);
-    while (!__atomic_load_n(&shared->intent_log.push_ready, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&shared->intent_log.push_ready, CHIMERA_MEMORY_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1540,9 +1543,9 @@ diskfs_bootstrap_orphans(struct diskfs_thread *thread)
     struct diskfs_mount_io *mio;
 
     /* Guard against concurrent first-touch from multiple workers. */
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     if (shared->orphans_created) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         return;
     }
 
@@ -1650,7 +1653,7 @@ diskfs_bootstrap_orphans(struct diskfs_thread *thread)
 
     diskfs_mount_io_close(mio);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 } /* diskfs_bootstrap_orphans */
 
 
@@ -1701,7 +1704,7 @@ diskfs_teardown(
      * trim unconditionally (a clean unmount persists the whole space map after the
      * drain; a crash leaves the log intact to replay), so set it first and the
      * push thread keeps the ring draining for the reclaim shutdown. */
-    __atomic_store_n(&shared->intent_log.shutdown, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->intent_log.shutdown, 1, CHIMERA_MEMORY_RELEASE);
 
     /* Reclaim workers first: their shutdown finishes the queued drains, which
      * need the inode cache and the intent-log threads still alive. */
@@ -1710,7 +1713,7 @@ diskfs_teardown(
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
         rb_tree_destroy(&shared->inode_cache->shards[i].inodes,
                         diskfs_inode_cache_release, NULL);
-        pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
+        evpl_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 
     /* Shut down the intent-log threads before tearing down anything they
@@ -1724,7 +1727,7 @@ diskfs_teardown(
      * destroying the commit thread closes that fd, and the push thread (torn
      * down afterwards, to drain what the commit thread handed off) would
      * otherwise abort writing to it. */
-    __atomic_store_n(&shared->intent_log.commit_alive, 0, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->intent_log.commit_alive, 0, CHIMERA_MEMORY_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
     /* Apply thread next: its shutdown drains the apply queue (applying every
      * remaining record's deltas and advancing applied_seq to the final
@@ -1754,7 +1757,7 @@ diskfs_teardown(
         }
     }
 
-    pthread_mutex_destroy(&shared->intent_log.registration_lock);
+    evpl_mutex_destroy(&shared->intent_log.registration_lock);
     free(shared->intent_log.handoff);
     free(shared->intent_log.apply_queue);   /* Stage B */
     free(shared->intent_log.metrics.block_io_device_ops);
@@ -1778,8 +1781,8 @@ diskfs_teardown(
          * durable_seq; stamp every checkpoint with it.  The redo ring is fully
          * trimmed, so the next clean mount loads these snapshots with no deltas
          * left to replay. */
-        uint64_t                ckpt_seq = __atomic_load_n(&shared->intent_log.applied_seq,
-                                                           __ATOMIC_ACQUIRE);
+        uint64_t                ckpt_seq = chimera_atomic_load_n(&shared->intent_log.applied_seq,
+                                                                 CHIMERA_MEMORY_ACQUIRE);
 
         if (space_map_persist(shared->space_map, &smio, ckpt_seq) != 0) {
             chimera_diskfs_error("space-map persist at unmount failed");
@@ -1791,8 +1794,8 @@ diskfs_teardown(
                                                 shared->fsid, SM_SB_CLEAN,
                                                 0, 0,
                                                 shared->intent_log.log_seq,
-                                                __atomic_load_n(&shared->gen_next,
-                                                                __ATOMIC_ACQUIRE),
+                                                chimera_atomic_load_n(&shared->gen_next,
+                                                                      CHIMERA_MEMORY_ACQUIRE),
                                                 shared->fs_table);
             if (rc != 0) {
                 chimera_diskfs_error("clean-superblock write at unmount failed");
@@ -1826,14 +1829,14 @@ diskfs_teardown(
         fs = fs_tmp;
     }
 
-    pthread_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->lock);
     free(shared->devices);
     free(shared->inode_cache);
 
     /* Clean up KV shards */
     for (i = 0; i < shared->num_kv_shards; i++) {
         rb_tree_destroy(&shared->kv_shards[i].entries, diskfs_kv_entry_release, NULL);
-        pthread_mutex_destroy(&shared->kv_shards[i].lock);
+        evpl_mutex_destroy(&shared->kv_shards[i].lock);
     }
     free(shared->kv_shards);
 
@@ -1888,10 +1891,10 @@ diskfs_thread_init(
     /* Inode lock-grant delivery queue + doorbell.  Register its poll before
      * the block-device queue polls so granted inode waiters are resumed before
      * the worker spends a loop iteration polling every VFIO queue. */
-    pthread_mutex_init(&thread->grant_lock, NULL);
+    evpl_mutex_init(&thread->grant_lock, NULL);
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
-    __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&thread->grant_pending, 0, CHIMERA_MEMORY_RELAXED);
     evpl_add_doorbell(evpl, &thread->grant_doorbell, diskfs_grant_doorbell_cb);
     thread->grant_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_grant_poll, thread);
 
@@ -1904,20 +1907,20 @@ diskfs_thread_init(
     }
 
     /* B+tree op resume queue: doorbell (cross-thread) + deferral (same-thread). */
-    pthread_mutex_init(&thread->resume_lock, NULL);
+    evpl_mutex_init(&thread->resume_lock, NULL);
     thread->resume_head            = NULL;
     thread->resume_tail            = NULL;
     thread->bt_op_free_list        = NULL;
     thread->block_waiter_free_list = NULL;
-    __atomic_store_n(&thread->resume_pending, 0, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&thread->resume_pending, 0, CHIMERA_MEMORY_RELAXED);
     evpl_add_doorbell(evpl, &thread->resume_doorbell, diskfs_bt_resume_doorbell_cb);
     evpl_deferral_init(&thread->resume_deferral, diskfs_bt_resume_deferral_cb, thread);
     thread->resume_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_bt_resume_poll,
                                         thread);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
     diskfs_thread_metrics_init(thread);
 
     /* Deferred-mtime coalescing flusher: scan from this worker's first owned
@@ -1929,15 +1932,15 @@ diskfs_thread_init(
     }
 
     /* Hand the channel to the intent log thread via the pending list. */
-    pthread_mutex_lock(&shared->intent_log.registration_lock);
+    evpl_mutex_lock(&shared->intent_log.registration_lock);
     thread->iq_channel->next_pending = shared->intent_log.pending_head;
     shared->intent_log.pending_head  = thread->iq_channel;
-    pthread_mutex_unlock(&shared->intent_log.registration_lock);
+    evpl_mutex_unlock(&shared->intent_log.registration_lock);
 
     /* Publish "registration pending" before the doorbell: the commit thread
      * services this from its per-iteration poll (reg_dirty) when awake, or from
      * the wake doorbell when asleep. */
-    __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&shared->intent_log.reg_dirty, 1, CHIMERA_MEMORY_SEQ_CST);
     evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
     return thread;
@@ -2048,15 +2051,15 @@ diskfs_thread_destroy(void *private_data)
     if (thread->iq_channel) {
         struct diskfs_iq_channel *ch = thread->iq_channel;
 
-        __atomic_store_n(&ch->unregister_requested, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
+        chimera_atomic_store_n(&ch->unregister_requested, 1, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_store_n(&shared->intent_log.reg_dirty, 1, CHIMERA_MEMORY_SEQ_CST);
         evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
         /* Spin (not evpl_continue: with nothing left in flight there is no
          * event to wake the loop, and the IL acks via a plain store with no
          * doorbell).  The commits_inflight drain above guarantees the channel
          * is quiescent, so the IL acks on its next registration sweep. */
-        while (!__atomic_load_n(&ch->unregister_done, __ATOMIC_ACQUIRE)) {
+        while (!chimera_atomic_load_n(&ch->unregister_done, CHIMERA_MEMORY_ACQUIRE)) {
             usleep(100);
         }
 
@@ -2069,13 +2072,13 @@ diskfs_thread_destroy(void *private_data)
         evpl_remove_poll(thread->evpl, thread->grant_poll);
     }
     evpl_remove_doorbell(thread->evpl, &thread->grant_doorbell);
-    pthread_mutex_destroy(&thread->grant_lock);
+    evpl_mutex_destroy(&thread->grant_lock);
 
     if (thread->resume_poll) {
         evpl_remove_poll(thread->evpl, thread->resume_poll);
     }
     evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
-    pthread_mutex_destroy(&thread->resume_lock);
+    evpl_mutex_destroy(&thread->resume_lock);
 
     while (thread->bt_op_free_list) {
         struct diskfs_bt_op *op = thread->bt_op_free_list;

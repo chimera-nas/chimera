@@ -28,6 +28,9 @@
 
 #include "diskfs_internal.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 
 #define DISKFS_COW_CHUNK (1ULL << 20)   /* device-copy chunk for privatization */
 

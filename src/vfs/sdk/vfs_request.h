@@ -19,10 +19,12 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include "vfs_mode.h"
 #include <time.h>
 
 #include "vfs_attrs.h"
 #include <sys/stat.h>
+#include "vfs_mode.h"
 #include "vfs_error.h"
 #include "vfs_cred.h"
 #include "vfs_claim_types.h"

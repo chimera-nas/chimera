@@ -3,8 +3,13 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/thread.h"
 #include <stdint.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/time.h>
+#endif // ifdef _WIN32
 #include <uthash.h>
 #include "sdk/chimera_vfs_sdk.h"
 #include "vfs_dump.h"
@@ -117,7 +122,7 @@ struct chimera_vfs_delegation_thread {
     struct evpl_thread         *evpl_thread;
     struct chimera_vfs_thread  *vfs_thread;
     struct chimera_vfs_request *requests;
-    pthread_mutex_t             lock;
+    evpl_mutex_t                lock;
     struct evpl_doorbell        doorbell;
     enum chimera_vfs_delegation_mode mode;
     struct evpl_poll           *poll;
@@ -144,8 +149,8 @@ struct chimera_vfs_close_thread {
     uint64_t                   closes_completed;
     struct evpl_doorbell       doorbell;
     struct evpl_timer          timer;
-    pthread_mutex_t            lock;
-    pthread_cond_t             cond;
+    evpl_mutex_t               lock;
+    evpl_cond_t                cond;
 };
 
 struct chimera_vfs_mount_table;
@@ -211,7 +216,7 @@ struct chimera_vfs_thread {
     /* Monotonic seconds of the last watchdog stuck-request report. */
     time_t                               watchdog_last_report;
     struct evpl_doorbell                 doorbell;
-    pthread_mutex_t                      lock;
+    evpl_mutex_t                         lock;
     uint64_t                             anon_fh_key;
 
     /* Trace parent for the next VFS op allocated on this thread: the protocol
