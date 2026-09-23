@@ -5,7 +5,6 @@
 if(NOT WIN32)
     find_package(PkgConfig REQUIRED)
 endif()
-find_package(OpenSSL REQUIRED)
 if(NOT WIN32)
     pkg_check_modules(JANSSON REQUIRED jansson)
 endif()
@@ -53,7 +52,7 @@ else()
 endif()
 
 target_link_libraries(chimera_rest chimera_vfs evpl_http evpl
-                      OpenSSL::Crypto ${CHIMERA_CRYPT_LIB})
+                      chimera_crypto ${CHIMERA_CRYPT_LIB})
 
 # Embed Swagger UI files at build time
 set(SWAGGER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/swagger)

@@ -12,7 +12,7 @@ add_library(chimera_vfs_smb ${CHIMERA_LIBRARY_TYPE}
     smb_ntlm.c
 )
 
-target_link_libraries(chimera_vfs_smb chimera_smb_common chimera_common evpl OpenSSL::Crypto)
+target_link_libraries(chimera_vfs_smb chimera_smb_common chimera_common evpl chimera_crypto)
 
 install(TARGETS chimera_vfs_smb DESTINATION lib)
 

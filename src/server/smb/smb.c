@@ -21,7 +21,6 @@
 #include <arpa/inet.h>
 #endif /* ifdef _WIN32 */
 
-#include <openssl/hmac.h>
 
 
 #include "smb.h"

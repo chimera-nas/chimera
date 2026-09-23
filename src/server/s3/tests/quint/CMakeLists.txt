@@ -42,16 +42,16 @@ set(CHIMERA_TEST_TIER quick)
 
 # The C replayer + probe: chimera server + libevpl HTTP client in one process
 # over the inproc transport (see s3_mbt_common.h).  They build regardless of
-# whether a trace corpus is available.  OpenSSL::Crypto is linked directly
+# whether a trace corpus is available.  chimera_crypto is linked directly
 # for the harness's own SigV4 signer (the same library the server verifies
 # with).
 add_executable(s3_mbt_probe s3_mbt_probe.c)
 target_include_directories(s3_mbt_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(s3_mbt_probe chimera_server chimera_metrics OpenSSL::Crypto)
+target_link_libraries(s3_mbt_probe chimera_server chimera_metrics chimera_crypto)
 
 add_executable(s3_mbt_replay s3_mbt_replay.c)
 target_include_directories(s3_mbt_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(s3_mbt_replay chimera_server chimera_metrics OpenSSL::Crypto jansson)
+target_link_libraries(s3_mbt_replay chimera_server chimera_metrics chimera_crypto jansson)
 
 # Smoke probe: the surface the trace corpus does not reach -- SigV4/SigV2
 # authentication and its failure codes, virtual-host addressing, aws-chunked

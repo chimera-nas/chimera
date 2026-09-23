@@ -55,7 +55,7 @@ chimera_smb_secure_send(
 /*
  * SMB3 transport encryption (MS-SMB2 §3.1.4.3 / §3.3.4.1.4).  Mirrors the
  * signing context: a per-thread object pre-fetches the AEAD ciphers and holds a
- * reusable EVP_CIPHER_CTX (which is NOT thread-safe, hence per-thread).
+ * reusable crypto context (which is NOT thread-safe, hence per-thread).
  */
 struct chimera_smb_encrypt_ctx *
 chimera_smb_encrypt_ctx_create(

@@ -13,10 +13,7 @@
 #else  /* ifdef _WIN32 */
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
-#include <openssl/provider.h>
+#include "common/crypto.h"
 
 #include "smb_ntlm.h"
 #include "smb_wbclient.h"
@@ -30,29 +27,7 @@
 #define smb_ntlm_info(...)  chimera_info("smb_ntlm", __FILE__, __LINE__, __VA_ARGS__)
 #define smb_ntlm_error(...) chimera_error("smb_ntlm", __FILE__, __LINE__, __VA_ARGS__)
 
-// OpenSSL 3.0 requires the legacy provider for MD4
-static OSSL_PROVIDER *legacy_provider  = NULL;
-static OSSL_PROVIDER *default_provider = NULL;
-static int            providers_loaded = 0;
 
-static void
-ensure_legacy_provider(void)
-{
-    if (providers_loaded) {
-        return;
-    }
-
-    // Load legacy provider for MD4 support
-    legacy_provider = OSSL_PROVIDER_load(NULL, "legacy");
-    if (!legacy_provider) {
-        smb_ntlm_debug("Could not load legacy provider - MD4 may not work");
-    }
-
-    // Also need the default provider for other algorithms
-    default_provider = OSSL_PROVIDER_load(NULL, "default");
-
-    providers_loaded = 1;
-} /* ensure_legacy_provider */
 
 // SPNEGO OIDs (ASN.1 encoded)
 static const uint8_t ntlmssp_oid[] = {
@@ -260,45 +235,17 @@ compute_nt_hash(
     const char *password,
     uint8_t     nt_hash[16])
 {
-    size_t        utf16_len;
-    uint8_t      *utf16_password;
-    EVP_MD_CTX   *ctx;
-    unsigned int  hash_len;
-    const EVP_MD *md4;
+    size_t   len;
+    uint8_t *utf16 = utf8_to_utf16le(password, &len);
+    int      ok;
 
-    // Ensure legacy provider is loaded for MD4
-    ensure_legacy_provider();
-
-    utf16_password = utf8_to_utf16le(password, &utf16_len);
-    if (!utf16_password) {
+    if (!utf16) {
         return -1;
     }
-
-    ctx = EVP_MD_CTX_new();
-    if (!ctx) {
-        free(utf16_password);
-        return -1;
-    }
-
-    md4 = EVP_md4();
-    if (!md4) {
-        smb_ntlm_error("MD4 not available - legacy provider may not be loaded");
-        EVP_MD_CTX_free(ctx);
-        free(utf16_password);
-        return -1;
-    }
-
-    if (EVP_DigestInit_ex(ctx, md4, NULL) != 1 ||
-        EVP_DigestUpdate(ctx, utf16_password, utf16_len) != 1 ||
-        EVP_DigestFinal_ex(ctx, nt_hash, &hash_len) != 1) {
-        EVP_MD_CTX_free(ctx);
-        free(utf16_password);
-        return -1;
-    }
-
-    EVP_MD_CTX_free(ctx);
-    free(utf16_password);
-    return 0;
+    ok = chimera_crypto_digest(CHIMERA_CRYPTO_MD4, utf16, len, nt_hash, 16);
+    chimera_crypto_clear(utf16, len);
+    free(utf16);
+    return ok ? 0 : -1;
 } /* compute_nt_hash */
 
 // Compute NTLMv2 hash: HMAC-MD5(NT_hash, UTF16LE(UPPER(user) + domain))
@@ -309,14 +256,14 @@ compute_ntlmv2_hash(
     const char *domain,
     uint8_t     ntlmv2_hash[16])
 {
-    uint8_t      nt_hash[16];
-    char        *user_upper;
-    size_t       user_len, domain_len;
-    size_t       user_utf16_len, domain_utf16_len;
-    uint8_t     *user_utf16, *domain_utf16;
-    uint8_t     *concat;
-    size_t       concat_len;
-    unsigned int hmac_len;
+    uint8_t  nt_hash[16];
+    char    *user_upper;
+    size_t   user_len, domain_len;
+    size_t   user_utf16_len, domain_utf16_len;
+    uint8_t *user_utf16, *domain_utf16;
+    uint8_t *concat;
+    size_t   concat_len;
+
 
     if (compute_nt_hash(password, nt_hash) < 0) {
         return -1;
@@ -370,7 +317,7 @@ compute_ntlmv2_hash(
     free(domain_utf16);
 
     // HMAC-MD5
-    if (!HMAC(EVP_md5(), nt_hash, 16, concat, concat_len, ntlmv2_hash, &hmac_len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, nt_hash, 16, concat, concat_len, ntlmv2_hash, 16)) {
         free(concat);
         return -1;
     }
@@ -607,7 +554,7 @@ generate_challenge(
     struct smb_ntlm_server_identity        local_identity;
 
     // Generate random server challenge
-    if (RAND_bytes(ctx->server_challenge, SMB_NTLM_CHALLENGE_SIZE) != 1) {
+    if (chimera_crypto_random(ctx->server_challenge, SMB_NTLM_CHALLENGE_SIZE) != 1) {
         return -1;
     }
     ctx->have_challenge = 1;
@@ -716,7 +663,7 @@ validate_local_user(
     uint8_t        expected_proof[16];
     uint8_t       *hmac_input;
     size_t         hmac_input_len;
-    unsigned int   hmac_len;
+
 
     if (!user->smbpasswd[0]) {
         smb_ntlm_error("NTLM: User '%s' has no SMB password", username);
@@ -745,8 +692,8 @@ validate_local_user(
     memcpy(hmac_input, ctx->server_challenge, SMB_NTLM_CHALLENGE_SIZE);
     memcpy(hmac_input + SMB_NTLM_CHALLENGE_SIZE, client_blob, client_blob_len);
 
-    if (!HMAC(EVP_md5(), ntlmv2_hash, 16, hmac_input, hmac_input_len,
-              expected_proof, &hmac_len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntlmv2_hash, 16, hmac_input, hmac_input_len,
+                             expected_proof, 16)) {
         free(hmac_input);
         smb_ntlm_error("NTLM: Failed to compute NTProofStr");
         return -1;
@@ -761,8 +708,8 @@ validate_local_user(
 
     // Compute the key-exchange key = HMAC-MD5(ntlmv2_hash, NTProofStr).
     // For NTLMv2 this is also the session base key.
-    if (!HMAC(EVP_md5(), ntlmv2_hash, 16, nt_response, 16,
-              ctx->session_key, &hmac_len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntlmv2_hash, 16, nt_response, 16,
+                             ctx->session_key, 16)) {
         smb_ntlm_error("NTLM: Failed to compute session key");
         return -1;
     }
@@ -773,21 +720,11 @@ validate_local_user(
      * key-exchange key is used directly as the session key. */
     if ((negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) &&
         enc_session_key_len == 16) {
-        uint8_t         exported_key[16];
-        int             outl = 0;
-        EVP_CIPHER_CTX *rc4  = EVP_CIPHER_CTX_new();
-
-        if (!rc4 ||
-            EVP_DecryptInit_ex(rc4, EVP_rc4(), NULL, ctx->session_key, NULL) != 1 ||
-            EVP_DecryptUpdate(rc4, exported_key, &outl, enc_session_key, 16) != 1 ||
-            outl != 16) {
-            if (rc4) {
-                EVP_CIPHER_CTX_free(rc4);
-            }
+        uint8_t exported_key[16];
+        if (!chimera_crypto_rc4(ctx->session_key, 16, enc_session_key, exported_key, 16)) {
             smb_ntlm_error("NTLM: Failed to unwrap exported session key");
             return -1;
         }
-        EVP_CIPHER_CTX_free(rc4);
         memcpy(ctx->session_key, exported_key, 16);
     }
 

@@ -14,6 +14,6 @@ add_library(chimera_smb_common ${CHIMERA_LIBRARY_TYPE}
 
 target_include_directories(chimera_smb_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_link_libraries(chimera_smb_common chimera_common evpl OpenSSL::Crypto)
+target_link_libraries(chimera_smb_common chimera_common evpl chimera_crypto)
 
 install(TARGETS chimera_smb_common DESTINATION lib)

@@ -30,10 +30,7 @@
 #endif    /* crypt(3) */
 #endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
 
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/params.h>
-#include <openssl/core_names.h>
+#include "common/crypto.h"
 #include <jansson.h>
 
 #include "evpl/evpl.h"
@@ -153,49 +150,12 @@ hmac_sha256(
     unsigned char       *out,
     size_t              *out_len)
 {
-    EVP_MAC     *mac     = NULL;
-    EVP_MAC_CTX *mac_ctx = NULL;
-    int          rc      = -1;
-
-    OSSL_PARAM   params[] = {
-        OSSL_PARAM_construct_utf8_string(
-            OSSL_MAC_PARAM_DIGEST,                                                                      (char *)
-            "SHA256", 0),
-        OSSL_PARAM_construct_end()
-    };
-
-    mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-    if (!mac) {
-        goto done;
+    if (key_len < 0 || data_len < 0 || !chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA256,
+                                                            key, key_len, data, data_len, out, 32)) {
+        return -1;
     }
-
-    mac_ctx = EVP_MAC_CTX_new(mac);
-    if (!mac_ctx) {
-        goto done;
-    }
-
-    if (EVP_MAC_init(mac_ctx, key, key_len, params) != 1) {
-        goto done;
-    }
-
-    if (EVP_MAC_update(mac_ctx, data, data_len) != 1) {
-        goto done;
-    }
-
-    if (EVP_MAC_final(mac_ctx, out, out_len, 32) != 1) {
-        goto done;
-    }
-
-    rc = 0;
-
- done:
-    if (mac_ctx) {
-        EVP_MAC_CTX_free(mac_ctx);
-    }
-    if (mac) {
-        EVP_MAC_free(mac);
-    }
-    return rc;
+    *out_len = 32;
+    return 0;
 } /* hmac_sha256 */
 
 /* ========== Secret init ========== */
@@ -228,12 +188,12 @@ chimera_rest_auth_init_secret(
         chimera_rest_error("Short read of JWT secret %s; regenerating", path);
     }
 
-    /* RAND_bytes returns 1 on success; on 0/-1 it may not write the buffer at
+    /* chimera_crypto_random returns 1 on success; on 0/-1 it may not write the buffer at
      * all (CWE-252).  A zero/unseeded jwt_secret would let anyone forge a valid
      * JWT for any user -- a full control-plane authentication bypass -- so a
      * CSPRNG failure must abort startup rather than silently run with a known
      * key. */
-    if (RAND_bytes(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) != 1) {
+    if (chimera_crypto_random(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) != 1) {
         chimera_rest_abort("Failed to seed JWT signing secret from CSPRNG");
     }
 
@@ -281,7 +241,7 @@ chimera_rest_crypt_match(
     char                output[128];
     char               *result = chimera_crypt_sha512(password, hash, output);
     return result == output && strlen(result) == strlen(hash) &&
-           CRYPTO_memcmp(result, hash, strlen(hash)) == 0;
+           chimera_crypto_compare(result, hash, strlen(hash)) == 0;
 #elif defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
     struct crypt_data   cdata;
     char               *result;
@@ -506,7 +466,7 @@ chimera_rest_jwt_verify(
     }
 
     /* Constant-time comparison */
-    if (CRYPTO_memcmp(expected_sig, actual_sig, expected_sig_len) != 0) {
+    if (chimera_crypto_compare(expected_sig, actual_sig, expected_sig_len) != 0) {
         return -1;
     }
 

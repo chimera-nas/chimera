@@ -7,10 +7,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/bio.h>
-#include <openssl/buffer.h>
+#include "common/crypto.h"
 #include "common/rcu.h"
 
 #include "evpl/evpl_http.h"
@@ -33,12 +30,9 @@ sha256_hex(
     char                *out)
 {
     unsigned char hash[SHA256_DIGEST_LENGTH];
-    EVP_MD_CTX   *ctx = EVP_MD_CTX_new();
 
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, hash, NULL);
-    EVP_MD_CTX_free(ctx);
+    chimera_s3_abort_if(!chimera_crypto_digest(CHIMERA_CRYPTO_SHA256, data, len, hash, sizeof(hash)),
+                        "SHA256 failed");
 
     for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
         sprintf(out + (i * 2), "%02x", hash[i]);
@@ -57,9 +51,8 @@ hmac_sha256(
     size_t               data_len,
     unsigned char       *out)
 {
-    unsigned int out_len = SHA256_DIGEST_LENGTH;
-
-    HMAC(EVP_sha256(), key, key_len, data, data_len, out, &out_len);
+    chimera_s3_abort_if(!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA256,
+                                             key, key_len, data, data_len, out, 32), "HMAC failed");
 } /* hmac_sha256 */
 
 /*
@@ -73,9 +66,8 @@ hmac_sha1(
     size_t               data_len,
     unsigned char       *out)
 {
-    unsigned int out_len = SHA1_DIGEST_LENGTH;
-
-    HMAC(EVP_sha1(), key, key_len, data, data_len, out, &out_len);
+    chimera_s3_abort_if(!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA1,
+                                             key, key_len, data, data_len, out, 20), "HMAC failed");
 } /* hmac_sha1 */
 
 /*
@@ -88,29 +80,7 @@ base64_encode(
     char                *out,
     size_t               out_max)
 {
-    BIO     *b64, *bio;
-    BUF_MEM *bufferPtr;
-    int      result_len;
-
-    b64 = BIO_new(BIO_f_base64());
-    bio = BIO_new(BIO_s_mem());
-    bio = BIO_push(b64, bio);
-
-    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-    BIO_write(bio, data, len);
-    BIO_flush(bio);
-    BIO_get_mem_ptr(bio, &bufferPtr);
-
-    result_len = bufferPtr->length;
-    if (result_len >= (int) out_max) {
-        result_len = out_max - 1;
-    }
-    memcpy(out, bufferPtr->data, result_len);
-    out[result_len] = '\0';
-
-    BIO_free_all(bio);
-
-    return result_len;
+    return chimera_crypto_base64(data, len, out, out_max);
 } /* base64_encode */
 
 /*

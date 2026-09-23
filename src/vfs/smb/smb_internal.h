@@ -13,7 +13,6 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #endif // ifdef _WIN32
-#include <openssl/evp.h>
 
 #include "vfs/sdk/chimera_vfs_sdk.h"
 #include "common/tcp_flavor.h"

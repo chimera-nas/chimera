@@ -43,8 +43,7 @@
 #include "common/platform.h"
 #endif // ifdef _WIN32
 
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
+#include "common/crypto.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
@@ -138,7 +137,7 @@ struct s3_mbt_req {
     size_t         body_len;
 };
 
-/* ---- crypto helpers (OpenSSL, same library the server verifies with) ---- */
+/* ---- crypto helpers (protocol encoding remains independent of the server) ---- */
 
 static inline void
 s3_mbt_sha256_hex(
@@ -147,13 +146,10 @@ s3_mbt_sha256_hex(
     char       *hex65)
 {
     unsigned char hash[32];
-    unsigned int  hl  = sizeof(hash);
-    EVP_MD_CTX   *ctx = EVP_MD_CTX_new();
 
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, hash, &hl);
-    EVP_MD_CTX_free(ctx);
+    if (!chimera_crypto_digest(CHIMERA_CRYPTO_SHA256, data, len, hash, sizeof(hash))) {
+        abort();
+    }
 
     for (int i = 0; i < 32; i++) {
         sprintf(hex65 + i * 2, "%02x", hash[i]);
@@ -168,9 +164,9 @@ s3_mbt_hmac256(
     size_t        datalen,
     unsigned char out[32])
 {
-    unsigned int hl = 32;
-
-    HMAC(EVP_sha256(), key, (int) keylen, data, datalen, out, &hl);
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA256, key, keylen, data, datalen, out, 32)) {
+        abort();
+    }
 } /* s3_mbt_hmac256 */
 
 /* AWS SigV4 Authorization header for one request as the harness sends it:
@@ -261,8 +257,8 @@ s3_mbt_sign_v2(
     char          sts[4096];
     unsigned char sig[20];
     unsigned char sig_b64[64];
-    unsigned int  siglen = sizeof(sig);
-    size_t        off    = 0;
+
+    size_t        off = 0;
     size_t        plen;
     const char   *method;
 
@@ -308,9 +304,12 @@ s3_mbt_sign_v2(
         off += snprintf(sts + off, sizeof(sts) - off, "/");
     }
 
-    HMAC(EVP_sha1(), secret_key, (int) strlen(secret_key),
-         (const unsigned char *) sts, off, sig, &siglen);
-    EVP_EncodeBlock(sig_b64, sig, (int) siglen);
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA1, secret_key, strlen(secret_key),
+                             sts, off, sig, sizeof(sig)) || chimera_crypto_base64(sig, sizeof(sig),
+                                                                                  (char *) sig_b64, sizeof(sig_b64)) < 0
+        ) {
+        abort();
+    }
 
     snprintf(authorization, authorization_len, "AWS %s:%s", access_key,
              sig_b64);
