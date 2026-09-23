@@ -15,13 +15,13 @@ permissions:
 
 # Let an expensive publication finish instead of cancelling it on redispatch.
 concurrency:
-  group: publish-windows-dependencies
+  group: publish-windows-dependencies-${{ github.event.pull_request.number || 'main' }}
   cancel-in-progress: false
 
 jobs:
   publish:
     name: Publish ${{ matrix.triplet }} (Debug and Release)
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
@@ -31,8 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-2022, triplet: x64-windows, vs: '[17.0,18.0)'}
-          - {runner: windows-11-vs2026-arm, triplet: arm64-windows, vs: '[18.0,19.0)'}
+          - {runner: windows-2022, triplet: x64-windows, vs: '[17.0,18.0)', arch: x64, generator: 'Visual Studio 17 2022'}
+          - {runner: windows-11-vs2026-arm, triplet: arm64-windows, vs: '[18.0,19.0)', arch: ARM64, generator: 'Visual Studio 18 2026'}
     defaults:
       run:
         shell: pwsh

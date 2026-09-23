@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+name: Windows
+on:
+  workflow_call:
+    inputs:
+      test_tier:
+        type: string
+        default: quick
+      full_matrix:
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      test_tier:
+        description: Test tier
+        type: choice
+        options: [quick, extended]
+        default: quick
+      full_matrix:
+        description: Run x64/ARM64 Debug/Release (false selects x64 Release)
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  test:
+    name: Test Windows ${{ matrix.arch }} ${{ matrix.config }} (${{ inputs.test_tier }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_USE_NUGET_CACHE: 'false'
+      X_VCPKG_NUGET_ID_PREFIX: chimera-
+      VS_VERSION_RANGE: ${{ matrix.vs }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2022","arch":"x64","config":"Debug","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Debug","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Release","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"}]' || '[{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"}]') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install model generator and prepare scratch directories
+        shell: pwsh
+        run: |
+          $version = (Get-Content ext/specs/.quint-version).Trim()
+          npm install -g "@informalsystems/quint@$version"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force /tmp, /build/test | Out-Null
+      - name: Read pinned vcpkg revision
+        id: manifest
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'Expected a pinned vcpkg baseline' }
+          "baseline=$baseline" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v5
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.manifest.outputs.baseline }}
+          path: _vcpkg
+          persist-credentials: false
+      - name: Select the publisher's toolchain and bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -version $env:VS_VERSION_RANGE -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio $env:VS_VERSION_RANGE is required" }
+          "VCPKG_VISUAL_STUDIO_PATH=$vs" >> $env:GITHUB_ENV
+          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure read-only package access
+        shell: pwsh
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $nuget = & ./_vcpkg/vcpkg.exe fetch nuget | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $feed = "https://nuget.pkg.github.com/$($env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant())/index.json"
+          '<configuration><packageSources><clear /></packageSources></configuration>' | Set-Content $config
+          & $nuget sources Add -Name Chimera -Source $feed -UserName $env:GITHUB_ACTOR -Password $env:GH_PACKAGES_TOKEN -StorePasswordInClearText -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,read" >> $env:GITHUB_ENV
+      - name: Restore prebuilt dependencies
+        shell: pwsh
+        run: |
+          $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          & ./_vcpkg/vcpkg.exe install --triplet $triplet --host-triplet $triplet "--x-install-root=$pwd/build/vcpkg_installed" --only-binarycaching
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'Binary dependency restore failed. Check package access and run Publish Windows dependencies on main for this manifest/toolchain.'
+            exit 1
+          }
+          $timer.Stop()
+          "Prebuilt dependency restore ($triplet): $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds; no dependency source builds permitted." >> $env:GITHUB_STEP_SUMMARY
+      - name: Verify Windows dependencies do not include OpenSSL
+        shell: pwsh
+        run: |
+          $status = Get-Content build/vcpkg_installed/vcpkg/status -Raw
+          if ($status -match '(?m)^Package: openssl\r?$') { throw 'Windows must use native TLS and crypto' }
+      - name: Install parser generators
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP/winflexbison.zip"
+          Invoke-WebRequest https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip -OutFile $archive -MaximumRetryCount 5 -RetryIntervalSec 10
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135') { throw 'WinFlexBison checksum mismatch' }
+          Expand-Archive $archive "$env:RUNNER_TEMP/winflexbison"
+      # Model traces depend on the generator, models and cell configuration,
+      # not on the C implementation being tested. Only an exact input match
+      # can reuse them; configure still validates every registered cell.
+      - uses: actions/cache/restore@v4
+        id: corpus-cache
+        with:
+          path: build/specs-corpus
+          key: windows-specs-v1-${{ matrix.arch }}-${{ hashFiles('ext/specs/.quint-version', 'ext/specs/CMakeLists.txt', 'ext/specs/cmake/**', 'ext/specs/quint/**', 'ext/specs/tools/**', 'src/**/quint/configs/**', 'src/**/CMakeLists.txt', 'CMakeLists.txt', 'cmake/**', 'vcpkg.json', '.github/workflows/windows.yml') }}
+      - name: Configure native Windows
+        id: configure
+        shell: pwsh
+        run: |
+          $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
+          $prebuiltCorpus = if ('${{ steps.corpus-cache.outputs.cache-hit }}' -eq 'true') { 'ON' } else { 'OFF' }
+          cmake -S . -B build -G "${{ matrix.generator }}" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DSPECS_CORPUS_PREBUILT=$prebuiltCorpus" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # The installed libraries live in build/vcpkg_installed. Drop temporary
+      # package extraction/probe trees before diskfs tests need scratch space.
+      - name: Release dependency staging space
+        shell: pwsh
+        run: |
+          foreach ($path in @('_vcpkg/packages', '_vcpkg/buildtrees')) {
+            if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+          }
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free
+      - name: Generate protocol model corpus
+        run: cmake --build build --target specs_corpus --config ${{ matrix.config }} --parallel 4
+      - uses: actions/cache/save@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.corpus-cache.outputs.cache-hit != 'true'
+        with:
+          path: build/specs-corpus
+          key: ${{ steps.corpus-cache.outputs.cache-primary-key }}
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4
+      - name: Test
+        shell: pwsh
+        env:
+          TEST_TIER: ${{ inputs.test_tier }}
+        run: |
+          New-Item -ItemType Directory -Force ctest-results | Out-Null
+          $selection = @()
+          if ($env:TEST_TIER -eq 'quick') {
+            $selection = @('--tests-from-file', "$pwd/build/quick-tests.txt")
+          } elseif ($env:TEST_TIER -ne 'extended') {
+            throw "Unknown test tier: $env:TEST_TIER"
+          }
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          ctest --test-dir build -C ${{ matrix.config }} @selection --output-on-failure --no-tests=error --parallel 4 --timeout 300 --test-output-size-failed 65536 --output-junit "$pwd/ctest-results/results.xml"
+          $testExit = $LASTEXITCODE
+          $timer.Stop()
+          [math]::Round($timer.Elapsed.TotalSeconds) | Set-Content ctest-results/duration_seconds
+          exit $testExit
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-windows-${{ matrix.arch }}-${{ matrix.config }}
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Remove temporary package credentials
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue

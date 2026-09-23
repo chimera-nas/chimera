@@ -1489,3 +1489,13 @@ jobs:
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
+
+  windows:
+    name: Windows
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/windows.yml
+    with:
+      test_tier: extended
+      full_matrix: true
