@@ -70,6 +70,19 @@ example configuration includes backends that are unavailable on Windows.
 
 ## Test
 
+Windows uses the same quick and extended tiers as Unix. PR checks run the
+quick tier on x64 Release; the merge queue and pushes to main run it on
+x64/ARM64 Debug/Release. The scheduled `Extended` workflow runs the full
+matrix and suite. Both call the reusable Windows build/test workflow and
+publish the same JUnit/duration artifacts as the other platforms.
+
+For MSVC, CTest's `-C` selects the binary configuration, so the generated
+`quick-tests.txt` selects the quick tier separately (CTest 3.29 or newer):
+
+```powershell
+ctest --test-dir build -C Debug --tests-from-file "$pwd/build/quick-tests.txt" --output-on-failure
+```
+
 Some shared fixtures use `/tmp` and `/build/test`. Create these directories
 on the current drive before running the full suite, as the workflow does:
 
@@ -138,9 +151,9 @@ the CRT `strerror()` does not supply descriptions for these two values.
 
 ## Crypto backend validation
 
-`Crypto backends` runs fixed digest, HMAC, CMAC, GMAC, SP800-108 KDF, RC4,
-and AES-128/256 CCM/GCM vectors on x64 and ARM64 in Debug and Release,
-without downloading any third-party libraries. The tests include split MAC
+The normal quick suite includes fixed digest, HMAC, CMAC, GMAC, SP800-108
+KDF, NTLM key-exchange and AES-128/256 CCM/GCM vectors on every platform.
+The standalone Windows crypto build needs no third-party libraries. The tests include split MAC
 input, embedded NULs in KDF labels, multi-block KDF output, and rejection and
 clearing of unauthenticated plaintext. The same tests exercise OpenSSL in the
 normal Unix suite, and can run separately:

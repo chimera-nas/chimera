@@ -23,7 +23,8 @@ name: PR checks
 #
 # It also carries the pre-merge signal that is cheap enough to be worth having
 # before the queue: clang static analysis on devcontainer and macOS, and the
-# quint model-based test suite (ctest label "quint") on devcontainer.  The MBT
+# quint model-based test suite (ctest label "quint") on devcontainer, plus
+# the native Windows x64 Release build and quick tier.  The MBT
 # suites are the fastest broad-coverage tests in the tree -- the whole label
 # runs in well under a minute -- and they are the ones a spec or harness change
 # breaks, so catching that here rather than in the queue is worth one image
@@ -71,7 +72,7 @@ env:
 jobs:
   ci-complete:
     name: CI complete
-    needs: [analyze-dev, quint-coverage, analyze-macos]
+    needs: [analyze-dev, quint-coverage, analyze-macos, windows]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
@@ -452,3 +453,13 @@ jobs:
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
+
+  windows:
+    name: Windows (pre-merge)
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/windows.yml
+    with:
+      test_tier: quick
+      full_matrix: false

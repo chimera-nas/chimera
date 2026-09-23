@@ -6,6 +6,8 @@ add_executable(rbtree_test rbtree_test.c)
 
 add_test(chimera/common/rbtree_test rbtree_test)
 
+set(CHIMERA_TEST_TIER quick)
+
 if(NOT URCU_ENABLED)
     add_executable(rcu_test rcu_test.c)
     target_link_libraries(rcu_test chimera_common)
@@ -27,3 +29,6 @@ else()
 endif()
 set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/crypto COMMAND crypto_test)
+
+# Portable runtime regressions participate in the normal platform suite.
+add_subdirectory(native)
