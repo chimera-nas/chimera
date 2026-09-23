@@ -36,7 +36,7 @@ add_test(NAME chimera/server/smb/mbt/smoke_probe_memfs
     COMMAND $<TARGET_FILE:smb2_smoke_probe>)
 set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_smoke_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 60)
 
 # Hold a backend rename across TREE_DISCONNECT to exercise a completion after
@@ -50,7 +50,7 @@ add_test(NAME chimera/server/smb/mbt/rename_disconnect_probe_memfs
     COMMAND $<TARGET_FILE:smb2_rename_disconnect_probe>)
 set_tests_properties(chimera/server/smb/mbt/rename_disconnect_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_rename_disconnect_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 60)
 
 # Same object-store caching key across distinct protocol lease records.
@@ -62,7 +62,7 @@ add_test(NAME chimera/server/smb/mbt/lease_identity_probe_memfs
     COMMAND $<TARGET_FILE:smb2_lease_identity_probe>)
 set_tests_properties(chimera/server/smb/mbt/lease_identity_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_lease_identity_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 90)
 
 # Oplock/lease ground-truth probe (Increment 1): pins chimera's grant ->
@@ -77,7 +77,7 @@ add_test(NAME chimera/server/smb/mbt/oplock_probe_memfs
     COMMAND $<TARGET_FILE:smb2_oplock_probe>)
 set_tests_properties(chimera/server/smb/mbt/oplock_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_oplock_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 90)
 
 # Durable/persistent-handle ground-truth probe: pins the durable grant matrix,
@@ -92,7 +92,7 @@ add_test(NAME chimera/server/smb/mbt/durable_probe_memfs
     COMMAND $<TARGET_FILE:smb2_durable_probe>)
 set_tests_properties(chimera/server/smb/mbt/durable_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_durable_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
 # Replay / ChannelSequence ground-truth probe: pins the exactly-once layer --
@@ -108,7 +108,7 @@ add_test(NAME chimera/server/smb/mbt/replay_probe_memfs
     COMMAND $<TARGET_FILE:smb2_replay_probe>)
 set_tests_properties(chimera/server/smb/mbt/replay_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_replay_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
 # Wire-protection ground-truth probe: walks a matrix of connection profiles
@@ -125,7 +125,7 @@ add_test(NAME chimera/server/smb/mbt/wire_probe_memfs
     COMMAND $<TARGET_FILE:smb2_wire_probe>)
 set_tests_properties(chimera/server/smb/mbt/wire_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_wire_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 180)
 
 # FSCTL ground-truth probe: server-side copy, copy-offload tokens, block
@@ -142,7 +142,7 @@ add_test(NAME chimera/server/smb/mbt/fsctl_probe_memfs
     COMMAND $<TARGET_FILE:smb2_fsctl_probe>)
 set_tests_properties(chimera/server/smb/mbt/fsctl_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_fsctl_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
 # Information-class probe: the QUERY_INFO / SET_INFO surface.  The corpus asks
@@ -159,7 +159,7 @@ add_test(NAME chimera/server/smb/mbt/info_probe_memfs
     COMMAND $<TARGET_FILE:smb2_info_probe>)
 set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_info_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
 # Alternate-data-stream (ADS / named stream) probe: the whole named-stream
@@ -175,7 +175,7 @@ add_test(NAME chimera/server/smb/mbt/stream_probe_memfs
     COMMAND $<TARGET_FILE:smb2_stream_probe>)
 set_tests_properties(chimera/server/smb/mbt/stream_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_stream_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
 # Transport-compression ground-truth probe: the MS-XCA codecs (LZ77, LZNT1,
@@ -197,7 +197,7 @@ add_test(NAME chimera/server/smb/mbt/compress_probe_memfs
     COMMAND $<TARGET_FILE:smb2_compress_probe>)
 set_tests_properties(chimera/server/smb/mbt/compress_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_compress_probe_memfs"
-    LABELS "quint;smb_mbt;memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
 # ---------------------------------------------------------------------------
@@ -243,10 +243,7 @@ endif()
 # regenerated with DEVS = Set(), i.e. every expectation the MS-FSA-correct one.
 # With every cell's deviation list now empty the twin passes, and it keeps
 # running so the day a deviation is added the debt it stands for is re-measured
-# on every run.  The other four cells get the liveness gate but no twin: three
-# of them (durable, leases, replay) are declined wholesale by the trace-limit
-# table below and would never be replayed, and force_l2 would re-measure the
-# same debt at a second cost.
+# on every run. Each family below has its own replay and coverage result.
 specs_corpus(NAME           smb2/base
              FAMILY         smb2
              CONFIG         ${CMAKE_CURRENT_SOURCE_DIR}/configs/base.json
@@ -269,53 +266,30 @@ specs_corpus(NAME    smb2/replay
              CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/replay.json
              OUT_DIR smb2_replay_traces)
 
-# Every cell, in the order the single flat corpus used to sort into.  A trace's
-# capability profile configures the SERVER, and smb2_mbt_replay restarts it
-# whenever the profile changes between adjacent traces, so keeping the cells
-# grouped (and in the old alphabetical order) keeps this at one server start
-# per cell, exactly as before.  mbt_collect_traces() honours a repeated
-# --trace-dir, appending each directory's sorted contents in argv order.
-set(SMB2_MBT_TRACE_DIRS
-    --trace-dir ${smb2_base_traces}
-    --trace-dir ${smb2_durable_traces}
-    --trace-dir ${smb2_force_l2_traces}
-    --trace-dir ${smb2_leases_traces}
-    --trace-dir ${smb2_replay_traces})
-
-add_test(NAME chimera/server/smb/mbt/batch_memfs
-    COMMAND $<TARGET_FILE:smb2_mbt_replay> ${SMB2_MBT_TRACE_DIRS})
-# The whole generated corpus in one ctest, not a single case.  ext/specs
-# generates every cell and flavor unconditionally -- nothing is withheld on
-# account of what chimera does with it -- so this runs 86 traces at depth
-# 300-500, each standing up and tearing down its own filesystem, against an
-# ASAN build on a loaded container.
-#
-# The batches chimera cannot drive yet are declined BY NAME in
-# smb2_mbt_deviations.h (smb2_mbt_trace_limits), each with the chimera bug that
-# would retire the entry, and reported as SKIP lines.  SKIP_RETURN_CODE turns a
-# run where nothing was drivable into a ctest SKIP rather than a false pass.
-set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs"
-    LABELS "quint;smb_mbt;memfs"
-    TIMEOUT 1800
-    SKIP_RETURN_CODE 77)
-
-# The same corpus over a PROTECTED connection: SMB 3.1.1, a real NTLMv2 logon,
-# and every request signed with AES-GMAC.  The model says nothing about wire
-# protection -- it is the same SMB2 conversation either way -- so the traces
-# and their expected results are identical; what changes is that the server's
-# signing path, 3.1.1 key derivation and negotiate-context handling are now
-# crossed by every packet of every trace, including the compound replies and
-# break notifications that no single-request probe reaches.  A divergence here
-# that does not reproduce in batch_memfs is a protection-layer bug.
-add_test(NAME chimera/server/smb/mbt/batch_memfs_signed
-    COMMAND $<TARGET_FILE:smb2_mbt_replay> ${SMB2_MBT_TRACE_DIRS}
-            --wire signed311)
-set_tests_properties(chimera/server/smb/mbt/batch_memfs_signed PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs_signed"
-    LABELS "quint;smb_mbt;memfs"
-    TIMEOUT 1800
-    SKIP_RETURN_CODE 77)
+# Execute each declared family independently. A lease timeout must not stop
+# durable/replay traces from running, and no family may pass by skipping all
+# of its traces. Plain and signed connections use the identical model corpus.
+foreach(cell base durable force_l2 leases replay)
+    foreach(wire plain signed311)
+        set(wire_args "")
+        if(NOT wire STREQUAL "plain")
+            set(wire_args --wire ${wire})
+        endif()
+        add_test(NAME chimera/server/smb/mbt/${cell}_memfs_${wire}
+            COMMAND $<TARGET_FILE:smb2_mbt_replay>
+                    --trace-dir ${smb2_${cell}_traces} ${wire_args})
+        set_tests_properties(chimera/server/smb/mbt/${cell}_memfs_${wire} PROPERTIES
+            ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_${cell}_${wire}"
+            LABELS "quint;smb_mbt;memfs;${cell}" TIMEOUT 600)
+    endforeach()
+    if(Python3_FOUND)
+        add_test(NAME chimera/server/smb/mbt/coverage_${cell}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/ext/specs/quint/smb2/coverage.py
+                    ${smb2_${cell}_traces})
+        set_tests_properties(chimera/server/smb/mbt/coverage_${cell} PROPERTIES
+            LABELS "quint;model_coverage;smb_mbt" TIMEOUT 120)
+    endif()
+endforeach()
 
 # ---- the deviation machinery ----------------------------------------------
 

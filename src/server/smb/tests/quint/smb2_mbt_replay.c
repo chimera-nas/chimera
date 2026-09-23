@@ -41,7 +41,6 @@
  */
 
 #include "smb2_mbt_common.h"
-#include "smb2_mbt_deviations.h"
 #include "common/mbt_trace_dir.h"
 
 #include <stdarg.h>
@@ -79,6 +78,7 @@ static uint8_t           g_wire_fid[MAX_FID][16];
  * be byte-identical, which is the exactly-once oracle MS-SMB2 3.3.5.9.10 asks
  * for stated as an assertion rather than a status comparison. */
 static int               g_fid_known[MAX_FID];
+static size_t            g_state_index;
 /* Which connection owns each model FileId: a break notification for a handle
  * is pushed to the HOLDER's connection, and the acknowledgment must go back on
  * that same connection, so the fid -> conn binding is as load-bearing as the
@@ -111,11 +111,10 @@ static uint64_t    g_notify_cancelled[MAX_FID];
 static json_t     *g_post_sdb;
 static const char *g_trace;
 static int         g_nmismatch;
-/* Traces this replayer declined to drive, and why (smb2_mbt_trace_limits). */
-static int         g_nskipped;
 /* Set when the model and chimera have parted ways and the rest of this trace
  * would report consequences rather than findings. */
 static int         g_abort_trace;
+static int         g_durable_fixture;
 
 /* Settle every server thread so the break notifications a command owes have
  * been delivered -- and so that "no break was sent" is a fact rather than a
@@ -197,7 +196,7 @@ mism(
 {
     va_list ap;
 
-    printf("MISMATCH [%s] ", g_trace);
+    printf("MISMATCH [%s state %zu] ", g_trace, g_state_index);
     va_start(ap, fmt);
     vprintf(fmt, ap);
     va_end(ap);
@@ -2251,22 +2250,6 @@ run_trace(
     const char *fsname,
     const char *path)
 {
-    /* The corpus is generated unconditionally, so it contains batches this
-     * replayer cannot drive against chimera.  Declining them HERE -- by name,
-     * with the chimera bug that would retire the entry -- keeps the gap
-     * visible and attributable, where declining to generate them made it
-     * invisible. */
-    const char                        *base = strrchr(path, '/');
-    const struct smb2_mbt_trace_limit *lim  =
-        smb2_mbt_trace_limit_find(base ? base + 1 : path);
-
-    if (lim) {
-        printf("SKIP %s [%s] %s\n", lim->id, base ? base + 1 : path,
-               lim->summary);
-        g_nskipped++;
-        return 0;
-    }
-
     json_error_t err;
     json_t      *root = json_load_file(path, 0, &err);
 
@@ -2340,7 +2323,8 @@ run_trace(
         if (!lo || strcmp(jtag(lo), "LMsg") != 0) {
             continue;
         }
-        g_post_sdb = json_object_get(st_i, sdbkey);
+        g_state_index = i;
+        g_post_sdb    = json_object_get(st_i, sdbkey);
         do_message(jval(lo));
         if (g_abort_trace) {
             /* A mismatch has already been reported, and it was one that leaves
@@ -2356,7 +2340,12 @@ run_trace(
     g_post_sdb = NULL;
 
     smb2_conn_reset(&g_env);
-    smb2_env_fs_teardown(&g_env, fsname);
+    /* A durable handle intentionally outlives its connection. Isolate these
+     * traces in a server fixture, whose shutdown drains parked handles, rather
+     * than treating a still-busy filesystem as a protocol divergence. */
+    if (!g_durable_fixture) {
+        smb2_env_fs_teardown(&g_env, fsname);
+    }
 
     int nm = g_nmismatch;
     if (nm) {
@@ -2378,6 +2367,8 @@ main(
     char                          **traces  = mbt_collect_traces(argc, argv, &ntraces);
     const struct smb2_wire_profile *wire    = NULL;
     int                             a;
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
     /* --wire replays the whole corpus over a protected connection profile
      * (signed or encrypted, real NTLMv2 logon, a chosen dialect ceiling).  The
@@ -2419,14 +2410,16 @@ main(
         }
 
         smb2_env_open_wire(&g_env, &group, wire);
+        g_durable_fixture = group.persistent_handles;
 
         int first = i;
         do {
             char fsname[32];
             snprintf(fsname, sizeof(fsname), "fs_%d", i);
+            printf("TRACE %d/%d: %s\n", i + 1, ntraces, traces[i]);
             total += run_trace(fsname, traces[i]);
             i++;
-            if (i >= ntraces) {
+            if (i >= ntraces || g_durable_fixture) {
                 break;
             }
             if (read_caps(traces[i], &opts) != 0) {
@@ -2446,22 +2439,12 @@ main(
 
     mbt_free_traces(traces, ntraces);
 
-    if (g_nskipped) {
-        printf("# %d of %d trace(s) skipped -- see smb2_mbt_deviations.h "
-               "(smb2_mbt_trace_limits)\n", g_nskipped, ntraces);
-    }
     if (total) {
         fprintf(stderr, "%d total mismatch(es) across %d trace(s)\n",
                 total, ntraces);
         return 1;
     }
-    if (g_nskipped == ntraces) {
-        /* Nothing was driven.  That is a ctest SKIP, not a pass: a batch this
-        * replayer cannot drive must not read as evidence about the server. */
-        printf("# nothing in this batch is replayable against chimera yet\n");
-        return 77;
-    }
     printf("ok: %d trace(s) replayed with no unrecorded divergence\n",
-           ntraces - g_nskipped);
+           ntraces);
     return 0;
 } /* main */

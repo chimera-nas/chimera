@@ -1009,6 +1009,12 @@ chimera_linux_open_at(
             if (fd < 0 && (errno == EACCES || errno == EPERM ||
                            errno == EROFS)) {
                 fd = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
+                /* This fallback can observe metadata but cannot do I/O.
+                 * Keep it in the path cache so a later authorized READ or
+                 * WRITE does not reuse this descriptor and fail EBADF. */
+                if (fd >= 0) {
+                    request->open_at.flags |= CHIMERA_VFS_OPEN_PATH;
+                }
             }
             reopened = 1;
         } else if (errno == EEXIST && chimera_linux_leaf_is_symlink(
