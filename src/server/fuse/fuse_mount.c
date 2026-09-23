@@ -5,13 +5,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/mount.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
+#endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
 #include "vfs/vfs_procs.h"
