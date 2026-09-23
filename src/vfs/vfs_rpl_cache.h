@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
 #include "vfs_internal.h"
@@ -39,7 +40,7 @@ struct chimera_vfs_rpl_cache_shard {
     struct chimera_vfs_rpl_cache_entry **fwd_entries; /* forward index slots */
     struct chimera_vfs_rpl_cache_entry **rev_entries; /* reverse index slots */
     struct chimera_rcu_domain            rcu;
-    pthread_mutex_t                      entry_lock;
+    evpl_mutex_t                         entry_lock;
 };
 
 struct chimera_vfs_rpl_cache {
@@ -79,7 +80,7 @@ chimera_vfs_rpl_cache_create(
                           sizeof(struct chimera_vfs_rpl_cache_entry));
 
     cache->num_shards  = 1 << num_shards_bits;
-    cache->num_slots   = 1 << num_slots_bits;
+    cache->num_slots   = UINT64_C(1) << num_slots_bits;
     cache->num_entries = 1 << entries_per_slot_bits;
 
     cache->num_slots_mask   = cache->num_slots - 1;
@@ -98,7 +99,7 @@ chimera_vfs_rpl_cache_create(
                                     sizeof(struct chimera_vfs_rpl_cache_entry *));
 
         chimera_rcu_domain_init(&shard->rcu);
-        pthread_mutex_init(&shard->entry_lock, NULL);
+        evpl_mutex_init(&shard->entry_lock, NULL);
     }
 
     return cache;
@@ -128,7 +129,7 @@ chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
         free(shard->fwd_entries);
         free(shard->rev_entries);
 
-        pthread_mutex_destroy(&shard->entry_lock);
+        evpl_mutex_destroy(&shard->entry_lock);
         chimera_rcu_domain_destroy(&shard->rcu);
     }
 
@@ -338,7 +339,7 @@ chimera_vfs_rpl_cache_insert(
 
     /* Insert into forward index */
     chimera_rcu_mutate_begin(&shard->rcu);
-    pthread_mutex_lock(&shard->entry_lock);
+    evpl_mutex_lock(&shard->entry_lock);
 
     slot     = &shard->fwd_entries[chimera_vfs_rpl_cache_fwd_slot(cache, fwd_key)];
     slot_end = slot + cache->num_entries;
@@ -396,7 +397,7 @@ chimera_vfs_rpl_cache_insert(
     /* Insert into reverse index */
     chimera_vfs_rpl_cache_rev_insert(cache, shard, entry);
 
-    pthread_mutex_unlock(&shard->entry_lock);
+    evpl_mutex_unlock(&shard->entry_lock);
 
     /* Dispatches the displaced entry, after the shard mutex is dropped. */
     chimera_rcu_mutate_end(&shard->rcu);
@@ -435,7 +436,7 @@ chimera_vfs_rpl_cache_invalidate(
         shard = &cache->shards[shard_idx];
 
         chimera_rcu_mutate_begin(&shard->rcu);
-        pthread_mutex_lock(&shard->entry_lock);
+        evpl_mutex_lock(&shard->entry_lock);
 
         slot     = &shard->rev_entries[(rev_key & cache->num_slots_mask) << cache->num_entries_bits];
         slot_end = slot + cache->num_entries;
@@ -478,7 +479,7 @@ chimera_vfs_rpl_cache_invalidate(
             slot++;
         }
 
-        pthread_mutex_unlock(&shard->entry_lock);
+        evpl_mutex_unlock(&shard->entry_lock);
 
         /* Dispatches the removed entry, after the shard mutex is dropped. */
         chimera_rcu_mutate_end(&shard->rcu);

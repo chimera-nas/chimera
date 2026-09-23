@@ -11,8 +11,10 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
+#endif /* ifndef _WIN32 */
 #undef NDEBUG
 #include <assert.h>
 
@@ -92,6 +94,36 @@ sid_bearing_handler(
     return -1;
 } /* sid_bearing_handler */
 
+#ifdef _WIN32
+/* Windows has no NSS provider. Supply deterministic worker results so the
+ * same async completion, caching, and SID-precedence checks still run. */
+static int
+fixture_identity_handler(
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data)
+{
+    (void) private_data;
+    if (key == CHIMERA_VFS_IDENTITY_BY_NAME && !strcmp(name, "root")) {
+        out->user.uid = 0;
+        out->user.gid = 0;
+        snprintf(out->user.username, sizeof(out->user.username), "root");
+        out->user.username_len = 4;
+        return 0;
+    }
+    if (key == CHIMERA_VFS_IDENTITY_BY_GID && id <= 1) {
+        out->is_group  = 1;
+        out->group.gid = id;
+        snprintf(out->group.groupname, sizeof(out->group.groupname), "group%u", id);
+        out->group.groupname_len = (int) strlen(out->group.groupname);
+        return 0;
+    }
+    return -1;
+} /* fixture_identity_handler */
+#endif /* ifdef _WIN32 */
+
 int
 main(
     int    argc,
@@ -103,12 +135,17 @@ main(
     struct chimera_vfs_module_cfg module_cfgs[2];
     struct prometheus_metrics    *metrics;
     struct probe                  p;
+
+#ifndef _WIN32
     struct passwd                *root_pw;
     struct group                 *root_gr;
+    uint32_t                      g;
+#endif /* ifndef _WIN32 */
+    uint32_t                      root_uid;
+    const char                   *root_group_name;
     char                          sidbuf[CHIMERA_VFS_SID_MAX_LEN];
     uint32_t                      scratch_id;
     uint32_t                      wb_gid;
-    uint32_t                      g;
 
     chimera_log_init();
 
@@ -129,6 +166,10 @@ main(
 
     thread = chimera_vfs_thread_init(evpl, vfs);
     assert(thread != NULL);
+
+#ifdef _WIN32
+    chimera_vfs_identity_register_handler(vfs, fixture_identity_handler, NULL);
+#endif /* ifdef _WIN32 */
 
     /* --- 1. cache hit resolves inline (synchronously) --- */
     chimera_vfs_add_user(vfs, "alice", NULL, NULL,
@@ -153,8 +194,13 @@ main(
     TEST_PASS("cache hit by SID resolves synchronously");
 
     /* --- 2. miss resolved off-loop by the NSS handler, then cached --- */
+#ifdef _WIN32
+    root_uid = 0;
+#else  /* ifdef _WIN32 */
     root_pw = getpwnam("root");
     assert(root_pw != NULL); /* present on any host/container */
+    root_uid = root_pw->pw_uid;
+#endif /* ifdef _WIN32 */
 
     memset(&p, 0, sizeof(p));
     chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_NAME, 0,
@@ -166,19 +212,24 @@ main(
         evpl_continue(evpl);
     }
     assert(p.found == 1);
-    assert(p.uid == root_pw->pw_uid);
-    TEST_PASS("miss resolved asynchronously via NSS worker");
+    assert(p.uid == root_uid);
+    TEST_PASS("miss resolved asynchronously via identity worker");
 
     /* The worker populated the cache: the same identity is now a sync hit. */
     memset(&p, 0, sizeof(p));
     chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
-                                 root_pw->pw_uid, NULL, resolve_cb, &p);
-    assert(p.done == 1 && p.found == 1 && p.uid == root_pw->pw_uid);
+                                 root_uid, NULL, resolve_cb, &p);
+    assert(p.done == 1 && p.found == 1 && p.uid == root_uid);
     TEST_PASS("resolved identity is cached for synchronous reuse");
 
     /* --- 3. BY_GID resolves to a GROUP record, not a user --- */
+#ifdef _WIN32
+    root_group_name = "group0";
+#else  /* ifdef _WIN32 */
     root_gr = getgrgid(0);
     assert(root_gr != NULL); /* gid 0 exists on any host/container */
+    root_group_name = root_gr->gr_name;
+#endif /* ifdef _WIN32 */
 
     memset(&p, 0, sizeof(p));
     chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_GID, 0,
@@ -191,10 +242,10 @@ main(
     assert(p.found == 1);
     assert(p.is_group == 1);
     assert(p.gid == 0);
-    assert(strcmp(p.name, root_gr->gr_name) == 0);
+    assert(strcmp(p.name, root_group_name) == 0);
     /* NSS supplies no SID, so the caller falls back to the algorithmic idmap. */
     assert(p.sid[0] == '\0');
-    TEST_PASS("gid resolves asynchronously to a group record via NSS");
+    TEST_PASS("gid resolves asynchronously to a group record via provider");
 
     /* The worker populated the GROUP chains: now a synchronous hit. */
     memset(&p, 0, sizeof(p));
@@ -220,6 +271,9 @@ main(
      * SID-less, and -- because the cache hit suppresses any further resolve --
      * pin the marshaller to the algorithmic S-1-5-88 SID permanently.  Pick a
      * gid NSS definitely CAN resolve, so the two handlers genuinely overlap. */
+#ifdef _WIN32
+    wb_gid = 1;
+#else  /* ifdef _WIN32 */
     wb_gid = 0;
     for (g = 1; g < 100; g++) {
         if (getgrgid(g)) {
@@ -229,6 +283,7 @@ main(
     }
     assert(wb_gid != 0); /* some low non-root group exists on any host */
     assert(getgrgid(wb_gid) != NULL);
+#endif /* ifdef _WIN32 */
 
     chimera_vfs_identity_register_handler(vfs, sid_bearing_handler, &wb_gid);
 

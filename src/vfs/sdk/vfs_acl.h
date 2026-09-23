@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/stat.h>
+#include "vfs_mode.h"
 
 #include "vfs_sid.h"
 

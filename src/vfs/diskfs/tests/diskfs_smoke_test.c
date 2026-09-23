@@ -14,6 +14,45 @@
 
 #include "diskfs_test_harness.h"
 
+/* Keep progress useful when a shared CI runner is slow: distinguish time
+ * spent running from time blocked on I/O or waiting to be scheduled. */
+static struct timespec started;
+
+static void
+progress(const char *phase)
+{
+    struct timespec now;
+    double          elapsed;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed = (double) (now.tv_sec - started.tv_sec) +
+        (double) (now.tv_nsec - started.tv_nsec) / 1000000000.0;
+    printf("[%8.3fs] %s", elapsed, phase);
+#ifdef _WIN32
+    {
+        FILETIME       creation, exit_time, kernel, user;
+        ULARGE_INTEGER k, u;
+        IO_COUNTERS    io;
+
+        if (GetProcessTimes(GetCurrentProcess(), &creation, &exit_time, &kernel, &user)) {
+            k.LowPart  = kernel.dwLowDateTime;
+            k.HighPart = kernel.dwHighDateTime;
+            u.LowPart  = user.dwLowDateTime;
+            u.HighPart = user.dwHighDateTime;
+            printf(" (CPU: kernel=%.3fs user=%.3fs)",
+                   (double) k.QuadPart / 10000000.0,
+                   (double) u.QuadPart / 10000000.0);
+        }
+        if (GetProcessIoCounters(GetCurrentProcess(), &io)) {
+            printf(" (I/O: reads=%llu writes=%llu)",
+                   (unsigned long long) io.ReadOperationCount,
+                   (unsigned long long) io.WriteOperationCount);
+        }
+    }
+#endif /* ifdef _WIN32 */
+    printf("\n");
+} /* progress */
+
 #define CHECK(dh) do { \
             char _e[256]; \
             if (diskfs_test_check((dh)->vfs, _e, sizeof(_e)) != 0) { \
@@ -42,11 +81,13 @@ main(
     (void) argc;
     (void) argv;
     setvbuf(stdout, NULL, _IONBF, 0);
+    clock_gettime(CLOCK_MONOTONIC, &started);
 
     /* 64 MiB device, 4 MiB (floor) intent log, deliberately small block cache
      * (512 * 4 KiB = 2 MiB) so a large tree evicts nodes and later structural
      * ops fault cold siblings back in. */
     dh_init(&dh, 1, 64ULL * 1024 * 1024, 4ULL * 1024 * 1024, 16384);
+    progress("pool mounted");
 
     root = dh_root_handle(&dh);
     CHECK(&dh);
@@ -71,6 +112,7 @@ main(
         r = dh_create(&dh, dirh, name, NULL, NULL, NULL);
         assert(r == CHIMERA_VFS_OK);
         if ((i + 1) % 1000 == 0) {
+            progress("directory fan-out");
             CHECK(&dh);
             if (dir_ino && diskfs_test_inode(dh.vfs, dir_ino, &di) == 0) {
                 printf("  after %5d dirents: tree_height=%u root_nitems=%u\n",
@@ -99,6 +141,7 @@ main(
     }
     CHECK(&dh);
     dh_release(&dh, fh);
+    progress("fragmented writes complete");
 
     /* ---- fragmenting churn: create + delete many small files ---- */
     for (r = 0; r < 6; r++) {
@@ -111,8 +154,11 @@ main(
             assert(dh_remove(&dh, dirh, name) == CHIMERA_VFS_OK);
         }
         CHECK(&dh);
+        snprintf(name, sizeof(name), "churn pass %d complete", r + 1);
+        progress(name);
     }
 
+    progress("waiting for reclaim...");
     diskfs_test_await_reclaim(dh.vfs, dh.evpl, 5000);
     CHECK(&dh);
     diskfs_test_space(dh.vfs, &sp);
@@ -134,7 +180,7 @@ main(
     dh_release(&dh, dirh);
     dh_release(&dh, root);
 
-    printf("crash + recover...\n");
+    progress("crash + recover...");
     dh_remount_crash(&dh);
     CHECK(&dh);
 
@@ -167,9 +213,9 @@ main(
             dh_release(&dh, sh);
         }
     }
-    printf("survivors intact after recovery\n");
+    progress("survivors intact after recovery");
 
     dh_fini(&dh);
-    printf("PASS\n");
+    progress("PASS");
     return 0;
 } /* main */

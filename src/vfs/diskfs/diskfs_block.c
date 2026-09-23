@@ -8,7 +8,10 @@
  * cross-thread waiter dispatch (doorbell/deferral) machinery.
  */
 
-#include <execinfo.h>
+#include "common/atomic.h"
+#include "common/thread.h"
+#include "common/compiler.h"
+#include "common/backtrace.h"
 #include "diskfs_internal.h"
 
 /*
@@ -73,8 +76,8 @@ diskfs_txn_trace_giant(struct diskfs_txn *txn)
     g_giant_bt_budget--;
 
     unique = diskfs_txn_count_unique_blocks(txn);
-    n      = backtrace(frames, 40);
-    syms   = backtrace_symbols(frames, n);
+    n      = chimera_backtrace(frames, 40);
+    syms   = chimera_backtrace_symbols(frames, n);
 
     /* journal = AG-log journal-block claims; direct = btree-node/inode adds.
      * unique = distinct blocks; reserve_again = RESERVE-phase re-drives.
@@ -105,8 +108,8 @@ diskfs_bt_done_trace(struct diskfs_bt_op *op)
     }
     g_dbg_btdone_budget--;
 
-    n    = backtrace(frames, 40);
-    syms = backtrace_symbols(frames, n);
+    n    = chimera_backtrace(frames, 40);
+    syms = chimera_backtrace_symbols(frames, n);
 
     /* A mutating op whose txn reserve-parked is completing via the done-path
      * (suspended==0) -- the async caller already left, so this op is dropped.
@@ -139,7 +142,7 @@ diskfs_block_recycle_waiter_trace(struct diskfs_block *blk)
     char                      **syms;
     struct diskfs_block_waiter *w;
 
-    __atomic_fetch_add(&g_dbg_recyc_waiter_count, 1, __ATOMIC_RELAXED);
+    chimera_atomic_fetch_add(&g_dbg_recyc_waiter_count, 1, CHIMERA_MEMORY_RELAXED);
     if (g_dbg_recyc_waiter_budget <= 0) {
         return;
     }
@@ -148,8 +151,8 @@ diskfs_block_recycle_waiter_trace(struct diskfs_block *blk)
     for (w = blk->wait_head; w; w = w->next) {
         wc++;
     }
-    n    = backtrace(frames, 40);
-    syms = backtrace_symbols(frames, n);
+    n    = chimera_backtrace(frames, 40);
+    syms = chimera_backtrace_symbols(frames, n);
     chimera_diskfs_error(
         "RECYC-WAITER blk=%p state=%d dev=%u off=%lu pin=%d on_lru=%d waiters=%d -- recycling a block with parked waiters (lost wakeup!) -- backtrace:",
         (void *) blk, (int) blk->state, blk->device_id,
@@ -174,7 +177,7 @@ diskfs_bt_op_park_account(struct diskfs_bt_op *op)
         op->dbg_park_counted = 1;
         op->dbg_park_phase   = op->phase;
         if ((unsigned) op->phase < 6) {
-            __atomic_fetch_add(&g_dbg_park[op->phase], 1, __ATOMIC_RELAXED);
+            chimera_atomic_fetch_add(&g_dbg_park[op->phase], 1, CHIMERA_MEMORY_RELAXED);
         }
     }
 } /* diskfs_bt_op_park_account */
@@ -186,7 +189,7 @@ diskfs_bt_op_park_clear(struct diskfs_bt_op *op)
     if (op->dbg_park_counted) {
         op->dbg_park_counted = 0;
         if ((unsigned) op->dbg_park_phase < 6) {
-            __atomic_fetch_sub(&g_dbg_park[op->dbg_park_phase], 1, __ATOMIC_RELAXED);
+            chimera_atomic_fetch_sub(&g_dbg_park[op->dbg_park_phase], 1, CHIMERA_MEMORY_RELAXED);
         }
     }
 } /* diskfs_bt_op_park_clear */
@@ -272,7 +275,7 @@ diskfs_block_drain_returned_locked(struct diskfs_block_shard *shard)
 {
     struct diskfs_block_buf *buf;
 
-    buf = __atomic_exchange_n(&shard->returned_buffers, NULL, __ATOMIC_ACQUIRE);
+    buf = chimera_atomic_exchange_n(&shard->returned_buffers, NULL, CHIMERA_MEMORY_ACQUIRE);
     while (buf) {
         struct diskfs_block_buf *next = buf->next;
 
@@ -289,15 +292,15 @@ diskfs_block_drain_clean_locked(struct diskfs_block_shard *shard)
 {
     struct diskfs_block *blk;
 
-    blk = __atomic_exchange_n(&shard->clean_head, NULL, __ATOMIC_ACQUIRE);
+    blk = chimera_atomic_exchange_n(&shard->clean_head, NULL, CHIMERA_MEMORY_ACQUIRE);
     while (blk) {
         struct diskfs_block *next = blk->clean_next;
 
         blk->clean_next = NULL;
-        __atomic_store_n(&blk->clean_queued, 0, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&blk->clean_queued, 0, CHIMERA_MEMORY_RELEASE);
 
-        if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_CLEAN &&
-            __atomic_load_n(&blk->pin_count, __ATOMIC_ACQUIRE) == 0 && !blk->on_lru) {
+        if (chimera_atomic_load_n(&blk->state, CHIMERA_MEMORY_ACQUIRE) == DISKFS_BLOCK_CLEAN &&
+            chimera_atomic_load_n(&blk->pin_count, CHIMERA_MEMORY_ACQUIRE) == 0 && !blk->on_lru) {
             diskfs_block_lru_push_tail(shard, blk);
         }
         blk = next;
@@ -346,8 +349,8 @@ diskfs_block_recycle(
      * drain order the head is the best (and effectively the only) candidate.
      */
     if (!blk ||
-        __atomic_load_n(&blk->pin_count, __ATOMIC_ACQUIRE) != 0 ||
-        __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) != DISKFS_BLOCK_CLEAN) {
+        chimera_atomic_load_n(&blk->pin_count, CHIMERA_MEMORY_ACQUIRE) != 0 ||
+        chimera_atomic_load_n(&blk->state, CHIMERA_MEMORY_ACQUIRE) != DISKFS_BLOCK_CLEAN) {
         return NULL;
     }
 
@@ -435,13 +438,13 @@ diskfs_block_cow_swap(
     /* Publish Y as the live, writable copy at (device_id, device_offset). */
     y->device_id     = device_id;
     y->device_offset = device_offset;
-    __atomic_store_n(&y->seq, __atomic_load_n(&x->seq, __ATOMIC_RELAXED),
-                     __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&y->seq, chimera_atomic_load_n(&x->seq, CHIMERA_MEMORY_RELAXED),
+                           CHIMERA_MEMORY_RELEASE);
     y->wait_head           = NULL;
     y->wait_tail           = NULL;
     y->hash_next           = shard->buckets[bucket];
     shard->buckets[bucket] = y;
-    __atomic_store_n(&y->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&y->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
 
     diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_COW);
     return y;
@@ -460,7 +463,7 @@ diskfs_block_cow_swap(
  */
 /* Unused under the block-swap CoW model (CoW swaps whole blocks via
  * diskfs_block_cow_swap, never buffers); kept for reference, remove later. */
-__attribute__((unused))
+CHIMERA_UNUSED
 static struct diskfs_block_buf *
 diskfs_block_buf_reclaim_locked(
     struct diskfs_thread      *thread,
@@ -477,8 +480,8 @@ diskfs_block_buf_reclaim_locked(
         shard->free_buffers = buf->next;
         shard->nfree_buffers--;
         buf->next = NULL;
-        __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&buf->on_free, 0, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_store_n(&buf->refs, 1, CHIMERA_MEMORY_RELEASE);
         return buf;
     }
 
@@ -511,8 +514,8 @@ diskfs_block_buf_reclaim_locked(
     shard->n_bufless++;
 
     buf->next = NULL;
-    __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&buf->on_free, 0, CHIMERA_MEMORY_RELEASE);
+    chimera_atomic_store_n(&buf->refs, 1, CHIMERA_MEMORY_RELEASE);
     diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_RECYCLE);
     return buf;
 } /* diskfs_block_buf_reclaim_locked */
@@ -532,11 +535,11 @@ diskfs_block_buf_wake(
 {
     struct diskfs_block_waiter *list = NULL, *w;
 
-    if (!__atomic_load_n(&shard->buf_wait_pending, __ATOMIC_ACQUIRE)) {
+    if (!chimera_atomic_load_n(&shard->buf_wait_pending, CHIMERA_MEMORY_ACQUIRE)) {
         return;
     }
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     diskfs_block_drain_returned_locked(shard);
     /*
      * Release at most (reclaimable - reserve) waiters: exactly the number that
@@ -563,9 +566,9 @@ diskfs_block_buf_wake(
         }
     }
     if (!shard->buf_wait_head) {
-        __atomic_store_n(&shard->buf_wait_pending, 0, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&shard->buf_wait_pending, 0, CHIMERA_MEMORY_RELEASE);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     while (list) {
         w    = list;
@@ -593,7 +596,7 @@ diskfs_block_unpin(
      * transition to CLEAN, and only at pin==0.
      */
     (void) new_state;
-    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) != 0) {
+    if (chimera_atomic_sub_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) != 0) {
         return;     /* still referenced -- stays as-is (DIRTY if un-home) */
     }
 
@@ -603,16 +606,16 @@ diskfs_block_unpin(
     {
         struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
                                                               blk->device_id, blk->device_offset);
-        pthread_mutex_lock(&shard->lock);
+        evpl_mutex_lock(&shard->lock);
         diskfs_block_drain_clean_locked(shard);
-        if (__atomic_load_n(&blk->pin_count, __ATOMIC_ACQUIRE) == 0) {
-            __atomic_sub_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);  /* 1->0 */
-            __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+        if (chimera_atomic_load_n(&blk->pin_count, CHIMERA_MEMORY_ACQUIRE) == 0) {
+            chimera_atomic_sub_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);  /* 1->0 */
+            chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
             if (!blk->on_lru) {
                 diskfs_block_lru_push_tail(shard, blk);
             }
         }
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
 
         /* This produced a CLEAN, unpinned LRU victim -- resume any CoW fork
          * parked waiting for a reclaimable buffer (main's park machinery). */
@@ -632,16 +635,16 @@ diskfs_block_release(
     struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
                                                           blk->device_id, blk->device_offset);
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     diskfs_block_drain_clean_locked(shard);
-    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0) {
-        __atomic_sub_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);  /* 1->0 */
-        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+    if (chimera_atomic_sub_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
+        chimera_atomic_sub_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);  /* 1->0 */
+        chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
         if (!blk->on_lru) {
             diskfs_block_lru_push_tail(shard, blk);
         }
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* Unpinning may have produced an LRU victim a parked CoW fork can reclaim. */
     diskfs_block_buf_wake(thread, shard);
@@ -689,12 +692,12 @@ diskfs_block_cache_create(struct diskfs_shared *shared)
      * so backing buffers are 1:1 with block structs. */
     extra                         = 0;
     cache->buffer_extra_per_shard = extra;
-    pthread_mutex_init(&cache->prealloc_lock, NULL);
+    evpl_mutex_init(&cache->prealloc_lock, NULL);
 
     for (i = 0; i < (int) cache->num_shards; i++) {
         struct diskfs_block_shard *shard = &cache->shards[i];
 
-        pthread_mutex_init(&shard->lock, NULL);
+        evpl_mutex_init(&shard->lock, NULL);
         shard->buckets = calloc(DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD,
                                 sizeof(struct diskfs_block *));
         shard->pool = calloc(cache->shard_cap, sizeof(struct diskfs_block));
@@ -722,9 +725,9 @@ diskfs_block_cache_prealloc(
     struct diskfs_block_cache *cache = shared->block_cache;
     uint32_t                   i, j;
 
-    pthread_mutex_lock(&cache->prealloc_lock);
+    evpl_mutex_lock(&cache->prealloc_lock);
     if (cache->buffers_ready) {
-        pthread_mutex_unlock(&cache->prealloc_lock);
+        evpl_mutex_unlock(&cache->prealloc_lock);
         return;
     }
 
@@ -803,7 +806,7 @@ diskfs_block_cache_prealloc(
     }
 
     cache->buffers_ready = 1;
-    pthread_mutex_unlock(&cache->prealloc_lock);
+    evpl_mutex_unlock(&cache->prealloc_lock);
 } /* diskfs_block_cache_prealloc */
 
 
@@ -843,9 +846,9 @@ diskfs_block_cache_destroy(struct diskfs_shared *shared)
         free(shard->buffers);
         free(shard->pool);
         free(shard->buckets);
-        pthread_mutex_destroy(&shard->lock);
+        evpl_mutex_destroy(&shard->lock);
     }
-    pthread_mutex_destroy(&cache->prealloc_lock);
+    evpl_mutex_destroy(&cache->prealloc_lock);
     free(cache);
     shared->block_cache = NULL;
 } /* diskfs_block_cache_destroy */
@@ -857,21 +860,21 @@ diskfs_block_buf_release(struct diskfs_block_buf *buf)
     struct diskfs_block_shard *shard;
     struct diskfs_block_buf   *head;
 
-    chimera_diskfs_abort_if(__atomic_load_n(&buf->refs, __ATOMIC_ACQUIRE) == 0,
+    chimera_diskfs_abort_if(chimera_atomic_load_n(&buf->refs, CHIMERA_MEMORY_ACQUIRE) == 0,
                             "diskfs block buffer ref underflow");
-    if (__atomic_sub_fetch(&buf->refs, 1, __ATOMIC_ACQ_REL) != 0) {
+    if (chimera_atomic_sub_fetch(&buf->refs, 1, CHIMERA_MEMORY_ACQ_REL) != 0) {
         return;
     }
 
     shard = buf->shard;
-    chimera_diskfs_abort_if(__atomic_exchange_n(&buf->on_free, 1, __ATOMIC_ACQ_REL),
+    chimera_diskfs_abort_if(chimera_atomic_exchange_n(&buf->on_free, 1, CHIMERA_MEMORY_ACQ_REL),
                             "diskfs block buffer already free");
 
     do {
-        head      = __atomic_load_n(&shard->returned_buffers, __ATOMIC_ACQUIRE);
+        head      = chimera_atomic_load_n(&shard->returned_buffers, CHIMERA_MEMORY_ACQUIRE);
         buf->next = head;
-    } while (!__atomic_compare_exchange_n(&shard->returned_buffers, &head, buf,
-                                          0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+    } while (!chimera_atomic_compare_exchange_n(&shard->returned_buffers, &head, buf,
+                                                0, CHIMERA_MEMORY_RELEASE, CHIMERA_MEMORY_ACQUIRE));
 
     /* The tail-pusher just freed a buffer cross-thread.  Wake any CoW fork
      * parked on this shard -- if every worker op on the shard is parked, nothing
@@ -922,7 +925,7 @@ diskfs_block_claim(
     struct diskfs_block_shard *shard  = &cache->shards[sidx];
     struct diskfs_block       *blk;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     diskfs_block_drain_returned_locked(shard);
     diskfs_block_drain_clean_locked(shard);
@@ -939,8 +942,8 @@ diskfs_block_claim(
                                 "still pinned) off=%lu", device_offset);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
-        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
-        __atomic_store_n(&blk->seq, 0, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
+        chimera_atomic_store_n(&blk->seq, 0, CHIMERA_MEMORY_RELEASE);
         blk->wait_head = NULL;
         blk->wait_tail = NULL;
         diskfs_block_assert_iov(thread, blk);
@@ -976,10 +979,10 @@ diskfs_block_claim(
         diskfs_block_lru_push_tail(shard, blk);
     }
 
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
-        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    if (chimera_atomic_add_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 1) {
+        chimera_atomic_add_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     return blk;
 } /* diskfs_block_claim */
@@ -1211,7 +1214,7 @@ diskfs_block_waiter_dispatch(
 {
     struct diskfs_thread *worker = w->thread;
 
-    pthread_mutex_lock(&worker->resume_lock);
+    evpl_mutex_lock(&worker->resume_lock);
     w->next = NULL;
     if (worker->resume_tail) {
         worker->resume_tail->next = w;
@@ -1219,8 +1222,8 @@ diskfs_block_waiter_dispatch(
         worker->resume_head = w;
     }
     worker->resume_tail = w;
-    __atomic_store_n(&worker->resume_pending, 1, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&worker->resume_lock);
+    chimera_atomic_store_n(&worker->resume_pending, 1, CHIMERA_MEMORY_RELEASE);
+    evpl_mutex_unlock(&worker->resume_lock);
 
     if (worker == waker) {
         evpl_defer(worker->evpl, &worker->resume_deferral);
@@ -1255,7 +1258,7 @@ diskfs_block_defer_retry(
     w->resume = resume;
     w->arg    = arg;
     w->next   = NULL;
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     diskfs_block_waiter_dispatch(thread, w);   /* self -> evpl_defer, re-runs */
     return NULL;
 } /* diskfs_block_defer_retry */
@@ -1282,16 +1285,16 @@ diskfs_bt_resume_drain(struct diskfs_thread *thread)
 {
     struct diskfs_block_waiter *list, *w;
 
-    if (!__atomic_load_n(&thread->resume_pending, __ATOMIC_ACQUIRE)) {
+    if (!chimera_atomic_load_n(&thread->resume_pending, CHIMERA_MEMORY_ACQUIRE)) {
         return;
     }
 
-    pthread_mutex_lock(&thread->resume_lock);
+    evpl_mutex_lock(&thread->resume_lock);
     list                = thread->resume_head;
     thread->resume_head = NULL;
     thread->resume_tail = NULL;
-    __atomic_store_n(&thread->resume_pending, 0, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&thread->resume_lock);
+    chimera_atomic_store_n(&thread->resume_pending, 0, CHIMERA_MEMORY_RELEASE);
+    evpl_mutex_unlock(&thread->resume_lock);
 
     while (list) {
         void  (*resume)(
@@ -1338,7 +1341,7 @@ diskfs_bt_resume_poll(
 {
     struct diskfs_thread *thread = private_data;
 
-    if (__atomic_load_n(&thread->resume_pending, __ATOMIC_ACQUIRE)) {
+    if (chimera_atomic_load_n(&thread->resume_pending, CHIMERA_MEMORY_ACQUIRE)) {
         diskfs_bt_resume_drain(thread);
         evpl_activity(evpl);
     }
@@ -1363,12 +1366,12 @@ diskfs_block_load_complete(
     chimera_diskfs_abort_if(status != 0, "block read failed off=%lu status=%d",
                             blk->device_offset, status);
 
-    pthread_mutex_lock(&shard->lock);
-    __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+    evpl_mutex_lock(&shard->lock);
+    chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
     waiters        = blk->wait_head;
     blk->wait_head = NULL;
     blk->wait_tail = NULL;
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     diskfs_pending_io_add(self, -1);
     free(ld);
@@ -1402,8 +1405,8 @@ diskfs_bt_op_pin(
      * to the MRU end since it is now active (recyclers take the unpinned head). */
     diskfs_block_lru_unlink(shard, blk);
     diskfs_block_lru_push_tail(shard, blk);
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
-        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    if (chimera_atomic_add_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 1) {
+        chimera_atomic_add_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);
     }
     chimera_diskfs_abort_if(op->npins >= (int) (sizeof(op->pins) / sizeof(op->pins[0])),
                             "b+tree op pin list overflow");
@@ -1425,12 +1428,12 @@ diskfs_bt_block_get(
     struct diskfs_block_load  *ld;
     int                        issue = 0;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (blk && blk->state != DISKFS_BLOCK_LOADING) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_bt_op_pin(op, shard, blk);
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return blk;
     }
 
@@ -1447,7 +1450,7 @@ diskfs_bt_block_get(
         }
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
-        __atomic_store_n(&blk->state, DISKFS_BLOCK_LOADING, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_LOADING, CHIMERA_MEMORY_RELEASE);
         blk->seq               = 0;
         blk->wait_head         = NULL;
         blk->wait_tail         = NULL;
@@ -1476,7 +1479,7 @@ diskfs_bt_block_get(
         }
         blk->wait_tail = w;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     if (issue) {
         diskfs_block_assert_iov(thread, blk);
@@ -1526,13 +1529,13 @@ diskfs_block_claim_async(
     struct diskfs_block_load   *ld;
     int                         issue = 0;
 
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
 
     diskfs_block_drain_returned_locked(shard);
     diskfs_block_drain_clean_locked(shard);
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
 
-    if (blk && __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOADING) {
+    if (blk && chimera_atomic_load_n(&blk->state, CHIMERA_MEMORY_ACQUIRE) == DISKFS_BLOCK_LOADING) {
         /* A read is already in flight: park and resume when it lands. */
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_WAIT);
         w         = diskfs_block_waiter_alloc(thread);
@@ -1545,7 +1548,7 @@ diskfs_block_claim_async(
             blk->wait_head = w;
         }
         blk->wait_tail = w;
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return NULL;
     }
 
@@ -1560,27 +1563,27 @@ diskfs_block_claim_async(
         }
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
-        __atomic_store_n(&blk->seq, 0, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&blk->seq, 0, CHIMERA_MEMORY_RELEASE);
         blk->wait_head = NULL;
         blk->wait_tail = NULL;
 
         if (is_new) {
             diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_NEW);
-            __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+            chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, CHIMERA_MEMORY_RELEASE);
             diskfs_block_assert_iov(thread, blk);
             memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
             blk->hash_next         = shard->buckets[bucket];
             shard->buckets[bucket] = blk;
-            if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
-                __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+            if (chimera_atomic_add_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 1) {
+                chimera_atomic_add_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);
             }
-            pthread_mutex_unlock(&shard->lock);
+            evpl_mutex_unlock(&shard->lock);
             return blk;
         }
 
         /* Miss: publish a LOADING block (recycle left it on the LRU tail; the
          * LOADING state keeps recycle from re-taking it), park, issue the read. */
-        __atomic_store_n(&blk->state, DISKFS_BLOCK_LOADING, __ATOMIC_RELEASE);
+        chimera_atomic_store_n(&blk->state, DISKFS_BLOCK_LOADING, CHIMERA_MEMORY_RELEASE);
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
         w                      = diskfs_block_waiter_alloc(thread);
@@ -1611,7 +1614,7 @@ diskfs_block_claim_async(
     }
 
     if (issue) {
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         diskfs_block_assert_iov(thread, blk);
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
@@ -1626,10 +1629,10 @@ diskfs_block_claim_async(
         return NULL;
     }
 
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
-        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    if (chimera_atomic_add_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 1) {
+        chimera_atomic_add_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
     return blk;
 } /* diskfs_block_claim_async */
 
@@ -1707,8 +1710,8 @@ diskfs_inode_link_root(
         diskfs_block_shard(txn->thread->shared->block_cache,
                            blk->device_id, blk->device_offset);
 
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
-        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    if (chimera_atomic_add_fetch(&blk->pin_count, 1, CHIMERA_MEMORY_ACQ_REL) == 1) {
+        chimera_atomic_add_fetch(&shard->pinned, 1, CHIMERA_MEMORY_RELAXED);
     }
     diskfs_txn_add_block(txn, blk);
     inode->block = blk;

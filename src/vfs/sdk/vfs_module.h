@@ -283,7 +283,7 @@ struct chimera_vfs_handle_state {
  * filesystem), and removed only while no mount references them (RMFS returns
  * CHIMERA_VFS_EBUSY otherwise).  Modules without this bit interpret the whole
  * module path themselves (e.g. as a host path for passthrough backends). */
-#define CHIMERA_VFS_CAP_MKFS                  (1UL << 25)
+#define CHIMERA_VFS_CAP_MKFS                  (1ULL << 25)
 
 /* Backend claim arbitration (the claim-core projection boundary).
  *

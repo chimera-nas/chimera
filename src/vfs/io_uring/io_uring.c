@@ -3,18 +3,37 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #define _GNU_SOURCE
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/sysmacros.h>
+#endif /* ifdef _WIN32 */
 #include <sys/types.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <sys/statvfs.h>
 #include <sys/eventfd.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#include <dirent.h>
+#endif /* ifdef _WIN32 */
+#include "common/dirent.h"
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>
@@ -146,14 +165,14 @@ struct chimera_io_uring_shared {
     struct io_uring                     ring;
     int                                 readdir_verifier;
 
-    pthread_mutex_t                     range_lock;
+    evpl_mutex_t                        range_lock;
     struct chimera_io_uring_range_file *range_files;
     struct chimera_io_uring_range      *ranges;
     uint64_t                            range_next_token;
 
     /* Mount roots handed out as mount_private, so destroy can free the ones
      * no UMOUNT reclaimed.  See chimera_linux_mount_root. */
-    pthread_mutex_t                     mount_lock;
+    evpl_mutex_t                        mount_lock;
     struct chimera_linux_mount_root    *mount_roots;
 };
 
@@ -278,8 +297,8 @@ chimera_io_uring_init(
         return NULL;
     }
 
-    pthread_mutex_init(&shared->range_lock, NULL);
-    pthread_mutex_init(&shared->mount_lock, NULL);
+    evpl_mutex_init(&shared->range_lock, NULL);
+    evpl_mutex_init(&shared->mount_lock, NULL);
 
     if (cfgdata && cfgdata[0] != '\0') {
         json_error_t json_error;
@@ -323,7 +342,7 @@ chimera_io_uring_destroy(void *private_data)
         free(file);
     }
 
-    pthread_mutex_destroy(&shared->range_lock);
+    evpl_mutex_destroy(&shared->range_lock);
 
     io_uring_queue_exit(&shared->ring);
     free(shared);
@@ -1478,9 +1497,9 @@ chimera_io_uring_mount(
             root->ino                      = st.st_ino;
             request->mount.r_mount_private = root;
 
-            pthread_mutex_lock(&thread->shared->mount_lock);
+            evpl_mutex_lock(&thread->shared->mount_lock);
             LL_PREPEND(thread->shared->mount_roots, root);
-            pthread_mutex_unlock(&thread->shared->mount_lock);
+            evpl_mutex_unlock(&thread->shared->mount_lock);
         }
     }
 
@@ -1500,9 +1519,9 @@ chimera_io_uring_umount(
     struct chimera_linux_mount_root *root   = request->umount.mount_private;
 
     if (root) {
-        pthread_mutex_lock(&thread->shared->mount_lock);
+        evpl_mutex_lock(&thread->shared->mount_lock);
         LL_DELETE(thread->shared->mount_roots, root);
-        pthread_mutex_unlock(&thread->shared->mount_lock);
+        evpl_mutex_unlock(&thread->shared->mount_lock);
         free(root);
     }
     request->status = CHIMERA_VFS_OK;
@@ -3061,10 +3080,10 @@ chimera_io_uring_claim_acquire(
         if (!(request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST)) {
             range = calloc(1, sizeof(*range));
 
-            pthread_mutex_lock(&shared->range_lock);
+            evpl_mutex_lock(&shared->range_lock);
             range->token = ++shared->range_next_token;
             LL_PREPEND(shared->ranges, range);
-            pthread_mutex_unlock(&shared->range_lock);
+            evpl_mutex_unlock(&shared->range_lock);
 
             request->claim_acquire.r_token   = range->token;
             request->claim_acquire.r_granted = 1;
@@ -3075,7 +3094,7 @@ chimera_io_uring_claim_acquire(
         return;
     }
 
-    pthread_mutex_lock(&shared->range_lock);
+    evpl_mutex_lock(&shared->range_lock);
 
     file = chimera_io_uring_range_file_get(thread,
                                            request->fh,
@@ -3085,7 +3104,7 @@ chimera_io_uring_claim_acquire(
 
     rc = file ? 0 : errno;
 
-    pthread_mutex_unlock(&shared->range_lock);
+    evpl_mutex_unlock(&shared->range_lock);
 
     if (!file) {
         request->status = chimera_linux_errno_to_status(rc);
@@ -3125,7 +3144,7 @@ chimera_io_uring_claim_acquire(
         chimera_io_uring_range_resolve(&fl, file->fd, &range->offset, &range->length);
     }
 
-    pthread_mutex_lock(&shared->range_lock);
+    evpl_mutex_lock(&shared->range_lock);
 
     if (range) {
         range->token = ++shared->range_next_token;
@@ -3139,7 +3158,7 @@ chimera_io_uring_claim_acquire(
         chimera_io_uring_range_file_put(shared, file);
     }
 
-    pthread_mutex_unlock(&shared->range_lock);
+    evpl_mutex_unlock(&shared->range_lock);
 
     request->complete(request);
 } /* chimera_io_uring_claim_acquire */
@@ -3164,7 +3183,7 @@ chimera_io_uring_claim_release_ranged(
     uint64_t                            length = request->claim_release.length;
     int                                 err    = 0;
 
-    pthread_mutex_lock(&shared->range_lock);
+    evpl_mutex_lock(&shared->range_lock);
 
     file = chimera_io_uring_range_file_find(shared,
                                             request->fh,
@@ -3177,7 +3196,7 @@ chimera_io_uring_claim_release_ranged(
         file->refcnt++;
     }
 
-    pthread_mutex_unlock(&shared->range_lock);
+    evpl_mutex_unlock(&shared->range_lock);
 
     if (!file) {
         /* This owner locks nothing on this file, so there is nothing of ours
@@ -3217,16 +3236,16 @@ chimera_io_uring_claim_release_ranged(
     }
 
     if (err) {
-        pthread_mutex_lock(&shared->range_lock);
+        evpl_mutex_lock(&shared->range_lock);
         chimera_io_uring_range_file_put(shared, file);
-        pthread_mutex_unlock(&shared->range_lock);
+        evpl_mutex_unlock(&shared->range_lock);
 
         request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
 
-    pthread_mutex_lock(&shared->range_lock);
+    evpl_mutex_lock(&shared->range_lock);
 
     LL_FOREACH_SAFE(shared->ranges, range, tmp)
     {
@@ -3248,7 +3267,7 @@ chimera_io_uring_claim_release_ranged(
         LL_PREPEND(matched, range);
     }
 
-    pthread_mutex_unlock(&shared->range_lock);
+    evpl_mutex_unlock(&shared->range_lock);
 
     /* Outside the registry lock, as every other lock syscall on this module is.
      * F_UNLCK does not block, but the descriptor put below wants the lock and
@@ -3264,7 +3283,7 @@ chimera_io_uring_claim_release_ranged(
         fcntl(file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
     }
 
-    pthread_mutex_lock(&shared->range_lock);
+    evpl_mutex_lock(&shared->range_lock);
 
     while (matched) {
         range = matched;
@@ -3275,7 +3294,7 @@ chimera_io_uring_claim_release_ranged(
 
     chimera_io_uring_range_file_put(shared, file);
 
-    pthread_mutex_unlock(&shared->range_lock);
+    evpl_mutex_unlock(&shared->range_lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -3302,7 +3321,7 @@ chimera_io_uring_claim_release(
         return;
     }
 
-    pthread_mutex_lock(&shared->range_lock);
+    evpl_mutex_lock(&shared->range_lock);
 
     for (range = shared->ranges; range; range = range->next) {
         if (range->token == request->claim_release.token) {
@@ -3311,7 +3330,7 @@ chimera_io_uring_claim_release(
         }
     }
 
-    pthread_mutex_unlock(&shared->range_lock);
+    evpl_mutex_unlock(&shared->range_lock);
 
     if (range && range->projected) {
         fl.l_type   = F_UNLCK;
@@ -3322,9 +3341,9 @@ chimera_io_uring_claim_release(
 
         fcntl(range->file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
 
-        pthread_mutex_lock(&shared->range_lock);
+        evpl_mutex_lock(&shared->range_lock);
         chimera_io_uring_range_file_put(shared, range->file);
-        pthread_mutex_unlock(&shared->range_lock);
+        evpl_mutex_unlock(&shared->range_lock);
     }
 
     free(range);

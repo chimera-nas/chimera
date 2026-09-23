@@ -2,13 +2,21 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include "common/platform.h"
 #include <rocksdb/c.h>
 #include "rocksdb_compat.h"
@@ -103,59 +111,77 @@ void rocksdb_flush_wal(
 #define chimera_cairn_abort_if(cond, ...) \
         chimera_abort_if(cond, "cairn", __FILE__, __LINE__, __VA_ARGS__)
 
+#pragma pack(push, 1)
 struct cairn_inode_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_dirent_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t hash;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_symlink_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_extent_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t offset;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_acl_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* Opaque per-file pNFS layout blob (CHIMERA_VFS_ATTR_PNFS_LAYOUT), stored as
  * its own record rather than widened into cairn_inode: only files a metadata
  * server has handed a layout for ever have one, and the inode record is read
  * on every lookup.  Cairn neither produces nor interprets the contents -- the
  * NFS server packs a deviceid plus a backing filehandle in there. */
+#pragma pack(push, 1)
 struct cairn_pnfs_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* Native owner / group SIDs, kept in a record separate from the
  * ACL so "no ACL record" still means "mode-derived DACL". */
+#pragma pack(push, 1)
 struct cairn_sid_key {
     uint8_t  keytype;
     uint64_t inum;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_xattr_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t hash;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
+#pragma pack(push, 1)
 struct cairn_super_key {
     uint8_t keytype;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 struct cairn_super {
     uint64_t fsid;
@@ -163,11 +189,13 @@ struct cairn_super {
 
 /* Named-filesystem record, keyed by { CAIRN_KEY_FS, <name bytes> }.  One per
 * filesystem created with MKFS; loaded into an in-memory cairn_fs at init. */
+#pragma pack(push, 1)
 struct cairn_fs_record {
     uint64_t fsid;
     uint64_t root_inum;
     uint32_t root_gen;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 /* KV key structure: keytype (1 byte) + key data (variable length) */
 #define CAIRN_KV_KEY_MAX 4096
@@ -188,11 +216,13 @@ struct cairn_symlink_target {
     char data[PATH_MAX];
 };
 
+#pragma pack(push, 1)
 struct cairn_xattr_value {
     uint32_t name_len;
     uint32_t value_len;
     char     data[];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 struct cairn_inode {
     uint64_t        inum;
@@ -281,7 +311,7 @@ struct cairn_shared {
      * lock).  Per-op resolution does not consult this: it comes in on the
      * request as mount_private. */
     struct cairn_fs                         *fs_list;
-    pthread_mutex_t                          lock;
+    evpl_mutex_t                             lock;
     /*
      * Striped per-inode mutexes (used by helpers below for fine-grained
      * locking on the metadata of a single inode).  Combined with
@@ -295,8 +325,8 @@ struct cairn_shared {
      * metadata-mutating op with the appropriate stripe locks is tracked
      * as Phase A.2.
      */
-    pthread_mutex_t                          multi_inode_lock;
-    pthread_mutex_t                          inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
+    evpl_mutex_t                             multi_inode_lock;
+    evpl_mutex_t                             inode_mutexes[CAIRN_INODE_LOCK_STRIPES];
     int                                      noatime;
 };
 
@@ -408,7 +438,7 @@ cairn_inode_handle_release(struct cairn_inode_handle *ih)
     rocksdb_pinnableslice_destroy(ih->slice);
 } /* cairn_inode_handle_release */
 
-static inline pthread_mutex_t *
+static inline evpl_mutex_t *
 cairn_inode_stripe(
     struct cairn_shared *shared,
     uint64_t             inum)
@@ -421,7 +451,7 @@ cairn_lock_inode(
     struct cairn_shared *shared,
     uint64_t             inum)
 {
-    pthread_mutex_lock(cairn_inode_stripe(shared, inum));
+    evpl_mutex_lock(cairn_inode_stripe(shared, inum));
 } /* cairn_lock_inode */
 
 static inline void
@@ -429,7 +459,7 @@ cairn_unlock_inode(
     struct cairn_shared *shared,
     uint64_t             inum)
 {
-    pthread_mutex_unlock(cairn_inode_stripe(shared, inum));
+    evpl_mutex_unlock(cairn_inode_stripe(shared, inum));
 } /* cairn_unlock_inode */
 
 /*
@@ -443,12 +473,12 @@ cairn_lock_inodes(
     uint64_t            *inums,
     int                  n)
 {
-    pthread_mutex_t *stripes[8];
-    int              ns = 0, i, j;
+    evpl_mutex_t *stripes[8];
+    int           ns = 0, i, j;
 
     for (i = 0; i < n; i++) {
-        pthread_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
-        int              dup = 0;
+        evpl_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
+        int           dup = 0;
         for (j = 0; j < ns; j++) {
             if (stripes[j] == s) {
                 dup = 1; break;
@@ -467,7 +497,7 @@ cairn_lock_inodes(
     }
 
     for (i = 0; i < ns; i++) {
-        pthread_mutex_lock(stripes[i]);
+        evpl_mutex_lock(stripes[i]);
     }
 } /* cairn_lock_inodes */
 
@@ -477,12 +507,12 @@ cairn_unlock_inodes(
     uint64_t            *inums,
     int                  n)
 {
-    pthread_mutex_t *stripes[8];
-    int              ns = 0, i, j;
+    evpl_mutex_t *stripes[8];
+    int           ns = 0, i, j;
 
     for (i = 0; i < n; i++) {
-        pthread_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
-        int              dup = 0;
+        evpl_mutex_t *s   = cairn_inode_stripe(shared, inums[i]);
+        int           dup = 0;
         for (j = 0; j < ns; j++) {
             if (stripes[j] == s) {
                 dup = 1; break;
@@ -494,7 +524,7 @@ cairn_unlock_inodes(
     }
 
     for (i = 0; i < ns; i++) {
-        pthread_mutex_unlock(stripes[i]);
+        evpl_mutex_unlock(stripes[i]);
     }
 } /* cairn_unlock_inodes */
 
@@ -909,11 +939,11 @@ cairn_put_acl(
     uint64_t                  inum,
     const struct chimera_acl *acl)
 {
-    rocksdb_transaction_t  *txn = cairn_get_meta_txn(thread);
-    char                   *err = NULL;
-    struct cairn_acl_key    key;
-    static __thread uint8_t buf[CAIRN_ACL_SCRATCH];
-    int                     len;
+    rocksdb_transaction_t              *txn = cairn_get_meta_txn(thread);
+    char                               *err = NULL;
+    struct cairn_acl_key                key;
+    static CHIMERA_THREAD_LOCAL uint8_t buf[CAIRN_ACL_SCRATCH];
+    int                                 len;
 
     len = chimera_acl_serialize(acl, buf, sizeof(buf));
     if (len < 0) {
@@ -1087,8 +1117,8 @@ cairn_map_sids(
     struct chimera_vfs_attrs *attr,
     const struct cairn_inode *inode)
 {
-    static __thread struct chimera_sid owner_scratch;
-    static __thread struct chimera_sid group_scratch;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid owner_scratch;
+    static CHIMERA_THREAD_LOCAL struct chimera_sid group_scratch;
 
     if (!(attr->va_req_mask & (CHIMERA_VFS_ATTR_OWNER_SID |
                                CHIMERA_VFS_ATTR_GROUP_SID))) {
@@ -1115,8 +1145,8 @@ cairn_map_acl(
     struct chimera_vfs_attrs *attr,
     const struct cairn_inode *inode)
 {
-    static __thread uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
-    struct chimera_acl     *dst = (struct chimera_acl *) scratch;
+    static CHIMERA_THREAD_LOCAL uint8_t scratch[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl                 *dst = (struct chimera_acl *) scratch;
 
     /* The SID companions travel with the ACL everywhere it is mapped. */
     cairn_map_sids(thread, attr, inode);
@@ -1153,10 +1183,10 @@ cairn_inherit_acl(
     const struct chimera_acl *new_acl,
     int                       windows_default)
 {
-    static __thread uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
-    struct chimera_acl     *pacl   = (struct chimera_acl *) pbuf;
-    int                     is_dir = S_ISDIR(child->mode);
-    uint16_t                want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
+    static CHIMERA_THREAD_LOCAL uint8_t pbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl                 *pacl   = (struct chimera_acl *) pbuf;
+    int                                 is_dir = S_ISDIR(child->mode);
+    uint16_t                            want   = CHIMERA_ACE_FLAG_FILE_INHERIT |
         (is_dir ? CHIMERA_ACE_FLAG_DIR_INHERIT : 0);
 
     /* An explicit ACL supplied at create (e.g. an SMB SD via SecD) takes
@@ -1370,10 +1400,10 @@ cairn_init(
         shared->noatime = 0; // Default to false
     }
 
-    pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->multi_inode_lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->multi_inode_lock, NULL);
     for (i = 0; i < CAIRN_INODE_LOCK_STRIPES; i++) {
-        pthread_mutex_init(&shared->inode_mutexes[i], NULL);
+        evpl_mutex_init(&shared->inode_mutexes[i], NULL);
     }
 
     /*
@@ -1596,10 +1626,10 @@ cairn_destroy(void *private_data)
     rocksdb_block_based_options_destroy(shared->meta_table_options);
     rocksdb_block_based_options_destroy(shared->data_table_options);
     for (i = 0; i < CAIRN_INODE_LOCK_STRIPES; i++) {
-        pthread_mutex_destroy(&shared->inode_mutexes[i]);
+        evpl_mutex_destroy(&shared->inode_mutexes[i]);
     }
-    pthread_mutex_destroy(&shared->multi_inode_lock);
-    pthread_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->multi_inode_lock);
+    evpl_mutex_destroy(&shared->lock);
     free(shared);
 } /* cairn_destroy */
 
@@ -1944,9 +1974,9 @@ cairn_thread_init(
 
     thread->shared = shared;
     thread->evpl   = evpl;
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     thread->next_inum = 3;
 
@@ -2008,7 +2038,7 @@ cairn_map_attrs(
         attr->va_mtime = inode->mtime;
         attr->va_ctime = inode->ctime;
         attr->va_ino   = inode->inum;
-        attr->va_dev   = (42UL << 32) | 42;
+        attr->va_dev   = (42ULL << 32) | 42;
         attr->va_rdev  = inode->rdev;
 
         /* cairn persists DOS attributes natively, so report them alongside
@@ -2343,10 +2373,10 @@ cairn_setattr(
                 cairn_remove_acl(thread, inode->inum);
             }
         } else if (orig_set_mask & CHIMERA_VFS_ATTR_MODE) {
-            static __thread uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
-            static __thread uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
-            struct chimera_acl     *old_acl = (struct chimera_acl *) old_buf;
-            struct chimera_acl     *new_acl = (struct chimera_acl *) new_buf;
+            static CHIMERA_THREAD_LOCAL uint8_t old_buf[CAIRN_ACL_STRUCT_SCRATCH];
+            static CHIMERA_THREAD_LOCAL uint8_t new_buf[CAIRN_ACL_STRUCT_SCRATCH];
+            struct chimera_acl                 *old_acl = (struct chimera_acl *) old_buf;
+            struct chimera_acl                 *new_acl = (struct chimera_acl *) new_buf;
 
             if (cairn_load_acl(thread, inode->inum, old_acl) &&
                 chimera_acl_chmod(old_acl, inode->mode, new_acl,
@@ -2602,12 +2632,12 @@ cairn_mount(
         path    = path_end;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs = namelen ? cairn_fs_find(shared, name, namelen) : NULL;
 
     if (unlikely(!fs)) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2615,14 +2645,14 @@ cairn_mount(
 
     fs->mount_count++;
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     rc = cairn_lookup_path(thread, fs, path, path_end - path, &ih);
 
     if (unlikely(rc)) {
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         fs->mount_count--;
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2651,9 +2681,9 @@ cairn_umount(
     struct cairn_fs *fs = request->umount.mount_private;
 
     if (fs) {
-        pthread_mutex_lock(&shared->lock);
+        evpl_mutex_lock(&shared->lock);
         fs->mount_count--;
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
     }
 
     request->status = CHIMERA_VFS_OK;
@@ -2733,10 +2763,10 @@ cairn_mkfs(
     fs_key[0] = CAIRN_KEY_FS;
     memcpy(fs_key + 1, request->mkfs.name, request->mkfs.namelen);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     if (cairn_fs_find(shared, request->mkfs.name, request->mkfs.namelen)) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_EEXIST;
         request->complete(request);
         return;
@@ -2758,7 +2788,7 @@ cairn_mkfs(
 
     cairn_fs_attach(shared, request->mkfs.name, request->mkfs.namelen, &record);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2969,12 +2999,12 @@ cairn_rmfs(
         return;
     }
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     fs = cairn_fs_find(shared, request->rmfs.name, request->rmfs.namelen);
 
     if (!fs) {
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
@@ -2984,7 +3014,7 @@ cairn_rmfs(
         /* Still mounted.  That is the whole test: umount does not return
          * until every open handle on the mount has been closed and released,
          * so no mount means no close can still land on these records. */
-        pthread_mutex_unlock(&shared->lock);
+        evpl_mutex_unlock(&shared->lock);
         request->status = CHIMERA_VFS_EBUSY;
         request->complete(request);
         return;
@@ -2992,7 +3022,7 @@ cairn_rmfs(
 
     DL_DELETE(shared->fs_list, fs);
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     cairn_rmfs_delete_tree(shared, fs->root_inum);
 
@@ -3815,9 +3845,9 @@ cairn_inode_access(
     const struct chimera_vfs_cred *cred,
     uint32_t                       requested)
 {
-    static __thread uint8_t  aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
-    struct chimera_acl      *acl = (struct chimera_acl *) aclbuf;
-    struct chimera_vfs_attrs attr;
+    static CHIMERA_THREAD_LOCAL uint8_t aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl                 *acl = (struct chimera_acl *) aclbuf;
+    struct chimera_vfs_attrs            attr;
 
     attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
         CHIMERA_VFS_ATTR_GID;
@@ -4312,7 +4342,7 @@ cairn_read(
             if (hole_size > bytes_remaining) {
                 hole_size = bytes_remaining;
             }
-            memset(iov[0].data + (current_offset - offset), 0, hole_size);
+            memset((char *) iov[0].data + (current_offset - offset), 0, hole_size);
             current_offset  += hole_size;
             bytes_remaining -= hole_size;
         }
@@ -4336,7 +4366,7 @@ cairn_read(
                 copy_size = bytes_remaining;
             }
 
-            memcpy(iov[0].data + dest_offset,
+            memcpy((char *) iov[0].data + dest_offset,
                    data + extent_offset,
                    copy_size);
 
@@ -4349,7 +4379,7 @@ cairn_read(
 
     if (bytes_remaining) {
         /* Fill trailing hole with zeros */
-        memset(iov[0].data + (current_offset - offset), 0, bytes_remaining);
+        memset((char *) iov[0].data + (current_offset - offset), 0, bytes_remaining);
     }
 
     rocksdb_iter_destroy(iter);

@@ -11,13 +11,18 @@
  *     and dispatch falls back to inline execution on the caller thread.
  */
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #undef NDEBUG
 #include <assert.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#include <pthread.h>
+#endif /* ifdef _WIN32 */
+#include "common/thread.h"
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
@@ -34,7 +39,7 @@ struct test_ctx {
     int                        done;
     enum chimera_vfs_error status;
     int                        search_hits;
-    pthread_t                  dispatch_tid;
+    evpl_thread_id_t           dispatch_tid;
     struct chimera_vfs        *vfs;
     struct chimera_vfs_thread *vfs_thread;
     struct evpl               *evpl;
@@ -78,7 +83,7 @@ search_keys_callback(
 {
     struct test_ctx *ctx = private_data;
 
-    ctx->dispatch_tid = pthread_self();
+    ctx->dispatch_tid = evpl_current_thread();
     ctx->search_hits++;
     return 0;
 } /* search_keys_callback */
@@ -137,9 +142,9 @@ put_key(
 
 /*
  * Runs a search over a range that matches a single inserted key and returns
- * the pthread_t that ran the per-entry callback.
+ * the evpl_thread_id_t that ran the per-entry callback.
  */
-static pthread_t
+static evpl_thread_id_t
 search_for_single_key(
     struct test_ctx *ctx,
     const char      *key)
@@ -192,13 +197,13 @@ delete_keys(
 static void
 test_sync_delegation_enabled(struct test_ctx *ctx)
 {
-    pthread_t main_tid = pthread_self();
-    pthread_t tids[NUM_DISTINCT_KEYS];
-    char      keys[NUM_DISTINCT_KEYS][32];
-    char      values[NUM_DISTINCT_KEYS][32];
-    int       i, j;
-    int       distinct_threads = 0;
-    int       saw_main_thread  = 0;
+    evpl_thread_id_t main_tid = evpl_current_thread();
+    evpl_thread_id_t tids[NUM_DISTINCT_KEYS];
+    char             keys[NUM_DISTINCT_KEYS][32];
+    char             values[NUM_DISTINCT_KEYS][32];
+    int              i, j;
+    int              distinct_threads = 0;
+    int              saw_main_thread  = 0;
 
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
         snprintf(keys[i], sizeof(keys[i]), "sync_test_%02d", i);
@@ -208,7 +213,7 @@ test_sync_delegation_enabled(struct test_ctx *ctx)
 
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
         tids[i] = search_for_single_key(ctx, keys[i]);
-        if (pthread_equal(tids[i], main_tid)) {
+        if (evpl_thread_equal(tids[i], main_tid)) {
             saw_main_thread = 1;
         }
     }
@@ -219,15 +224,15 @@ test_sync_delegation_enabled(struct test_ctx *ctx)
 
     /* Affinity: re-running search for the same key lands on the same thread. */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
-        pthread_t again = search_for_single_key(ctx, keys[i]);
-        assert(pthread_equal(again, tids[i]));
+        evpl_thread_id_t again = search_for_single_key(ctx, keys[i]);
+        assert(evpl_thread_equal(again, tids[i]));
     }
 
     /* Distribution: 4 threads, 32 independently hashed keys -> multiple used. */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
         int seen = 0;
         for (j = 0; j < i; j++) {
-            if (pthread_equal(tids[i], tids[j])) {
+            if (evpl_thread_equal(tids[i], tids[j])) {
                 seen = 1;
                 break;
             }
@@ -248,9 +253,9 @@ test_sync_delegation_enabled(struct test_ctx *ctx)
 static void
 test_sync_delegation_disabled(struct test_ctx *ctx)
 {
-    pthread_t main_tid = pthread_self();
-    pthread_t tid;
-    char      keys[1][32];
+    evpl_thread_id_t main_tid = evpl_current_thread();
+    evpl_thread_id_t tid;
+    char             keys[1][32];
 
     snprintf(keys[0], sizeof(keys[0]), "inline_key_a");
     put_key(ctx, keys[0], "v_a");
@@ -259,7 +264,7 @@ test_sync_delegation_disabled(struct test_ctx *ctx)
 
     /* With the sync pool disabled, the BLOCKING flag is ignored and dispatch
      * must happen inline on the caller thread. */
-    assert(pthread_equal(tid, main_tid));
+    assert(evpl_thread_equal(tid, main_tid));
 
     delete_keys(ctx, keys, 1);
 
@@ -279,7 +284,7 @@ run_phase(
     char                          tmpl[]    = "/tmp/chimera_sync_deleg_XXXXXX";
     char                         *cairn_dir = mkdtemp(tmpl);
     char                          cairn_cfg[256];
-    char                          rmcmd[512];
+
 
     assert(cairn_dir != NULL);
 
@@ -342,8 +347,7 @@ run_phase(
     evpl_destroy(ctx.evpl);
     prometheus_metrics_destroy(metrics);
 
-    snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", cairn_dir);
-    if (system(rmcmd) != 0) {
+    if (chimera_test_remove_tree(cairn_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", cairn_dir);
     }
 } /* run_phase */

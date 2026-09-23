@@ -4,13 +4,25 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/atomic.h"
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdio.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif /* ifndef _WIN32 */
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <utlist.h>
 
 #include "common/platform.h"
@@ -74,10 +86,10 @@ chimera_vfs_delegation_drain(struct chimera_vfs_delegation_thread *delegation_th
     struct chimera_vfs_request *requests, *request;
     struct chimera_vfs_module  *module;
 
-    pthread_mutex_lock(&delegation_thread->lock);
+    evpl_mutex_lock(&delegation_thread->lock);
     requests                    = delegation_thread->requests;
     delegation_thread->requests = NULL;
-    pthread_mutex_unlock(&delegation_thread->lock);
+    evpl_mutex_unlock(&delegation_thread->lock);
 
     while (requests) {
         request = requests;
@@ -160,7 +172,7 @@ chimera_vfs_close_thread_callback(
 
     close_thread->num_pending--;
 
-    __atomic_add_fetch(&close_thread->closes_completed, 1, __ATOMIC_RELEASE);
+    chimera_atomic_add_fetch(&close_thread->closes_completed, 1, CHIMERA_MEMORY_RELEASE);
 } /* chimera_vfs_close_thread_callback */
 
 static uint64_t
@@ -196,7 +208,7 @@ chimera_vfs_close_thread_sweep(
         } else {
             /* Nothing to close, so the fence slot this handle took when it left
              * the cache is settled here rather than by a callback. */
-            __atomic_add_fetch(&close_thread->closes_completed, 1, __ATOMIC_RELEASE);
+            chimera_atomic_add_fetch(&close_thread->closes_completed, 1, CHIMERA_MEMORY_RELEASE);
         }
 
         /* defer_close removed the handle from the bucket but frees the struct
@@ -247,10 +259,10 @@ chimera_vfs_close_thread_wake_shutdown(
     if (count == 0 && close_thread->num_pending == 0) {
         /* Fully drained: hand off to the waiter in chimera_vfs_destroy.  Signal
          * under the lock so the wakeup can't be lost against its cond_wait. */
-        pthread_mutex_lock(&close_thread->lock);
+        evpl_mutex_lock(&close_thread->lock);
         close_thread->signaled = 1;
-        pthread_cond_signal(&close_thread->cond);
-        pthread_mutex_unlock(&close_thread->lock);
+        evpl_cond_signal(&close_thread->cond);
+        evpl_mutex_unlock(&close_thread->lock);
         return;
     }
 
@@ -397,6 +409,15 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
 {
     char  hostname[64];
     char  machine_id[64];
+
+#ifdef _WIN32
+    DWORD hostname_size = sizeof(hostname);
+    if (!GetComputerNameA(hostname, &hostname_size)) {
+        snprintf(hostname, sizeof(hostname), "unknown");
+    }
+    chimera_vfs_abort_if(chimera_windows_machine_identity(machine_id, sizeof(machine_id)),
+                         "Could not determine the Windows machine identity");
+#else  /* ifdef _WIN32 */
     int   len;
     FILE *fp;
 
@@ -452,6 +473,8 @@ chimera_vfs_synthesize_machine_name(struct chimera_vfs *vfs)
         snprintf(machine_id, sizeof(machine_id), "%08lx", gethostid());
     }
 
+#endif /* ifdef _WIN32 */
+
     /* Synthesize machine name: hostname chimera version machine-id */
     vfs->machine_name_len = snprintf(vfs->machine_name,
                                      sizeof(vfs->machine_name),
@@ -486,7 +509,7 @@ chimera_vfs_spawn_delegation_pool(
     for (int i = 0; i < count; i++) {
         pool[i].vfs  = vfs;
         pool[i].mode = mode;
-        pthread_mutex_init(&pool[i].lock, NULL);
+        evpl_mutex_init(&pool[i].lock, NULL);
 
         pool[i].evpl_thread = evpl_thread_create(
             NULL,
@@ -562,6 +585,9 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
     free(workers);
 } /* chimera_vfs_create_call_rcu_workers */
 
+
+
+
 #else /* !CHIMERA_HAVE_URCU */
 
 /* No worker pool to size: see chimera_rcu.h. */
@@ -572,6 +598,42 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 } /* chimera_vfs_create_call_rcu_workers */
 
 #endif /* CHIMERA_HAVE_URCU */
+
+/* Native builds resolve built-ins explicitly so archive members are retained.
+* External modules require a shared Chimera SDK and remain a Unix facility. */
+static struct chimera_vfs_module *
+chimera_vfs_find_module(const char *symbol)
+{
+#ifdef _WIN32
+    extern struct chimera_vfs_module vfs_root, vfs_memfs, vfs_memkv;
+    extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
+#ifdef CHIMERA_HAVE_SQLITE_VFS
+    extern struct chimera_vfs_module vfs_sqlite;
+#endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
+    struct chimera_vfs_module       *builtins[] = {
+        &vfs_root,
+        &vfs_memfs,
+        &vfs_memkv,
+        &vfs_nfs,
+        &vfs_smb,
+        &vfs_diskfs,
+#ifdef HAVE_CAIRN
+        &vfs_cairn,
+#endif /* ifdef HAVE_CAIRN */
+#ifdef CHIMERA_HAVE_SQLITE_VFS
+        &vfs_sqlite,
+#endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
+    };
+    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
+        if (!strncmp(symbol, "vfs_", 4) && !strcmp(symbol + 4, builtins[i]->name)) {
+            return builtins[i];
+        }
+    }
+    return NULL;
+#else  /* ifdef _WIN32 */
+    return dlsym(RTLD_DEFAULT, symbol);
+#endif /* ifdef _WIN32 */
+} /* chimera_vfs_find_module */
 
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
@@ -589,7 +651,10 @@ chimera_vfs_init(
     struct chimera_vfs        *vfs;
     struct chimera_vfs_module *module;
     char                       modsym[80];
+
+#ifndef _WIN32
     void                      *handle;
+#endif /* ifndef _WIN32 */
     const char                *effective_kv_module;
 
     /* Bring up the process-wide TSC clock before any cache/timestamp use. */
@@ -670,10 +735,14 @@ chimera_vfs_init(
         // If a module path is specified, attempt to load the shared object
         if (module_cfgs[i].module_path[0] != '\0') {
             // Check if the symbol is already present (module already loaded)
-            if (dlsym(RTLD_DEFAULT, modsym) != NULL) {
+            if (chimera_vfs_find_module(modsym) != NULL) {
                 chimera_vfs_error("Module %s already loaded, skipping dlopen of %s",
                                   module_cfgs[i].module_name, module_cfgs[i].module_path);
             } else {
+#ifdef _WIN32
+                chimera_vfs_abort_if(1, "External VFS modules require a shared-library build: %s",
+                                     module_cfgs[i].module_path);
+#else  /* ifdef _WIN32 */
                 // Attempt to load the module shared object
                 handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
                 if (!handle) {
@@ -683,11 +752,12 @@ chimera_vfs_init(
                                          dlerror());
                 }
                 chimera_vfs_info("Module %s loaded from %s", module_cfgs[i].module_name, module_cfgs[i].module_path);
+#endif /* ifdef _WIN32 */
             }
         }
 
         // Lookup the module symbol (should be present after dlopen or if statically linked)
-        module = dlsym(RTLD_DEFAULT, modsym);
+        module = chimera_vfs_find_module(modsym);
         chimera_vfs_abort_if(!module,
                              "Module %s symbol %s not found after loading %s",
                              module_cfgs[i].module_name,
@@ -724,7 +794,7 @@ chimera_vfs_init(
             module = &vfs_memkv;
         } else {
             snprintf(modsym, sizeof(modsym), "vfs_%s", effective_kv_module);
-            module = dlsym(RTLD_DEFAULT, modsym);
+            module = chimera_vfs_find_module(modsym);
         }
         chimera_vfs_abort_if(!module,
                              "KV module '%s' not found (symbol vfs_%s)",
@@ -750,8 +820,8 @@ chimera_vfs_init(
     vfs->async_delegation_threads     = chimera_vfs_spawn_delegation_pool(
         vfs, num_async_delegation_threads, CHIMERA_VFS_DELEGATION_ASYNC);
 
-    pthread_mutex_init(&vfs->close_thread.lock, NULL);
-    pthread_cond_init(&vfs->close_thread.cond, NULL);
+    evpl_mutex_init(&vfs->close_thread.lock, NULL);
+    evpl_cond_init(&vfs->close_thread.cond, NULL);
     vfs->close_thread.vfs      = vfs;
     vfs->close_thread.shutdown = 0;
 
@@ -836,7 +906,7 @@ chimera_vfs_module_capabilities(
 #define CHIMERA_RCU_TEARDOWN_MAX_THREADS 64
 
 struct chimera_rcu_teardown_ctx {
-    pthread_t              thread;
+    evpl_native_thread_t   thread;
     struct call_rcu_data **crdps;
     int                    count;
     int                    started;
@@ -945,7 +1015,7 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
         ctx[t].count = (idx + per <= n) ? per : (n - idx);
         idx         += ctx[t].count;
 
-        if (pthread_create(&ctx[t].thread, NULL, chimera_vfs_rcu_teardown_worker, &ctx[t]) == 0) {
+        if (evpl_native_thread_create(&ctx[t].thread, NULL, chimera_vfs_rcu_teardown_worker, &ctx[t]) == 0) {
             ctx[t].started = 1;
         } else {
             /* Spawn failed -- free this chunk inline so nothing leaks. */
@@ -955,13 +1025,14 @@ chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
 
     for (int t = 0; t < nthreads; t++) {
         if (ctx[t].started) {
-            pthread_join(ctx[t].thread, NULL);
+            evpl_native_thread_join(ctx[t].thread, NULL);
         }
     }
 
     free(ctx);
     free(crdps);
 } /* chimera_vfs_free_all_cpu_call_rcu_data_parallel */
+
 
 #else /* !CHIMERA_HAVE_URCU */
 
@@ -980,15 +1051,15 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     struct chimera_vfs_module *module;
     int                        i;
 
-    pthread_mutex_lock(&vfs->close_thread.lock);
+    evpl_mutex_lock(&vfs->close_thread.lock);
     vfs->close_thread.shutdown = 1;
 
-    __sync_synchronize();
+    atomic_thread_fence(memory_order_seq_cst);
 
     evpl_ring_doorbell(&vfs->close_thread.doorbell);
 
-    pthread_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
-    pthread_mutex_unlock(&vfs->close_thread.lock);
+    evpl_cond_wait(&vfs->close_thread.cond, &vfs->close_thread.lock);
+    evpl_mutex_unlock(&vfs->close_thread.lock);
 
     /* Stop the identity resolver first: its workers ring protocol/delegation
      * thread doorbells and write the user cache, both of which must still be
@@ -1091,14 +1162,14 @@ chimera_vfs_process_completion(
     struct chimera_vfs_thread  *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
     struct chimera_vfs_request *complete_requests, *unblocked_requests, *io_resume_requests, *request;
 
-    pthread_mutex_lock(&thread->lock);
+    evpl_mutex_lock(&thread->lock);
     complete_requests                 = thread->pending_complete_requests;
     unblocked_requests                = thread->unblocked_requests;
     io_resume_requests                = thread->pending_io_resume;
     thread->pending_complete_requests = NULL;
     thread->unblocked_requests        = NULL;
     thread->pending_io_resume         = NULL;
-    pthread_mutex_unlock(&thread->lock);
+    evpl_mutex_unlock(&thread->lock);
 
     while (complete_requests) {
         request = complete_requests;
@@ -1249,7 +1320,7 @@ static const struct evpl_loop_hooks chimera_vfs_rcu_hooks = {
  * install the loop hooks) exactly once per thread, on the first entry, and
  * tear down on the last.  Thread-local, so no locking is needed.
  */
-static __thread int chimera_vfs_rcu_refs;
+static CHIMERA_THREAD_LOCAL int chimera_vfs_rcu_refs;
 
 SYMBOL_EXPORT struct chimera_vfs_thread *
 chimera_vfs_thread_init(
@@ -1270,7 +1341,7 @@ chimera_vfs_thread_init(
      * CPU migration -- and never strands in a stripe nothing pops. */
     {
         static uint32_t rcu_stripe_seq;
-        uint32_t        s = __atomic_fetch_add(&rcu_stripe_seq, 1, __ATOMIC_RELAXED);
+        uint32_t        s = chimera_atomic_fetch_add(&rcu_stripe_seq, 1, CHIMERA_MEMORY_RELAXED);
         int             p;
 
         for (p = 0; p < CHIMERA_RCU_POOL_COUNT; p++) {
@@ -1292,7 +1363,7 @@ chimera_vfs_thread_init(
         evpl_set_loop_hooks(evpl, &chimera_vfs_rcu_hooks);
     }
 
-    pthread_mutex_init(
+    evpl_mutex_init(
         &thread->lock,
         NULL);
 

@@ -16,6 +16,7 @@
  * That path is exercised by the libsmb2-based integration test.
  */
 
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -808,7 +809,7 @@ test_subtree_rpl_max_pending_overflows(void)
     /* watch_create populated a mount entry while registering the
      * subtree watch.  Flip has_rpl=1 so the emit path leaves the
      * !has_rpl branch and reaches the pending-queue check. */
-    pthread_mutex_lock(&notify->mount_entries_lock);
+    evpl_mutex_lock(&notify->mount_entries_lock);
     HASH_FIND(hh, notify->mount_entries,
               chimera_vfs_fh_mount_id(parent_fh),
               CHIMERA_VFS_MOUNT_ID_SIZE, me);
@@ -816,13 +817,13 @@ test_subtree_rpl_max_pending_overflows(void)
     if (me) {
         me->has_rpl = 1;
     }
-    pthread_mutex_unlock(&notify->mount_entries_lock);
+    evpl_mutex_unlock(&notify->mount_entries_lock);
 
     /* Fill the pending-events counter to the cap so emit takes the
      * max-pending fallback path. */
-    pthread_mutex_lock(&notify->pending_lock);
+    evpl_mutex_lock(&notify->pending_lock);
     notify->num_pending = CHIMERA_VFS_NOTIFY_MAX_PENDING;
-    pthread_mutex_unlock(&notify->pending_lock);
+    evpl_mutex_unlock(&notify->pending_lock);
 
     chimera_vfs_notify_emit(notify, child_fh, sizeof(child_fh),
                             CHIMERA_VFS_NOTIFY_FILE_ADDED,
@@ -833,12 +834,12 @@ test_subtree_rpl_max_pending_overflows(void)
     CHECK(overflowed == 1, "watch overflowed on max-pending coarse fallback");
 
     /* num_pending must not have been incremented — no resolver started. */
-    pthread_mutex_lock(&notify->pending_lock);
+    evpl_mutex_lock(&notify->pending_lock);
     CHECK(notify->num_pending == CHIMERA_VFS_NOTIFY_MAX_PENDING,
           "num_pending unchanged by overflow path");
     /* Reset so destroy()'s wait loop terminates. */
     notify->num_pending = 0;
-    pthread_mutex_unlock(&notify->pending_lock);
+    evpl_mutex_unlock(&notify->pending_lock);
 
     chimera_vfs_notify_watch_destroy(notify, watch);
     chimera_vfs_notify_destroy(notify);
@@ -1073,7 +1074,7 @@ test_cross_dir_source_overflows_subtree(void)
     /* Force has_rpl=1 so emit takes the RPL path (otherwise the
      * !has_rpl coarse fallback would overflow too, but for a
      * different reason). */
-    pthread_mutex_lock(&notify->mount_entries_lock);
+    evpl_mutex_lock(&notify->mount_entries_lock);
     HASH_FIND(hh, notify->mount_entries,
               chimera_vfs_fh_mount_id(parent_fh),
               CHIMERA_VFS_MOUNT_ID_SIZE, me);
@@ -1081,7 +1082,7 @@ test_cross_dir_source_overflows_subtree(void)
     if (me) {
         me->has_rpl = 1;
     }
-    pthread_mutex_unlock(&notify->mount_entries_lock);
+    evpl_mutex_unlock(&notify->mount_entries_lock);
 
     /* Emit on child_fh with name_len=0 (cross-dir source-side
      * RENAMED).  The exact-watch path does not match (different fh
@@ -1147,6 +1148,7 @@ main(
     (void) argv;
 
     ChimeraLogLevel = CHIMERA_LOG_INFO;
+    chimera_vfs_clock_init();
 
     /* Required for the RPL cache test — its insert/invalidate paths
      * retire through the RCU shim, which needs this thread registered. */

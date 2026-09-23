@@ -30,10 +30,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
+#include "common/dirent.h"
+#include "common/thread.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/sysmacros.h>
+#endif // ifdef _WIN32
 
 struct chimera_vfs_fsid_ent {
     uint64_t devkey;   /* (major << 32) | minor */
@@ -41,12 +48,12 @@ struct chimera_vfs_fsid_ent {
 };
 
 static struct {
-    pthread_mutex_t              lock;
+    evpl_mutex_t                 lock;
     struct chimera_vfs_fsid_ent *ents;
     int                          num;
     int                          cap;
     int                          built;
-} chimera_vfs_fsid = { .lock = PTHREAD_MUTEX_INITIALIZER };
+} chimera_vfs_fsid = { .lock = EVPL_MUTEX_INITIALIZER };
 
 static inline uint64_t
 chimera_vfs_fsid_hash(
@@ -260,15 +267,15 @@ chimera_vfs_fsid_for_dev(
     char                        *mountinfo;
 
     /* Fast path: the map is built and already knows this device. */
-    pthread_mutex_lock(&chimera_vfs_fsid.lock);
+    evpl_mutex_lock(&chimera_vfs_fsid.lock);
     if (chimera_vfs_fsid.built) {
         fsid = chimera_vfs_fsid_lookup_locked(devkey);
         if (fsid) {
-            pthread_mutex_unlock(&chimera_vfs_fsid.lock);
+            evpl_mutex_unlock(&chimera_vfs_fsid.lock);
             return fsid;
         }
     }
-    pthread_mutex_unlock(&chimera_vfs_fsid.lock);
+    evpl_mutex_unlock(&chimera_vfs_fsid.lock);
 
     /* Slow path -- (re)build (first use, or a device mounted since the last
      * build).  Do the blocking I/O (the by-uuid scan and the mountinfo read)
@@ -277,14 +284,14 @@ chimera_vfs_fsid_for_dev(
     num_uuids = chimera_vfs_fsid_scan_uuids(&uuids);
     mountinfo = chimera_vfs_fsid_slurp("/proc/self/mountinfo");
 
-    pthread_mutex_lock(&chimera_vfs_fsid.lock);
+    evpl_mutex_lock(&chimera_vfs_fsid.lock);
     chimera_vfs_fsid_rebuild_locked(mountinfo, uuids, num_uuids);
     fsid = chimera_vfs_fsid_lookup_locked(devkey);
     if (!fsid) {
         fsid = chimera_vfs_fsid_hash(&devkey, sizeof(devkey));
         chimera_vfs_fsid_append(devkey, fsid);   /* anon dev: stable synthesized id */
     }
-    pthread_mutex_unlock(&chimera_vfs_fsid.lock);
+    evpl_mutex_unlock(&chimera_vfs_fsid.lock);
 
     free(mountinfo);
     free(uuids);

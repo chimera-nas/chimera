@@ -2,9 +2,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #include "vfs_claim.h"
 #include "vfs_claim_internal.h"
@@ -105,7 +110,7 @@ chimera_vfs_bl_post(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file)
 {
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
     if (!file->bl_work_queued) {
         file->bl_work_queued = 1;
         file->bl_work_next   = NULL;
@@ -125,7 +130,7 @@ chimera_vfs_bl_post(
             evpl_ring_doorbell(state->service_doorbell);
         }
     }
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 } /* chimera_vfs_bl_post */
 
 /* Lazy module scan: the close thread attaches before backends register, so
@@ -188,7 +193,7 @@ chimera_vfs_claim_backend_reeval(
         return;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     chimera_vfs_bl_target_locked(file, &rev, &deny, &held_rev);
 
     switch (file->bl_state) {
@@ -217,7 +222,7 @@ chimera_vfs_claim_backend_reeval(
         default:
             break;
     } /* switch */
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (post) {
         chimera_vfs_bl_post(state, file);
@@ -250,7 +255,7 @@ chimera_vfs_bl_acquire_complete(
 
     (void) conflict; /* an AGGREGATE grant is a mask, never a range */
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     if (error_code != CHIMERA_VFS_OK) {
         /* Backend refused outright: remember the missing bits so parked
          * implicit I/O fails EACCES instead of spinning; keep any prior
@@ -270,7 +275,7 @@ chimera_vfs_bl_acquire_complete(
             take_ref          = true;
         }
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (take_ref) {
         /* The held token keeps the file anchored (dropped at release). */
@@ -300,7 +305,7 @@ chimera_vfs_bl_release_complete(
 
     (void) error_code; /* best-effort: local state advances regardless */
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     drop_ref           = file->bl_ref_held;
     file->bl_ref_held  = 0;
     file->bl_token     = 0;
@@ -308,7 +313,7 @@ chimera_vfs_bl_release_complete(
     file->bl_held_deny = 0;
     file->bl_refused   = 0;
     file->bl_state     = CHIMERA_VFS_BL_NONE;
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (drop_ref) {
         chimera_vfs_state_put(state, file);
@@ -339,12 +344,12 @@ chimera_vfs_bl_step(
             chimera_vfs_get_module(state->service_thread, file->fh,
                                    file->fh_len);
 
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         file->bl_probed = 1;
         if (!module || !(module->capabilities & CHIMERA_VFS_CAP_CLAIM_AGGREGATE)) {
             file->bl_disabled = 1;
         }
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
     }
 
     if (file->bl_disabled) {
@@ -353,7 +358,7 @@ chimera_vfs_bl_step(
         return;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     chimera_vfs_bl_target_locked(file, &rev, &deny, &held_rev);
 
     switch (file->bl_state) {
@@ -398,7 +403,7 @@ chimera_vfs_bl_step(
         default:
             break;
     } /* switch */
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (!action) {
         return;
@@ -460,7 +465,7 @@ chimera_vfs_claim_backend_recall(
         return;
     }
 
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     accept = (file->bl_state == CHIMERA_VFS_BL_HELD &&
               file->bl_token == token);
     if (accept) {
@@ -468,7 +473,7 @@ chimera_vfs_claim_backend_recall(
         file->bl_recall_retain = retain;
         file->bl_refused       = 0; /* the world changed; requests may work */
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     if (accept) {
         /* Drive the frontend recalls on the service thread: the trigger
@@ -496,12 +501,12 @@ chimera_vfs_bl_recall_drive(
     chimera_vfs_claim_trigger_ns_full(state, file, NULL, flush_only, NULL);
 
     /* Drain the implicit claim when it holds bits beyond the floor. */
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     {
         bool drain = file->implicit_active &&
             (file->implicit_claim.used & (uint8_t) ~retain) != 0;
 
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
         if (drain) {
             chimera_vfs_claim_begin_break_ex(state, &file->implicit_claim,
                                              0, 0, true);
@@ -524,11 +529,11 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
         return;
     }
 
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
     head                = state->service_head;
     state->service_head = NULL;
     state->service_tail = NULL;
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 
     /* bl_work_queued stays SET across the splice and is cleared per file
      * just before its step: while it is set, bl_post leaves the node —
@@ -543,9 +548,9 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
         next               = file->bl_work_next;
         file->bl_work_next = NULL;
 
-        pthread_mutex_lock(&state->service_lock);
+        evpl_mutex_lock(&state->service_lock);
         file->bl_work_queued = 0;
-        pthread_mutex_unlock(&state->service_lock);
+        evpl_mutex_unlock(&state->service_lock);
 
         if (file->bl_state == CHIMERA_VFS_BL_RECALLING) {
             chimera_vfs_bl_recall_drive(state, file);
@@ -577,27 +582,27 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
          * selected AND dispatched under bl_dispatch_lock, so that an inline
          * confirm's drain cannot slip between the two and miss it; a TICKET
          * must NOT hold that lock, because its project_range takes it. */
-        pthread_mutex_lock(&state->service_lock);
+        evpl_mutex_lock(&state->service_lock);
         if (state->work_confirming) {
             /* A confirm is in flight; its completion resumes the drain. */
-            pthread_mutex_unlock(&state->service_lock);
+            evpl_mutex_unlock(&state->service_lock);
             break;
         }
         w      = state->work_head;
         is_rel = w && w->type == CHIMERA_VFS_BL_WORK_RELEASE;
-        pthread_mutex_unlock(&state->service_lock);
+        evpl_mutex_unlock(&state->service_lock);
 
         if (!w) {
             break;
         }
 
         if (is_rel) {
-            pthread_mutex_lock(&state->bl_dispatch_lock);
+            evpl_mutex_lock(&state->bl_dispatch_lock);
         }
 
         /* Re-read: the head may have changed while the lock was not held.
          * Only take it if it still matches what we prepared for. */
-        pthread_mutex_lock(&state->service_lock);
+        evpl_mutex_lock(&state->service_lock);
         w = state->work_head;
         if (w && (w->type == CHIMERA_VFS_BL_WORK_RELEASE) != is_rel) {
             w = NULL;
@@ -612,11 +617,11 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
                 state->work_confirming = true;
             }
         }
-        pthread_mutex_unlock(&state->service_lock);
+        evpl_mutex_unlock(&state->service_lock);
 
         if (!w) {
             if (is_rel) {
-                pthread_mutex_unlock(&state->bl_dispatch_lock);
+                evpl_mutex_unlock(&state->bl_dispatch_lock);
             }
             continue;
         }
@@ -633,7 +638,7 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
                                                   w->token, 0,
                                                   SEEK_SET, 0, 0, NULL,
                                                   NULL, NULL);
-                pthread_mutex_unlock(&state->bl_dispatch_lock);
+                evpl_mutex_unlock(&state->bl_dispatch_lock);
                 break;
         } /* switch */
         free(w);
@@ -671,9 +676,9 @@ chimera_vfs_claim_backend_attach(
 SYMBOL_EXPORT void
 chimera_vfs_claim_backend_detach(struct chimera_vfs_state *state)
 {
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
     state->service_doorbell = NULL;
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 } /* chimera_vfs_claim_backend_detach */
 
 /* ------------------------------------------------------------------ */
@@ -715,12 +720,12 @@ chimera_vfs_bl_range_complete(
      * protocol code that can take arbitrary locks, and nothing it does
      * needs the lane held. */
     if (serial_lane) {
-        pthread_mutex_lock(&state->service_lock);
+        evpl_mutex_lock(&state->service_lock);
         state->work_confirming = false;
         if (state->work_head && state->service_doorbell) {
             evpl_ring_doorbell(state->service_doorbell);
         }
-        pthread_mutex_unlock(&state->service_lock);
+        evpl_mutex_unlock(&state->service_lock);
     }
 
     if (error_code == CHIMERA_VFS_ENOTSUP) {
@@ -728,10 +733,10 @@ chimera_vfs_bl_range_complete(
          * chimera_vfs_claim_acquire_backend answered for it).  That is not a
          * refusal -- nobody outside this node has an opinion -- so the local
          * grant stands, and the file is marked so we stop asking. */
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         file->bl_range_disabled = 1;
         file->bl_range_probed   = 1;
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
 
         cb(CHIMERA_CLAIM_GRANTED, claim, NULL, cb_private);
         chimera_vfs_state_put(state, file);
@@ -741,7 +746,7 @@ chimera_vfs_bl_range_complete(
     if (error_code == CHIMERA_VFS_OK && granted) {
         uint64_t old_token;
 
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         old_token            = claim->backend_token;
         claim->backend_token = token;
         if (old_token && old_token != token) {
@@ -752,7 +757,7 @@ chimera_vfs_bl_range_complete(
              * file->lock, exactly as chimera_vfs_claim_release does. */
             chimera_vfs_claim_backend_release_token(state, file, old_token);
         }
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
 
         cb(CHIMERA_CLAIM_GRANTED, claim, NULL, cb_private);
     } else {
@@ -860,12 +865,12 @@ chimera_vfs_claim_backend_range_projects(
     module = chimera_vfs_get_module(thread, file->fh, file->fh_len);
 
     if (!file->bl_range_probed) {
-        pthread_mutex_lock(&file->lock);
+        evpl_mutex_lock(&file->lock);
         file->bl_range_probed = 1;
         if (!module || !(module->capabilities & CHIMERA_VFS_CAP_CLAIM_RANGE)) {
             file->bl_range_disabled = 1;
         }
-        pthread_mutex_unlock(&file->lock);
+        evpl_mutex_unlock(&file->lock);
     }
     if (file->bl_range_disabled) {
         return false;
@@ -908,9 +913,9 @@ chimera_vfs_claim_backend_drain_releases(
     struct chimera_vfs_bl_work *mine = NULL, **mtail = &mine;
 
     /* Selection and dispatch together: see bl_dispatch_lock in vfs_claim.h. */
-    pthread_mutex_lock(&state->bl_dispatch_lock);
+    evpl_mutex_lock(&state->bl_dispatch_lock);
 
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
     pp = &state->work_head;
     while ((w = *pp)) {
         if (w->type == CHIMERA_VFS_BL_WORK_RELEASE &&
@@ -934,7 +939,7 @@ chimera_vfs_claim_backend_drain_releases(
             state->work_tail = w;
         }
     }
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 
     while ((w = mine)) {
         mine = w->next;
@@ -946,7 +951,7 @@ chimera_vfs_claim_backend_drain_releases(
         free(w);
     }
 
-    pthread_mutex_unlock(&state->bl_dispatch_lock);
+    evpl_mutex_unlock(&state->bl_dispatch_lock);
 } /* chimera_vfs_claim_backend_drain_releases */
 
 /* The same drain, but tells the caller when the backend has actually let
@@ -994,7 +999,7 @@ chimera_vfs_claim_backend_flush_releases(
     struct chimera_vfs_bl_flush *fl;
     int                          n = 0;
 
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
     pp = &state->work_head;
     while ((w = *pp)) {
         if (w->type == CHIMERA_VFS_BL_WORK_RELEASE &&
@@ -1018,7 +1023,7 @@ chimera_vfs_claim_backend_flush_releases(
             state->work_tail = w;
         }
     }
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 
     if (n == 0) {
         cb(private_data);
@@ -1068,7 +1073,7 @@ chimera_vfs_claim_backend_ticket_cancel(
     struct chimera_vfs_bl_work *w, **pp;
     struct chimera_vfs_bl_work *yanked = NULL;
 
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
 
     pp = &state->work_head;
     while ((w = *pp)) {
@@ -1090,7 +1095,7 @@ chimera_vfs_claim_backend_ticket_cancel(
         pp = &w->next;
     }
 
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 
     free(yanked);
 
@@ -1103,7 +1108,7 @@ chimera_vfs_bl_work_enqueue(
     struct chimera_vfs_state   *state,
     struct chimera_vfs_bl_work *work)
 {
-    pthread_mutex_lock(&state->service_lock);
+    evpl_mutex_lock(&state->service_lock);
     work->next = NULL;
     if (state->work_tail) {
         state->work_tail->next = work;
@@ -1115,7 +1120,7 @@ chimera_vfs_bl_work_enqueue(
     if (state->service_doorbell) {
         evpl_ring_doorbell(state->service_doorbell);
     }
-    pthread_mutex_unlock(&state->service_lock);
+    evpl_mutex_unlock(&state->service_lock);
 } /* chimera_vfs_bl_work_enqueue */
 
 /* Fire-and-forget release of a projected RANGE token.  Ordered behind every

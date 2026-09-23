@@ -4,7 +4,11 @@
 
 #pragma once
 
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/sysmacros.h>
+#endif // ifdef _WIN32
 #include <sys/xattr.h>
 #include <fcntl.h>
 

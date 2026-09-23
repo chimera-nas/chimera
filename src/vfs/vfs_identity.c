@@ -16,10 +16,16 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
+#ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
+#endif /* ifndef _WIN32 */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #include "vfs.h"
 #include "vfs_internal.h"
@@ -51,12 +57,12 @@ struct chimera_vfs_identity_request {
 struct chimera_vfs_identity {
     struct chimera_vfs                        *vfs;
     int                                        num_workers;
-    pthread_t                                 *workers;
-    pthread_mutex_t                            lock;
-    pthread_cond_t                             cond;
+    evpl_native_thread_t                      *workers;
+    evpl_mutex_t                               lock;
+    evpl_cond_t                                cond;
     struct chimera_vfs_identity_request       *queue;
     int                                        shutdown;
-    pthread_mutex_t                            handler_lock;
+    evpl_mutex_t                               handler_lock;
     struct chimera_vfs_identity_handler_entry *handlers;
 };
 
@@ -186,9 +192,9 @@ chimera_vfs_identity_run_handlers(
     prefer_sid = (req->key == CHIMERA_VFS_IDENTITY_BY_UID ||
                   req->key == CHIMERA_VFS_IDENTITY_BY_GID);
 
-    pthread_mutex_lock(&identity->handler_lock);
+    evpl_mutex_lock(&identity->handler_lock);
     entry = identity->handlers;
-    pthread_mutex_unlock(&identity->handler_lock);
+    evpl_mutex_unlock(&identity->handler_lock);
 
     /* The handler list is only appended to at startup, so it is safe to walk
      * after grabbing the head. */
@@ -231,11 +237,11 @@ chimera_vfs_identity_worker(void *arg)
      * reader; registering it would put a thread that blocks in cond_wait and in
      * NSS/winbind resolution into the grace-period quorum and stall reclamation
      * process-wide. */
-    pthread_mutex_lock(&identity->lock);
+    evpl_mutex_lock(&identity->lock);
 
     while (1) {
         while (!identity->queue && !identity->shutdown) {
-            pthread_cond_wait(&identity->cond, &identity->lock);
+            evpl_cond_wait(&identity->cond, &identity->lock);
         }
 
         if (identity->shutdown && !identity->queue) {
@@ -245,7 +251,7 @@ chimera_vfs_identity_worker(void *arg)
         req = identity->queue;
         DL_DELETE(identity->queue, req);
 
-        pthread_mutex_unlock(&identity->lock);
+        evpl_mutex_unlock(&identity->lock);
 
         /* Blocking resolution happens here, off the event loop. */
         if (chimera_vfs_identity_run_handlers(identity, req) == 0) {
@@ -283,22 +289,23 @@ chimera_vfs_identity_worker(void *arg)
          * catch it, which is how it survived. */
         origin = req->origin;
 
-        pthread_mutex_lock(&origin->lock);
+        evpl_mutex_lock(&origin->lock);
         DL_APPEND(origin->pending_identity, req);
-        pthread_mutex_unlock(&origin->lock);
+        evpl_mutex_unlock(&origin->lock);
 
         evpl_ring_doorbell(&origin->doorbell);
 
-        pthread_mutex_lock(&identity->lock);
+        evpl_mutex_lock(&identity->lock);
     }
 
-    pthread_mutex_unlock(&identity->lock);
+    evpl_mutex_unlock(&identity->lock);
 
     return NULL;
 } /* chimera_vfs_identity_worker */
 
 /* ---- default NSS miss handler ------------------------------------------ */
 
+#ifndef _WIN32
 static int
 chimera_vfs_identity_nss_handler(
     enum chimera_vfs_identity_key       key,
@@ -367,6 +374,8 @@ chimera_vfs_identity_nss_handler(
     /* NSS supplies no SID; left empty so the algorithmic idmap is used. */
     return 0;
 } /* chimera_vfs_identity_nss_handler */
+#endif /* ifndef _WIN32 */
+
 
 static void
 chimera_vfs_identity_add_handler(
@@ -380,14 +389,14 @@ chimera_vfs_identity_add_handler(
     entry->handler      = handler;
     entry->private_data = private_data;
 
-    pthread_mutex_lock(&identity->handler_lock);
+    evpl_mutex_lock(&identity->handler_lock);
     /* Append to preserve registration order (NSS first, then winbind, ...). */
     pp = &identity->handlers;
     while (*pp) {
         pp = &(*pp)->next;
     }
     *pp = entry;
-    pthread_mutex_unlock(&identity->handler_lock);
+    evpl_mutex_unlock(&identity->handler_lock);
 } /* chimera_vfs_identity_add_handler */
 
 /* ---- lifecycle --------------------------------------------------------- */
@@ -407,26 +416,28 @@ chimera_vfs_identity_create(
     identity              = calloc(1, sizeof(*identity));
     identity->vfs         = vfs;
     identity->num_workers = num_workers;
-    identity->workers     = calloc(num_workers, sizeof(pthread_t));
+    identity->workers     = calloc(num_workers, sizeof(evpl_native_thread_t));
 
-    pthread_mutex_init(&identity->lock, NULL);
-    pthread_cond_init(&identity->cond, NULL);
-    pthread_mutex_init(&identity->handler_lock, NULL);
+    evpl_mutex_init(&identity->lock, NULL);
+    evpl_cond_init(&identity->cond, NULL);
+    evpl_mutex_init(&identity->handler_lock, NULL);
 
     /* The default local/NSS handler is always present and tried first.
      * (Registered directly on `identity`: vfs->identity is assigned only after
      * this function returns.) */
+#ifndef _WIN32
     chimera_vfs_identity_add_handler(identity, chimera_vfs_identity_nss_handler,
                                      NULL);
+#endif /* ifndef _WIN32 */
 
     for (i = 0; i < num_workers; i++) {
         int rc = chimera_pthread_create(&identity->workers[i], NULL,
                                         chimera_vfs_identity_worker, identity);
 
         /* A missing worker would leave queued identity jobs that nothing
-         * services and destroy() joining a garbage pthread_t. */
+         * services and destroy() joining a garbage evpl_native_thread_t. */
         chimera_vfs_abort_if(rc,
-                             "chimera_vfs_identity_create: pthread_create failed: %s",
+                             "chimera_vfs_identity_create: evpl_native_thread_create failed: %s",
                              strerror(rc));
     }
 
@@ -440,13 +451,13 @@ chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
     struct chimera_vfs_identity_request       *req;
     int                                        i;
 
-    pthread_mutex_lock(&identity->lock);
+    evpl_mutex_lock(&identity->lock);
     identity->shutdown = 1;
-    pthread_cond_broadcast(&identity->cond);
-    pthread_mutex_unlock(&identity->lock);
+    evpl_cond_broadcast(&identity->cond);
+    evpl_mutex_unlock(&identity->lock);
 
     for (i = 0; i < identity->num_workers; i++) {
-        pthread_join(identity->workers[i], NULL);
+        evpl_native_thread_join(identity->workers[i], NULL);
     }
 
     /* Any jobs still queued at shutdown are dropped (their callers are gone). */
@@ -463,9 +474,9 @@ chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
         entry = next;
     }
 
-    pthread_mutex_destroy(&identity->lock);
-    pthread_cond_destroy(&identity->cond);
-    pthread_mutex_destroy(&identity->handler_lock);
+    evpl_mutex_destroy(&identity->lock);
+    evpl_cond_destroy(&identity->cond);
+    evpl_mutex_destroy(&identity->handler_lock);
 
     free(identity->workers);
     free(identity);
@@ -514,10 +525,10 @@ chimera_vfs_identity_resolve(
         strncpy(req->name, name, sizeof(req->name) - 1);
     }
 
-    pthread_mutex_lock(&identity->lock);
+    evpl_mutex_lock(&identity->lock);
     DL_APPEND(identity->queue, req);
-    pthread_cond_signal(&identity->cond);
-    pthread_mutex_unlock(&identity->lock);
+    evpl_cond_signal(&identity->cond);
+    evpl_mutex_unlock(&identity->lock);
 } /* chimera_vfs_identity_resolve */
 
 SYMBOL_EXPORT int
@@ -540,10 +551,10 @@ chimera_vfs_identity_thread_complete(struct chimera_vfs_thread *thread)
 {
     struct chimera_vfs_identity_request *jobs, *req;
 
-    pthread_mutex_lock(&thread->lock);
+    evpl_mutex_lock(&thread->lock);
     jobs                     = thread->pending_identity;
     thread->pending_identity = NULL;
-    pthread_mutex_unlock(&thread->lock);
+    evpl_mutex_unlock(&thread->lock);
 
     while (jobs) {
         req = jobs;

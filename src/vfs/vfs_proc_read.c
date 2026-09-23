@@ -37,7 +37,7 @@ chimera_vfs_read_finalize_buffers(struct chimera_vfs_request *request)
         return;
     }
 
-    iov[0].data   += prefix;
+    iov[0].data    = (char *) iov[0].data + prefix;
     iov[0].length -= prefix;
 
     total = 0;

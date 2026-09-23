@@ -18,8 +18,12 @@
 #include <string.h>
 #undef NDEBUG
 #include <assert.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#include <pthread.h>
+#endif /* ifdef _WIN32 */
+#include "common/thread.h"
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
@@ -36,7 +40,7 @@ struct test_ctx {
     int                        done;
     enum chimera_vfs_error status;
     int                        search_hits;
-    pthread_t                  dispatch_tid;
+    evpl_thread_id_t           dispatch_tid;
     struct chimera_vfs        *vfs;
     struct chimera_vfs_thread *vfs_thread;
     struct evpl               *evpl;
@@ -79,7 +83,7 @@ search_keys_callback(
 {
     struct test_ctx *ctx = private_data;
 
-    ctx->dispatch_tid = pthread_self();
+    ctx->dispatch_tid = evpl_current_thread();
     ctx->search_hits++;
     return 0;
 } /* search_keys_callback */
@@ -126,9 +130,9 @@ put_key(
 
 /*
  * Runs a search over a range that matches a single inserted key and returns
- * the pthread_t that ran the per-entry callback.
+ * the evpl_thread_id_t that ran the per-entry callback.
  */
-static pthread_t
+static evpl_thread_id_t
 search_for_single_key(
     struct test_ctx *ctx,
     const char      *key)
@@ -162,13 +166,13 @@ search_for_single_key(
 static void
 test_async_delegation_enabled(struct test_ctx *ctx)
 {
-    pthread_t main_tid = pthread_self();
-    pthread_t tids[NUM_DISTINCT_KEYS];
-    char      keys[NUM_DISTINCT_KEYS][32];
-    char      values[NUM_DISTINCT_KEYS][32];
-    int       i, j;
-    int       distinct_threads = 0;
-    int       saw_main_thread  = 0;
+    evpl_thread_id_t main_tid = evpl_current_thread();
+    evpl_thread_id_t tids[NUM_DISTINCT_KEYS];
+    char             keys[NUM_DISTINCT_KEYS][32];
+    char             values[NUM_DISTINCT_KEYS][32];
+    int              i, j;
+    int              distinct_threads = 0;
+    int              saw_main_thread  = 0;
 
     /* Insert NUM_DISTINCT_KEYS keys with prefixes that should hash differently. */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
@@ -180,7 +184,7 @@ test_async_delegation_enabled(struct test_ctx *ctx)
     /* Run one search per key and capture the dispatch thread. */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
         tids[i] = search_for_single_key(ctx, keys[i]);
-        if (pthread_equal(tids[i], main_tid)) {
+        if (evpl_thread_equal(tids[i], main_tid)) {
             saw_main_thread = 1;
         }
     }
@@ -190,8 +194,8 @@ test_async_delegation_enabled(struct test_ctx *ctx)
 
     /* Affinity: re-running search for the same key should land on the same thread. */
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
-        pthread_t again = search_for_single_key(ctx, keys[i]);
-        assert(pthread_equal(again, tids[i]));
+        evpl_thread_id_t again = search_for_single_key(ctx, keys[i]);
+        assert(evpl_thread_equal(again, tids[i]));
     }
 
     /* Distribution: with NUM_ASYNC_THREADS=4 threads and NUM_DISTINCT_KEYS=32
@@ -199,7 +203,7 @@ test_async_delegation_enabled(struct test_ctx *ctx)
     for (i = 0; i < NUM_DISTINCT_KEYS; i++) {
         int seen = 0;
         for (j = 0; j < i; j++) {
-            if (pthread_equal(tids[i], tids[j])) {
+            if (evpl_thread_equal(tids[i], tids[j])) {
                 seen = 1;
                 break;
             }
@@ -230,8 +234,8 @@ test_async_delegation_enabled(struct test_ctx *ctx)
 static void
 test_async_delegation_disabled(struct test_ctx *ctx)
 {
-    pthread_t main_tid = pthread_self();
-    pthread_t tid;
+    evpl_thread_id_t main_tid = evpl_current_thread();
+    evpl_thread_id_t tid;
 
     put_key(ctx, "inline_key_a", "v_a");
 
@@ -239,7 +243,7 @@ test_async_delegation_disabled(struct test_ctx *ctx)
 
     /* With the async pool disabled and a non-BLOCKING backend, dispatch must
      * happen inline on the caller thread. */
-    assert(pthread_equal(tid, main_tid));
+    assert(evpl_thread_equal(tid, main_tid));
 
     chimera_vfs_delete_key(
         ctx->vfs_thread,

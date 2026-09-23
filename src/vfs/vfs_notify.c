@@ -2,10 +2,19 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/atomic.h"
+#include "common/thread.h"
 #include <string.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <utlist.h>
 
 #include "vfs_notify.h"
@@ -42,11 +51,11 @@ chimera_vfs_notify_watch_enqueue(
     struct chimera_vfs_notify_event *ev;
     int                              idx;
 
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
 
     if (watch->ring_count >= CHIMERA_VFS_NOTIFY_RING_SIZE) {
         watch->overflowed = 1;
-        pthread_mutex_unlock(&watch->lock);
+        evpl_mutex_unlock(&watch->lock);
         return;
     }
 
@@ -77,7 +86,7 @@ chimera_vfs_notify_watch_enqueue(
 
     watch->ring_count++;
 
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 } /* chimera_vfs_notify_watch_enqueue */
 
 /*
@@ -94,9 +103,9 @@ chimera_vfs_notify_watch_enqueue(
 static inline void
 chimera_vfs_notify_watch_overflow(struct chimera_vfs_notify_watch *watch)
 {
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
     watch->overflowed = 1;
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 } /* chimera_vfs_notify_watch_overflow */
 
 SYMBOL_EXPORT void
@@ -186,11 +195,11 @@ chimera_vfs_notify_free_pending(
     struct chimera_vfs_notify               *notify,
     struct chimera_vfs_notify_pending_event *ev)
 {
-    pthread_mutex_lock(&notify->pending_lock);
+    evpl_mutex_lock(&notify->pending_lock);
     ev->next            = notify->free_events;
     notify->free_events = ev;
     notify->num_pending--;
-    pthread_mutex_unlock(&notify->pending_lock);
+    evpl_mutex_unlock(&notify->pending_lock);
 } /* chimera_vfs_notify_free_pending */
 
 /* Forward declaration for the resolver chain */
@@ -333,11 +342,11 @@ chimera_vfs_notify_resolve_getparent_cb(
          * this mount so the client rescans.  Better than silently
          * dropping the event. */
         struct chimera_vfs_notify_mount_entry *me;
-        pthread_mutex_lock(&notify->mount_entries_lock);
+        evpl_mutex_lock(&notify->mount_entries_lock);
         HASH_FIND(hh, notify->mount_entries, pev->mount_id,
                   CHIMERA_VFS_MOUNT_ID_SIZE, me);
         chimera_vfs_notify_overflow_all_subtree(me);
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         chimera_vfs_notify_free_pending(notify, pev);
         return;
     }
@@ -367,11 +376,11 @@ chimera_vfs_notify_resolve_getparent_cb(
          * subtree watch on this mount.  Heavy-handed but always
          * correct: the client will rescan via NOTIFY_ENUM_DIR. */
         struct chimera_vfs_notify_mount_entry *me;
-        pthread_mutex_lock(&notify->mount_entries_lock);
+        evpl_mutex_lock(&notify->mount_entries_lock);
         HASH_FIND(hh, notify->mount_entries, pev->mount_id,
                   CHIMERA_VFS_MOUNT_ID_SIZE, me);
         chimera_vfs_notify_overflow_all_subtree(me);
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         chimera_vfs_notify_free_pending(notify, pev);
         return;
     }
@@ -410,11 +419,11 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
              * cycle (shouldn't happen) or a pathologically deep tree.
              * Overflow all subtree watches on this mount so any client
              * that cares rescans, rather than silently dropping. */
-            pthread_mutex_lock(&notify->mount_entries_lock);
+            evpl_mutex_lock(&notify->mount_entries_lock);
             HASH_FIND(hh, notify->mount_entries, pev->mount_id,
                       CHIMERA_VFS_MOUNT_ID_SIZE, me);
             chimera_vfs_notify_overflow_all_subtree(me);
-            pthread_mutex_unlock(&notify->mount_entries_lock);
+            evpl_mutex_unlock(&notify->mount_entries_lock);
             chimera_vfs_notify_free_pending(notify, pev);
             return;
         }
@@ -436,7 +445,7 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
             int at_root  = 0;
             int no_entry = 0;
 
-            pthread_mutex_lock(&notify->mount_entries_lock);
+            evpl_mutex_lock(&notify->mount_entries_lock);
             HASH_FIND(hh, notify->mount_entries, pev->mount_id,
                       CHIMERA_VFS_MOUNT_ID_SIZE, me);
 
@@ -461,7 +470,7 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
                 }
             }
 
-            pthread_mutex_unlock(&notify->mount_entries_lock);
+            evpl_mutex_unlock(&notify->mount_entries_lock);
 
             if (no_entry || at_root) {
                 chimera_vfs_notify_free_pending(notify, pev);
@@ -486,11 +495,11 @@ chimera_vfs_notify_resolve(struct chimera_vfs_notify_pending_event *pev)
                 /* Path overflow — overflow all subtree watches on this
                  * mount so the client rescans.  Same rationale as the
                  * getparent_cb path. */
-                pthread_mutex_lock(&notify->mount_entries_lock);
+                evpl_mutex_lock(&notify->mount_entries_lock);
                 HASH_FIND(hh, notify->mount_entries, pev->mount_id,
                           CHIMERA_VFS_MOUNT_ID_SIZE, me);
                 chimera_vfs_notify_overflow_all_subtree(me);
-                pthread_mutex_unlock(&notify->mount_entries_lock);
+                evpl_mutex_unlock(&notify->mount_entries_lock);
                 chimera_vfs_notify_free_pending(notify, pev);
                 return;
             }
@@ -533,12 +542,12 @@ chimera_vfs_notify_init(struct chimera_vfs *vfs)
 
     for (i = 0; i < CHIMERA_VFS_NOTIFY_NUM_BUCKETS; i++) {
         notify->buckets[i].watches = NULL;
-        pthread_mutex_init(&notify->buckets[i].lock, NULL);
+        evpl_mutex_init(&notify->buckets[i].lock, NULL);
     }
 
-    pthread_mutex_init(&notify->mount_entries_lock, NULL);
-    pthread_mutex_init(&notify->pending_lock, NULL);
-    pthread_mutex_init(&notify->gates_lock, NULL);
+    evpl_mutex_init(&notify->mount_entries_lock, NULL);
+    evpl_mutex_init(&notify->pending_lock, NULL);
+    evpl_mutex_init(&notify->gates_lock, NULL);
 
     /* RPL cache: 64 shards, 16 slots/shard, 4 entries/slot, 30s TTL */
     notify->rpl_cache = chimera_vfs_rpl_cache_create(6, 4, 2, 30);
@@ -562,9 +571,9 @@ chimera_vfs_notify_destroy(struct chimera_vfs_notify *notify)
     /* Mark the subsystem as shutting down so no new RPL resolver chains
      * can start.  Existing in-flight chains observe a live state until
      * their pev is freed and num_pending drops to zero. */
-    pthread_mutex_lock(&notify->pending_lock);
+    evpl_mutex_lock(&notify->pending_lock);
     notify->shutdown = 1;
-    pthread_mutex_unlock(&notify->pending_lock);
+    evpl_mutex_unlock(&notify->pending_lock);
 
     /* Block until all in-flight subtree resolvers (chimera_vfs_getparent
      * callbacks still in motion) have completed and freed their pev.
@@ -575,9 +584,9 @@ chimera_vfs_notify_destroy(struct chimera_vfs_notify *notify)
     waits = 0;
     for (;;) {
         int n;
-        pthread_mutex_lock(&notify->pending_lock);
+        evpl_mutex_lock(&notify->pending_lock);
         n = notify->num_pending;
-        pthread_mutex_unlock(&notify->pending_lock);
+        evpl_mutex_unlock(&notify->pending_lock);
         if (n == 0) {
             break;
         }
@@ -605,11 +614,11 @@ chimera_vfs_notify_destroy(struct chimera_vfs_notify *notify)
                 free(sev);
                 sev = sev_tmp;
             }
-            pthread_mutex_destroy(&watch->lock);
+            evpl_mutex_destroy(&watch->lock);
             free(watch);
             watch = watch_tmp;
         }
-        pthread_mutex_destroy(&notify->buckets[i].lock);
+        evpl_mutex_destroy(&notify->buckets[i].lock);
     }
 
     /* Free mount entries */
@@ -634,9 +643,9 @@ chimera_vfs_notify_destroy(struct chimera_vfs_notify *notify)
         pev = pev_tmp;
     }
 
-    pthread_mutex_destroy(&notify->mount_entries_lock);
-    pthread_mutex_destroy(&notify->pending_lock);
-    pthread_mutex_destroy(&notify->gates_lock);
+    evpl_mutex_destroy(&notify->mount_entries_lock);
+    evpl_mutex_destroy(&notify->pending_lock);
+    evpl_mutex_destroy(&notify->gates_lock);
 
     chimera_vfs_rpl_cache_destroy(notify->rpl_cache);
 
@@ -671,14 +680,14 @@ chimera_vfs_notify_watch_create(
     watch->ring_head    = 0;
     watch->ring_count   = 0;
     watch->overflowed   = 0;
-    pthread_mutex_init(&watch->lock, NULL);
+    evpl_mutex_init(&watch->lock, NULL);
 
     /* Insert into exact-watch bucket */
     fh_hash = watch->dir_fh_hash;
     bi      = chimera_vfs_notify_bucket_index(fh_hash);
     bucket  = &notify->buckets[bi];
 
-    pthread_mutex_lock(&bucket->lock);
+    evpl_mutex_lock(&bucket->lock);
     /* If this object was removed in the brief window before this watch was
      * created (emit_delete ran first and found no watch to flag), inherit
      * that deletion now so the first drain reports STATUS_DELETE_PENDING
@@ -697,17 +706,17 @@ chimera_vfs_notify_watch_create(
     }
     watch->next     = bucket->watches;
     bucket->watches = watch;
-    pthread_mutex_unlock(&bucket->lock);
+    evpl_mutex_unlock(&bucket->lock);
 
     /* If subtree watch, also register in mount entry */
     if (watch_tree) {
-        pthread_mutex_lock(&notify->mount_entries_lock);
+        evpl_mutex_lock(&notify->mount_entries_lock);
         me = chimera_vfs_notify_get_mount_entry(notify,
                                                 chimera_vfs_fh_mount_id(dir_fh));
         watch->subtree_next = me->subtree_watches;
         me->subtree_watches = watch;
         me->num_subtree_watches++;
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
     }
 
     return watch;
@@ -746,13 +755,13 @@ chimera_vfs_notify_watch_update(
     struct chimera_vfs_notify_mount_entry *me;
     int                                    old_tree;
 
-    pthread_mutex_lock(&watch->lock);
-    /* Paired with __atomic_load_n in emit's bucket-walk read.  The
+    evpl_mutex_lock(&watch->lock);
+    /* Paired with chimera_atomic_load_n in emit's bucket-walk read.  The
      * lock makes the store visible under the bucket-walk; the atomic
      * load makes the read well-defined per C11. */
-    __atomic_store_n(&watch->filter_mask, filter_mask, __ATOMIC_RELAXED);
+    chimera_atomic_store_n(&watch->filter_mask, filter_mask, CHIMERA_MEMORY_RELAXED);
     old_tree = watch->watch_tree;
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 
     if (old_tree == watch_tree) {
         return;
@@ -775,7 +784,7 @@ chimera_vfs_notify_watch_update(
      * events, not to drop them.
      */
     /* watch_tree flipped — relink in mount entries' subtree list. */
-    pthread_mutex_lock(&notify->mount_entries_lock);
+    evpl_mutex_lock(&notify->mount_entries_lock);
 
     HASH_FIND(hh, notify->mount_entries,
               chimera_vfs_fh_mount_id(watch->dir_fh),
@@ -806,11 +815,11 @@ chimera_vfs_notify_watch_update(
         me->num_subtree_watches++;
     }
 
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
     watch->watch_tree = watch_tree;
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 
-    pthread_mutex_unlock(&notify->mount_entries_lock);
+    evpl_mutex_unlock(&notify->mount_entries_lock);
 } /* chimera_vfs_notify_watch_update */
 
 SYMBOL_EXPORT void
@@ -828,7 +837,7 @@ chimera_vfs_notify_watch_destroy(
     bi     = chimera_vfs_notify_bucket_index(watch->dir_fh_hash);
     bucket = &notify->buckets[bi];
 
-    pthread_mutex_lock(&bucket->lock);
+    evpl_mutex_lock(&bucket->lock);
     pp = &bucket->watches;
     while (*pp) {
         if (*pp == watch) {
@@ -837,10 +846,10 @@ chimera_vfs_notify_watch_destroy(
         }
         pp = &(*pp)->next;
     }
-    pthread_mutex_unlock(&bucket->lock);
+    evpl_mutex_unlock(&bucket->lock);
 
     if (watch->sync) {
-        __atomic_fetch_sub(&notify->num_sync_watches, 1, __ATOMIC_RELAXED);
+        chimera_atomic_fetch_sub(&notify->num_sync_watches, 1, CHIMERA_MEMORY_RELAXED);
 
         /* Ack any events the consumer never drained: the watcher is going
          * away (its kernel objects with it), so the gated mutations must
@@ -860,7 +869,7 @@ chimera_vfs_notify_watch_destroy(
     if (watch->watch_tree) {
         struct chimera_vfs_notify_mount_entry *me_to_free = NULL;
 
-        pthread_mutex_lock(&notify->mount_entries_lock);
+        evpl_mutex_lock(&notify->mount_entries_lock);
         HASH_FIND(hh, notify->mount_entries,
                   chimera_vfs_fh_mount_id(watch->dir_fh),
                   CHIMERA_VFS_MOUNT_ID_SIZE, me);
@@ -885,12 +894,12 @@ chimera_vfs_notify_watch_destroy(
                 me_to_free = me;
             }
         }
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
 
         free(me_to_free);
     }
 
-    pthread_mutex_destroy(&watch->lock);
+    evpl_mutex_destroy(&watch->lock);
     free(watch);
 } /* chimera_vfs_notify_watch_destroy */
 
@@ -904,7 +913,7 @@ chimera_vfs_notify_drain(
     int count = 0;
     int idx;
 
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
 
     *overflowed = watch->overflowed;
 
@@ -920,7 +929,7 @@ chimera_vfs_notify_drain(
         watch->overflowed = 0;
     }
 
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 
     return count;
 } /* chimera_vfs_notify_drain */
@@ -930,10 +939,10 @@ chimera_vfs_notify_watch_take_deleted(struct chimera_vfs_notify_watch *watch)
 {
     int deleted;
 
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
     deleted        = watch->deleted;
     watch->deleted = 0;
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 
     return deleted;
 } /* chimera_vfs_notify_watch_take_deleted */
@@ -1010,14 +1019,14 @@ chimera_vfs_notify_emit_body(
     bi     = chimera_vfs_notify_bucket_index(fh_hash);
     bucket = &notify->buckets[bi];
 
-    pthread_mutex_lock(&bucket->lock);
+    evpl_mutex_lock(&bucket->lock);
 
     for (watch = bucket->watches; watch; watch = watch->next) {
         /* Read filter_mask atomically — watch_update writes it under
          * watch->lock, and we don't take watch->lock here.  Relaxed
          * order is enough: the SMB layer re-filters at response time
          * anyway, so a momentarily stale mask is benign. */
-        uint32_t mask = __atomic_load_n(&watch->filter_mask, __ATOMIC_RELAXED);
+        uint32_t mask = chimera_atomic_load_n(&watch->filter_mask, CHIMERA_MEMORY_RELAXED);
 
         if (watch->dir_fh_len == dir_fh_len &&
             memcmp(watch->dir_fh, dir_fh, dir_fh_len) == 0 &&
@@ -1033,7 +1042,7 @@ chimera_vfs_notify_emit_body(
         }
     }
 
-    pthread_mutex_unlock(&bucket->lock);
+    evpl_mutex_unlock(&bucket->lock);
 
     /* 2. RPL cache invalidation */
     if (notify->rpl_cache) {
@@ -1055,14 +1064,14 @@ chimera_vfs_notify_emit_body(
     }
 
     /* 3. Subtree watches */
-    pthread_mutex_lock(&notify->mount_entries_lock);
+    evpl_mutex_lock(&notify->mount_entries_lock);
 
     HASH_FIND(hh, notify->mount_entries,
               chimera_vfs_fh_mount_id(dir_fh),
               CHIMERA_VFS_MOUNT_ID_SIZE, me);
 
     if (!me || me->num_subtree_watches == 0) {
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         return;
     }
 
@@ -1086,7 +1095,7 @@ chimera_vfs_notify_emit_body(
                 watch->callback(watch, watch->private_data);
             }
         }
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         return;
     }
 
@@ -1112,7 +1121,7 @@ chimera_vfs_notify_emit_body(
         if (me->root_fh_len > 0 &&
             dir_fh_len == me->root_fh_len &&
             memcmp(dir_fh, me->root_fh, dir_fh_len) == 0) {
-            pthread_mutex_unlock(&notify->mount_entries_lock);
+            evpl_mutex_unlock(&notify->mount_entries_lock);
             return;
         }
 
@@ -1131,21 +1140,21 @@ chimera_vfs_notify_emit_body(
             }
         }
 
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         return;
     }
 
-    pthread_mutex_unlock(&notify->mount_entries_lock);
+    evpl_mutex_unlock(&notify->mount_entries_lock);
 
     /* RPL path: queue for async resolution */
-    pthread_mutex_lock(&notify->pending_lock);
+    evpl_mutex_lock(&notify->pending_lock);
 
     /* Refuse to start new resolvers once destroy() has begun.  Without
      * this the destroy wait loop could observe num_pending == 0 between
      * a callback completing and a new emit allocating the next pev,
      * race past the wait, and free state behind an in-flight resolver. */
     if (notify->shutdown) {
-        pthread_mutex_unlock(&notify->pending_lock);
+        evpl_mutex_unlock(&notify->pending_lock);
         return;
     }
 
@@ -1156,9 +1165,9 @@ chimera_vfs_notify_emit_body(
          * above: mark each watch overflowed so the consumer escalates
          * to STATUS_NOTIFY_ENUM_DIR rather than inventing a "."
          * MODIFIED record. */
-        pthread_mutex_unlock(&notify->pending_lock);
+        evpl_mutex_unlock(&notify->pending_lock);
 
-        pthread_mutex_lock(&notify->mount_entries_lock);
+        evpl_mutex_lock(&notify->mount_entries_lock);
         HASH_FIND(hh, notify->mount_entries,
                   chimera_vfs_fh_mount_id(dir_fh),
                   CHIMERA_VFS_MOUNT_ID_SIZE, me);
@@ -1170,7 +1179,7 @@ chimera_vfs_notify_emit_body(
                 }
             }
         }
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         return;
     }
 
@@ -1179,9 +1188,9 @@ chimera_vfs_notify_emit_body(
         /* OOM allocating a fresh pev.  Fall back to the coarse overflow
          * path so subtree watchers rescan rather than missing the event
          * entirely.  num_pending was not incremented. */
-        pthread_mutex_unlock(&notify->pending_lock);
+        evpl_mutex_unlock(&notify->pending_lock);
 
-        pthread_mutex_lock(&notify->mount_entries_lock);
+        evpl_mutex_lock(&notify->mount_entries_lock);
         HASH_FIND(hh, notify->mount_entries,
                   chimera_vfs_fh_mount_id(dir_fh),
                   CHIMERA_VFS_MOUNT_ID_SIZE, me);
@@ -1197,11 +1206,11 @@ chimera_vfs_notify_emit_body(
                 }
             }
         }
-        pthread_mutex_unlock(&notify->mount_entries_lock);
+        evpl_mutex_unlock(&notify->mount_entries_lock);
         return;
     }
     notify->num_pending++;
-    pthread_mutex_unlock(&notify->pending_lock);
+    evpl_mutex_unlock(&notify->pending_lock);
 
     pev->action       = action;
     pev->dir_fh_len   = dir_fh_len;
@@ -1358,15 +1367,15 @@ chimera_vfs_notify_emit_delete(
     bi      = chimera_vfs_notify_bucket_index(fh_hash);
     bucket  = &notify->buckets[bi];
 
-    pthread_mutex_lock(&bucket->lock);
+    evpl_mutex_lock(&bucket->lock);
 
     for (watch = bucket->watches; watch; watch = watch->next) {
         if (watch->dir_fh_len == fh_len &&
             memcmp(watch->dir_fh, fh, fh_len) == 0) {
 
-            pthread_mutex_lock(&watch->lock);
+            evpl_mutex_lock(&watch->lock);
             watch->deleted = 1;
-            pthread_mutex_unlock(&watch->lock);
+            evpl_mutex_unlock(&watch->lock);
 
             if (watch->callback) {
                 watch->callback(watch, watch->private_data);
@@ -1391,7 +1400,7 @@ chimera_vfs_notify_emit_delete(
             (bucket->tombstone_next + 1) % CHIMERA_VFS_NOTIFY_TOMBSTONE_COUNT;
     }
 
-    pthread_mutex_unlock(&bucket->lock);
+    evpl_mutex_unlock(&bucket->lock);
 } /* chimera_vfs_notify_emit_delete */
 
 /* ----------------------------------------------------------------
@@ -1431,13 +1440,13 @@ chimera_vfs_notify_watch_set_sync(
     struct chimera_vfs_notify_watch *watch,
     const void                      *origin)
 {
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
     watch->origin = origin;
     if (!watch->sync) {
         watch->sync = 1;
-        __atomic_fetch_add(&notify->num_sync_watches, 1, __ATOMIC_RELAXED);
+        chimera_atomic_fetch_add(&notify->num_sync_watches, 1, CHIMERA_MEMORY_RELAXED);
     }
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 } /* chimera_vfs_notify_watch_set_sync */
 
 SYMBOL_EXPORT struct chimera_vfs_notify_sync_event *
@@ -1445,11 +1454,11 @@ chimera_vfs_notify_drain_sync(struct chimera_vfs_notify_watch *watch)
 {
     struct chimera_vfs_notify_sync_event *head;
 
-    pthread_mutex_lock(&watch->lock);
+    evpl_mutex_lock(&watch->lock);
     head                    = watch->sync_events;
     watch->sync_events      = NULL;
     watch->sync_events_tail = NULL;
-    pthread_mutex_unlock(&watch->lock);
+    evpl_mutex_unlock(&watch->lock);
 
     return head;
 } /* chimera_vfs_notify_drain_sync */
@@ -1457,7 +1466,7 @@ chimera_vfs_notify_drain_sync(struct chimera_vfs_notify_watch *watch)
 static void
 chimera_vfs_notify_gate_unref(struct chimera_vfs_notify_gate *gate)
 {
-    if (__atomic_sub_fetch(&gate->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&gate->refs, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         free(gate);
     }
 } /* chimera_vfs_notify_gate_unref */
@@ -1481,13 +1490,13 @@ chimera_vfs_notify_gate_fire(
 {
     struct chimera_vfs_request *request;
 
-    pthread_mutex_lock(&notify->gates_lock);
+    evpl_mutex_lock(&notify->gates_lock);
     request       = gate->request;
     gate->request = NULL;
     if (request) {
         DL_DELETE(notify->gates, gate);
     }
-    pthread_mutex_unlock(&notify->gates_lock);
+    evpl_mutex_unlock(&notify->gates_lock);
 
     if (request) {
         request->notify_gate = NULL;
@@ -1519,7 +1528,7 @@ chimera_vfs_notify_gate_ack(
     (void) request;
     chimera_vfs_notify_gate_unref(gate);
 #else  /* ifdef __clang_analyzer__ */
-    if (__atomic_sub_fetch(&gate->pending, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&gate->pending, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         request = chimera_vfs_notify_gate_fire(notify, gate);
         if (request) {
             /* Resume the parked completion on its owning thread; the
@@ -1548,7 +1557,7 @@ chimera_vfs_notify_gate_sweep(struct chimera_vfs_notify *notify)
 
     now = chimera_vfs_now_ticks();
 
-    pthread_mutex_lock(&notify->gates_lock);
+    evpl_mutex_lock(&notify->gates_lock);
     for (gate = notify->gates; gate && n < 16; gate = next) {
         next = gate->next;
         if (gate->request && now >= gate->deadline) {
@@ -1563,7 +1572,7 @@ chimera_vfs_notify_gate_sweep(struct chimera_vfs_notify *notify)
             chimera_vfs_notify_gate_unref(gate);
         }
     }
-    pthread_mutex_unlock(&notify->gates_lock);
+    evpl_mutex_unlock(&notify->gates_lock);
 
     for (i = 0; i < n; i++) {
         chimera_vfs_info("notify gate: sync watcher ack overdue; "
@@ -1654,7 +1663,7 @@ chimera_vfs_notify_gate_mark(
             chimera_vfs_hash(dirs[i].fh, dirs[i].fh_len));
         bucket = &notify->buckets[bi];
 
-        pthread_mutex_lock(&bucket->lock);
+        evpl_mutex_lock(&bucket->lock);
         for (watch = bucket->watches; watch; watch = watch->next) {
             if (watch->sync &&
                 watch->origin == origin &&
@@ -1669,7 +1678,7 @@ chimera_vfs_notify_gate_mark(
                 }
             }
         }
-        pthread_mutex_unlock(&bucket->lock);
+        evpl_mutex_unlock(&bucket->lock);
     }
 } /* chimera_vfs_notify_gate_mark */
 
@@ -1706,10 +1715,10 @@ chimera_vfs_notify_emit_sync(
     bi      = chimera_vfs_notify_bucket_index(fh_hash);
     bucket  = &notify->buckets[bi];
 
-    pthread_mutex_lock(&bucket->lock);
+    evpl_mutex_lock(&bucket->lock);
 
     for (watch = bucket->watches; watch; watch = watch->next) {
-        uint32_t mask = __atomic_load_n(&watch->filter_mask, __ATOMIC_RELAXED);
+        uint32_t mask = chimera_atomic_load_n(&watch->filter_mask, CHIMERA_MEMORY_RELAXED);
 
         if (!watch->sync ||
             watch->dir_fh_len != dir_fh_len ||
@@ -1746,24 +1755,24 @@ chimera_vfs_notify_emit_sync(
         }
         ev->gate = gate;
 
-        __atomic_fetch_add(&gate->pending, 1, __ATOMIC_ACQ_REL);
-        __atomic_fetch_add(&gate->refs, 1, __ATOMIC_ACQ_REL);
+        chimera_atomic_fetch_add(&gate->pending, 1, CHIMERA_MEMORY_ACQ_REL);
+        chimera_atomic_fetch_add(&gate->refs, 1, CHIMERA_MEMORY_ACQ_REL);
 
-        pthread_mutex_lock(&watch->lock);
+        evpl_mutex_lock(&watch->lock);
         if (watch->sync_events_tail) {
             watch->sync_events_tail->next = ev;
         } else {
             watch->sync_events = ev;
         }
         watch->sync_events_tail = ev;
-        pthread_mutex_unlock(&watch->lock);
+        evpl_mutex_unlock(&watch->lock);
 
         if (watch->callback) {
             watch->callback(watch, watch->private_data);
         }
     }
 
-    pthread_mutex_unlock(&bucket->lock);
+    evpl_mutex_unlock(&bucket->lock);
 } /* chimera_vfs_notify_emit_sync */
 
 /* The gated completion: runs in place of the proc's own completion handler
@@ -1806,9 +1815,9 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
 
     request->notify_gate = gate;
 
-    pthread_mutex_lock(&notify->gates_lock);
+    evpl_mutex_lock(&notify->gates_lock);
     DL_APPEND(notify->gates, gate);
-    pthread_mutex_unlock(&notify->gates_lock);
+    evpl_mutex_unlock(&notify->gates_lock);
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_REMOVE_AT:
@@ -1912,7 +1921,7 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
 
     /* Release the arm hold; if nothing was delivered (or everything acked
      * already) the fire is ours and the completion proceeds inline. */
-    if (__atomic_sub_fetch(&gate->pending, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&gate->pending, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         struct chimera_vfs_request *fired =
             chimera_vfs_notify_gate_fire(notify, gate);
         if (fired) {
@@ -1927,7 +1936,7 @@ chimera_vfs_notify_gate_install(struct chimera_vfs_request *request)
     struct chimera_vfs_notify *notify = request->thread->vfs->vfs_notify;
 
     if (!notify ||
-        __atomic_load_n(&notify->num_sync_watches, __ATOMIC_RELAXED) == 0) {
+        chimera_atomic_load_n(&notify->num_sync_watches, CHIMERA_MEMORY_RELAXED) == 0) {
         return;
     }
 

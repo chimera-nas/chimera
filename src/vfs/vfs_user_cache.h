@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <time.h>
 #include "common/chimera_rcu.h"
 
@@ -91,10 +91,10 @@ struct chimera_vfs_user_cache {
     struct chimera_vfs_group_cache_bucket *group_sid_buckets;
     struct chimera_vfs_user               *builtin_users;
     struct chimera_rcu_domain              rcu;
-    pthread_mutex_t                        write_lock;
-    pthread_t                              expiry_thread;
-    pthread_mutex_t                        expiry_lock;
-    pthread_cond_t                         expiry_cond;
+    evpl_mutex_t                           write_lock;
+    evpl_native_thread_t                   expiry_thread;
+    evpl_mutex_t                           expiry_lock;
+    evpl_cond_t                            expiry_cond;
     int                                    shutdown;
 };
 
@@ -259,13 +259,13 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
      * domain, never on the read side.  Not registered as a QSBR reader -- a
      * thread parked in cond_timedwait must not sit in the grace-period
      * quorum. */
-    pthread_mutex_lock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
 
     while (!cache->shutdown) {
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 60;
 
-        pthread_cond_timedwait(&cache->expiry_cond, &cache->expiry_lock, &ts);
+        chimera_cond_timedwait(&cache->expiry_cond, &cache->expiry_lock, &ts);
 
         if (cache->shutdown) {
             break;
@@ -273,12 +273,12 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
 
         /* Drop the expiry lock during the sweep and serialize the actual
          * removals on the cache write_lock like every other mutation. */
-        pthread_mutex_unlock(&cache->expiry_lock);
+        evpl_mutex_unlock(&cache->expiry_lock);
 
         clock_gettime(CLOCK_REALTIME, &ts);
 
         chimera_rcu_publish_begin(&cache->rcu);
-        pthread_mutex_lock(&cache->write_lock);
+        evpl_mutex_lock(&cache->write_lock);
 
         for (i = 0; i < cache->num_buckets; i++) {
             user = cache->name_buckets[i].head;
@@ -309,13 +309,13 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
             }
         }
 
-        pthread_mutex_unlock(&cache->write_lock);
+        evpl_mutex_unlock(&cache->write_lock);
         chimera_rcu_publish_end(&cache->rcu);
 
-        pthread_mutex_lock(&cache->expiry_lock);
+        evpl_mutex_lock(&cache->expiry_lock);
     }
 
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
     return NULL;
 } // chimera_vfs_user_cache_expiry_thread
@@ -347,12 +347,12 @@ chimera_vfs_user_cache_create(
     cache->builtin_users = NULL;
 
     chimera_rcu_domain_init(&cache->rcu);
-    pthread_mutex_init(&cache->write_lock, NULL);
-    pthread_mutex_init(&cache->expiry_lock, NULL);
-    pthread_cond_init(&cache->expiry_cond, NULL);
+    evpl_mutex_init(&cache->write_lock, NULL);
+    evpl_mutex_init(&cache->expiry_lock, NULL);
+    evpl_cond_init(&cache->expiry_cond, NULL);
 
-    pthread_create(&cache->expiry_thread, NULL,
-                   chimera_vfs_user_cache_expiry_thread, cache);
+    evpl_native_thread_create(&cache->expiry_thread, NULL,
+                              chimera_vfs_user_cache_expiry_thread, cache);
 
     return cache;
 } // chimera_vfs_user_cache_create
@@ -364,12 +364,12 @@ chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
     struct chimera_vfs_group *group, *group_next;
     int                       i;
 
-    pthread_mutex_lock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
     cache->shutdown = 1;
-    pthread_cond_signal(&cache->expiry_cond);
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
-    pthread_join(cache->expiry_thread, NULL);
+    evpl_native_thread_join(cache->expiry_thread, NULL);
 
     chimera_rcu_barrier();
 
@@ -397,10 +397,10 @@ chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
     free(cache->group_gid_buckets);
     free(cache->group_sid_buckets);
 
-    pthread_mutex_destroy(&cache->write_lock);
+    evpl_mutex_destroy(&cache->write_lock);
     chimera_rcu_domain_destroy(&cache->rcu);
-    pthread_mutex_destroy(&cache->expiry_lock);
-    pthread_cond_destroy(&cache->expiry_cond);
+    evpl_mutex_destroy(&cache->expiry_lock);
+    evpl_cond_destroy(&cache->expiry_cond);
 
     free(cache);
 } // chimera_vfs_user_cache_destroy
@@ -463,7 +463,7 @@ chimera_vfs_user_cache_add(
     uid_idx = chimera_vfs_user_cache_hash_uid(uid, cache->num_buckets);
 
     chimera_rcu_publish_begin(&cache->rcu);
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
 
     /* Check for an existing entry with the same username and remove it */
     existing = cache->name_buckets[name_idx].head;
@@ -509,7 +509,7 @@ chimera_vfs_user_cache_add(
         cache->builtin_users = user;
     }
 
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
     chimera_rcu_publish_end(&cache->rcu);
 
     return 0;
@@ -531,7 +531,7 @@ chimera_vfs_user_cache_remove(
                                                     cache->num_buckets);
 
     chimera_rcu_publish_begin(&cache->rcu);
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
 
     user = cache->name_buckets[name_idx].head;
     while (user) {
@@ -553,7 +553,7 @@ chimera_vfs_user_cache_remove(
         user = user->next_by_name;
     }
 
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
     chimera_rcu_publish_end(&cache->rcu);
     return found;
 } // chimera_vfs_user_cache_remove
@@ -671,7 +671,7 @@ chimera_vfs_group_cache_add(
     gid_idx = chimera_vfs_group_cache_hash_gid(gid, cache->num_buckets);
 
     chimera_rcu_publish_begin(&cache->rcu);
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
 
     /* Replace any existing record for this gid. */
     existing = cache->group_gid_buckets[gid_idx].head;
@@ -693,7 +693,7 @@ chimera_vfs_group_cache_add(
         chimera_rcu_assign(cache->group_sid_buckets[sid_idx].head, group);
     }
 
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
     chimera_rcu_publish_end(&cache->rcu);
 
     return 0;
@@ -722,7 +722,7 @@ chimera_vfs_group_cache_remove(
     }
 
     chimera_rcu_publish_begin(&cache->rcu);
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
 
     for (i = 0; i < cache->num_buckets; i++) {
         group = cache->group_gid_buckets[i].head;
@@ -736,7 +736,7 @@ chimera_vfs_group_cache_remove(
         }
     }
 
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
     chimera_rcu_publish_end(&cache->rcu);
     return found;
 } // chimera_vfs_group_cache_remove
@@ -875,7 +875,7 @@ chimera_vfs_user_cache_iterate_builtin(
 {
     struct chimera_vfs_user *user;
 
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
 
     user = cache->builtin_users;
     while (user) {
@@ -885,5 +885,5 @@ chimera_vfs_user_cache_iterate_builtin(
         user = user->next_builtin;
     }
 
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
 } // chimera_vfs_user_cache_iterate_builtin

@@ -8,9 +8,15 @@
  * structures; exported (SYMBOL_EXPORT) for the model-based-test harness to link.
  */
 
+#include "common/atomic.h"
+#include "common/thread.h"
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <time.h>
 
@@ -46,9 +52,9 @@ diskfs_test_lock_all_ags(
 
         for (a = 0; a < dev->num_ags; a++) {
             if (lock) {
-                pthread_mutex_lock(&dev->ags[a].lock);
+                evpl_mutex_lock(&dev->ags[a].lock);
             } else {
-                pthread_mutex_unlock(&dev->ags[a].lock);
+                evpl_mutex_unlock(&dev->ags[a].lock);
             }
         }
     }
@@ -161,7 +167,7 @@ diskfs_test_snapshot(
     out->usable_capacity = sm->usable_capacity;
     out->num_devices     = sm->num_devices;
     out->reserve_bytes   = diskfs_space_reserve_bytes(shared);
-    out->available_bytes = __atomic_load_n(&sm->available_bytes, __ATOMIC_RELAXED);
+    out->available_bytes = chimera_atomic_load_n(&sm->available_bytes, CHIMERA_MEMORY_RELAXED);
 
     diskfs_test_lock_all_ags(sm, 1);
 
@@ -271,7 +277,7 @@ diskfs_test_inode(
     /* Freshest source: a resident inode whose home block is still pinned in the
      * cache (dirty / mid-transaction). */
     shard = diskfs_inode_shard(shared, inum);
-    pthread_mutex_lock(&shard->lock);
+    evpl_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, inum, inum, inode);
     if (inode && inode->block) {
         struct diskfs_bt_node_hdr *h =
@@ -282,10 +288,10 @@ diskfs_test_inode(
         out->nlink       = inode->nlink;
         out->tree_height = (uint16_t) (h->level + 1);
         out->root_nitems = h->nitems;
-        pthread_mutex_unlock(&shard->lock);
+        evpl_mutex_unlock(&shard->lock);
         return 0;
     }
-    pthread_mutex_unlock(&shard->lock);
+    evpl_mutex_unlock(&shard->lock);
 
     /* Idle inode: its home block has been returned to the cache, so read the
      * on-disk image directly from the backing device file.  This can lag the
@@ -304,7 +310,14 @@ diskfs_test_inode(
     if (fd < 0) {
         return -1;
     }
+#ifdef _WIN32
+    /* This private descriptor is used only by this snapshot read. */
+    _setmode(fd, _O_BINARY);
+    rc = _lseeki64(fd, (int64_t) off, SEEK_SET) < 0 ? -1 :
+        _read(fd, blk, sizeof(blk));
+#else  /* ifdef _WIN32 */
     rc = pread(fd, blk, sizeof(blk), (off_t) off);
+#endif /* ifdef _WIN32 */
     close(fd);
     if (rc != (ssize_t) sizeof(blk)) {
         return -1;
@@ -327,11 +340,11 @@ diskfs_test_reclaim_idle(struct diskfs_shared *shared)
     for (i = 0; i < r->nworkers; i++) {
         struct diskfs_reclaim_worker *w = &r->workers[i];
 
-        pthread_mutex_lock(&w->lock);
+        evpl_mutex_lock(&w->lock);
         if (w->head != NULL || w->condenses != 0) {
             idle = 0;
         }
-        pthread_mutex_unlock(&w->lock);
+        evpl_mutex_unlock(&w->lock);
         if (!idle) {
             break;
         }
@@ -368,10 +381,10 @@ diskfs_test_await_reclaim(
      * a few consecutive polls so a momentary lull between two reclaim batches is
      * not mistaken for completion. */
     while (diskfs_test_now_ms() < deadline) {
-        uint64_t applied = __atomic_load_n(&shared->intent_log.applied_seq,
-                                           __ATOMIC_ACQUIRE);
-        uint64_t durable = __atomic_load_n(&shared->intent_log.durable_seq,
-                                           __ATOMIC_ACQUIRE);
+        uint64_t applied = chimera_atomic_load_n(&shared->intent_log.applied_seq,
+                                                 CHIMERA_MEMORY_ACQUIRE);
+        uint64_t durable = chimera_atomic_load_n(&shared->intent_log.durable_seq,
+                                                 CHIMERA_MEMORY_ACQUIRE);
 
         if (diskfs_test_reclaim_idle(shared) && applied == durable) {
             if (++stable >= 3) {
@@ -402,5 +415,5 @@ diskfs_test_crash(struct chimera_vfs *vfs)
      * it there rather than freeing shared here is what keeps the VFS's own
      * internal threads (RCU / close-thread), whose diskfs_thread_destroy still
      * dereferences shared, from touching freed memory. */
-    __atomic_store_n(&shared->test_crash, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&shared->test_crash, 1, CHIMERA_MEMORY_RELEASE);
 } /* diskfs_test_crash */

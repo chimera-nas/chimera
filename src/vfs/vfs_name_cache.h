@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/thread.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_rcu_pool.h"
 #include "common/chimera_rcu.h"
@@ -24,7 +25,7 @@ struct chimera_vfs_name_cache_entry {
 struct chimera_vfs_name_cache_shard {
     struct chimera_vfs_name_cache_entry **entries;
     struct chimera_rcu_domain             rcu;
-    pthread_mutex_t                       entry_lock;
+    evpl_mutex_t                          entry_lock;
     struct prometheus_counter_instance   *miss;
     struct prometheus_counter_instance   *hit;
     struct prometheus_counter_instance   *insert;
@@ -73,7 +74,7 @@ chimera_vfs_name_cache_create(
                           sizeof(struct chimera_vfs_name_cache_entry));
 
     cache->num_shards  = 1 << num_shards_bits;
-    cache->num_slots   = 1 << num_slots_bits;
+    cache->num_slots   = UINT64_C(1) << num_slots_bits;
     cache->num_entries = 1 << entries_per_slot_bits;
 
     cache->num_slots_mask   = cache->num_slots - 1;
@@ -105,7 +106,7 @@ chimera_vfs_name_cache_create(
         shard->entries = calloc(cache->num_slots * cache->num_entries, sizeof(struct chimera_vfs_name_cache_entry *));
 
         chimera_rcu_domain_init(&shard->rcu);
-        pthread_mutex_init(&shard->entry_lock, NULL);
+        evpl_mutex_init(&shard->entry_lock, NULL);
 
         shard->miss   = prometheus_counter_series_create_instance(cache->miss_series);
         shard->hit    = prometheus_counter_series_create_instance(cache->hit_series);
@@ -146,7 +147,7 @@ chimera_vfs_name_cache_destroy(struct chimera_vfs_name_cache *cache)
 
         free(shard->entries);
 
-        pthread_mutex_destroy(&shard->entry_lock);
+        evpl_mutex_destroy(&shard->entry_lock);
         chimera_rcu_domain_destroy(&shard->rcu);
     }
 
@@ -281,7 +282,7 @@ chimera_vfs_name_cache_insert(
 
     chimera_rcu_mutate_begin(&shard->rcu);
 
-    pthread_mutex_lock(&shard->entry_lock);
+    evpl_mutex_lock(&shard->entry_lock);
 
     best_entry = *slot_best;
 
@@ -338,7 +339,7 @@ chimera_vfs_name_cache_insert(
 
     prometheus_counter_increment(shard->insert);
 
-    pthread_mutex_unlock(&shard->entry_lock);
+    evpl_mutex_unlock(&shard->entry_lock);
 
     /* Dispatches the displaced entry, after the shard mutex is dropped. */
     chimera_rcu_mutate_end(&shard->rcu);
@@ -372,7 +373,7 @@ chimera_vfs_name_cache_remove(
 
     chimera_rcu_mutate_begin(&shard->rcu);
 
-    pthread_mutex_lock(&shard->entry_lock);
+    evpl_mutex_lock(&shard->entry_lock);
 
     while (slot < slot_end) {
 
@@ -393,7 +394,7 @@ chimera_vfs_name_cache_remove(
 
     //prometheus_counter_increment(shard->remove);
 
-    pthread_mutex_unlock(&shard->entry_lock);
+    evpl_mutex_unlock(&shard->entry_lock);
 
     chimera_rcu_mutate_end(&shard->rcu);
 

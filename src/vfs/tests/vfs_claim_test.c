@@ -1721,6 +1721,7 @@ main(
     (void) argv;
 
     ChimeraLogLevel = CHIMERA_LOG_INFO;
+    chimera_vfs_clock_init();
 
     test_init_destroy();
     test_file_state_lookup();

@@ -2,12 +2,17 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #undef NDEBUG
 #include <assert.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include "common/chimera_rcu.h"
 
 #include "vfs/vfs_user_cache.h"
@@ -183,9 +188,9 @@ test_ttl_expiration(void)
 #endif /* ifndef __clang_analyzer__ */
 
     /* Signal the expiry thread to wake up and do a sweep */
-    pthread_mutex_lock(&cache->expiry_lock);
-    pthread_cond_signal(&cache->expiry_cond);
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
     /* Give expiry thread time to process */
     usleep(100000);
@@ -222,9 +227,9 @@ test_pinned_no_expire(void)
 #endif /* ifndef __clang_analyzer__ */
 
     /* Signal the expiry thread */
-    pthread_mutex_lock(&cache->expiry_lock);
-    pthread_cond_signal(&cache->expiry_cond);
-    pthread_mutex_unlock(&cache->expiry_lock);
+    evpl_mutex_lock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
 
     usleep(100000);
 
@@ -451,7 +456,7 @@ test_group_ttl_expiration(void)
     chimera_rcu_read_unlock(&cache->rcu);
 
     /* Drive the sweep directly rather than waiting out its 60s period. */
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
     {
         struct chimera_vfs_group *group, *next;
         struct timespec           ts;
@@ -472,7 +477,7 @@ test_group_ttl_expiration(void)
             }
         }
     }
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
 
     chimera_rcu_barrier();
     chimera_rcu_read_lock(&cache->rcu);

@@ -3,6 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#ifdef _MSC_VER
+#define CHIMERA_VFS_NORETURN __declspec(noreturn)
+#else // ifdef _MSC_VER
+#define CHIMERA_VFS_NORETURN __attribute__((noreturn))
+#endif // ifdef _MSC_VER
 
 /*
  * Logging entry points for VFS modules.
@@ -15,10 +20,10 @@
 
 extern int ChimeraLogLevel;
 
-#define CHIMERA_LOG_FATAL 1
-#define CHIMERA_LOG_ERROR 2
-#define CHIMERA_LOG_INFO  3
-#define CHIMERA_LOG_DEBUG 4
+#define CHIMERA_LOG_FATAL    1
+#define CHIMERA_LOG_ERROR    2
+#define CHIMERA_LOG_INFO     3
+#define CHIMERA_LOG_DEBUG    4
 
 void __chimera_debug(
     const char *mod,
@@ -41,14 +46,14 @@ void __chimera_error(
     const char *fmt,
     ...);
 
-__attribute__((noreturn)) void __chimera_fatal(
+CHIMERA_VFS_NORETURN void __chimera_fatal(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-__attribute__((noreturn)) void __chimera_abort(
+CHIMERA_VFS_NORETURN void __chimera_abort(
     const char *mod,
     const char *file,
     int         line,

@@ -12,12 +12,22 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #ifdef __linux__
 #include <sys/fsuid.h>
 #include <sys/syscall.h>
 #endif /* ifdef __linux__ */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <errno.h>
 
 #include "sdk/vfs_cred.h"
@@ -73,9 +83,14 @@ chimera_vfs_get_server_cred(void)
 
     if (cred.flavor == CHIMERA_VFS_AUTH_NONE) {
         cred.flavor = CHIMERA_VFS_AUTH_UNIX;
-        cred.uid    = getuid();
-        cred.gid    = getgid();
-        cred.ngids  = 0;
+#ifdef _WIN32
+        cred.uid = CHIMERA_VFS_ANON_UID;
+        cred.gid = CHIMERA_VFS_ANON_GID;
+#else  /* ifdef _WIN32 */
+        cred.uid = getuid();
+        cred.gid = getgid();
+#endif /* ifdef _WIN32 */
+        cred.ngids = 0;
     }
     return &cred;
 } /* chimera_vfs_get_server_cred */
