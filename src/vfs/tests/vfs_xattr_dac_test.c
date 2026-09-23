@@ -364,7 +364,7 @@ main(
     struct chimera_vfs_attrs      sattr;
     const char                   *backend = argc > 1 ? argv[1] : "linux";
     const char                   *scratch;
-    char                          scratch_buf[PATH_MAX];
+    char                         *scratch_path = NULL;
     char                          session_dir[PATH_MAX];
     char                          file_path[PATH_MAX + 8];
     char                          value[64];
@@ -387,11 +387,12 @@ main(
 
     scratch = getenv("CHIMERA_MBT_SCRATCH");
     if (!scratch || !*scratch) {
-        scratch = realpath(".", scratch_buf);
+        scratch = scratch_path = realpath(".", NULL);
         assert(scratch != NULL);
     }
     snprintf(session_dir, sizeof(session_dir), "%s/vfs_xattr_dac_XXXXXX",
              scratch);
+    free(scratch_path);
     assert(mkdtemp(session_dir) != NULL);
     snprintf(file_path, sizeof(file_path), "%s/f", session_dir);
 
