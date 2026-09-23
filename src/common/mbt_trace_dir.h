@@ -23,7 +23,7 @@
 #ifndef CHIMERA_MBT_TRACE_DIR_H
 #define CHIMERA_MBT_TRACE_DIR_H
 
-#include <dirent.h>
+#include "common/dirent.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -19,12 +19,22 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <stddef.h>
 #include <time.h>
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/random.h>
+#include <unistd.h>
+#endif // ifndef _WIN32
 
-#ifdef __APPLE__
+#ifdef _WIN32
+#include "common/windows.h"
+typedef gid_t chimera_grouplist_t;
+#define CHIMERA_STAT_ATIM(st) ((st).st_atim)
+#define CHIMERA_STAT_MTIM(st) ((st).st_mtim)
+#define CHIMERA_STAT_CTIM(st) ((st).st_ctim)
+#elif defined(__APPLE__)
 
 #include <pthread.h>
 #include <libkern/OSByteOrder.h>
@@ -125,7 +135,13 @@ chimera_getrandom(
     void  *buf,
     size_t len)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    if (len > ULONG_MAX || BCryptGenRandom(NULL, buf, (ULONG) len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+#elif defined(__APPLE__)
     return getentropy(buf, len);
 #else  /* ifdef __APPLE__ */
     return getrandom(buf, len, 0) == (ssize_t) len ? 0 : -1;
@@ -143,7 +159,9 @@ chimera_getrandom(
 static inline uint64_t
 chimera_gettid(void)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#elif defined(__APPLE__)
     uint64_t tid = 0;
 
     pthread_threadid_np(NULL, &tid);
@@ -152,3 +170,44 @@ chimera_gettid(void)
     return (uint64_t) syscall(SYS_gettid);
 #endif /* ifdef __APPLE__ */
 } /* chimera_gettid */
+
+static inline unsigned
+chimera_cpu_count(void)
+{
+#ifdef _WIN32
+    return GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+#else // ifdef _WIN32
+    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count > 0 ? (unsigned) count : 1;
+#endif // ifdef _WIN32
+} // chimera_cpu_count
+static inline void *
+chimera_aligned_alloc(
+    size_t alignment,
+    size_t bytes)
+{
+#ifdef _WIN32
+    return _aligned_malloc(bytes, alignment);
+#else // ifdef _WIN32
+    return aligned_alloc(alignment, bytes);
+#endif // ifdef _WIN32
+} // chimera_aligned_alloc
+static inline void
+chimera_aligned_free(void *ptr)
+{
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else // ifdef _WIN32
+    free(ptr);
+#endif // ifdef _WIN32
+} // chimera_aligned_free
+
+#ifdef _WIN32
+typedef int64_t chimera_off_t;
+typedef uint64_t chimera_dev_t;
+typedef int64_t chimera_dirpos_t;
+#else // ifdef _WIN32
+typedef off_t chimera_off_t;
+typedef dev_t chimera_dev_t;
+typedef long chimera_dirpos_t;
+#endif // ifdef _WIN32

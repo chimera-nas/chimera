@@ -67,7 +67,7 @@ evpl_iovec_cursor_get_blob(
     int                       length)
 {
     int   chunk, left = length;
-    void *ptr = blob;
+    char *ptr = blob;
 
     while (left && cursor->niov) {
         chunk = cursor->iov->length - cursor->offset;
@@ -76,7 +76,7 @@ evpl_iovec_cursor_get_blob(
             chunk = left;
         }
 
-        memcpy(ptr, cursor->iov->data + cursor->offset, chunk);
+        memcpy(ptr, (char *) cursor->iov->data + cursor->offset, chunk);
 
         ptr  += chunk;
         left -= chunk;
@@ -114,10 +114,10 @@ evpl_iovec_cursor_copy(
             chunk = left;
         }
 
-        memcpy(out, cursor->iov->data + cursor->offset, chunk);
+        memcpy(out, (char *) cursor->iov->data + cursor->offset, chunk);
 
         left -= chunk;
-        out  += chunk;
+        out   = (char *) out + chunk;
 
         cursor->offset   += chunk;
         cursor->consumed += chunk;
@@ -180,7 +180,7 @@ evpl_iovec_cursor_zero(
             chunk = left;
         }
 
-        memset(cursor->iov->data + cursor->offset, 0, chunk);
+        memset((char *) cursor->iov->data + cursor->offset, 0, chunk);
 
         left -= chunk;
 
@@ -202,7 +202,7 @@ evpl_iovec_cursor_zero(
 static inline void *
 evpl_iovec_cursor_data(struct evpl_iovec_cursor *cursor)
 {
-    return cursor->iov->data + cursor->offset;
+    return (char *) cursor->iov->data + cursor->offset;
 } /* evpl_iovec_cursor_data */
 
 static inline void

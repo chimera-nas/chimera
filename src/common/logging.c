@@ -13,14 +13,22 @@
 #include <signal.h>
 #include <limits.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#include <pthread.h>
+#endif /* ifdef _WIN32 */
+#include "common/thread.h"
+#ifndef _WIN32
 #include <execinfo.h>
+#endif /* ifndef _WIN32 */
 
 #include "evpl/evpl.h"
 
  #define UNW_LOCAL_ONLY
+#ifndef _WIN32
 #include <libunwind.h>
+#endif /* ifndef _WIN32 */
 
 #include "common/macros.h"
 #include "common/logging.h"
@@ -122,7 +130,7 @@ chimera_timet2tmZ(
 } /* ot_timet2tmZ */
 
 
-static const char *level_string[] = {
+static const char   *level_string[] = {
     "none",
     "fatal",
     "error",
@@ -132,15 +140,15 @@ static const char *level_string[] = {
 
 #define CHIMERA_LOG_BUF_SIZE 1024 * 1024
 
-char              *ChimeraLogBuffers[2];
-int                ChimeraLogIndex    = 0;
-char              *ChimeraLogBuf      = NULL;
-char              *ChimeraLogBufPtr   = NULL;
-volatile int       ChimeraLogRun      = 1;
-SYMBOL_EXPORT int  ChimeraLogLevel    = CHIMERA_LOG_INFO;
-FILE              *ChimeraLogFile     = NULL; /* NULL => write to stdout */
-int                ChimeraLogDisabled = 0;
-pthread_mutex_t    ChimeraLogBufLock  = PTHREAD_MUTEX_INITIALIZER;
+char                *ChimeraLogBuffers[2];
+int                  ChimeraLogIndex    = 0;
+char                *ChimeraLogBuf      = NULL;
+char                *ChimeraLogBufPtr   = NULL;
+volatile int         ChimeraLogRun      = 1;
+SYMBOL_EXPORT int    ChimeraLogLevel    = CHIMERA_LOG_INFO;
+FILE                *ChimeraLogFile     = NULL; /* NULL => write to stdout */
+int                  ChimeraLogDisabled = 0;
+evpl_mutex_t         ChimeraLogBufLock  = EVPL_MUTEX_INITIALIZER;
 /* Held by the flusher across its stdio write and by the atfork prepare
  * handler: without it, fork() can land while the flusher is inside
  * fprintf/fflush holding the C library's stream lock, and the child inherits
@@ -148,9 +156,9 @@ pthread_mutex_t    ChimeraLogBufLock  = PTHREAD_MUTEX_INITIALIZER;
  * chimera_vlog's inline drain once the buffer fills with no flusher alive)
  * deadlocks.  ChimeraLogBufLock alone cannot prevent this because the flusher
  * deliberately prints outside it. */
-pthread_mutex_t    ChimeraLogFlushLock = PTHREAD_MUTEX_INITIALIZER;
-pthread_t          ChimeraLogThread;
-pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
+evpl_mutex_t         ChimeraLogFlushLock = EVPL_MUTEX_INITIALIZER;
+evpl_native_thread_t ChimeraLogThread;
+evpl_once_t          ChimeraLogOnce = EVPL_ONCE_INIT;
 
 static void *
 chimera_log_thread(void *arg)
@@ -165,17 +173,17 @@ chimera_log_thread(void *arg)
 
             /* FlushLock before BufLock; the atfork prepare handler takes them
              * in the same order. */
-            pthread_mutex_lock(&ChimeraLogFlushLock);
-            pthread_mutex_lock(&ChimeraLogBufLock);
+            evpl_mutex_lock(&ChimeraLogFlushLock);
+            evpl_mutex_lock(&ChimeraLogBufLock);
             tmp              = ChimeraLogBuf;
             ChimeraLogIndex  = !ChimeraLogIndex;
             ChimeraLogBuf    = ChimeraLogBuffers[ChimeraLogIndex];
             ChimeraLogBufPtr = ChimeraLogBuf;
-            pthread_mutex_unlock(&ChimeraLogBufLock);
+            evpl_mutex_unlock(&ChimeraLogBufLock);
 
             fprintf(out, "%s", tmp);
             fflush(out);
-            pthread_mutex_unlock(&ChimeraLogFlushLock);
+            evpl_mutex_unlock(&ChimeraLogFlushLock);
         }
         usleep(1000);
     }
@@ -183,14 +191,14 @@ chimera_log_thread(void *arg)
     /* Clear the pointers under the lock so a straggling chimera_vlog()
      * after the flush sees NULL and bails instead of writing into freed
      * memory. */
-    pthread_mutex_lock(&ChimeraLogBufLock);
+    evpl_mutex_lock(&ChimeraLogBufLock);
     for (i = 0; i < 2; ++i) {
         free(ChimeraLogBuffers[i]);
         ChimeraLogBuffers[i] = NULL;
     }
     ChimeraLogBuf    = NULL;
     ChimeraLogBufPtr = NULL;
-    pthread_mutex_unlock(&ChimeraLogBufLock);
+    evpl_mutex_unlock(&ChimeraLogBufLock);
 
     if (ChimeraLogFile) {
         fclose(ChimeraLogFile);
@@ -205,7 +213,7 @@ chimera_log_thread_exit(void)
 {
     if (ChimeraLogRun) {
         ChimeraLogRun = 0;
-        pthread_join(ChimeraLogThread, NULL);
+        evpl_native_thread_join(ChimeraLogThread, NULL);
     }
 } /* chimera_log_thread_exit */
 
@@ -214,7 +222,7 @@ chimera_log_flush(void)
 {
     if (ChimeraLogRun) {
         ChimeraLogRun = 0;
-        pthread_join(ChimeraLogThread, NULL);
+        evpl_native_thread_join(ChimeraLogThread, NULL);
     }
 } /* chimera_log_flush */
 
@@ -224,21 +232,22 @@ chimera_log_flush_signal(int signum)
     chimera_log_flush();
 } /* chimera_log_flush */
 
+#ifndef _WIN32
 static void
 chimera_log_atfork_prepare(void)
 {
     /* FlushLock first (same order as the flusher): holding it across fork()
      * guarantees the flusher is not mid-fprintf/fflush, so the child cannot
      * inherit the C library's stream lock in a taken state. */
-    pthread_mutex_lock(&ChimeraLogFlushLock);
-    pthread_mutex_lock(&ChimeraLogBufLock);
+    evpl_mutex_lock(&ChimeraLogFlushLock);
+    evpl_mutex_lock(&ChimeraLogBufLock);
 } /* chimera_log_atfork_prepare */
 
 static void
 chimera_log_atfork_parent(void)
 {
-    pthread_mutex_unlock(&ChimeraLogBufLock);
-    pthread_mutex_unlock(&ChimeraLogFlushLock);
+    evpl_mutex_unlock(&ChimeraLogBufLock);
+    evpl_mutex_unlock(&ChimeraLogFlushLock);
 } /* chimera_log_atfork_parent */
 
 static void
@@ -249,13 +258,13 @@ chimera_log_atfork_child(void)
      * parent held it when fork() was called, the child inherits it locked
      * and no thread in the child will ever release it.  Re-initializing is
      * safe in both cases.  Also clear ChimeraLogRun so the inherited atexit
-     * handler does not attempt to pthread_join() the parent's (now-invalid)
+     * handler does not attempt to evpl_native_thread_join() the parent's (now-invalid)
      * thread handle.  Any log data buffered by the parent at fork time is
      * discarded in the child (the parent's own copy still gets flushed by
      * the parent's log thread).
      */
-    pthread_mutex_init(&ChimeraLogBufLock, NULL);
-    pthread_mutex_init(&ChimeraLogFlushLock, NULL);
+    evpl_mutex_init(&ChimeraLogBufLock, NULL);
+    evpl_mutex_init(&ChimeraLogFlushLock, NULL);
     ChimeraLogRun = 0;
 
     if (ChimeraLogBuf) {
@@ -263,6 +272,8 @@ chimera_log_atfork_child(void)
         ChimeraLogBuf[0] = '\0';
     }
 } /* chimera_log_atfork_child */
+#endif /* ifndef _WIN32 */
+
 
 static void
 chimera_log_thread_init(void)
@@ -286,6 +297,9 @@ chimera_log_thread_init(void)
     ChimeraLogBuf    = ChimeraLogBuffers[ChimeraLogIndex];
     ChimeraLogBufPtr = ChimeraLogBuf;
 
+#ifdef _WIN32
+    signal(SIGABRT, chimera_log_flush_signal);
+#else  /* ifdef _WIN32 */
     struct sigaction sa;
     sa.sa_handler = chimera_log_flush_signal;
     sigemptyset(&sa.sa_mask);
@@ -294,6 +308,8 @@ chimera_log_thread_init(void)
 
     pthread_atfork(chimera_log_atfork_prepare, chimera_log_atfork_parent,
                    chimera_log_atfork_child);
+#endif /* ifdef _WIN32 */
+
 
     int rc = chimera_pthread_create(&ChimeraLogThread, NULL,
                                     chimera_log_thread, NULL);
@@ -302,7 +318,7 @@ chimera_log_thread_init(void)
         /* Without a flusher thread nothing ever drains the log buffer, so
          * later log calls would stall once it fills.  Report directly to
          * stderr (the logging system is the thing that failed) and abort. */
-        fprintf(stderr, "chimera_log_init: pthread_create failed: %s\n",
+        fprintf(stderr, "chimera_log_init: evpl_native_thread_create failed: %s\n",
                 strerror(rc));
         abort();
     }
@@ -314,7 +330,7 @@ chimera_log_thread_init(void)
 SYMBOL_EXPORT void
 chimera_log_init(void)
 {
-    pthread_once(&ChimeraLogOnce, chimera_log_thread_init);
+    evpl_once(&ChimeraLogOnce, chimera_log_thread_init);
 } /* chimera_log_init */
 
 SYMBOL_EXPORT void
@@ -354,11 +370,11 @@ chimera_vlog(
     pid = getpid();
     tid = chimera_gettid();
 
-    pthread_mutex_lock(&ChimeraLogBufLock);
+    evpl_mutex_lock(&ChimeraLogBufLock);
 
     if (!ChimeraLogBuf) {
         /* Buffers already torn down by chimera_log_flush(). */
-        pthread_mutex_unlock(&ChimeraLogBufLock);
+        evpl_mutex_unlock(&ChimeraLogBufLock);
         return;
     }
 
@@ -375,9 +391,9 @@ chimera_vlog(
             ChimeraLogBuf[0] = '\0';
             break;
         }
-        pthread_mutex_unlock(&ChimeraLogBufLock);
+        evpl_mutex_unlock(&ChimeraLogBufLock);
         usleep(1);
-        pthread_mutex_lock(&ChimeraLogBufLock);
+        evpl_mutex_lock(&ChimeraLogBufLock);
     }
 
     ChimeraLogBufPtr += chimera_snprintf(ChimeraLogBufPtr,
@@ -397,7 +413,7 @@ chimera_vlog(
                                          " level=%s module=%s source=\"%s:%d\"\n",
                                          pid, tid, level, mod, file, line);
 
-    pthread_mutex_unlock(&ChimeraLogBufLock);
+    evpl_mutex_unlock(&ChimeraLogBufLock);
 } /* chimera_vlog */
 
 SYMBOL_EXPORT void
@@ -492,6 +508,14 @@ __chimera_abort(
 static void
 chimera_crash_handler(int signum)
 {
+#ifdef _WIN32
+    void         *frames[BACKTRACE_SIZE];
+    USHORT        count = CaptureStackBackTrace(0, BACKTRACE_SIZE, frames, NULL);
+    chimera_error("core", __FILE__, __LINE__, "Received signal %d.", signum);
+    for (USHORT i = 0; i < count; i++) {
+        chimera_error("core", __FILE__, __LINE__, "frame %u: %p", i, frames[i]);
+    }
+#else  /* ifdef _WIN32 */
     unw_cursor_t  cursor;
     unw_context_t context;
     unw_word_t    ip, sp, off;
@@ -515,15 +539,68 @@ chimera_crash_handler(int signum)
         }
     }
 
+#endif /* ifdef _WIN32 */
+
     chimera_log_flush_signal(signum);
 
     signal(signum, SIG_DFL);
     raise(signum);
 } /* chimera_crash_handler */
 
+#ifdef _WIN32
+static LONG WINAPI
+chimera_windows_exception(EXCEPTION_POINTERS *exception)
+{
+    HMODULE module  = NULL;
+    void   *address = exception->ExceptionRecord->ExceptionAddress;
+    char    path[MAX_PATH];
+    void   *frames[BACKTRACE_SIZE];
+    USHORT  count;
+
+    fprintf(stderr, "Unhandled Windows exception 0x%08lx at %p\n",
+            exception->ExceptionRecord->ExceptionCode, address);
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR) address, &module) &&
+        GetModuleFileNameA(module, path, sizeof(path))) {
+        fprintf(stderr, "Fault location: %s + 0x%llx\n", path,
+                (unsigned long long) ((uintptr_t) address - (uintptr_t) module));
+    }
+    if (exception->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        exception->ExceptionRecord->NumberParameters >= 2) {
+        ULONG_PTR access = exception->ExceptionRecord->ExceptionInformation[0];
+
+        fprintf(stderr, "Fault access: %s at %p, thread %lu\n",
+                access == 0 ? "read" : access == 1 ? "write" : "execute",
+                (void *) exception->ExceptionRecord->ExceptionInformation[1],
+                GetCurrentThreadId());
+    }
+    count = CaptureStackBackTrace(0, BACKTRACE_SIZE, frames, NULL);
+    for (USHORT i = 0; i < count; i++) {
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR) frames[i], &module) &&
+            GetModuleFileNameA(module, path, sizeof(path))) {
+            fprintf(stderr, "frame %u: %s + 0x%llx\n", i, path,
+                    (unsigned long long) ((uintptr_t) frames[i] - (uintptr_t) module));
+        } else {
+            fprintf(stderr, "frame %u: %p\n", i, frames[i]);
+        }
+    }
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+} /* chimera_windows_exception */
+#endif /* ifdef _WIN32 */
+
 SYMBOL_EXPORT void
 chimera_enable_crash_handler(void)
 {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(chimera_windows_exception);
+    signal(SIGSEGV, chimera_crash_handler);
+    signal(SIGFPE, chimera_crash_handler);
+    signal(SIGILL, chimera_crash_handler);
+#else  /* ifdef _WIN32 */
     struct sigaction sa;
 
     sa.sa_handler = chimera_crash_handler;
@@ -534,4 +611,5 @@ chimera_enable_crash_handler(void)
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
+#endif /* ifdef _WIN32 */
 } /* chimera_enable_crash_handler */

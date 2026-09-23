@@ -1,0 +1,217 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+// SPDX-License-Identifier: LGPL-2.1-only
+#pragma once
+
+/* Native Win32/CRT boundary. Protocol/VFS mode bits describe Chimera objects;
+ * they never imply Windows host impersonation or POSIX host permissions. */
+#include <evpl/evpl_platform.h>
+#include <ws2tcpip.h>
+#include <winioctl.h>
+#include <bcrypt.h>
+#include <io.h>
+#include <direct.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <stdint.h>
+#include <limits.h>
+#include <string.h>
+#include <malloc.h>
+#include "common/compiler.h"
+
+typedef intptr_t ssize_t;
+typedef uint32_t uid_t;
+typedef uint32_t gid_t;
+typedef uint32_t mode_t;
+typedef int pid_t;
+typedef unsigned int useconds_t;
+typedef int socklen_t;
+struct iovec { void *iov_base; size_t iov_len; };
+#define PATH_MAX               32768
+#define NAME_MAX               255
+#include "vfs/sdk/vfs_mode.h"
+#define CLOCK_MONOTONIC        1
+#define CLOCK_REALTIME         2
+#define CLOCK_MONOTONIC_COARSE CLOCK_MONOTONIC
+#define strcasecmp             _stricmp
+#define strncasecmp            _strnicmp
+#define strdup                 _strdup
+#define strtok_r               strtok_s
+#define alloca                 _alloca
+static inline int fsync(int fd) { return _commit(fd); }
+#define STDIN_FILENO           0
+#define STDOUT_FILENO          1
+#define STDERR_FILENO          2
+/* Chimera POSIX-client errno extensions absent from the Windows CRT. */
+#define EDQUOT                 2001
+#define ESTALE                 2002
+#define F_OK                   0
+#define R_OK                   4
+#define W_OK                   2
+/* Virtual POSIX execute permission remains distinct from existence, even
+ * though the Windows CRT does not implement an execute-access check. */
+#define X_OK                   1
+
+static inline int
+chimera_clock_gettime(
+    int              clock,
+    struct timespec *ts)
+{
+    if (clock == CLOCK_MONOTONIC) {
+        LARGE_INTEGER now, frequency;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&frequency);
+        ts->tv_sec  = (time_t) (now.QuadPart / frequency.QuadPart);
+        ts->tv_nsec = (long) ((now.QuadPart % frequency.QuadPart) *
+                              1000000000ULL / frequency.QuadPart);
+    } else if (clock == CLOCK_REALTIME) {
+        timespec_get(ts, TIME_UTC);
+    } else {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+} // chimera_clock_gettime
+#define clock_gettime chimera_clock_gettime
+static inline int
+usleep(useconds_t us)
+{
+    Sleep((us + 999) / 1000);
+    return 0;
+} // usleep
+static inline unsigned
+sleep(unsigned seconds)
+{
+    Sleep(seconds * 1000);
+    return 0;
+} // sleep
+static inline struct tm *
+gmtime_r(
+    const time_t *t,
+    struct tm    *out)
+{
+    return gmtime_s(out, t) ? NULL : out;
+} // gmtime_r
+static inline struct tm *
+localtime_r(
+    const time_t *t,
+    struct tm    *out)
+{
+    return localtime_s(out, t) ? NULL : out;
+} // localtime_r
+#define htobe16(x)                        _byteswap_ushort(x)
+#define htobe32(x)                        _byteswap_ulong(x)
+#define htobe64(x)                        _byteswap_uint64(x)
+#define be16toh(x)                        _byteswap_ushort(x)
+#define be32toh(x)                        _byteswap_ulong(x)
+#define be64toh(x)                        _byteswap_uint64(x)
+#define htole16(x)                        ((uint16_t) (x))
+#define htole32(x)                        ((uint32_t) (x))
+#define htole64(x)                        ((uint64_t) (x))
+#define le16toh(x)                        ((uint16_t) (x))
+#define le32toh(x)                        ((uint32_t) (x))
+#define le64toh(x)                        ((uint64_t) (x))
+
+/* Virtual special-device identifiers retain the complete major/minor pair. */
+#define makedev(major_value, minor_value) (((uint64_t) (major_value) << 32) | (uint32_t) (minor_value))
+#define major(device)                     ((uint32_t) ((uint64_t) (device) >> 32))
+#define minor(device)                     ((uint32_t) (device))
+#ifndef SSIZE_MAX
+#define SSIZE_MAX INTPTR_MAX
+#endif // ifndef SSIZE_MAX
+
+static inline char *
+strndup(
+    const char *source,
+    size_t      limit)
+{
+    size_t len  = strnlen(source, limit);
+    char  *copy = malloc(len + 1);
+
+    if (copy) {
+        memcpy(copy, source, len);
+        copy[len] = 0;
+    }
+    return copy;
+} // strndup
+static inline int
+ftruncate(
+    int     fd,
+    int64_t length)
+{
+    FILE_END_OF_FILE_INFO info;
+    HANDLE                handle;
+    DWORD                 bytes, error;
+
+    if (length < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (fd < 0 || (handle = (HANDLE) _get_osfhandle(fd)) == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return -1;
+    }
+
+    /* The CRT grows files by writing zero buffers. Mark sparse-capable files
+     * sparse and set EOF directly, preserving both zero-filled holes and the
+     * descriptor position without allocating every byte of a device image.
+     * Sparse marking is only an optimization; other filesystems can still
+     * resize through FileEndOfFileInfo. */
+    DeviceIoControl(handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytes, NULL);
+    info.EndOfFile.QuadPart = length;
+    if (SetFileInformationByHandle(handle, FileEndOfFileInfo, &info, sizeof(info))) {
+        return 0;
+    }
+    error = GetLastError();
+    errno = error == ERROR_DISK_FULL ? ENOSPC :
+        error == ERROR_ACCESS_DENIED ? EACCES :
+        error == ERROR_INVALID_HANDLE ? EBADF : EIO;
+    return -1;
+} // ftruncate
+
+/* Stable per-host identity for protocol metadata. The computer name is a
+ * fallback when access to the installation GUID is restricted. */
+static inline int
+chimera_windows_machine_identity(
+    char  *buffer,
+    size_t capacity)
+{
+    DWORD bytes = (DWORD) capacity;
+
+    if (!RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography",
+                      "MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                      NULL, buffer, &bytes) && buffer[0]) {
+        return 0;
+    }
+    bytes = (DWORD) capacity;
+    if (GetComputerNameA(buffer, &bytes) && buffer[0]) {
+        return 0;
+    }
+    errno = EIO;
+    return -1;
+} // chimera_windows_machine_identity
+
+/* Bounded byte search used by protocol parsers; empty needles match first. */
+static inline void *
+memmem(
+    const void *haystack,
+    size_t      haystack_size,
+    const void *needle,
+    size_t      needle_size)
+{
+    const unsigned char *bytes = haystack;
+
+    if (!needle_size) {
+        return (void *) haystack;
+    }
+    if (needle_size > haystack_size) {
+        return NULL;
+    }
+    for (size_t i = 0; i <= haystack_size - needle_size; i++) {
+        if (!memcmp(bytes + i, needle, needle_size)) {
+            return (void *) (bytes + i);
+        }
+    }
+    return NULL;
+} // memmem

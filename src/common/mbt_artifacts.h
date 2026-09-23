@@ -44,7 +44,18 @@ mbt_artifacts_name(void)
     if (name && *name) {
         return name;
     }
-#ifdef __APPLE__
+#ifdef _WIN32
+    char       *path = NULL;
+    if (_get_pgmptr(&path) != 0 || !path || !*path) {
+        return "chimera-mbt";
+    }
+    const char *base  = strrchr(path, '\\');
+    const char *slash = strrchr(path, '/');
+    if (slash && (!base || slash > base)) {
+        base = slash;
+    }
+    return base ? base + 1 : path;
+#elif defined(__APPLE__)
     return getprogname();
 #else  /* ifdef __APPLE__ */
     {
@@ -83,6 +94,7 @@ mbt_debug_log_start(void)
 
     chimera_log_set_file(fp);
     chimera_log_init();
+    chimera_enable_crash_handler();
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 } /* mbt_debug_log_start */
 
