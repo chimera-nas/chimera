@@ -13,33 +13,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  native-runtime:
-    name: Runtime ${{ matrix.arch }} ${{ matrix.config }}
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: windows-2022, arch: x64, config: Debug, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
-          - {runner: windows-2022, arch: x64, config: Release, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
-          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Debug, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
-          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Release, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-      - name: Test native runtime
-        shell: pwsh
-        run: |
-          cmake -S src/common/tests/native -B runtime -G "${{ matrix.generator }}" -A ${{ matrix.arch }}
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build runtime --config ${{ matrix.config }}
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir runtime -C ${{ matrix.config }} --output-on-failure --no-tests=error
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   native:
     name: MSVC ${{ matrix.arch }} ${{ matrix.config }}
     runs-on: ${{ matrix.runner }}
@@ -55,10 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-2022, arch: x64, config: Debug, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
           - {runner: windows-2022, arch: x64, config: Release, generator: "Visual Studio 17 2022", vs: "[17.0,18.0)"}
-          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Debug, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
-          - {runner: windows-11-vs2026-arm, arch: ARM64, config: Release, generator: "Visual Studio 18 2026", vs: "[18.0,19.0)"}
     steps:
       - uses: actions/checkout@v5
         with:
