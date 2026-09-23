@@ -171,6 +171,9 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
     struct chimera_smb_request       *request;
 
     while ((request = conn->parked_requests) != NULL) {
+        bool break_parked = request->smb2_hdr.command == SMB2_CREATE &&
+            request->create.break_waiter_counted;
+
         conn->parked_requests    = request->async.park_next;
         request->async.park_next = NULL;
         request->async.armed     = 0;
@@ -220,6 +223,18 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
             }
             chimera_smb_open_file_release(request, of);
             request->create.r_open_file = NULL;
+        }
+
+        if (break_parked) {
+            /* The break timer was this CREATE's only continuation.
+             * It is cancelled above, so nobody can complete its compound now.
+             * Requests within a compound execute serially: abandon the whole
+             * compound rather than starting its remaining commands on a dead
+             * connection. Share-acquire callbacks are handled separately above;
+             * other CREATEs may already have handed off to an async VFS call.
+             */
+            chimera_smb_create_pending_unregister(request);
+            chimera_smb_compound_free(thread, request->compound);
         }
     }
 

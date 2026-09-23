@@ -1523,6 +1523,7 @@ chimera_smb_server_handle_smb2(
         if (unlikely(memcmp(request->smb2_hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0)) {
             chimera_smb_error("Received SMB2 message with invalid protocol header");
             chimera_smb_request_free(thread, request);
+            chimera_smb_compound_free(thread, compound);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -1530,6 +1531,7 @@ chimera_smb_server_handle_smb2(
         if (unlikely(request->smb2_hdr.struct_size != 64)) {
             chimera_smb_error("Received SMB2 message with invalid struct size");
             chimera_smb_request_free(thread, request);
+            chimera_smb_compound_free(thread, compound);
             evpl_close(evpl, conn->bind);
             return;
         }
@@ -1570,6 +1572,7 @@ chimera_smb_server_handle_smb2(
                     request->smb2_hdr.message_id, charge,
                     conn->seq_low, conn->seq_high);
                 chimera_smb_request_free(thread, request);
+                chimera_smb_compound_free(thread, compound);
                 evpl_close(evpl, conn->bind);
                 return;
             }
@@ -1812,6 +1815,7 @@ chimera_smb_server_handle_smb2(
                 if (unlikely(conn->last_session_handle == NULL)) {
                     chimera_smb_error("Message contains RELATED_OPERATIONS flag but no last session handle exists");
                     chimera_smb_request_free(thread, request);
+                    chimera_smb_compound_free(thread, compound);
                     evpl_close(evpl, conn->bind);
                     return;
                 }
@@ -1866,6 +1870,7 @@ chimera_smb_server_handle_smb2(
 
                 chimera_smb_error("Received SMB2 message with invalid signature");
                 chimera_smb_request_free(thread, request);
+                chimera_smb_compound_free(thread, compound);
                 evpl_close(evpl, conn->bind);
                 return;
             }
