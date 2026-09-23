@@ -39,7 +39,24 @@ jobs:
       run: |
         reuse lint
 
-    - name: Check copyright years
+    - name: Check copyright years and commit attribution
       if: github.event_name == 'pull_request'
+      env:
+        BASE_REF: origin/${{ github.base_ref }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
-        bash etc/copyright-year.sh --check --base origin/${{ github.base_ref }}
+        bash etc/copyright-year.sh --check --base "$BASE_REF"
+
+        pattern='(^|[^[:alnum:]_])(claude|codex)([^[:alnum:]_]|$)'
+        merge_base=$(git merge-base "$BASE_REF" "$HEAD_SHA")
+        failed=0
+
+        while read -r commit; do
+          if git show -s --format='%an <%ae>%n%B' "$commit" | grep -Eiq "$pattern"; then
+            summary=$(git show -s --format='%h %s' "$commit")
+            echo "::error title=Invalid commit attribution::$summary names a prohibited automated agent in its author identity or message"
+            failed=1
+          fi
+        done < <(git rev-list "$merge_base..$HEAD_SHA")
+
+        exit "$failed"
