@@ -40,6 +40,12 @@ add_dependencies(chimera_smb ndrzcc)
 
 target_link_libraries(chimera_smb chimera_smb_common chimera_vfs evpl ${CHIMERA_GSS_LIB})
 
+# SMB string conversion needs iconv even when Kerberos is disabled.
+if(NOT WIN32)
+    find_package(Iconv REQUIRED)
+    target_link_libraries(chimera_smb Iconv::Iconv)
+endif()
+
 # Conditionally link libwbclient for Winbind integration
 if(WBCLIENT_FOUND)
     target_include_directories(chimera_smb PRIVATE ${WBCLIENT_INCLUDE_DIRS})
