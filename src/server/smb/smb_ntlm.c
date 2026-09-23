@@ -716,13 +716,12 @@ validate_local_user(
 
     /* If the client negotiated key exchange, the actual session key is a
      * random value the client generated and sent RC4-wrapped with the
-     * key-exchange key (MS-NLMP 3.4.5.1). Recover it; otherwise the
+     * key-exchange key (MS-NLMP 3.2.5.1.2). Recover it; otherwise the
      * key-exchange key is used directly as the session key. */
     if ((negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) &&
         enc_session_key_len == 16) {
         uint8_t exported_key[16];
-        /* Preserve MS-NLMP 3.4.5.1 key exchange; SMB payload encryption uses AES. */
-        // codeql[cpp/weak-cryptographic-algorithm]
+        /* Preserve MS-NLMP 3.2.5.1.2 key exchange; SMB payload encryption uses AES. */
         if (!chimera_crypto_ntlm_key_exchange(ctx->session_key, enc_session_key, exported_key)) {
             smb_ntlm_error("NTLM: Failed to unwrap exported session key");
             return -1;

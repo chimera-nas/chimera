@@ -194,7 +194,6 @@ main(void)
     }
     memset(data, 0, 16);
     /* Known-answer fixture for NTLM's required legacy key exchange. */
-    // codeql[cpp/weak-cryptographic-algorithm]
     assert(chimera_crypto_ntlm_key_exchange(key, data, out));
     check(out, 16, "9ac7cc9a609d1ef7b2932899cde41b97");
     assert(chimera_crypto_random(out, 32));

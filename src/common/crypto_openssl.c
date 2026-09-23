@@ -326,8 +326,7 @@ chimera_crypto_ntlm_key_exchange(
     if (!ctx) {
         return 0;
     }
-    /* MS-NLMP 3.4.5.1 mandates RC4 for this existing NTLMv2 wire operation. */
-    // codeql[cpp/weak-cryptographic-algorithm]
+    /* MS-NLMP 3.2.5.1.2 specifies RC4 for NTLM's negotiated key exchange. */
     ok = EVP_EncryptInit_ex(ctx, EVP_rc4(), NULL, key, NULL) == 1 &&
         EVP_EncryptUpdate(ctx, output, &outl, input, 16) == 1 && outl == 16;
     EVP_CIPHER_CTX_free(ctx);
