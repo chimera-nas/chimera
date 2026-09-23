@@ -260,9 +260,14 @@ ip netns exec "${NETNS_NAME}" env \
     2>"$CHIMERA_LOG" &
 CHIMERA_PID=$!
 
-# Wait for SMB port to be ready
-for i in $(seq 1 150); do
+# Wait for SMB port to be ready.  Diskfs initialization can take more than the
+# old three-second polling window on a loaded hosted runner.  The old loop also
+# fell through after its last attempt and booted the guest anyway, turning slow
+# startup into a racy CIFS ECONNREFUSED failure.
+SMB_READY=0
+for i in $(seq 1 1500); do
     if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/10.0.0.1/445" 2>/dev/null; then
+        SMB_READY=1
         break
     fi
     if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
@@ -271,6 +276,11 @@ for i in $(seq 1 150); do
     fi
     sleep 0.02
 done
+if [ "$SMB_READY" -ne 1 ]; then
+    echo "timed out waiting for SMB port 10.0.0.1:445"
+    tail -100 "$CHIMERA_LOG" 2>/dev/null || true
+    exit 1
+fi
 
 # Translate the server-side dialect string into the kernel cifs `vers=` token.
 # They are NOT identical: SMB 2.0.2 mounts as vers=2.0 (there is no "2.0.2"

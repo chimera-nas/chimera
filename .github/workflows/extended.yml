@@ -1227,13 +1227,15 @@ jobs:
           # against 16 before the move, at identical concurrency -- the machine
           # was thrashing, not the tests regressing.
           #
-          # Two per vCPU keeps the overlap these cells actually benefit from --
-          # they spend most of their time waiting on a daemon, which is why
-          # oversubscribing at all is right -- without the 8x that broke them.
-          # regen.sh's own default is 12, for reference.  Derived rather than
-          # hardcoded so a runner change does not silently reintroduce this.
+          # One per vCPU still overlaps the client/server wait time while leaving
+          # enough memory and kernel io_uring capacity for the diskfs cells.
+          # Two per vCPU continued to produce io_uring ENOMEM aborts and made
+          # maxfid take more than twenty minutes on the four-vCPU runner, while
+          # both maxfid backends finish locally in about one minute when they
+          # are not competing with seven other server instances.  Derived rather
+          # than hardcoded so a runner change does not silently reintroduce this.
           if [ -z "${SMBTORTURE_PARALLEL}" ]; then
-            SMBTORTURE_PARALLEL=$(( $(nproc) * 2 ))
+            SMBTORTURE_PARALLEL=$(nproc)
           fi
           export SMBTORTURE_PARALLEL
           echo "smbtorture concurrency: ${SMBTORTURE_PARALLEL} cells ($(nproc) vCPU)"
