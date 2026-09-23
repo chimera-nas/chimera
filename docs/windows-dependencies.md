@@ -10,11 +10,11 @@ permalink: /windows-dependencies
 The **Publish Windows dependencies** workflow builds Chimera's third-party
 dependencies with MSVC and publishes native binary packages to the
 organization's GitHub Packages NuGet feed. Ordinary Windows builds can then
-download these packages instead of compiling RocksDB, Protobuf, OpenSSL, and
+download these packages instead of compiling RocksDB, Protobuf, and
 the other dependencies on every runner.
 
-This workflow prepares dependencies only. The Windows application build and
-its integration with this feed land separately.
+The native Windows application workflow consumes this feed and forbids source
+builds of missing packages.
 
 ## Publishing
 
@@ -65,6 +65,11 @@ binary caches are disabled for this check. Thus an upload failure cannot be
 hidden behind a successful source build. Each job records the source commit,
 manifest hash, runner image, MSVC tools version, and restored package status
 in a diagnostic artifact. NuGet credentials are temporary and are not uploaded.
+Windows crypto is supplied by the operating system. OpenSSL is absent from the
+manifest, and its former ARM64 compiler overlay is no longer needed. The
+application workflow tests Schannel TLS and HTTPS, while the crypto workflow
+checks CNG primitives without vcpkg dependencies. Removing OpenSSL leaves the
+other packages' recipes unchanged, so their existing binaries remain reusable.
 
 ## Consuming the packages
 

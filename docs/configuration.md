@@ -80,6 +80,8 @@ the canonical place to set them.
 | `sync_delegation_threads` | int | - | Size of the synchronous delegation pool. |
 | `async_delegation` | bool | - | Enable the asynchronous VFS delegation thread pool. |
 | `async_delegation_threads` | int | - | Size of the asynchronous delegation pool. |
+| `tls_verify_peer` | bool | `true` | Verify TLS peer certificates; servers require a client certificate. Applies to all libevpl TLS connections in this process, including outbound clients. |
+| `tls_ca_file` | string | libevpl default | PEM CA bundle used for TLS peer verification. |
 | `huge_pages` | bool | libevpl default | Allocate libevpl memory from huge pages. |
 | `huge_page_size` | size | libevpl default | Huge page size to request (e.g. `"2M"`, `"1G"`). |
 | `slab_size` | size | libevpl default | libevpl memory slab size. |
