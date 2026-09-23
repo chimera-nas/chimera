@@ -31,6 +31,15 @@ chimera_vfs_access_check(
         return requested;
     }
 
+    /* Grant nothing on under-filled attrs.  Reading 0 for a missing mode,
+     * uid or gid does not deny -- it evaluates the object as if owned by
+     * root:root, which hands the real owner the group or other class and
+     * every gid-0 member the group class.  Root is decided without looking
+     * at the object (the ACL engine's root bypass) and keeps its answer. */
+    if (cred->uid != 0 && chimera_vfs_gate_attrs_missing(attr, 0)) {
+        return 0;
+    }
+
     if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
         acl = attr->va_acl;
     }
@@ -167,6 +176,21 @@ chimera_vfs_open_gate_needed(
 
     return 1;
 } /* chimera_vfs_open_gate_needed */
+
+SYMBOL_EXPORT uint64_t
+chimera_vfs_gate_attrs_missing(
+    const struct chimera_vfs_attrs *attr,
+    uint64_t                        module_capabilities)
+{
+    uint64_t need = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+
+    if (module_capabilities & CHIMERA_VFS_CAP_ACL_NATIVE) {
+        need |= CHIMERA_VFS_ATTR_ACL;
+    }
+
+    return need & ~attr->va_set_mask;
+} /* chimera_vfs_gate_attrs_missing */
 
 SYMBOL_EXPORT enum chimera_vfs_error
 chimera_vfs_gate(

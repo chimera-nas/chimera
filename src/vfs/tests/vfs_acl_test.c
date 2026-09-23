@@ -389,6 +389,56 @@ test_gate(void)
     TEST_PASS("gate: enforcement scoping + owner-implicit WRITE_ACL, not WRITE_OWNER");
 } /* test_gate */
 
+/*
+ * gate_attrs_missing names exactly the attrs a gate evaluates: mode, uid and
+ * gid always, plus the ACL for a backend whose ACL (not its mode) is
+ * authoritative.  Anything else in the mask is irrelevant to it.
+ */
+static void
+test_gate_attrs_missing(void)
+{
+    struct chimera_vfs_attrs attr;
+    const uint64_t           stat3 = CHIMERA_VFS_ATTR_MODE |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+
+    memset(&attr, 0, sizeof(attr));
+
+    /* A mode-authoritative backend needs mode/uid/gid and nothing else. */
+    attr.va_set_mask = stat3;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == 0);
+
+    /* An ACL-native backend must also return its ACL. */
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_ACL_NATIVE) ==
+           CHIMERA_VFS_ATTR_ACL);
+    attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_ACL_NATIVE) == 0);
+
+    /* Each of mode, uid and gid is reported on its own. */
+    attr.va_set_mask = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == CHIMERA_VFS_ATTR_MODE);
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_GID;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == CHIMERA_VFS_ATTR_UID);
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == CHIMERA_VFS_ATTR_GID);
+
+    /* An empty reply is missing everything the gate reads. */
+    attr.va_set_mask = 0;
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_ACL_NATIVE) ==
+           (stat3 | CHIMERA_VFS_ATTR_ACL));
+
+    /* Bits the gate does not read neither help nor hurt. */
+    attr.va_set_mask = stat3 | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE;
+    assert(chimera_vfs_gate_attrs_missing(&attr, 0) == 0);
+
+    /* A DAC-delegating backend gets no exemption here: whether a gate runs
+     * at all is gate_needed's decision, not this helper's. */
+    attr.va_set_mask = 0;
+    assert(chimera_vfs_gate_attrs_missing(&attr, CHIMERA_VFS_CAP_DELEGATES_DAC) ==
+           stat3);
+
+    TEST_PASS("gate_attrs_missing: mode/uid/gid always, ACL only when native");
+} /* test_gate_attrs_missing */
+
 #define INIT_ATTR(a, m, u, g)                                            \
         do {                                                             \
             memset(&(a), 0, sizeof(a));                                  \
@@ -462,6 +512,59 @@ test_delete_allowed(void)
 
     TEST_PASS("delete_allowed: DELETE_CHILD synthesis / per-file DELETE / sticky");
 } /* test_delete_allowed */
+
+/*
+ * access_check must grant nothing to a non-exempt caller when mode, uid or
+ * gid is missing: zeros read in their place evaluate the object as owned by
+ * root:root, an over-grant (not a denial) for the real owner and for every
+ * gid-0 member.
+ */
+static void
+test_access_check_incomplete_attrs(void)
+{
+    struct chimera_vfs_cred  owner = mkcred(1000, 1000);
+    struct chimera_vfs_cred  wheel = mkcred(3000, 0);
+    struct chimera_vfs_cred  root  = mkcred(0, 0);
+    struct chimera_vfs_cred  none  = mkcred(0, 0);
+    struct chimera_vfs_attrs attr;
+    const uint32_t           rw = CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA;
+
+    none.flavor = CHIMERA_VFS_AUTH_NONE;
+
+    /* Controls on complete attrs: POSIX picks the first matching class, so
+     * the owner of a 0066 file and a non-member of a 0060 file get no data
+     * access. */
+    INIT_ATTR(attr, 0066, 1000, 1000);
+    assert((chimera_vfs_access_check(&attr, &owner, rw) & rw) == 0);
+    INIT_ATTR(attr, 0060, 1000, 1000);
+    assert((chimera_vfs_access_check(&attr, &wheel, rw) & rw) == 0);
+
+    /* uid withheld: the owner must not fall through to the group class. */
+    INIT_ATTR(attr, 0066, 1000, 1000);
+    attr.va_set_mask &= ~CHIMERA_VFS_ATTR_UID;
+    assert(chimera_vfs_access_check(&attr, &owner, CHIMERA_ACE_MASK_ALL) == 0);
+
+    /* gid withheld: a gid-0 caller must not inherit the group class. */
+    INIT_ATTR(attr, 0060, 1000, 1000);
+    attr.va_set_mask &= ~CHIMERA_VFS_ATTR_GID;
+    assert(chimera_vfs_access_check(&attr, &wheel, CHIMERA_ACE_MASK_ALL) == 0);
+
+    /* mode withheld: nothing at all, not even the baseline rights. */
+    INIT_ATTR(attr, 0777, 1000, 1000);
+    attr.va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+    assert(chimera_vfs_access_check(&attr, &owner, CHIMERA_ACE_MASK_ALL) == 0);
+
+    /* Exempt credentials keep their unconditional answer. */
+    attr.va_set_mask = 0;
+    assert(chimera_vfs_access_check(&attr, &root, rw) == rw);
+    assert(chimera_vfs_access_check(&attr, &none, rw) == rw);
+
+    /* Complete attrs are unaffected. */
+    INIT_ATTR(attr, 0600, 1000, 1000);
+    assert((chimera_vfs_access_check(&attr, &owner, rw) & rw) == rw);
+
+    TEST_PASS("access_check: incomplete attrs grant nothing; exempt creds unchanged");
+} /* test_access_check_incomplete_attrs */
 
 #undef INIT_ATTR
 
@@ -652,10 +755,12 @@ main(
     test_inherit_fallback();
     test_serialize_roundtrip();
     test_gate();
+    test_gate_attrs_missing();
     test_delete_allowed();
     test_sid_principal_never_matches();
     test_sid_survives_chmod_and_inherit();
     test_serialize_bogus_sid_len();
+    test_access_check_incomplete_attrs();
 
     fprintf(stderr, "All ACL engine tests passed\n");
     return 0;

@@ -149,6 +149,33 @@ chimera_vfs_open_at_hdl_callback(
         handle->r_created = request->open_at.r_created;
     }
 
+    /* Fail closed on an under-filled reply.  The semantics block below reads
+     * mode, uid, gid and (on an ACL-native backend) the ACL from r_attr; a
+     * backend that completed the open without them would otherwise have the
+     * access gate skipped outright (no MODE) or evaluated against zeros read
+     * as root:root.  Only opens the gate must actually decide are refused: a
+     * gate-exempt credential, a file this open just created, and an open
+     * requesting no data access need nothing from these attrs. */
+    if (request->status == CHIMERA_VFS_OK && handle &&
+        !request->open_at.r_created &&
+        chimera_vfs_open_at_checked(request->cred, request->open_at.flags) &&
+        chimera_vfs_open_required_access(request->open_at.flags) &&
+        chimera_vfs_open_gate_needed(request->module->capabilities,
+                                     request->cred)) {
+        uint64_t missing = chimera_vfs_gate_attrs_missing(
+            &request->open_at.r_attr, request->module->capabilities);
+
+        if (missing) {
+            chimera_vfs_error("open_at: module %s replied without attrs 0x%llx "
+                              "the access gate needs; refusing the open",
+                              request->module->name,
+                              (unsigned long long) missing);
+            chimera_vfs_release(thread, handle);
+            handle          = NULL;
+            request->status = CHIMERA_VFS_EIO;
+        }
+    }
+
     /* POSIX open semantics, evaluated against the just-returned attrs
      * (mirroring the checks the plain-open wrapper applies on its lookup
      * path, which this create/openat path previously skipped entirely):

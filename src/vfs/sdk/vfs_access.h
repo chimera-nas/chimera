@@ -30,6 +30,10 @@ struct chimera_vfs_open_handle;
  * native ACL it is evaluated; otherwise the decision falls back to the POSIX
  * mode bits.  Callers test `(granted & requested) == requested` for a hard
  * allow, or inspect individual bits (e.g. for an NFS ACCESS reply).
+ *
+ * `attr` must carry mode, uid and gid: for any caller other than AUTH_NONE
+ * or root, attrs missing one of them grant nothing (see
+ * chimera_vfs_gate_attrs_missing).
  */
 uint32_t chimera_vfs_access_check(
     const struct chimera_vfs_attrs *attr,
@@ -91,6 +95,20 @@ int chimera_vfs_gate_needed_prefix(
 int chimera_vfs_open_gate_needed(
     uint64_t                       module_capabilities,
     const struct chimera_vfs_cred *cred);
+
+/*
+ * The attribute bits an engine access gate evaluates, for a backend with
+ * `module_capabilities`: mode, uid and gid always, plus the native ACL for a
+ * CHIMERA_VFS_CAP_ACL_NATIVE backend (whose ACL, not its mode, is the
+ * authority).  Returns the subset of those bits NOT set in attr->va_set_mask,
+ * so 0 means the attrs are complete enough to authorize against.  A gate
+ * handed a non-zero answer must refuse the operation rather than evaluate:
+ * a missing mode would skip the check and a missing uid/gid would be read as
+ * root:root, both of which grant access the object does not.
+ */
+uint64_t chimera_vfs_gate_attrs_missing(
+    const struct chimera_vfs_attrs *attr,
+    uint64_t                        module_capabilities);
 
 /*
  * The enforcement decision itself: CHIMERA_VFS_OK if every bit in `required`
