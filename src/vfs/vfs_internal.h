@@ -186,7 +186,7 @@ chimera_vfs_resolve_mount(
         return NULL;
     }
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&vfs->mount_table->rcu);
 
     mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
 
@@ -199,7 +199,7 @@ chimera_vfs_resolve_mount(
         module = NULL;
     }
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&vfs->mount_table->rcu);
 
     return module;
 } /* chimera_vfs_resolve_mount */

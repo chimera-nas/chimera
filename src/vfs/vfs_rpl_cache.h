@@ -8,7 +8,7 @@
 #include "vfs/vfs_rcu_pool.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
-#include <urcu/urcu-qsbr.h>
+#include "common/chimera_rcu.h"
 
 /*
  * RPL (Reverse Path Lookup) Cache
@@ -38,6 +38,7 @@ struct chimera_vfs_rpl_cache_entry {
 struct chimera_vfs_rpl_cache_shard {
     struct chimera_vfs_rpl_cache_entry **fwd_entries; /* forward index slots */
     struct chimera_vfs_rpl_cache_entry **rev_entries; /* reverse index slots */
+    struct chimera_rcu_domain            rcu;
     pthread_mutex_t                      entry_lock;
 };
 
@@ -96,6 +97,7 @@ chimera_vfs_rpl_cache_create(
         shard->rev_entries = calloc(cache->num_slots * cache->num_entries,
                                     sizeof(struct chimera_vfs_rpl_cache_entry *));
 
+        chimera_rcu_domain_init(&shard->rcu);
         pthread_mutex_init(&shard->entry_lock, NULL);
     }
 
@@ -112,7 +114,7 @@ chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
         return;
     }
 
-    rcu_barrier();
+    chimera_rcu_barrier();
 
     for (i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
@@ -127,6 +129,7 @@ chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
         free(shard->rev_entries);
 
         pthread_mutex_destroy(&shard->entry_lock);
+        chimera_rcu_domain_destroy(&shard->rcu);
     }
 
     chimera_rcu_pool_destroy(&cache->pool);
@@ -190,10 +193,10 @@ chimera_vfs_rpl_cache_lookup(
     slot     = &shard->fwd_entries[chimera_vfs_rpl_cache_fwd_slot(cache, key)];
     slot_end = slot + cache->num_entries;
 
-    urcu_qsbr_read_lock();
+    chimera_rcu_read_lock(&shard->rcu);
 
     while (slot < slot_end) {
-        entry = rcu_dereference(*slot);
+        entry = chimera_rcu_deref(*slot);
 
         if (entry && entry->fwd_key == key &&
             entry->expiration >= now &&
@@ -206,20 +209,20 @@ chimera_vfs_rpl_cache_lookup(
             memcpy(r_name, entry->name, entry->name_len);
             entry->score++;
 
-            urcu_qsbr_read_unlock();
+            chimera_rcu_read_unlock(&shard->rcu);
             return 0;
         }
 
         slot++;
     }
 
-    urcu_qsbr_read_unlock();
+    chimera_rcu_read_unlock(&shard->rcu);
     return -1;
 } /* chimera_vfs_rpl_cache_lookup */
 
 /*
  * Remove an entry from the reverse index.
- * Caller must hold shard->entry_lock and be in an RCU read section.
+ * Caller must hold shard->entry_lock and be inside the shard's mutate region.
  */
 static inline void
 chimera_vfs_rpl_cache_rev_remove(
@@ -234,7 +237,7 @@ chimera_vfs_rpl_cache_rev_remove(
 
     while (slot < slot_end) {
         if (*slot == target) {
-            rcu_assign_pointer(*slot, NULL);
+            chimera_rcu_assign(*slot, NULL);
             return;
         }
         slot++;
@@ -243,7 +246,7 @@ chimera_vfs_rpl_cache_rev_remove(
 
 /*
  * Insert an entry into the reverse index.
- * Caller must hold shard->entry_lock and be in an RCU read section.
+ * Caller must hold shard->entry_lock and be inside the shard's mutate region.
  * Uses LRU eviction if all slots are occupied.
  * Returns evicted entry or NULL.
  */
@@ -266,7 +269,7 @@ chimera_vfs_rpl_cache_rev_insert(
         old_entry = *slot;
 
         if (!old_entry) {
-            rcu_assign_pointer(*slot, entry);
+            chimera_rcu_assign(*slot, entry);
             return NULL;
         }
 
@@ -286,7 +289,7 @@ chimera_vfs_rpl_cache_rev_insert(
     /* All slots full — evict lowest-score entry from reverse index only.
      * The forward index entry remains; it just won't be invalidatable
      * by parent+name until TTL expires. */
-    rcu_assign_pointer(*slot_best, entry);
+    chimera_rcu_assign(*slot_best, entry);
     return NULL;
 } /* chimera_vfs_rpl_cache_rev_insert */
 
@@ -334,7 +337,7 @@ chimera_vfs_rpl_cache_insert(
     memcpy(entry->name, name, name_len);
 
     /* Insert into forward index */
-    urcu_qsbr_read_lock();
+    chimera_rcu_mutate_begin(&shard->rcu);
     pthread_mutex_lock(&shard->entry_lock);
 
     slot     = &shard->fwd_entries[chimera_vfs_rpl_cache_fwd_slot(cache, fwd_key)];
@@ -386,17 +389,17 @@ chimera_vfs_rpl_cache_insert(
         chimera_vfs_rpl_cache_rev_remove(cache, shard, best_entry);
     }
 
-    rcu_assign_pointer(*slot_best, entry);
+    chimera_rcu_replace(&shard->rcu, *slot_best, entry,
+                        best_entry ? &best_entry->rnode.rcu : NULL,
+                        chimera_rcu_pool_retire);
 
     /* Insert into reverse index */
     chimera_vfs_rpl_cache_rev_insert(cache, shard, entry);
 
     pthread_mutex_unlock(&shard->entry_lock);
-    urcu_qsbr_read_unlock();
 
-    if (best_entry) {
-        call_rcu(&best_entry->rnode.rcu, chimera_rcu_pool_retire);
-    }
+    /* Dispatches the displaced entry, after the shard mutex is dropped. */
+    chimera_rcu_mutate_end(&shard->rcu);
 } /* chimera_vfs_rpl_cache_insert */
 
 /*
@@ -423,12 +426,15 @@ chimera_vfs_rpl_cache_invalidate(
      * lookup hot path is O(1).  We don't have fwd_key during invalidate
      * (the caller knows only the parent_fh + name), so scan every shard's
      * reverse index.  Invalidation runs on rename/remove which is far
-     * less frequent than lookup. */
-    urcu_qsbr_read_lock();
-
+     * less frequent than lookup.
+     *
+     * Each shard is entered on its own: the scan holds no claim on the shards
+     * it has already passed, so there is nothing to gain from one section
+     * spanning all of them. */
     for (shard_idx = 0; shard_idx < cache->num_shards; shard_idx++) {
         shard = &cache->shards[shard_idx];
 
+        chimera_rcu_mutate_begin(&shard->rcu);
         pthread_mutex_lock(&shard->entry_lock);
 
         slot     = &shard->rev_entries[(rev_key & cache->num_slots_mask) << cache->num_entries_bits];
@@ -445,7 +451,9 @@ chimera_vfs_rpl_cache_invalidate(
                 removed_entry = entry;
 
                 /* Remove from reverse index */
-                rcu_assign_pointer(*slot, NULL);
+                chimera_rcu_replace(&shard->rcu, *slot, NULL,
+                                    &removed_entry->rnode.rcu,
+                                    chimera_rcu_pool_retire);
 
                 /* Remove from forward index (same shard — entries are
                  * stored together in the shard chosen by fwd_key). */
@@ -458,7 +466,7 @@ chimera_vfs_rpl_cache_invalidate(
 
                     while (fwd_slot < fwd_end) {
                         if (*fwd_slot == entry) {
-                            rcu_assign_pointer(*fwd_slot, NULL);
+                            chimera_rcu_assign(*fwd_slot, NULL);
                             break;
                         }
                         fwd_slot++;
@@ -472,14 +480,11 @@ chimera_vfs_rpl_cache_invalidate(
 
         pthread_mutex_unlock(&shard->entry_lock);
 
+        /* Dispatches the removed entry, after the shard mutex is dropped. */
+        chimera_rcu_mutate_end(&shard->rcu);
+
         if (removed_entry) {
             break;
         }
-    }
-
-    urcu_qsbr_read_unlock();
-
-    if (removed_entry) {
-        call_rcu(&removed_entry->rnode.rcu, chimera_rcu_pool_retire);
     }
 } /* chimera_vfs_rpl_cache_invalidate */

@@ -27,7 +27,7 @@
 #include "vfs/vfs_rpl_cache.h"
 #include "common/logging.h"
 
-#include <urcu/urcu-qsbr.h>
+#include "common/chimera_rcu.h"
 
 static int passed = 0;
 static int failed = 0;
@@ -1149,8 +1149,8 @@ main(
     ChimeraLogLevel = CHIMERA_LOG_INFO;
 
     /* Required for the RPL cache test — its insert/invalidate paths
-     * use call_rcu which relies on the URCU thread registry. */
-    urcu_qsbr_register_thread();
+     * retire through the RCU shim, which needs this thread registered. */
+    chimera_rcu_register_thread();
 
     test_init_destroy();
     test_watch_create_destroy();
@@ -1178,6 +1178,6 @@ main(
     fprintf(stderr, "Results: %d passed, %d failed\n", passed, failed);
     fprintf(stderr, "========================================\n");
 
-    urcu_qsbr_unregister_thread();
+    chimera_rcu_unregister_thread();
     return failed == 0 ? 0 : 1;
 } /* main */

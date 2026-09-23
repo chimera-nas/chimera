@@ -4,9 +4,10 @@
 
 add_library(chimera_common SHARED
     logging.c snprintf.c pthread_create_interpose.c chimera_tracing.c
+    chimera_rcu.c
 )
 
-target_link_libraries(chimera_common ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS})
+target_link_libraries(chimera_common ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS} ${CHIMERA_RCU_LIBS})
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)

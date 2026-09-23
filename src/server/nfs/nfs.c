@@ -780,7 +780,7 @@ nfs_server_destroy(void *data)
 
     /* Drain any export removed at runtime whose free is still queued behind a
      * grace period (see chimera_nfs_remove_export). */
-    rcu_barrier();
+    chimera_rcu_barrier();
 
     while (shared->exports) {
         export = shared->exports;
@@ -1290,7 +1290,7 @@ chimera_nfs_get_export_by_id(
 
 
 static void
-chimera_nfs_export_free_rcu(struct rcu_head *head)
+chimera_nfs_export_free_rcu(chimera_rcu_head *head)
 {
     free(container_of(head, struct chimera_nfs_export, rcu));
 } /* chimera_nfs_export_free_rcu */
@@ -1319,12 +1319,15 @@ chimera_nfs_remove_export(
             shared->num_exports--;
             chimera_nfs_abort_if(shared->num_exports < 0, "num_exports went negative");
             /* Request threads resolve exports_by_id[] locklessly and then read
-             * the export's sec/squash policy, so freeing here (this runs on the
-             * REST thread) would let an in-flight request touch freed memory,
-             * or a recycled id hand it another export's policy.  Defer the free
-             * to a grace period: the evpl loops report their quiescent state
-             * between requests, never inside one. */
-            call_rcu(&export->rcu, chimera_nfs_export_free_rcu);
+            * the export's sec/squash policy, so freeing here (this runs on the
+            * REST thread) would let an in-flight request touch freed memory,
+            * or a recycled id hand it another export's policy.  Defer the free
+            * to a grace period on the quiescence domain: the readers are
+            * inside a dispatch rather than inside a critical section of their
+            * own, so what has to drain is the event loops themselves, which
+            * reach a quiescent state between requests and never inside one. */
+            chimera_rcu_retire(&chimera_rcu_global, &export->rcu,
+                               chimera_nfs_export_free_rcu);
             found = 1;
             break;
         }
