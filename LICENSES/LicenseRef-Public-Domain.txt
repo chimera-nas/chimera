@@ -1,0 +1,4 @@
+This work has been placed in the public domain by its authors.
+
+The source file explicitly states: "public domain sha512 crypt implementation"
+and "public domain sha512 implementation based on fips180-3".

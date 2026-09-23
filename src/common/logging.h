@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -67,14 +68,14 @@ void __chimera_error(
     const char *fmt,
     ...);
 
-__attribute__((noreturn)) void __chimera_fatal(
+CHIMERA_NORETURN void __chimera_fatal(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-__attribute__((noreturn)) void __chimera_abort(
+CHIMERA_NORETURN void __chimera_abort(
     const char *mod,
     const char *file,
     int         line,
