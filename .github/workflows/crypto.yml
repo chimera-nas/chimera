@@ -3,7 +3,7 @@
 name: Crypto backends
 on:
   push:
-    branches: [main, windows-native-crypto]
+    branches: [main]
   pull_request:
   merge_group:
   workflow_dispatch:

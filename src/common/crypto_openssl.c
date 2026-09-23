@@ -20,6 +20,17 @@ load_legacy(void)
     legacy_provider  = OSSL_PROVIDER_load(NULL, "legacy");
 } /* load_legacy */
 
+/* Algorithm descriptions are immutable. Cache them once so packet signing
+ * allocates only the per-message MAC state, as the SMB backend did before. */
+static CRYPTO_ONCE mac_once = CRYPTO_ONCE_STATIC_INIT;
+static EVP_MAC    *hmac_algorithm, *cmac_algorithm;
+static void
+load_macs(void)
+{
+    hmac_algorithm = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    cmac_algorithm = EVP_MAC_fetch(NULL, "CMAC", NULL);
+} /* load_macs */
+
 struct chimera_crypto_hash {
     EVP_MD_CTX     *digest;
     EVP_MAC_CTX    *mac;
@@ -85,12 +96,14 @@ chimera_crypto_hash_new(
             goto fail;
         }
     } else {
-        mac = EVP_MAC_fetch(NULL, digest ? "HMAC" : "CMAC", NULL);
+        if (!CRYPTO_THREAD_run_once(&mac_once, load_macs)) {
+            goto fail;
+        }
+        mac = digest ? hmac_algorithm : cmac_algorithm;
         if (!mac) {
             goto fail;
         }
-        ctx->mac = EVP_MAC_CTX_new(mac);
-        EVP_MAC_free(mac);
+        ctx->mac  = EVP_MAC_CTX_new(mac);
         params[0] = OSSL_PARAM_construct_utf8_string(digest ? OSSL_MAC_PARAM_DIGEST : OSSL_MAC_PARAM_CIPHER,
                                                      (char *) (digest ? digest : "AES-128-CBC"), 0);
         params[1] = OSSL_PARAM_construct_end();
