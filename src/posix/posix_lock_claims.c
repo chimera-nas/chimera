@@ -17,7 +17,12 @@
  * The order fd_lock -> file->lock is used consistently (carve, teardown).
  */
 
+#ifdef _WIN32
+#include "common/thread.h"
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #include "posix_internal.h"
 #include "vfs/sdk/vfs_module.h"
@@ -84,11 +89,11 @@ chimera_posix_ofd_lock_track(
     struct chimera_posix_ofd      *ofd,
     struct chimera_posix_ofd_lock *node)
 {
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
     node->ofd = ofd;
     DL_APPEND(ofd->locks, node);
     atomic_fetch_add(&posix->n_range_locks, 1);
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 } /* chimera_posix_ofd_lock_track */
 
 void
@@ -98,13 +103,13 @@ chimera_posix_ofd_lock_untrack_release(
 {
     struct chimera_vfs_state *state = chimera_posix_vfs_state(posix);
 
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
     if (node->ofd) {
         DL_DELETE(node->ofd->locks, node);
         node->ofd = NULL;
         atomic_fetch_sub(&posix->n_range_locks, 1);
     }
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 
     chimera_vfs_claim_release(state, node->file, &node->claim);
     chimera_vfs_state_put(state, node->file);
@@ -169,10 +174,10 @@ chimera_posix_ofd_track_token(
     t->fh_hash = handle->fh_hash;
     t->token   = token;
 
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
     t->next             = ofd->backend_tokens;
     ofd->backend_tokens = t;
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 } /* chimera_posix_ofd_track_token */
 
 /* -------------------------------------------------------------------- */
@@ -265,7 +270,7 @@ chimera_posix_ofd_lock_carve(
         spare[i] = &spare_nodes[i]->claim;
     }
 
-    pthread_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&posix->fd_lock);
 
     chimera_vfs_claim_range_replace(state, file, owner, except, offset, length,
                                     /* new_mask */ 0,
@@ -291,7 +296,7 @@ chimera_posix_ofd_lock_carve(
         atomic_fetch_add(&posix->n_range_locks, 1);
     }
 
-    pthread_mutex_unlock(&posix->fd_lock);
+    evpl_mutex_unlock(&posix->fd_lock);
 
     for (i = spare_used; i < POSIX_LOCK_CARVE_SPARES; i++) {
         chimera_vfs_state_put(state, spare_nodes[i]->file);
@@ -313,9 +318,9 @@ chimera_posix_ofd_lock_carve(
 /* -------------------------------------------------------------------- */
 
 struct chimera_posix_lock_waiter {
-    pthread_mutex_t mutex;
-    pthread_cond_t  cond;
-    int             done;
+    evpl_mutex_t mutex;
+    evpl_cond_t  cond;
+    int          done;
     enum chimera_vfs_claim_result result;
 };
 
@@ -328,11 +333,11 @@ chimera_posix_lock_acquire_cb(
 {
     struct chimera_posix_lock_waiter *waiter = private_data;
 
-    pthread_mutex_lock(&waiter->mutex);
+    evpl_mutex_lock(&waiter->mutex);
     waiter->result = result;
     waiter->done   = 1;
-    pthread_cond_signal(&waiter->cond);
-    pthread_mutex_unlock(&waiter->mutex);
+    evpl_cond_signal(&waiter->cond);
+    evpl_mutex_unlock(&waiter->mutex);
 } /* chimera_posix_lock_acquire_cb */
 
 /* Everything the acquire needs, on the calling thread's stack: the ticket
@@ -387,8 +392,8 @@ chimera_posix_lock_claim_acquire(
     ctx.node  = node;
     ctx.wait  = wait;
 
-    pthread_mutex_init(&ctx.waiter.mutex, NULL);
-    pthread_cond_init(&ctx.waiter.cond, NULL);
+    evpl_mutex_init(&ctx.waiter.mutex, NULL);
+    evpl_cond_init(&ctx.waiter.cond, NULL);
     ctx.waiter.done   = 0;
     ctx.waiter.result = CHIMERA_CLAIM_DENIED;
 
@@ -417,14 +422,14 @@ chimera_posix_lock_claim_acquire(
                                   &ctx.waiter);
     }
 
-    pthread_mutex_lock(&ctx.waiter.mutex);
+    evpl_mutex_lock(&ctx.waiter.mutex);
     while (!ctx.waiter.done) {
-        pthread_cond_wait(&ctx.waiter.cond, &ctx.waiter.mutex);
+        evpl_cond_wait(&ctx.waiter.cond, &ctx.waiter.mutex);
     }
-    pthread_mutex_unlock(&ctx.waiter.mutex);
+    evpl_mutex_unlock(&ctx.waiter.mutex);
 
-    pthread_mutex_destroy(&ctx.waiter.mutex);
-    pthread_cond_destroy(&ctx.waiter.cond);
+    evpl_mutex_destroy(&ctx.waiter.mutex);
+    evpl_cond_destroy(&ctx.waiter.cond);
 
     return ctx.waiter.result;
 } /* chimera_posix_lock_claim_acquire */
@@ -448,8 +453,8 @@ struct chimera_posix_lock_probe_ctx {
     uint8_t                             granted;
     uint64_t                            token;
     struct chimera_claim_range_conflict conflict;
-    pthread_mutex_t                     mutex;
-    pthread_cond_t                      cond;
+    evpl_mutex_t                        mutex;
+    evpl_cond_t                         cond;
     int                                 done;
 };
 
@@ -463,7 +468,7 @@ chimera_posix_lock_probe_cb(
 {
     struct chimera_posix_lock_probe_ctx *ctx = private_data;
 
-    pthread_mutex_lock(&ctx->mutex);
+    evpl_mutex_lock(&ctx->mutex);
     ctx->status  = status;
     ctx->granted = granted;
     ctx->token   = token;
@@ -471,8 +476,8 @@ chimera_posix_lock_probe_cb(
         ctx->conflict = *conflict;
     }
     ctx->done = 1;
-    pthread_cond_signal(&ctx->cond);
-    pthread_mutex_unlock(&ctx->mutex);
+    evpl_cond_signal(&ctx->cond);
+    evpl_mutex_unlock(&ctx->mutex);
 } /* chimera_posix_lock_probe_cb */
 
 static void
@@ -510,8 +515,8 @@ chimera_posix_lock_probe(
     ctx->status = CHIMERA_VFS_OK;
     ctx->done   = 0;
     chimera_posix_lock_owner_init(&ctx->owner);
-    pthread_mutex_init(&ctx->mutex, NULL);
-    pthread_cond_init(&ctx->cond, NULL);
+    evpl_mutex_init(&ctx->mutex, NULL);
+    evpl_cond_init(&ctx->cond, NULL);
 
     ctx->request.heap_allocated     = 0;
     ctx->request.lock_probe_private = ctx;
@@ -520,14 +525,14 @@ chimera_posix_lock_probe(
                                  &ctx->request,
                                  chimera_posix_lock_probe_exec);
 
-    pthread_mutex_lock(&ctx->mutex);
+    evpl_mutex_lock(&ctx->mutex);
     while (!ctx->done) {
-        pthread_cond_wait(&ctx->cond, &ctx->mutex);
+        evpl_cond_wait(&ctx->cond, &ctx->mutex);
     }
-    pthread_mutex_unlock(&ctx->mutex);
+    evpl_mutex_unlock(&ctx->mutex);
 
-    pthread_mutex_destroy(&ctx->mutex);
-    pthread_cond_destroy(&ctx->cond);
+    evpl_mutex_destroy(&ctx->mutex);
+    evpl_cond_destroy(&ctx->cond);
     return true;
 } /* chimera_posix_lock_probe */
 
@@ -616,8 +621,8 @@ chimera_posix_lock_claim_seek_end(
             fl->l_type = (ctx.conflict.type == CHIMERA_VFS_LOCK_READ)
                 ? F_RDLCK : F_WRLCK;
             fl->l_whence = SEEK_SET;
-            fl->l_start  = (off_t) ctx.conflict.offset;
-            fl->l_len    = (off_t) ctx.conflict.length;
+            fl->l_start  = (chimera_off_t) ctx.conflict.offset;
+            fl->l_len    = (chimera_off_t) ctx.conflict.length;
             fl->l_pid    = (pid_t) ctx.conflict.pid;
         }
         return 0;
@@ -656,8 +661,8 @@ struct chimera_posix_unlock_ctx {
     const struct chimera_vfs_claim *except;
     uint64_t                        offset;
     uint64_t                        length;
-    pthread_mutex_t                 mutex;
-    pthread_cond_t                  cond;
+    evpl_mutex_t                    mutex;
+    evpl_cond_t                     cond;
     int                             done;
 };
 
@@ -666,10 +671,10 @@ chimera_posix_unlock_flushed(void *private_data)
 {
     struct chimera_posix_unlock_ctx *ctx = private_data;
 
-    pthread_mutex_lock(&ctx->mutex);
+    evpl_mutex_lock(&ctx->mutex);
     ctx->done = 1;
-    pthread_cond_signal(&ctx->cond);
-    pthread_mutex_unlock(&ctx->mutex);
+    evpl_cond_signal(&ctx->cond);
+    evpl_mutex_unlock(&ctx->mutex);
 } /* chimera_posix_unlock_flushed */
 
 static void
@@ -726,8 +731,8 @@ chimera_posix_lock_claim_carve_wait(
     ctx.except = except;
     ctx.offset = offset;
     ctx.length = length;
-    pthread_mutex_init(&ctx.mutex, NULL);
-    pthread_cond_init(&ctx.cond, NULL);
+    evpl_mutex_init(&ctx.mutex, NULL);
+    evpl_cond_init(&ctx.cond, NULL);
 
     ctx.request.heap_allocated     = 0;
     ctx.request.lock_probe_private = &ctx;
@@ -735,14 +740,14 @@ chimera_posix_lock_claim_carve_wait(
     chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
                                  &ctx.request, chimera_posix_unlock_exec);
 
-    pthread_mutex_lock(&ctx.mutex);
+    evpl_mutex_lock(&ctx.mutex);
     while (!ctx.done) {
-        pthread_cond_wait(&ctx.cond, &ctx.mutex);
+        evpl_cond_wait(&ctx.cond, &ctx.mutex);
     }
-    pthread_mutex_unlock(&ctx.mutex);
+    evpl_mutex_unlock(&ctx.mutex);
 
-    pthread_mutex_destroy(&ctx.mutex);
-    pthread_cond_destroy(&ctx.cond);
+    evpl_mutex_destroy(&ctx.mutex);
+    evpl_cond_destroy(&ctx.cond);
 } /* chimera_posix_lock_claim_carve_wait */
 
 void
@@ -769,8 +774,8 @@ struct chimera_posix_unlock_ranged_ctx {
     uint64_t                        length;
     struct chimera_claim_owner      owner;
     enum chimera_vfs_error status;
-    pthread_mutex_t                 mutex;
-    pthread_cond_t                  cond;
+    evpl_mutex_t                    mutex;
+    evpl_cond_t                     cond;
     int                             done;
 };
 
@@ -781,11 +786,11 @@ chimera_posix_unlock_ranged_cb(
 {
     struct chimera_posix_unlock_ranged_ctx *ctx = private_data;
 
-    pthread_mutex_lock(&ctx->mutex);
+    evpl_mutex_lock(&ctx->mutex);
     ctx->status = status;
     ctx->done   = 1;
-    pthread_cond_signal(&ctx->cond);
-    pthread_mutex_unlock(&ctx->mutex);
+    evpl_cond_signal(&ctx->cond);
+    evpl_mutex_unlock(&ctx->mutex);
 } /* chimera_posix_unlock_ranged_cb */
 
 static void
@@ -829,8 +834,8 @@ chimera_posix_lock_claim_unlock_ranged(
     ctx.offset = offset;
     ctx.length = length;
     chimera_posix_lock_owner_init(&ctx.owner);
-    pthread_mutex_init(&ctx.mutex, NULL);
-    pthread_cond_init(&ctx.cond, NULL);
+    evpl_mutex_init(&ctx.mutex, NULL);
+    evpl_cond_init(&ctx.cond, NULL);
 
     ctx.request.heap_allocated     = 0;
     ctx.request.lock_probe_private = &ctx;
@@ -838,14 +843,14 @@ chimera_posix_lock_claim_unlock_ranged(
     chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
                                  &ctx.request, chimera_posix_unlock_ranged_exec);
 
-    pthread_mutex_lock(&ctx.mutex);
+    evpl_mutex_lock(&ctx.mutex);
     while (!ctx.done) {
-        pthread_cond_wait(&ctx.cond, &ctx.mutex);
+        evpl_cond_wait(&ctx.cond, &ctx.mutex);
     }
-    pthread_mutex_unlock(&ctx.mutex);
+    evpl_mutex_unlock(&ctx.mutex);
 
-    pthread_mutex_destroy(&ctx.mutex);
-    pthread_cond_destroy(&ctx.cond);
+    evpl_mutex_destroy(&ctx.mutex);
+    evpl_cond_destroy(&ctx.cond);
 
     if (ctx.status != CHIMERA_VFS_OK && ctx.status != CHIMERA_VFS_ENOTSUP) {
         errno = chimera_posix_errno_from_status(ctx.status);

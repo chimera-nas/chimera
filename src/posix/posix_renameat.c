@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -67,7 +67,7 @@ chimera_posix_renameat(
     }
 
     req.rename.source_path[old_path_len] = '\0';
-    old_slash                            = rindex(req.rename.source_path, '/');
+    old_slash                            = strrchr(req.rename.source_path, '/');
 
     req.rename.source_path_len   = old_path_len;
     req.rename.source_parent_len = old_slash ? old_slash - req.rename.source_path : old_path_len;
@@ -90,7 +90,7 @@ chimera_posix_renameat(
     }
 
     req.rename.dest_path[new_path_len] = '\0';
-    new_slash                          = rindex(req.rename.dest_path, '/');
+    new_slash                          = strrchr(req.rename.dest_path, '/');
 
     req.rename.dest_path_len   = new_path_len;
     req.rename.dest_parent_len = new_slash ? new_slash - req.rename.dest_path : new_path_len;

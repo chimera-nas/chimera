@@ -35,12 +35,12 @@ chimera_posix_copy_file_range_exec(
 
 SYMBOL_EXPORT ssize_t
 chimera_posix_copy_file_range(
-    int          fd_in,
-    off_t       *off_in,
-    int          fd_out,
-    off_t       *off_out,
-    size_t       len,
-    unsigned int flags)
+    int            fd_in,
+    chimera_off_t *off_in,
+    int            fd_out,
+    chimera_off_t *off_out,
+    size_t         len,
+    unsigned int   flags)
 {
     struct chimera_posix_client          *posix  = chimera_posix_get_global();
     struct chimera_posix_worker          *worker = chimera_posix_choose_worker(posix);
@@ -48,7 +48,7 @@ chimera_posix_copy_file_range(
     struct chimera_posix_fd_entry        *out_entry;
     struct chimera_client_request         req;
     struct chimera_posix_copy_range_state st;
-    off_t                                 src_off, dst_off;
+    chimera_off_t                         src_off, dst_off;
 
     if (flags != 0) {
         errno = EINVAL;
@@ -81,8 +81,8 @@ chimera_posix_copy_file_range(
         return -1;
     }
 
-    src_off = off_in ? *off_in : (off_t) in_entry->ofd->offset;
-    dst_off = off_out ? *off_out : (off_t) out_entry->ofd->offset;
+    src_off = off_in ? *off_in : (chimera_off_t) in_entry->ofd->offset;
+    dst_off = off_out ? *off_out : (chimera_off_t) out_entry->ofd->offset;
 
     /* copy_file_range(2): overlapping source and destination ranges within one
      * file are EINVAL.  This is a POSIX rule -- SMB copychunk, NFS4 COPY and S3
@@ -104,12 +104,12 @@ chimera_posix_copy_file_range(
     if (in_entry->handle->fh_len == out_entry->handle->fh_len &&
         memcmp(in_entry->handle->fh, out_entry->handle->fh,
                in_entry->handle->fh_len) == 0) {
-        struct stat st;
-        off_t       clamped = 0;
+        chimera_posix_stat_t st;
+        chimera_off_t        clamped = 0;
 
         if (chimera_posix_fstat(fd_in, &st) == 0) {
             if (src_off < st.st_size) {
-                clamped = (off_t) len;
+                clamped = (chimera_off_t) len;
                 if (clamped > st.st_size - src_off) {
                     clamped = st.st_size - src_off;
                 }
@@ -117,7 +117,7 @@ chimera_posix_copy_file_range(
         } else {
             /* The size is unknown; judge the request as asked rather than
              * letting an unrelated failure permit an overlapping copy. */
-            clamped = (off_t) len;
+            clamped = (chimera_off_t) len;
         }
 
         if (clamped > 0 &&
@@ -150,14 +150,14 @@ chimera_posix_copy_file_range(
 
     if (!err) {
         if (off_in) {
-            *off_in = src_off + (off_t) st.bytes_copied;
+            *off_in = src_off + (chimera_off_t) st.bytes_copied;
         } else {
-            in_entry->ofd->offset = (uint64_t) (src_off + (off_t) st.bytes_copied);
+            in_entry->ofd->offset = (uint64_t) (src_off + (chimera_off_t) st.bytes_copied);
         }
         if (off_out) {
-            *off_out = dst_off + (off_t) st.bytes_copied;
+            *off_out = dst_off + (chimera_off_t) st.bytes_copied;
         } else {
-            out_entry->ofd->offset = (uint64_t) (dst_off + (off_t) st.bytes_copied);
+            out_entry->ofd->offset = (uint64_t) (dst_off + (chimera_off_t) st.bytes_copied);
         }
     }
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -12,6 +12,7 @@
 //   stat()
 //   creat()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int Tflag = 0;
@@ -32,7 +33,7 @@ main(
     char                 *fname = CTHON_FNAME;
     char                 *nname = "newfile.";
     int                   fd;
-    struct stat           statb;
+    chimera_posix_stat_t  statb;
     struct timeval        time;
     int                   opt;
     char                  str[MAXPATHLEN];

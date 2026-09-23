@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -23,8 +23,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/time.h>
-#include <dirent.h>
+#endif // ifdef _WIN32
+#include "common/dirent.h"
 
 #include "posix/posix.h"
 #include "posix_test_common.h"

@@ -14,6 +14,9 @@
  * implementation-defined, so success is equally acceptable. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 
 static void
 expect_open_accmode(

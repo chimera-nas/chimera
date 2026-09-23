@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -12,7 +12,7 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           st1, st2;
+    chimera_posix_stat_t  st1, st2;
 
     posix_test_init(&env, argv, argc);
 

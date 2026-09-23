@@ -26,16 +26,27 @@
 
 #define _GNU_SOURCE
 
+#include "common/test_host.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>     /* struct statvfs for statvfs/fstatvfs */
-#include <sys/uio.h>         /* struct iovec for the vectored read/write ops */
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
+#include "posix/posix_types.h"     /* struct statvfs for statvfs/fstatvfs */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
+#include <sys/uio.h>
+#endif         /* struct iovec for the vectored read/write ops */
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 /* makedev() (block/char device mknod) and struct statfs (statfs/fstatfs) come
  * from common/platform.h below: <sys/sysmacros.h>+<sys/vfs.h> on glibc,
  * <sys/types.h>+<sys/mount.h> on Darwin -- so this file builds on both. */
@@ -92,7 +103,7 @@ static int                        g_smb_client_compress; /* client asks to compr
 * leaves a half-built environment -- a running server, a client with no mount,
 * evpl pools on both -- and unwinding that is the hazardous part, not the
 * refusal itself.  A caller whose verdict is already decided sets this and
-* _exit()s instead, which cannot abort on any platform.  See
+* exits without cleanup instead, preserving the refusal verdict.  See
 * posix_env_setup_unwind for what is being skipped and why it is a hazard. */
 static int                        g_expect_mount_failure;
 
@@ -143,18 +154,6 @@ posix_module_tracks_holes(const char *module)
     return posix_module_is_passthrough(module) || strcmp(module, "cairn") == 0;
 } /* posix_module_tracks_holes */
 
-static int
-pt_rm_cb(
-    const char        *path,
-    const struct stat *st,
-    int                type,
-    struct FTW        *ftw)
-{
-    (void) st;
-    (void) ftw;
-    return (type == FTW_DP ? rmdir(path) : unlink(path));
-} /* pt_rm_cb */
-
 /* Build the SMB loopback's mount option string, appending the pinned dialect
  * when one was requested.  Shared by the initial mount and the newfs remount so
  * a recycled mount cannot silently drop back to the negotiated default. */
@@ -183,7 +182,7 @@ smb_mount_options(
 static int
 pt_remove_tree(const char *path)
 {
-    return nftw(path, pt_rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+    return chimera_test_remove_tree(path);
 } /* pt_remove_tree */
 
 /* Path of the current passthrough backing directory (g_pt_root/g_fsname). */
@@ -387,8 +386,8 @@ res_int(
 
 static void
 stat_fill(
-    json_t            *res,
-    const struct stat *st)
+    json_t                     *res,
+    const chimera_posix_stat_t *st)
 {
     const char *ftype = "unk";
 
@@ -537,7 +536,7 @@ handle(json_t *req)
             whence = SEEK_HOLE;
         }
         return res_int(chimera_posix_lseek(jint(req, "fd", -1),
-                                           (off_t) jint64(req, "off", 0),
+                                           (chimera_off_t) jint64(req, "off", 0),
                                            whence), errno);
     }
 
@@ -550,7 +549,7 @@ handle(json_t *req)
             n = chimera_posix_read(jint(req, "fd", -1), buf, len);
         } else {
             n = chimera_posix_pread(jint(req, "fd", -1), buf, len,
-                                    (off_t) jint64(req, "off", 0));
+                                    (chimera_off_t) jint64(req, "off", 0));
         }
 
         json_t *res = res_int(n, errno);
@@ -579,7 +578,7 @@ handle(json_t *req)
             n = chimera_posix_write(jint(req, "fd", -1), buf, (size_t) len);
         } else {
             n = chimera_posix_pwrite(jint(req, "fd", -1), buf, (size_t) len,
-                                     (off_t) jint64(req, "off", 0));
+                                     (chimera_off_t) jint64(req, "off", 0));
         }
         free(buf);
         return res_int(n, errno);
@@ -596,7 +595,7 @@ handle(json_t *req)
             n = chimera_posix_readv(jint(req, "fd", -1), iov, niov);
         } else {
             n = chimera_posix_preadv2(jint(req, "fd", -1), iov, niov,
-                                      (off_t) jint64(req, "off", 0), 0);
+                                      (chimera_off_t) jint64(req, "off", 0), 0);
         }
 
         json_t *res = res_int(n, errno);
@@ -628,7 +627,7 @@ handle(json_t *req)
             n = chimera_posix_writev(jint(req, "fd", -1), iov, niov);
         } else {
             n = chimera_posix_pwritev2(jint(req, "fd", -1), iov, niov,
-                                       (off_t) jint64(req, "off", 0), 0);
+                                       (chimera_off_t) jint64(req, "off", 0), 0);
         }
         free(buf);
         return res_int(n, errno);
@@ -636,13 +635,13 @@ handle(json_t *req)
 
     if (strcmp(op, "truncate") == 0) {
         return res_int(chimera_posix_truncate(jstr(req, "path"),
-                                              (off_t) jint64(req, "len", 0)),
+                                              (chimera_off_t) jint64(req, "len", 0)),
                        errno);
     }
 
     if (strcmp(op, "ftruncate") == 0) {
         return res_int(chimera_posix_ftruncate(jint(req, "fd", -1),
-                                               (off_t) jint64(req, "len", 0)),
+                                               (chimera_off_t) jint64(req, "len", 0)),
                        errno);
     }
 
@@ -668,8 +667,8 @@ handle(json_t *req)
 
     if (strcmp(op, "stat") == 0 || strcmp(op, "fstat") == 0 ||
         strcmp(op, "fstatat") == 0) {
-        struct stat st;
-        int         ret;
+        chimera_posix_stat_t st;
+        int                  ret;
 
         memset(&st, 0, sizeof(st));
         if (strcmp(op, "fstat") == 0) {
@@ -775,9 +774,9 @@ handle(json_t *req)
     }
 
     if (strcmp(op, "mknod") == 0) {
-        const char *ft   = jstr(req, "ftype");
-        mode_t      mode = (mode_t) jint(req, "mode", 0);
-        dev_t       dev  = 0;
+        const char   *ft   = jstr(req, "ftype");
+        mode_t        mode = (mode_t) jint(req, "mode", 0);
+        chimera_dev_t dev  = 0;
 
         if (ft && strcmp(ft, "fifo") == 0) {
             mode |= S_IFIFO;
@@ -921,7 +920,7 @@ handle(json_t *req)
         if (sid < 0 || sid >= MAX_DIRS || !driver_dirs[sid]) {
             return res_int(-1, EBADF);
         }
-        chimera_posix_seekdir(driver_dirs[sid], (long) jint64(req, "loc", 0));
+        chimera_posix_seekdir(driver_dirs[sid], (chimera_dirpos_t) jint64(req, "loc", 0));
         return res_int(0, 0);
     }
 
@@ -945,8 +944,8 @@ handle(json_t *req)
             fl.l_type = F_UNLCK;
         }
         fl.l_whence = SEEK_SET;
-        fl.l_start  = (off_t) jint64(req, "start", 0);
-        fl.l_len    = (off_t) jint64(req, "len", 0);
+        fl.l_start  = (chimera_off_t) jint64(req, "start", 0);
+        fl.l_len    = (chimera_off_t) jint64(req, "len", 0);
 
         ret = chimera_posix_fcntl(jint(req, "fd", -1), cmd, &fl);
 
@@ -997,7 +996,7 @@ handle(json_t *req)
             cmd = F_TEST;
         }
         return res_int(chimera_posix_lockf(jint(req, "fd", -1), cmd,
-                                           (off_t) jint64(req, "len", 0)),
+                                           (chimera_off_t) jint64(req, "len", 0)),
                        errno);
     }
 
@@ -1010,9 +1009,9 @@ handle(json_t *req)
     }
 
     if (strcmp(op, "copy_range") == 0) {
-        off_t   off_in  = (off_t) jint64(req, "off_in", 0);
-        off_t   off_out = (off_t) jint64(req, "off_out", 0);
-        ssize_t n       = chimera_posix_copy_file_range(
+        chimera_off_t off_in  = (chimera_off_t) jint64(req, "off_in", 0);
+        chimera_off_t off_out = (chimera_off_t) jint64(req, "off_out", 0);
+        ssize_t       n       = chimera_posix_copy_file_range(
             jint(req, "fd_in", -1), &off_in,
             jint(req, "fd_out", -1), &off_out,
             (size_t) jint64(req, "len", 0), 0);
@@ -1023,20 +1022,20 @@ handle(json_t *req)
     if (strcmp(op, "clone_range") == 0) {
         return res_int(chimera_posix_clone_file_range(
                            jint(req, "dst_fd", -1),
-                           (off_t) jint64(req, "dst_off", 0),
+                           (chimera_off_t) jint64(req, "dst_off", 0),
                            jint(req, "src_fd", -1),
-                           (off_t) jint64(req, "src_off", 0),
+                           (chimera_off_t) jint64(req, "src_off", 0),
                            (size_t) jint64(req, "len", 0)), errno);
     }
 
     if (strcmp(op, "fallocate") == 0) {
-        int   fd   = jint(req, "fd", -1);
-        int   mode = jint(req, "mode", 0);
-        off_t off  = (off_t) jint64(req, "off", 0);
-        off_t len  = (off_t) jint64(req, "len", 0);
+        int           fd   = jint(req, "fd", -1);
+        int           mode = jint(req, "mode", 0);
+        chimera_off_t off  = (chimera_off_t) jint64(req, "off", 0);
+        chimera_off_t len  = (chimera_off_t) jint64(req, "len", 0);
         /* mode 0 == posix_fallocate (grow); mode 1 == the
          * FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE deallocate pair. */
-        int   ret = (mode == 0)
+        int           ret = (mode == 0)
             ? chimera_posix_fallocate(fd, off, len)
             : chimera_posix_fallocate_mode(
             fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, len);
@@ -1115,7 +1114,7 @@ handle(json_t *req)
                 }
                 snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
                 pt_tree_path(new_dir, sizeof(new_dir));
-                if (mkdir(new_dir, 0777) != 0) {
+                if (chimera_test_mkdir(new_dir, 0777) != 0) {
                     fprintf(stderr,
                             "posix_driver: newfs mkdir %s failed: %s\n",
                             new_dir, strerror(errno));
@@ -1223,7 +1222,7 @@ handle(json_t *req)
             }
             snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
             pt_tree_path(new_dir, sizeof(new_dir));
-            if (mkdir(new_dir, 0777) != 0) {
+            if (chimera_test_mkdir(new_dir, 0777) != 0) {
                 fprintf(stderr, "posix_driver: newfs mkdir %s failed: %s\n",
                         new_dir, strerror(errno));
                 return res_int(-1, errno);
@@ -1426,7 +1425,7 @@ posix_env_setup(
         }
         /* The module opens this path from a worker thread, so it must be
          * absolute. */
-        abs_scratch = realpath(scratch, NULL);
+        abs_scratch = chimera_test_absolute_path(scratch);
         if (!abs_scratch) {
             fprintf(stderr, "posix_driver: realpath(%s): %s\n", scratch,
                     strerror(errno));
@@ -1524,7 +1523,7 @@ posix_env_setup(
             int  mrc;
 
             snprintf(dir, sizeof(dir), "%s/fs0", g_pt_root);
-            if (mkdir(dir, 0777) != 0) {
+            if (chimera_test_mkdir(dir, 0777) != 0) {
                 fprintf(stderr, "posix_driver: mkdir %s: %s\n", dir,
                         strerror(errno));
                 return 1;
@@ -1633,7 +1632,7 @@ posix_env_setup(
             char dir[340];
 
             snprintf(dir, sizeof(dir), "%s/fs0", g_pt_root);
-            if (mkdir(dir, 0777) != 0) {
+            if (chimera_test_mkdir(dir, 0777) != 0) {
                 fprintf(stderr, "posix_driver: mkdir %s: %s\n", dir,
                         strerror(errno));
                 return 1;
@@ -1755,7 +1754,7 @@ main(
             DRIVER_BLOCK_SIZE);
     fflush(proto_out);
 
-    while (getline(&line, &cap, stdin) != -1) {
+    while (chimera_test_getline(&line, &cap, stdin) != -1) {
         json_error_t jerr;
         json_t      *req = json_loads(line, 0, &jerr);
         json_t      *res;

@@ -60,7 +60,7 @@ main(
     struct posix_test_env env;
     uint64_t              baseline, avail, ask, reclaimed;
     int                   fd, small_fd, rc, i, alloc_errno = 0;
-    struct stat           st;
+    chimera_posix_stat_t  st;
     char                  block[4096];
 
     posix_test_diskfs_device_count = ENOSPC_DEV_COUNT;
@@ -110,7 +110,7 @@ main(
         fprintf(stderr, "open /test/big failed: %s\n", strerror(errno));
         posix_test_fail(&env);
     }
-    rc          = chimera_posix_fallocate(fd, 0, (off_t) ask);
+    rc          = chimera_posix_fallocate(fd, 0, (chimera_off_t) ask);
     alloc_errno = rc ? errno : 0;
     fprintf(stderr, "fallocate %" PRIu64 " (free - 256K): rc=%d errno=%d (%s)\n",
             ask, rc, alloc_errno, rc ? strerror(alloc_errno) : "ok");

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2000-2001 Silicon Graphics, Inc.
 //
 // SPDX-License-Identifier: GPL-2.0-only
@@ -16,6 +16,7 @@
  * generates test filenames programmatically for simplicity.
  */
 
+#include "common/getopt.h"
 #include "posix_test_common.h"
 #include <ctype.h>
 #include <limits.h>
@@ -95,8 +96,8 @@ get_name(struct info *ip)
 static int
 auto_lookup(struct info *ip)
 {
-    struct stat statb;
-    int         retval;
+    chimera_posix_stat_t statb;
+    int                  retval;
 
     retval = chimera_posix_stat(get_name(ip), &statb);
     if (retval >= 0) {
@@ -137,9 +138,9 @@ auto_lookup(struct info *ip)
 static int
 auto_create(struct info *ip)
 {
-    struct stat statb;
-    int         retval;
-    int         fd;
+    chimera_posix_stat_t statb;
+    int                  retval;
+    int                  fd;
 
     fd = chimera_posix_open(get_name(ip), O_RDWR | O_EXCL | O_CREAT, 0666);
     if (fd >= 0) {

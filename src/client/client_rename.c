@@ -18,8 +18,8 @@ chimera_rename(
     const char                    *source_slash;
     const char                    *dest_slash;
 
-    source_slash = rindex(source_path, '/');
-    dest_slash   = rindex(dest_path, '/');
+    source_slash = strrchr(source_path, '/');
+    dest_slash   = strrchr(dest_path, '/');
 
     request = chimera_client_request_alloc(thread);
 

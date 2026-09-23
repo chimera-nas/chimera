@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -8,6 +8,8 @@
 // Creates files, walks directory with telldir, then uses seekdir
 // to verify cookies work correctly
 
+#include "common/getopt.h"
+#include "common/format.h"
 #include "cthon_common.h"
 
 static int          debug    = 0;
@@ -15,9 +17,9 @@ static int          numfiles = 200;
 static char        *tdirname = "telldir-test";
 
 typedef struct {
-    int  inuse;
-    long cookie;
-    int  numfiles;
+    int              inuse;
+    chimera_dirpos_t cookie;
+    int              numfiles;
 } file_info_t;
 
 static file_info_t *file_info;
@@ -34,12 +36,12 @@ alloc_file_info(int nfiles)
 
 static void
 save_file_info(
-    int  filenum,
-    long cookie,
-    int  files_left)
+    int              filenum,
+    chimera_dirpos_t cookie,
+    int              files_left)
 {
     if (debug) {
-        printf("\t%d 0x%lx %d\n", filenum, cookie, files_left);
+        printf("\t%d 0x%" PRIx64 " %d\n", filenum, (uint64_t) cookie, files_left);
     }
 
     file_info[filenum].inuse    = 1;
@@ -61,7 +63,7 @@ main(
     CHIMERA_DIR          *dp;
     struct dirent        *entry;
     int                   files_left;
-    long                  cookie;
+    chimera_dirpos_t      cookie;
 
     cthon_Myname = "cthon_special_telldir";
 
@@ -176,7 +178,7 @@ main(
             if (entry == NULL) {
                 char *errmsg = errno != 0 ? strerror(errno) : NULL;
 
-                fprintf(stderr, "\tentry for %d (cookie %ld):\n", i, ip->cookie);
+                fprintf(stderr, "\tentry for %d (cookie %" PRId64 "):\n", i, (int64_t) ip->cookie);
                 fprintf(stderr, "\texpected to find %d entries, only found %d\n",
                         ip->numfiles, files_found);
                 if (errmsg) {
@@ -189,8 +191,8 @@ main(
             if (first_file) {
                 int file_read = atoi(entry->d_name);
                 if (file_read != i) {
-                    fprintf(stderr, "\texpected file %d at cookie %ld, found %s\n",
-                            i, ip->cookie, entry->d_name);
+                    fprintf(stderr, "\texpected file %d at cookie %" PRId64 ", found %s\n",
+                            i, (int64_t) ip->cookie, entry->d_name);
                     chimera_posix_closedir(dp);
                     posix_test_fail(&env);
                 }

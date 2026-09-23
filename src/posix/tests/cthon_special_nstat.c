@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -7,6 +7,7 @@
 //
 // Performance test for stat operation
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int
@@ -21,7 +22,7 @@ main(
     float                 elapsed;
     int                   count;
     int                   i;
-    struct stat           statb;
+    chimera_posix_stat_t  statb;
     char                  testfile[MAXPATHLEN];
     int                   fd;
 

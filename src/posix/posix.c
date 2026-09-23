@@ -2,20 +2,22 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdlib.h>
 
 #include "posix_internal.h"
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
 
-struct chimera_posix_client     *chimera_posix_global;
+struct chimera_posix_client                 *chimera_posix_global;
 
-__thread int                     chimera_posix_tls_has_cred;
-__thread struct chimera_vfs_cred chimera_posix_tls_cred;
-__thread int                     chimera_posix_tls_has_umask;
-__thread mode_t                  chimera_posix_tls_umask;
-__thread int                     chimera_posix_tls_has_lock_owner;
-__thread uint64_t                chimera_posix_tls_lock_owner;
+CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_cred;
+CHIMERA_THREAD_LOCAL struct chimera_vfs_cred chimera_posix_tls_cred;
+CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_umask;
+CHIMERA_THREAD_LOCAL mode_t                  chimera_posix_tls_umask;
+CHIMERA_THREAD_LOCAL int                     chimera_posix_tls_has_lock_owner;
+CHIMERA_THREAD_LOCAL uint64_t                chimera_posix_tls_lock_owner;
 
 SYMBOL_EXPORT void
 chimera_posix_set_cred(const struct chimera_vfs_cred *cred)
@@ -68,7 +70,7 @@ chimera_posix_worker_init(
     worker->index  = idx;
     worker->evpl   = evpl;
 
-    pthread_mutex_init(&worker->lock, NULL);
+    evpl_mutex_init(&worker->lock, NULL);
     evpl_add_doorbell(evpl, &worker->doorbell, chimera_posix_worker_doorbell);
 
     worker->client_thread = chimera_client_thread_init(evpl, posix->client);
@@ -88,7 +90,7 @@ chimera_posix_worker_shutdown(
     }
 
     evpl_remove_doorbell(evpl, &worker->doorbell);
-    pthread_mutex_destroy(&worker->lock);
+    evpl_mutex_destroy(&worker->lock);
 } /* chimera_posix_worker_shutdown */
 
 void
@@ -101,12 +103,12 @@ chimera_posix_worker_doorbell(
     for (;;) {
         struct chimera_client_request *request;
 
-        pthread_mutex_lock(&worker->lock);
+        evpl_mutex_lock(&worker->lock);
         request = worker->pending_requests;
         if (request) {
             DL_DELETE(worker->pending_requests, request);
         }
-        pthread_mutex_unlock(&worker->lock);
+        evpl_mutex_unlock(&worker->lock);
 
         if (!request) {
             break;
@@ -180,8 +182,8 @@ chimera_posix_init(
     }
 
     for (int i = 0; i < posix->max_fds; i++) {
-        pthread_mutex_init(&posix->fds[i].lock, NULL);
-        pthread_cond_init(&posix->fds[i].cond, NULL);
+        evpl_mutex_init(&posix->fds[i].lock, NULL);
+        evpl_cond_init(&posix->fds[i].cond, NULL);
         posix->fds[i].handle        = NULL;
         posix->fds[i].ofd           = NULL;
         posix->fds[i].flags         = CHIMERA_POSIX_FD_CLOSED;
@@ -198,7 +200,7 @@ chimera_posix_init(
         }
     }
 
-    pthread_mutex_init(&posix->fd_lock, NULL);
+    evpl_mutex_init(&posix->fd_lock, NULL);
     atomic_init(&posix->next_worker, 0);
     atomic_init(&posix->init_cursor, 0);
 
@@ -211,11 +213,11 @@ chimera_posix_init(
 
     if (!posix->pool) {
         for (int i = 0; i < posix->max_fds; i++) {
-            pthread_mutex_destroy(&posix->fds[i].lock);
-            pthread_cond_destroy(&posix->fds[i].cond);
+            evpl_mutex_destroy(&posix->fds[i].lock);
+            evpl_cond_destroy(&posix->fds[i].cond);
         }
         free(posix->fds);
-        pthread_mutex_destroy(&posix->fd_lock);
+        evpl_mutex_destroy(&posix->fd_lock);
         free(posix->workers);
         chimera_destroy(posix->client);
         free(posix);
@@ -274,8 +276,8 @@ chimera_posix_init_json(
     }
 
     for (int i = 0; i < posix->max_fds; i++) {
-        pthread_mutex_init(&posix->fds[i].lock, NULL);
-        pthread_cond_init(&posix->fds[i].cond, NULL);
+        evpl_mutex_init(&posix->fds[i].lock, NULL);
+        evpl_cond_init(&posix->fds[i].cond, NULL);
         posix->fds[i].handle        = NULL;
         posix->fds[i].ofd           = NULL;
         posix->fds[i].flags         = CHIMERA_POSIX_FD_CLOSED;
@@ -292,7 +294,7 @@ chimera_posix_init_json(
         }
     }
 
-    pthread_mutex_init(&posix->fd_lock, NULL);
+    evpl_mutex_init(&posix->fd_lock, NULL);
     atomic_init(&posix->next_worker, 0);
     atomic_init(&posix->init_cursor, 0);
 
@@ -305,11 +307,11 @@ chimera_posix_init_json(
 
     if (!posix->pool) {
         for (int i = 0; i < posix->max_fds; i++) {
-            pthread_mutex_destroy(&posix->fds[i].lock);
-            pthread_cond_destroy(&posix->fds[i].cond);
+            evpl_mutex_destroy(&posix->fds[i].lock);
+            evpl_cond_destroy(&posix->fds[i].cond);
         }
         free(posix->fds);
-        pthread_mutex_destroy(&posix->fd_lock);
+        evpl_mutex_destroy(&posix->fd_lock);
         free(posix->workers);
         chimera_destroy(posix->client);
         free(posix);
@@ -351,12 +353,12 @@ chimera_posix_shutdown(void)
         evpl_threadpool_destroy(posix->pool);
     }
 
-    pthread_mutex_destroy(&posix->fd_lock);
+    evpl_mutex_destroy(&posix->fd_lock);
 
     if (posix->fds) {
         for (int i = 0; i < posix->max_fds; i++) {
-            pthread_mutex_destroy(&posix->fds[i].lock);
-            pthread_cond_destroy(&posix->fds[i].cond);
+            evpl_mutex_destroy(&posix->fds[i].lock);
+            evpl_cond_destroy(&posix->fds[i].cond);
         }
         free(posix->fds);
     }

@@ -20,7 +20,11 @@
 
 #include "chimera_vfs_sdk.h"
 
+#ifdef _MSC_VER
+#define VFS_EXAMPLE_EXPORT __declspec(dllexport)
+#else
 #define VFS_EXAMPLE_EXPORT __attribute__((visibility("default")))
+#endif
 
 static void *
 vfs_example_init(

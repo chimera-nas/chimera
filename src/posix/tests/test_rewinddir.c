@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2023 SUSE Linux Products GmbH
 //
 // SPDX-License-Identifier: GPL-2.0-only
@@ -14,7 +14,7 @@
  */
 
 #include "posix_test_common.h"
-#include <dirent.h>
+#include "common/dirent.h"
 
 /*
  * Number of files we add to the test directory after calling opendir()

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -260,8 +260,8 @@ cthon_rmdirtree(
 void
 cthon_testdir(const char *dir)
 {
-    struct stat statb;
-    char        fullpath[MAXPATHLEN];
+    chimera_posix_stat_t statb;
+    char                 fullpath[MAXPATHLEN];
 
     if (dir == NULL) {
         dir = "/test/nfstestdir";

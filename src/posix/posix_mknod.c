@@ -30,9 +30,9 @@ chimera_posix_mknod_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_mknod(
-    const char *path,
-    mode_t      mode,
-    dev_t       dev)
+    const char   *path,
+    mode_t        mode,
+    chimera_dev_t dev)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
@@ -63,7 +63,7 @@ chimera_posix_mknod(
     }
 
     chimera_posix_completion_init(&comp, &req);
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode             = CHIMERA_CLIENT_OP_MKNOD;
     req.mknod.callback     = chimera_posix_mknod_callback;
@@ -82,7 +82,7 @@ chimera_posix_mknod(
     req.mknod.set_attr.va_req_mask = 0;
     req.mknod.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
     req.mknod.set_attr.va_mode     = mode & ~chimera_posix_effective_umask();
-    /* Encode the host dev_t into the canonical VFS rdev form (major << 32 |
+    /* Encode the host chimera_dev_t into the canonical VFS rdev form (major << 32 |
      * minor) the backends and NFS server expect; chimera_attrs_to_stat() does
      * the inverse on the way back. */
     req.mknod.set_attr.va_rdev = ((uint64_t) major(dev) << 32) | minor(dev);

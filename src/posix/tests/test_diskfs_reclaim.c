@@ -16,6 +16,7 @@
  * (park -> snapshot -> slot flip -> resume) many times over.
  */
 
+#include "common/test_host.h"
 #include <inttypes.h>
 
 #include "common/platform.h"
@@ -186,7 +187,7 @@ main(
 
         for (k = 0; k < (int) (RECLAIM_FILE_BYTES / sizeof(rbuf)); k++) {
             r = (int) chimera_posix_pread(fd, rbuf, sizeof(rbuf),
-                                          (off_t) k * (off_t) sizeof(rbuf));
+                                          (chimera_off_t) k * (chimera_off_t) sizeof(rbuf));
             if (r != (int) sizeof(rbuf) ||
                 memchr(rbuf, 0, sizeof(rbuf)) != NULL) {
                 fprintf(stderr, "phase 2: unlinked-but-open file unreadable "

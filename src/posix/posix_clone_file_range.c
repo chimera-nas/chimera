@@ -28,11 +28,11 @@ chimera_posix_clone_file_range_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_clone_file_range(
-    int    dst_fd,
-    off_t  dst_offset,
-    int    src_fd,
-    off_t  src_offset,
-    size_t len)
+    int           dst_fd,
+    chimera_off_t dst_offset,
+    int           src_fd,
+    chimera_off_t src_offset,
+    size_t        len)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);

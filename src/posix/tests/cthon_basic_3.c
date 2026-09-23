@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -8,6 +8,7 @@
 // Uses the following important system calls against the server:
 //   stat()
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int Tflag = 0;   // print timing
@@ -33,7 +34,7 @@ main(
     int                   rc;
     int                   count = 250;
     int                   ct;
-    struct stat           statb;
+    chimera_posix_stat_t  statb;
     struct timeval        time;
     int                   opt;
     const char           *path;

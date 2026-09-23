@@ -22,9 +22,9 @@
 /* open `name` with flags, ftruncate to len, return ftruncate's errno-or-0. */
 static int
 open_ftruncate(
-    const char *name,
-    int         flags,
-    off_t       len)
+    const char   *name,
+    int           flags,
+    chimera_off_t len)
 {
     int fd = pjd_open(name, flags, 0644);
     int rc;

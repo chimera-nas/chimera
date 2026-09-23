@@ -512,9 +512,9 @@ pjd_rename(
 
 static inline int
 pjd_mknod(
-    const char *name,
-    mode_t      mode,
-    dev_t       dev)
+    const char   *name,
+    mode_t        mode,
+    chimera_dev_t dev)
 {
     char p[PJD_PATHBUF];
 
@@ -540,8 +540,8 @@ pjd_mknod_fifo(
 
 static inline int
 pjd_truncate(
-    const char *name,
-    off_t       length)
+    const char   *name,
+    chimera_off_t length)
 {
     char p[PJD_PATHBUF];
 
@@ -555,8 +555,8 @@ pjd_truncate(
 static inline mode_t
 pjd_stat_type(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return 0;
@@ -567,8 +567,8 @@ pjd_stat_type(const char *name)
 static inline mode_t
 pjd_lstat_type(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return 0;
@@ -580,8 +580,8 @@ pjd_lstat_type(const char *name)
 static inline int
 pjd_stat_mode(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -592,8 +592,8 @@ pjd_stat_mode(const char *name)
 static inline int
 pjd_lstat_mode(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -604,8 +604,8 @@ pjd_lstat_mode(const char *name)
 /* Full lstat/stat into caller's struct; returns 0/-1 (errno set). */
 static inline int
 pjd_lstat(
-    const char  *name,
-    struct stat *st)
+    const char           *name,
+    chimera_posix_stat_t *st)
 {
     char p[PJD_PATHBUF];
 
@@ -614,8 +614,8 @@ pjd_lstat(
 
 static inline int
 pjd_stat(
-    const char  *name,
-    struct stat *st)
+    const char           *name,
+    chimera_posix_stat_t *st)
 {
     char p[PJD_PATHBUF];
 
@@ -625,8 +625,8 @@ pjd_stat(
 static inline long
 pjd_stat_nlink(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -641,8 +641,8 @@ pjd_lstat_ctime(
     const char      *name,
     struct timespec *ts)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     /* Leave the output defined even when the stat fails: the pjd cases
      * use non-fatal expectations and keep running, so a caller can
@@ -661,8 +661,8 @@ pjd_lstat_mtime(
     const char      *name,
     struct timespec *ts)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     /* Leave the output defined even when the stat fails: the pjd cases
      * use non-fatal expectations and keep running, so a caller can
@@ -679,8 +679,8 @@ pjd_lstat_mtime(
 static inline long
 pjd_lstat_inode(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -691,8 +691,8 @@ pjd_lstat_inode(const char *name)
 static inline long
 pjd_lstat_major(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -703,8 +703,8 @@ pjd_lstat_major(const char *name)
 static inline long
 pjd_lstat_minor(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -715,8 +715,8 @@ pjd_lstat_minor(const char *name)
 static inline long
 pjd_lstat_uid(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -727,8 +727,8 @@ pjd_lstat_uid(const char *name)
 static inline long
 pjd_lstat_gid(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -739,8 +739,8 @@ pjd_lstat_gid(const char *name)
 static inline long
 pjd_stat_size(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -754,8 +754,8 @@ pjd_stat_ctime(
     const char      *name,
     struct timespec *ts)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     /* Leave the output defined even when the stat fails: the pjd cases
      * use non-fatal expectations and keep running, so a caller can
@@ -774,8 +774,8 @@ pjd_stat_mtime(
     const char      *name,
     struct timespec *ts)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     /* Leave the output defined even when the stat fails: the pjd cases
      * use non-fatal expectations and keep running, so a caller can
@@ -817,8 +817,8 @@ pjd_backend_is_nfs3(void)
 static inline long
 pjd_lstat_atime(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -829,8 +829,8 @@ pjd_lstat_atime(const char *name)
 static inline long
 pjd_lstat_mtime_sec(const char *name)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -845,8 +845,8 @@ pjd_lstat_times(
     struct timespec *atime,
     struct timespec *mtime)
 {
-    char        p[PJD_PATHBUF];
-    struct stat st;
+    char                 p[PJD_PATHBUF];
+    chimera_posix_stat_t st;
 
     /* Leave the outputs defined even when the stat fails: the pjd cases
      * use non-fatal expectations and keep running, so a caller can still

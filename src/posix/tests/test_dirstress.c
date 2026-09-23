@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2000-2001 Silicon Graphics, Inc.
 //
 // SPDX-License-Identifier: GPL-2.0-only
@@ -13,6 +13,7 @@
  * Originally from xfstests, ported to Chimera POSIX userspace API.
  */
 
+#include "common/getopt.h"
 #include <sys/wait.h>
 #include "posix_test_common.h"
 
@@ -542,11 +543,11 @@ remove_entries(
     struct posix_test_env *env,
     int                    nfiles)
 {
-    int         i;
-    char        buf[1024];
-    char        path[2048];
-    struct stat statb;
-    int         error;
+    int                  i;
+    char                 buf[1024];
+    char                 path[2048];
+    chimera_posix_stat_t statb;
+    int                  error;
 
     for (i = 0; i < nfiles; i++) {
         snprintf(buf, sizeof(buf), "XXXXXXXXXXXX.%d", i);

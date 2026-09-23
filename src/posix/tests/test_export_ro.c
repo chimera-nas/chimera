@@ -80,7 +80,7 @@ main(
     struct posix_test_env env;
     int                   rc;
     int                   fd;
-    struct stat           st;
+    chimera_posix_stat_t  st;
     char                  buf[64];
 
     /* Ask the harness to also create the access-ro export of the rw mount. */

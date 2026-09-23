@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,10 +6,12 @@
 // Based on cthon/basic/test1.c from Connectathon 2004
 //
 // Uses the following important system calls against the server:
-//   mkdir()
+//   chimera_test_mkdir()
 //   creat()
 //   close()
 
+#include "common/test_host.h"
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int Tflag = 0;   // print timing

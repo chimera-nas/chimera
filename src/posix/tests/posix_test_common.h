@@ -3,18 +3,35 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/test_host.h"
+#include "common/getopt.h"
+#include "common/compiler.h"
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <strings.h>
+#endif // ifdef _WIN32
 #include <time.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
 #include <errno.h>
 #include <signal.h>
-#include <dirent.h>
+#include "common/dirent.h"
+#ifndef _WIN32
 #include <execinfo.h>
+#endif // ifndef _WIN32
 #include <jansson.h>
 #include "posix/posix.h"
 #include "server/server.h"
@@ -52,6 +69,7 @@
  * buffers instead of using stdio, and pre-warm backtrace() at arm time so
  * its one-time dlopen/malloc happens outside the handler.
  */
+#ifndef _WIN32
 static void
 posix_test_child_watchdog_fire(int sig)
 {
@@ -215,6 +233,8 @@ posix_test_fork_exec(char *const cargv[])
     return pid;
 } /* posix_test_fork_exec */
 
+#endif /* Unix cross-process fixtures */
+
 struct posix_test_env {
     struct chimera_posix_client *posix;
     struct chimera_server       *server;       // For NFS backend tests
@@ -333,17 +353,24 @@ static inline const char *
 posix_test_session_root(void)
 {
     const char *root = getenv("CHIMERA_TEST_ROOT");
+
+#ifndef _WIN32
     struct stat st;
+#endif // ifndef _WIN32
 
     if (root) {
         return root;
     }
 
+#ifdef _WIN32
+    return chimera_test_session_root();
+#else // ifdef _WIN32
     if (stat("/build", &st) == 0 && S_ISDIR(st.st_mode)) {
         return "/build/test";
     }
 
     return "/tmp/chimera_test";
+#endif // ifdef _WIN32
 } // posix_test_session_root
 
 /* Emit the external-module client config into a posix.json "config" object:
@@ -407,13 +434,13 @@ posix_test_emit_ext_module_config(
  * posix_test_diskfs_reuse_devices reuses the existing device images without
  * re-initializing the filesystem (cold remount).  Set before posix_test_init
  * / posix_test_configure_diskfs. */
-static const char *posix_test_diskfs_extra_cfg = NULL;
-static int         posix_test_diskfs_reuse_devices __attribute__ ((unused)) = 0;
+static const char                         *posix_test_diskfs_extra_cfg = NULL;
+static int posix_test_diskfs_reuse_devices CHIMERA_UNUSED              = 0;
 /* Device geometry.  The default 10 x 1 GiB pool is effectively unbounded; a
  * test that needs ENOSPC to be reachable shrinks it (the kvm nfstest_alloc
  * wrapper does the same thing for the same reason). */
-static int         posix_test_diskfs_device_count = 10;
-static uint64_t    posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
+static int                                 posix_test_diskfs_device_count = 10;
+static uint64_t                            posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
  * mounts the SAME NFS backend a second time, read-only, under a subdirectory
@@ -425,7 +452,7 @@ static uint64_t    posix_test_diskfs_device_bytes = 1024ULL * 1024 * 1024;
  * carries a distinct mount_id (its root_fh is encoded from the subdirectory
  * inode rather than copied from the root mount), which is what the VFS
  * read-only gate keys on. */
-static int posix_test_ro_export __attribute__ ((unused)) = 0;
+static int posix_test_ro_export CHIMERA_UNUSED = 0;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
  * creates a SECOND export "/roaccess" of the SAME writable "/share" mount,
@@ -434,7 +461,7 @@ static int posix_test_ro_export __attribute__ ((unused)) = 0;
  * backing mount here stays read-write, so a test using this flag isolates the
  * NFS per-export access enforcement from the VFS-mount read-only gate: any
  * EROFS seen through "/roaccess" can only come from the export policy. */
-static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
+static int posix_test_ro_access_export CHIMERA_UNUSED = 0;
 
 /* Name of the subdirectory (relative to the backend root) that the read-only
  * export is mounted at; the read-write export sees it as "/share/ro". */
@@ -459,14 +486,14 @@ static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
  * Export names are fixed width ("page00", "page01", ...) so no name is a
  * string prefix of another: chimera_nfs_find_export_path matches export names
  * by prefix, the same collision the "roshare" note below avoids. */
-static int posix_test_extra_exports __attribute__ ((unused)) = 0;
+static int posix_test_extra_exports CHIMERA_UNUSED = 0;
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server
  * also creates a root export "/" backed by the same "/share" mount.  The
  * NFSv4 namespace root is then the share's real backend directory rather
  * than the synthetic pseudo-root, and the other exports remain reachable as
  * junctions grafted over it at LOOKUP (see nfs4_root_junction_check). */
-static int posix_test_root_export __attribute__ ((unused)) = 0;
+static int posix_test_root_export   CHIMERA_UNUSED = 0;
 
 /* Pinned id for the root export, clear of the other pinned ids here. */
 #define POSIX_TEST_ROOT_EXPORT_ID        (POSIX_TEST_EXPORT_ID + 3)
@@ -533,7 +560,7 @@ posix_test_configure_diskfs(
             exit(EXIT_FAILURE);
         }
 
-        rc = ftruncate(fd, (off_t) posix_test_diskfs_device_bytes);
+        rc = ftruncate(fd, (chimera_off_t) posix_test_diskfs_device_bytes);
 
         if (rc < 0) {
             fprintf(stderr, "Failed to truncate device %s: %s\n", device_path, strerror(errno));
@@ -764,7 +791,7 @@ posix_test_start_nfs_server(struct posix_test_env *env)
          * which the container's overlayfs root rejects with EOPNOTSUPP. */
         if (strcmp(nfs_backend_name, "linux") == 0 ||
             strcmp(nfs_backend_name, "io_uring") == 0) {
-            if (mkdir(module_path, 0777) != 0 && errno != EEXIST) {
+            if (chimera_test_mkdir(module_path, 0777) != 0 && errno != EEXIST) {
                 fprintf(stderr, "Failed to create extra export subdir %s: %s\n",
                         module_path, strerror(errno));
                 exit(EXIT_FAILURE);
@@ -939,28 +966,29 @@ posix_test_init(
     const char *session_root = posix_test_session_root();
 
     snprintf(env->session_dir, sizeof(env->session_dir),
-             "%s/posix_session_%d_%lu_%lu",
-             session_root, getpid(), tv.tv_sec, tv.tv_nsec);
+             "%s/posix_session_%d_%" PRId64 "_%ld",
+             session_root, getpid(), (int64_t) tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-    int         rc;
-
-    (void) mkdir(session_root, 0755);
-    (void) mkdir(env->session_dir, 0755);
+    (void) chimera_test_mkdir(session_root, 0755);
+    (void) chimera_test_mkdir(env->session_dir, 0755);
 
     /* Ownership by the test identity matters for the passthrough (linux)
      * backend, whose server side writes into the dir as cred.uid; chown needs
      * privilege.  Unprivileged (serialized-fallback) runs only use
      * engine-managed backends, where ownership by the invoking user is
      * already right. */
+#ifndef _WIN32
     if (geteuid() == 0) {
-        rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
+        int rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
         if (rc < 0) {
             fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
+
+#endif // ifndef _WIN32
 
     if (is_nfs) {
         posix_test_start_nfs_server(env);
@@ -1109,9 +1137,7 @@ posix_test_cleanup(
     }
 
     if (remove_session && env->session_dir[0] != '\0') {
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-        rc = system(cmd);
+        rc = chimera_test_remove_tree(env->session_dir);
         if (rc < 0) {
             fprintf(stderr, "Failed to remove session directory %s: %s\n", env->session_dir, strerror(errno));
             exit(EXIT_FAILURE);
@@ -1121,7 +1147,7 @@ posix_test_cleanup(
     prometheus_metrics_destroy(env->metrics);
 } /* posix_test_cleanup */
 
-__attribute__((noreturn)) static inline void
+CHIMERA_NORETURN static inline void
 posix_test_fail(struct posix_test_env *env)
 {
     fprintf(stderr, "Test failed\n");

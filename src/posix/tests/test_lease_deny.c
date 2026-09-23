@@ -14,6 +14,7 @@
  * backend only (the knob only exists on the memfs arbiter).
  */
 
+#include "common/test_host.h"
 #include "posix_test_common.h"
 
 int

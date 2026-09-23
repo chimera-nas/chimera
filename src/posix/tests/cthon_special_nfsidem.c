@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -8,6 +8,7 @@
 // Performs a sequence of operations to stress test idempotent behavior:
 //   mkdir, create, chmod, rename, link, symlink, unlink, rmdir, stat
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define STRCHARS 100
@@ -30,7 +31,7 @@ main(
     char                  str[STRCHARS];
     int                   count = 10;
     int                   fd, slen, lerr, slerr;
-    struct stat           sb;
+    chimera_posix_stat_t  sb;
 
     cthon_Myname = "cthon_special_nfsidem";
 

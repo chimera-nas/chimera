@@ -30,10 +30,10 @@ main(
      * unlink.  Skip the nlink==0 assertion there but still exercise the path. */
     EXPECT(0, pjd_create(n0, 0644));
     {
-        int         fd = pjd_open(n0, O_RDONLY, 0644);
+        int                  fd = pjd_open(n0, O_RDONLY, 0644);
         PJD_CHECK(fd >= 0, "open n0");
         EXPECT(0, pjd_unlink(n0));
-        struct stat stbuf;
+        chimera_posix_stat_t stbuf;
         EXPECT(0, chimera_posix_fstat(fd, &stbuf));
         if (!pjd_backend_is_nfs3()) {
             EXPECT_EQ(0, (long) stbuf.st_nlink);

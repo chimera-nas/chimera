@@ -4,8 +4,13 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/compiler.h"
+#include "common/thread.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/uio.h>
+#endif // ifdef _WIN32
 #include <utlist.h>
 
 #include "client.h"
@@ -68,7 +73,7 @@ typedef void (*chimera_client_request_callback)(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);
 
-struct chimera_client_request {
+struct CHIMERA_ALIGNED(64) chimera_client_request {
     enum chimera_client_request_opcode opcode;
     struct chimera_client_thread      *thread;
     struct chimera_client_request     *prev;
@@ -457,7 +462,7 @@ struct chimera_client_request {
             void                           *private_data;
         } write_same;
     };
-} __attribute__((aligned(64)));
+};
 
 struct chimera_client_config {
     int                           core_threads;
@@ -483,19 +488,19 @@ struct chimera_client_config {
  * stores (vmovdqa), which GP-fault when the allocation lands 16- but not
  * 32-byte aligned (Release-only; -O0 Debug uses scalar stores and survives). */
 
-struct chimera_client {
+struct CHIMERA_ALIGNED(64) chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
     struct chimera_vfs_cred             cred;
     uint32_t                            root_fh_len;
     uint8_t                             root_fh[CHIMERA_VFS_FH_SIZE];
-} __attribute__((aligned(64)));
+};
 
-struct chimera_client_thread {
+struct CHIMERA_ALIGNED(64) chimera_client_thread {
     struct chimera_client         *client;
     struct chimera_vfs_thread     *vfs_thread;
     struct chimera_client_request *free_requests;
-} __attribute__((aligned(64)));
+};
 
 /*
  * Return the effective credential for a request: the per-request override when

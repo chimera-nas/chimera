@@ -29,8 +29,8 @@
 * on success or -1.  (A single 1 MiB write exceeds the NFS transport limit.) */
 static int
 fill_block(
-    int   fd,
-    off_t off)
+    int           fd,
+    chimera_off_t off)
 {
     char  *c = malloc(CHUNK);
     size_t done;
@@ -38,7 +38,7 @@ fill_block(
     memset(c, 0xab, CHUNK);
 
     for (done = 0; done < BLK; done += CHUNK) {
-        if (chimera_posix_pwrite(fd, c, CHUNK, off + (off_t) done) != (ssize_t) CHUNK) {
+        if (chimera_posix_pwrite(fd, c, CHUNK, off + (chimera_off_t) done) != (ssize_t) CHUNK) {
             free(c);
             return -1;
         }
@@ -65,16 +65,16 @@ all_zero(
  * all zero. */
 static int
 region_is_zero(
-    int    fd,
-    off_t  off,
-    size_t n)
+    int           fd,
+    chimera_off_t off,
+    size_t        n)
 {
     char  *c = malloc(CHUNK);
     size_t done;
 
     for (done = 0; done < n; done += CHUNK) {
         size_t  want = (n - done < CHUNK) ? (n - done) : CHUNK;
-        ssize_t r    = chimera_posix_pread(fd, c, want, off + (off_t) done);
+        ssize_t r    = chimera_posix_pread(fd, c, want, off + (chimera_off_t) done);
 
         if (r != (ssize_t) want || !all_zero(c, want)) {
             free(c);
@@ -126,7 +126,7 @@ main(
     PJD_CHECK(fd >= 0, "open dense file rw");
 
     for (unsigned i = 0; i < 3; i++) {
-        EXPECT_EQ(0, fill_block(fd, (off_t) i * BLK));
+        EXPECT_EQ(0, fill_block(fd, (chimera_off_t) i * BLK));
     }
     EXPECT_EQ((long) (3 * BLK), pjd_stat_size(n0));
 

@@ -46,7 +46,7 @@ chimera_posix_mkdir(
 
     chimera_posix_completion_init(&comp, &req);
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode             = CHIMERA_CLIENT_OP_MKDIR;
     req.mkdir.callback     = chimera_posix_mkdir_callback;
@@ -81,7 +81,7 @@ chimera_posix_mkdir(
              * preserved applies exactly those rules; any other stat
              * outcome (a directory, a dangling link) keeps the backend's
              * errno. */
-            struct stat st;
+            chimera_posix_stat_t st;
 
             if (chimera_posix_stat(path, &st) < 0) {
                 if (errno == ENOTDIR || errno == ELOOP) {
@@ -111,7 +111,7 @@ chimera_posix_mkdir(
                         if (tgt[0] == '/') {
                             return chimera_posix_mkdir(tgt, mode);
                         } else {
-                            const char *ls   = rindex(link, '/');
+                            const char *ls   = strrchr(link, '/');
                             int         dlen = ls ? (int) (ls - link) : 0;
 
                             if (snprintf(full, sizeof(full), "%.*s/%s", dlen,

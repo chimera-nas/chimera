@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 // Tests fseek and ftell
 
 #include <string.h>
+#include <limits.h>
 #include "posix_test_common.h"
 
 int
@@ -92,6 +93,29 @@ main(
     pos = chimera_posix_ftell(fp);
     if (pos != (long) len) {
         fprintf(stderr, "ftell after SEEK_END: expected %zu, got %ld\n", len, pos);
+        posix_test_fail(&env);
+    }
+
+    /* Windows long is 32-bit; the offset and saved-position APIs must keep
+     * the high bits, while ftell must report overflow instead of truncating. */
+    const chimera_off_t wide = (INT64_C(1) << 33) + 123;
+    chimera_fpos_t      saved;
+
+    if (chimera_posix_fseeko(fp, wide, SEEK_SET) != 0 ||
+        chimera_posix_ftello(fp) != wide ||
+        chimera_posix_fgetpos(fp, &saved) != 0 ||
+        saved.pos != wide ||
+        chimera_posix_fseeko(fp, 0, SEEK_SET) != 0 ||
+        chimera_posix_fsetpos(fp, &saved) != 0 ||
+        chimera_posix_ftello(fp) != wide) {
+        fprintf(stderr, "large stream offset did not round-trip\n");
+        posix_test_fail(&env);
+    }
+    errno = 0;
+    pos   = chimera_posix_ftell(fp);
+    if (wide > LONG_MAX ? (pos != -1 || errno != EOVERFLOW) :
+        (pos != wide)) {
+        fprintf(stderr, "ftell failed to preserve the offset or report overflow\n");
         posix_test_fail(&env);
     }
 
