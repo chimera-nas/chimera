@@ -930,7 +930,7 @@ mbt_pnfs_proxy_start(struct mbt_env *env)
     char                          dir[300];
 
     snprintf(dir, sizeof(dir), "%s/proxy", env->session_dir);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr, "pnfs proxy state dir %s: %s\n", dir, strerror(errno));
         exit(1);
     }
