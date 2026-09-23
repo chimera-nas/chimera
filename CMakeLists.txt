@@ -886,26 +886,4 @@ if(NOT DISABLE_TESTS)
 endif()
 
 # Temporary benchmark target: one build-system invocation on every platform.
-add_custom_target(platform_timing_all DEPENDS
-    chimera
-    crypto_test
-    ctl_proto_probe
-    ctl_smoke_probe
-    native_atomic_test
-    native_getopt_test
-    native_host_fixture_test
-    native_password_test
-    native_unicode_test
-    nfs3_mbt_probe
-    nfs4_deleg_probe
-    nfs_aux_probe
-    nfs_drc_probe
-    rbtree_test
-    rcu_test
-    rest_auth_test
-    rest_exports_test
-    rest_mounts_test
-    s3_mbt_probe
-    smb2_smoke_probe
-    smb_loopback_probe
-)
+add_custom_target(platform_timing_all DEPENDS diskfs_mbt_replay)

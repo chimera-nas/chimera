@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Unlicense
 """Temporary controlled platform comparison; not part of the Windows PR."""
 import json
+import hashlib
 import os
 import pathlib
 import platform
@@ -68,11 +69,22 @@ try:
     selection.write_text('\n'.join(cohort['tests']) + '\n')
     for source in (root / 'timing-build/CMakeFiles').glob('*/CMakeCCompiler.cmake'):
         (out / 'compiler.cmake').write_bytes(source.read_bytes())
+    run('corpus', ['cmake', '--build', 'timing-build', '--config', 'Release',
+                   '--parallel', '3', '--target', 'diskfs_traces'])
+    traces = sorted((root / 'timing-build/src/vfs/diskfs/tests/quint/traces').glob('*.itf.json'))
+    results['corpus_sha256'] = {}
+    for trace in traces:
+        document = json.loads(trace.read_text())
+        payload = {'vars': document['vars'], 'states': document['states']}
+        results['corpus_sha256'][trace.name] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if len(traces) != 11:
+        raise RuntimeError(f'Expected 11 identical storage traces, got {len(traces)}')
     run('cold-build', ['cmake', '--build', 'timing-build', '--config', 'Release',
                       '--parallel', '3', '--target', 'platform_timing_all'])
     run('noop-build', ['cmake', '--build', 'timing-build', '--config', 'Release',
                       '--parallel', '3', '--target', 'platform_timing_all'])
-    for sample in range(1, 4):
+    for sample in range(1, 2):
         name = f'tests-{sample}'
         junit = out / (name + '.xml')
         run(name, ['ctest', '--test-dir', 'timing-build', '-C', config,
