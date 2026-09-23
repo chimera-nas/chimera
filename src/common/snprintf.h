@@ -175,14 +175,14 @@
 #endif /* ifndef STBSP__ASAN */
 
 #ifdef STB_SPRINTF_STATIC
-#define STBSP__PUBLICDEC static
+#define STBSP__PUBLICDEC static STBSP__ASAN
 #define STBSP__PUBLICDEF static STBSP__ASAN
 #else  /* ifdef STB_SPRINTF_STATIC */
 #ifdef __cplusplus
-#define STBSP__PUBLICDEC extern "C"
+#define STBSP__PUBLICDEC extern "C" STBSP__ASAN
 #define STBSP__PUBLICDEF extern "C" STBSP__ASAN
 #else  /* ifdef __cplusplus */
-#define STBSP__PUBLICDEC extern
+#define STBSP__PUBLICDEC extern STBSP__ASAN
 #define STBSP__PUBLICDEF STBSP__ASAN
 #endif /* ifdef __cplusplus */
 #endif /* ifdef STB_SPRINTF_STATIC */
