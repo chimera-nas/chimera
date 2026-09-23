@@ -545,8 +545,10 @@ verify_signature_v2(
     rcu_read_unlock();
 
     /* Base64 encode the result */
-    base64_encode(sig_bytes, SHA1_DIGEST_LENGTH,
-                  expected_signature, sizeof(expected_signature));
+    if (base64_encode(sig_bytes, SHA1_DIGEST_LENGTH,
+                      expected_signature, sizeof(expected_signature)) < 0) {
+        return CHIMERA_S3_AUTH_SIGNATURE_MISMATCH;
+    }
 
     chimera_s3_debug("V2 Expected signature: %s", expected_signature);
     chimera_s3_debug("V2 Received signature: %s", signature);
