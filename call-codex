@@ -18,6 +18,9 @@ Create a git worktree and launch Codex CLI in it.
 The worktree is created in /worktrees/<name> if /worktrees exists (devcontainer
 volume), otherwise in worktrees/<name> under the main source tree.
 
+When run inside tmux, the agent opens in a new tmux window named for the branch
+rather than taking over the current window.
+
 Options:
   -b <branch>           Setup worktree from an existing branch
   -B <branch>           Create a new branch off latest origin/main
@@ -243,11 +246,26 @@ esac
 
 # Launch Codex CLI in the worktree
 echo "" >&2
-echo "Launching Codex CLI in $WORKTREE_PATH..." >&2
 cd "$WORKTREE_PATH"
 
-# Set terminal title to the worktree name
+# Name both the tmux window and the terminal title after the worktree, which
+# for -b/-B is the branch name (for -p it is org-project-pr-N).
 WORKTREE_NAME=$(basename "$WORKTREE_PATH")
+
+# Inside tmux, fork the agent into its own window rather than taking over the
+# one this script was run from: the launching shell stays usable and several
+# worktrees can run agents side by side, each in a window named for its branch.
+# `exec bash -l` keeps the window alive after Codex exits, so its scrollback
+# survives and the worktree is there to poke at.
+if [[ -n "$TMUX" ]] && command -v tmux >/dev/null 2>&1; then
+    echo "Opening Codex CLI in tmux window '$WORKTREE_NAME'..." >&2
+    exec tmux new-window -n "$WORKTREE_NAME" -c "$WORKTREE_PATH" \
+        'codex; exec bash -l'
+fi
+
+echo "Launching Codex CLI in $WORKTREE_PATH..." >&2
+
+# Set terminal title to the worktree name
 printf '\033]0;%s\007' "$WORKTREE_NAME"
 
 exec codex
