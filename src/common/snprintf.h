@@ -162,6 +162,8 @@
    #endif /* if __has_attribute(__no_sanitize__) */
   #endif /* if __has_feature(address_sanitizer) */
  #endif /* if defined(__has_feature) && defined(__has_attribute) */
+#elif defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
+ #define STBSP__ASAN    __declspec(no_sanitize_address)
 #elif defined(__GNUC__) && (__GNUC__ >= 5 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8))
  #if defined(__SANITIZE_ADDRESS__) && __SANITIZE_ADDRESS__
   #define STBSP__ASAN   __attribute__((__no_sanitize_address__))
@@ -173,14 +175,14 @@
 #endif /* ifndef STBSP__ASAN */
 
 #ifdef STB_SPRINTF_STATIC
-#define STBSP__PUBLICDEC static
+#define STBSP__PUBLICDEC static STBSP__ASAN
 #define STBSP__PUBLICDEF static STBSP__ASAN
 #else  /* ifdef STB_SPRINTF_STATIC */
 #ifdef __cplusplus
-#define STBSP__PUBLICDEC extern "C"
+#define STBSP__PUBLICDEC extern "C" STBSP__ASAN
 #define STBSP__PUBLICDEF extern "C" STBSP__ASAN
 #else  /* ifdef __cplusplus */
-#define STBSP__PUBLICDEC extern
+#define STBSP__PUBLICDEC extern STBSP__ASAN
 #define STBSP__PUBLICDEF STBSP__ASAN
 #endif /* ifdef __cplusplus */
 #endif /* ifdef STB_SPRINTF_STATIC */
