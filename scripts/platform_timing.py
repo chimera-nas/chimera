@@ -69,9 +69,9 @@ try:
     for source in (root / 'timing-build/CMakeFiles').glob('*/CMakeCCompiler.cmake'):
         (out / 'compiler.cmake').write_bytes(source.read_bytes())
     run('cold-build', ['cmake', '--build', 'timing-build', '--config', 'Release',
-                      '--parallel', '3', '--target', *cohort['targets']])
+                      '--parallel', '3', '--target', 'platform_timing_all'])
     run('noop-build', ['cmake', '--build', 'timing-build', '--config', 'Release',
-                      '--parallel', '3', '--target', *cohort['targets']])
+                      '--parallel', '3', '--target', 'platform_timing_all'])
     for sample in range(1, 4):
         name = f'tests-{sample}'
         junit = out / (name + '.xml')
