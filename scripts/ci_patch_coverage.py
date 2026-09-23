@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: Unlicense
-"""Report how much of what a pull request changed the model suites executed.
+"""Report how much of what a pull request changed the quick-tier tests executed.
 
 Two modes, because the llvm-cov export in between needs to know which files to
 bother with:
@@ -198,11 +198,11 @@ def main():
         total_runs = sum(len(s) for _, s in uncovered)
         more = (f" …and {total_runs - shown} more"
                 if total_runs > shown else "")
-        out += ["", "Changed lines the model suites never executed: "
+        out += ["", "Changed lines the quick-tier tests never executed: "
                 + "; ".join(items) + more + "."]
 
-    out += ["", "<sub>Executed by the quint model suites only "
-            "(`ctest -L quint`) — code reached solely by the other suites "
+    out += ["", "<sub>Executed by the quick-tier tests "
+            "(`ctest`) — code reached solely by the other suites "
             "counts as unexecuted here. Lines with no coverage mapping "
             "(declarations, braces, comments) are excluded rather than counted "
             "as misses.</sub>"]

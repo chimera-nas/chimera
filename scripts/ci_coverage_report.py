@@ -46,9 +46,9 @@ import sys
 MARKER = "<!-- quint-coverage-report -->"
 
 # The selection this report measures, as something to paste.  The make target
-# builds Coverage, runs the label with LLVM_PROFILE_FILE set, and then runs
+# builds Coverage, runs the quick tier with LLVM_PROFILE_FILE set, and then runs
 # etc/coverage-report.sh over the result -- exactly what CI does.
-REPRO = 'make coverage CTEST_ARGS="-L quint --output-on-failure"'
+REPRO = 'make coverage CTEST_ARGS="--output-on-failure"'
 
 METRICS = ("functions", "lines", "branches")
 
@@ -150,7 +150,7 @@ def main():
             totals[metric][0] += got.get("count", 0)
             totals[metric][1] += got.get("covered", 0)
 
-    title = "Quint model-based test coverage"
+    title = "Quick-tier test coverage"
     out = [MARKER, "",
            f"## [{title}]({run_url})" if run_url else f"## {title}", ""]
 

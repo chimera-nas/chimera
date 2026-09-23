@@ -529,8 +529,7 @@ set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
 # deviation registry could never do: a registry entry keeps forgiving after the
 # bug is fixed, and forgives the same divergence somewhere it was never meant
 # to.
-# Reporting, not gating, so it goes in the extended tier.
-set(CHIMERA_TEST_TIER extended)
+# Strict replays run and gate in quick alongside the configured corpus.
 
 add_test(NAME chimera/server/nfs/mbt/strict_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_STRICT_TRACES})
@@ -538,8 +537,6 @@ set_tests_properties(chimera/server/nfs/mbt/strict_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_strict_memfs"
     LABELS "quint;nfs3_mbt;memfs;strict"
     TIMEOUT 300)
-
-set(CHIMERA_TEST_TIER quick)
 
 # The liveness gate: a cell may not enable a deviation its own corpus never
 # exercises.  Either the deviation is dead (retire it from the config and
@@ -1039,18 +1036,14 @@ endif()
 
 # ---- the NFSv4 deviation machinery ----------------------------------------
 #
-# The strict twins: each cell's config regenerated with DEVS = Set(), so every
-# expectation is the RFC-correct answer rather than chimera's.  These are
-# EXPECTED to fail, and their output is the conformance debt -- re-measured on
-# every run instead of remembered in a registry.  That is the whole point: a
-# registry entry keeps forgiving after the bug behind it is fixed, and keeps
-# forgiving the same divergence somewhere it was never meant to.  Reporting,
-# not gating, so they live in the extended tier.
+# The strict twins regenerate each cell with DEVS = Set(), so every
+# expectation is the RFC-correct answer. They run and gate in quick. A known
+# conformance failure needs an explicit, narrow expectation; it must not hide
+# the entire replay in extended or excuse unrelated failures.
 #
 # One test per cell rather than one over all of them, and deliberately so: the
 # order dependence documented above NFS4_TRACE_ARGS only bites when several
 # minor versions share a replayer process, and a per-cell test cannot hit it.
-set(CHIMERA_TEST_TIER extended)
 
 foreach(scell memfs40 memfs41 memfs41_root memfs42)
     string(TOUPPER ${scell} SCELL)
@@ -1086,8 +1079,6 @@ foreach(scell pnfs41 pnfs42)
         SKIP_RETURN_CODE 77
         TIMEOUT 300)
 endforeach()
-
-set(CHIMERA_TEST_TIER quick)
 
 # The liveness gate, one per cell: a cell may not enable a deviation its own
 # corpus never exercises.  Either the deviation is dead -- retire it from the

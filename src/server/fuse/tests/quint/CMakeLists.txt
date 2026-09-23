@@ -66,19 +66,9 @@ set_tests_properties(chimera/fuse/mbt/batch_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
-# The strict twin of the same cell: the identical batches regenerated with every
-# deviation forced off, so its failures ARE the FUSE server's conformance debt,
-# re-measured on every run rather than remembered in a registry.  Reporting, not
-# a gate, so it belongs in the extended tier -- the tier is decided by
-# CHIMERA_TEST_TIER at the point of add_test() (see the wrapper in the top-level
-# CMakeLists.txt).
-#
-# The fuse config enables no deviations today, which makes this corpus identical
-# to the one above: the four the direct and loopback profiles carry are all
-# demonstrably absent on this path (see configs/fuse.json for why).  The cell is
-# still registered strict, so the day a FUSE deviation is found and named in the
-# config, the twin that measures it already exists.
-set(CHIMERA_TEST_TIER extended)
+# The strict twin disables every model deviation and gates in quick.
+# This cell currently has no deviations, so its corpus matches the ordinary
+# replay. Keeping both registered makes any future deviation visible.
 add_test(NAME chimera/fuse/mbt/strict_memfs
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/src/posix/tests/quint/posix_replay.py
@@ -90,4 +80,3 @@ set_tests_properties(chimera/fuse/mbt/strict_memfs PROPERTIES
     LABELS "quint;fuse;posix_mbt;memfs;strict"
     SKIP_RETURN_CODE 77
     TIMEOUT 900)
-set(CHIMERA_TEST_TIER quick)

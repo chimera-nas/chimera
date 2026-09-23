@@ -32,8 +32,8 @@ set(CHIMERA_TEST_TIER quick)
 # exact match, and two mechanisms keep the claims from decaying:
 #
 #  - each cell's STRICT TWIN (same batches, every deviation off).  Its
-#    failures are the conformance debt, re-measured on every extended run
-#    rather than remembered in C.  Reporting, not gating.
+#    failures are the conformance debt, re-measured on every quick run
+#    rather than remembered in C, and gate alongside the configured corpus.
 #  - the LIVENESS gate, which fails a cell that enables a deviation its own
 #    corpus never exercises -- a deviation that has been fixed, or coverage
 #    that was quietly lost.  That one IS a quick-tier gate.
@@ -193,16 +193,9 @@ set_tests_properties(chimera/server/s3/mbt/batch_sigv2_memfs PROPERTIES
 
 # ---- the deviation machinery ------------------------------------------------
 
-# The strict twin of each cell: the identical batch list regenerated with
-# DEVS = Set(), so every expectation is the AWS behavior.  These are expected
-# to FAIL for as long as chimera carries the divergences listed in the two
-# configs -- that is the point.  Their output is the conformance debt,
-# re-measured on every run, which is what a deviation registry could never do:
-# a registry entry keeps forgiving after the bug is fixed, and forgives the
-# same divergence somewhere it was never meant to.  Reporting, not gating, so
-# they go in the extended tier.
-set(CHIMERA_TEST_TIER extended)
-
+# Strict twins regenerate the batches with DEVS = Set() and gate in quick.
+# Both cells currently have no model deviations; the old conformance failures
+# have been fixed. Future failures must not be silently treated as expected.
 add_test(NAME chimera/server/s3/mbt/strict_memfs
     COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${S3_BASE_STRICT})
 set_tests_properties(chimera/server/s3/mbt/strict_memfs PROPERTIES
@@ -217,8 +210,6 @@ set_tests_properties(chimera/server/s3/mbt/strict_multipart_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_strict_multipart_memfs"
     LABELS "quint;s3_mbt;memfs;strict"
     TIMEOUT 600)
-
-set(CHIMERA_TEST_TIER quick)
 
 # The liveness gate: a cell may not enable a deviation its own corpus never
 # exercises.  Either the deviation is dead (retire it from the config and

@@ -23,12 +23,10 @@ name: PR checks
 #
 # It also carries the pre-merge signal that is cheap enough to be worth having
 # before the queue: clang static analysis on devcontainer and macOS, and the
-# quint model-based test suite (ctest label "quint") on devcontainer.  The MBT
-# suites are the fastest broad-coverage tests in the tree -- the whole label
-# runs in well under a minute -- and they are the ones a spec or harness change
-# breaks, so catching that here rather than in the queue is worth one image
-# build.  macOS runs the quint suite post-merge, in build-test.yml's macOS job,
-# rather than twice.
+# full quick test tier on devcontainer, including model replays, strict twins
+# and supporting probes. Catching regressions here rather than in the queue
+# is worth one image build. macOS runs quick post-merge in build-test.yml's
+# macOS job, rather than twice.
 #
 # The queue now runs this same pair -- quick-tier ctest and static analysis --
 # across every supported OS, so what this job buys is earliness, not extra
@@ -193,7 +191,7 @@ jobs:
           retention-days: 30
 
   quint-coverage:
-    name: Quint coverage devcontainer amd64
+    name: Quick-tier coverage devcontainer amd64
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -249,16 +247,14 @@ jobs:
 
       # A Coverage build (clang source-based instrumentation, -O0) rather than
       # Debug: the suite still reports pass/fail, and the same run answers the
-      # question this job exists for -- how much of chimera the models actually
-      # reach.  ASan coverage of these suites comes from the merge queue's Debug
-      # jobs, which now have a trace corpus too.
+      # question this job exists for -- how much of chimera quick tests reach.
+      # ASan coverage comes from the merge queue's Debug jobs, which also have
+      # a trace corpus.
       #
-      # --no-tests=error is the point of the label: a configuration that
-      # silently loses its MBT suites (no quint, no node) must fail here
-      # rather than report a vacuous pass.  It only catches losing the label
-      # ENTIRELY, though, so REQUIRE_CTL_MBT=ON covers the narrower case of
-      # the in-tree control-plane corpus alone going missing.
-      - name: Build instrumented and run the quint suite
+      # Run the same default quick tier as the merge queue, without a label
+      # filter: relabeling a supporting probe must not remove its coverage.
+      # REQUIRE_CTL_MBT guards against losing control-plane model registration.
+      - name: Build instrumented and run the quick tier
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_REPO: ${{ github.repository }}
@@ -285,7 +281,7 @@ jobs:
               ninja
               mkdir -p /build/coverage/profraw
               LLVM_PROFILE_FILE=/build/coverage/profraw/%m-%p.profraw \
-                ctest -L quint --output-on-failure --no-tests=error \
+                ctest --output-on-failure --no-tests=error \
                       --test-output-size-failed 65536 --timeout 600 -j "$(nproc)"
               # Which of the changed files are worth an lcov export; empty
               # (or absent, on a non-PR run) means the export is skipped.

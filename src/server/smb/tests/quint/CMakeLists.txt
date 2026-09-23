@@ -315,16 +315,9 @@ endforeach()
 
 set(SPECS_DEVLIVENESS ${CMAKE_SOURCE_DIR}/ext/specs/tools/devliveness.py)
 
-# The strict twin of smb2/base: the same batches regenerated with
-# DEVS = Set(), so every expectation is the MS-FSA-correct one.  With base
-# carrying no deviations it now PASSES -- it failed for as long as chimera
-# carried CD-3, which was the point.  Its output is the conformance debt,
-# re-measured on every run, which is what a deviation registry could never do:
-# a registry entry keeps forgiving after the bug is fixed, and forgives the same
-# divergence somewhere it was never meant to.  Reporting, not gating, so it goes
-# in the extended tier.
-set(CHIMERA_TEST_TIER extended)
-
+# The strict twin of smb2/base regenerates the same batches with DEVS = Set().
+# It passes today and gates in quick, keeping strict conformance visible on
+# every run rather than withholding the replay until extended testing.
 add_test(NAME chimera/server/smb/mbt/strict_memfs
     COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${smb2_base_strict})
 set_tests_properties(chimera/server/smb/mbt/strict_memfs PROPERTIES
@@ -332,8 +325,6 @@ set_tests_properties(chimera/server/smb/mbt/strict_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs;strict"
     TIMEOUT 1800
     SKIP_RETURN_CODE 77)
-
-set(CHIMERA_TEST_TIER quick)
 
 # The liveness gate: a cell may not enable a deviation its own corpus never
 # exercises.  Either the deviation is dead (retire it from the config and
