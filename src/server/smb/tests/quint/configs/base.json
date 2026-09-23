@@ -24,6 +24,8 @@
   "deviations": [
   ],
 
+  "scenarios": [{ "run": "renameRegression", "flavor": "stepNs" }],
+
   "batches": [
     { "flavor": "stepCore",     "steps": 500, "traces": 8, "seed": "0x7"  },
     { "flavor": "stepReq",      "steps": 500, "traces": 8, "seed": "0x11" },

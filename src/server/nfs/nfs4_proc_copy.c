@@ -209,7 +209,9 @@ chimera_nfs4_copy_read_complete(
         evpl_iovecs_release(req->thread->evpl, iov, niov);
     }
 
-    dst_handle     = nfs_state_io_handle(refs->dst_state, refs->dst_type, OPEN4_SHARE_ACCESS_WRITE);
+    /* COPY may have opened this endpoint for an anonymous stateid. Use the
+     * handle resolved by copy_begin, just as the native copy-range path does. */
+    dst_handle     = refs->dst_handle;
     refs->rw_count = count;
     refs->rw_eof   = eof;
     refs->rw_niov  = niov;
@@ -252,7 +254,7 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
         chunk = refs->remaining;
     }
 
-    src_handle    = nfs_state_io_handle(refs->src_state, refs->src_type, OPEN4_SHARE_ACCESS_READ);
+    src_handle    = refs->src_handle;
     refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
 
     /* Attribute the read to the client that holds the source stateid, as

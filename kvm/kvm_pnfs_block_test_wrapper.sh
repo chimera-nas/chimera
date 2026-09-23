@@ -282,7 +282,17 @@ echo "=== pNFS block metadata server up on ${MDS_IP}:${MDS_PORT} (pid $MDS_PID) 
 # Arm the stall watchdog now that the MDS PID is known.  If the workload hangs,
 # this fires before ctest's 300s kill and captures the MDS thread state + log.
 # A normal (fast) test reaches cleanup() in seconds and kills it unused.
-( sleep "$WATCHDOG_SECS"
+( watchdog_sleep=""
+  # Killing the watchdog shell must also reap its timer. Otherwise an orphaned
+  # sleep retains CTest's output pipe for 240 seconds after a successful test.
+  trap 'if [ -n "$watchdog_sleep" ]; then
+            kill "$watchdog_sleep" 2>/dev/null || true
+            wait "$watchdog_sleep" 2>/dev/null || true
+        fi
+        exit 0' TERM INT
+  sleep "$WATCHDOG_SECS" &
+  watchdog_sleep=$!
+  wait "$watchdog_sleep" || exit 0
   echo "=== WATCHDOG: test still running after ${WATCHDOG_SECS}s; dumping MDS state ==="
   dump_mds_state "watchdog ${WATCHDOG_SECS}s" ) &
 WATCHDOG_PID=$!

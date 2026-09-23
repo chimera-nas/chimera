@@ -311,6 +311,15 @@ chimera_vfs_pnfs_io_getattr_cb(
         return;
     }
 
+    /* Only regular files have redirected data. A size request on a FIFO,
+     * symlink or directory must reach the backend's type check without first
+     * allocating a DS file and attaching layout state to that object. */
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ||
+        !S_ISREG(attr->va_mode)) {
+        chimera_vfs_pnfs_io_done(ctx, CHIMERA_VFS_OK, ctx->mds_handle, 0);
+        return;
+    }
+
     if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) ||
         chimera_vfs_pnfs_blob_unpack(attr->va_pnfs, attr->va_pnfs_len,
                                      NULL, &backing_fh, &backing_fh_len) != 0) {
