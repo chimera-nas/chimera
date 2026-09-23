@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+name: Temporary MSVC buffering reproduction
+on:
+  push:
+    branches: [windows-crt-buffering-check]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Reproduce the old call and verify the replacement
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force crt-repro | Out-Null
+          @'
+          #include <stdio.h>
+          int main(int argc, char **argv) {
+              (void)argv;
+              if (setvbuf(stdout, NULL, argc > 1 ? _IOLBF : _IONBF, 0) != 0)
+                  return 2;
+              puts("replay startup reached");
+              return 0;
+          }
+          '@ | Set-Content crt-repro/repro.c
+          @'
+          cmake_minimum_required(VERSION 3.21)
+          project(crt_repro C)
+          add_executable(crt_repro repro.c)
+          '@ | Set-Content crt-repro/CMakeLists.txt
+          cmake -S crt-repro -B crt-repro/build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build crt-repro/build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          import subprocess
+          exe = "crt-repro/build/Release/crt_repro.exe"
+          before = subprocess.run([exe, "old"], capture_output=True, text=True)
+          after = subprocess.run([exe], capture_output=True, text=True)
+          print("Old _IOLBF call:", hex(before.returncode & 0xffffffff), repr(before.stdout))
+          print("New _IONBF call:", after.returncode, repr(after.stdout))
+          assert before.returncode & 0xffffffff == 0xc0000409
+          assert after.returncode == 0 and "replay startup reached" in after.stdout
+          '@ | Set-Content crt-repro/check.py
+          python crt-repro/check.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
