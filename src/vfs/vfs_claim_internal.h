@@ -205,7 +205,8 @@ chimera_vfs_claim_trigger_ns_full(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_open_handle *skip_handle,
-    bool                                  flush_only);
+    bool                                  flush_only,
+    const struct chimera_claim_actor     *actor);
 
 bool
 chimera_vfs_claim_trigger_ns_unlink(

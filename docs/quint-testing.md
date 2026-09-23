@@ -69,23 +69,35 @@ as separate CTests, both plain and signed. A family cannot pass by skipping
 every trace. Durable fixtures shut down the server between traces to drain
 handles that intentionally outlive connections.
 
-## Remaining work exposed by enabling SMB replay
+## Pending SMB CREATEs
 
-The durable, lease and replay families now expose failures that were hidden by
-whole-family exclusions. These tests deliberately retain normal failure
-semantics; there are no expected-failure or skip exemptions.
+The lease model records `STATUS_PENDING` without committing the new open.
+An explicit ACK or CLOSE transition resolves the break; `LCreateComplete`
+then evaluates and records the final result. The wire harness retains the
+original request's MessageId/AsyncId and captures its final response separately
+from ACK, CLOSE, and ECHO responses. It never supplies an unmodeled ACK.
 
-* Lease CREATE needs explicit pending-request state and completion actions in
-  the model, plus asynchronous request routing in the harness. A synchronous
-  CREATE currently waits for an ACK that a later model action must send.
-  Do not auto-ACK behind the model's back. The old exclusion incorrectly
-  treated waiting for a handle-caching lease break as necessarily a server bug.
-* Durable create-GUID collision precedence and replay eligibility/break timing
-  still need protocol triage. Preserve the first divergent trace/state before
-  interpreting downstream mismatches as independent bugs.
-* Keep the durable, lease and replay probes until their model families pass.
-  Streams and FSCTL effects also still need model transitions before their
-  probes can be retired.
+The generator serializes pending CREATEs and permits ACK/CLOSE actions until
+the request can complete. Other families retain atomic CREATE evaluation for
+quiet operations and model self-tests. Lease compounds use the existing quiet
+compound action; suspending partway through a compound is not modeled yet.
+
+Named lease scenarios cover sharing conflicts and caching breaks, each resolved
+by ACK and CLOSE, plus failed lease-key validation without namespace mutation
+and shared lease upgrades followed by resizing. Replay has a named duplicate
+CreateGuid scenario for an eligible open without a durable grant. Coverage
+requires pending requests and successful/refused completions through both
+resolution paths. Replayers stop at the first divergent state in each trace.
+
+Lease identity is `(ClientGuid, LeaseKey)` across sessions; the harness maps
+symbolic lease keys within each client. The identity probe retains deliberate
+cross-client raw-key collisions. Durable and lease fixtures restart the server
+between traces, including traces ending with pending requests.
+
+The durable, lease and replay probes remain useful for wire encodings and
+operations beyond the current model. Retire individual assertions only once
+their behavior has equivalent model and corpus coverage. Streams and FSCTL
+effects still need model transitions before their probes can be retired.
 
 This is an incremental migration. The same model/fixture separation should be
 applied to the remaining POSIX, FUSE, REST and S3 probes where their assertions

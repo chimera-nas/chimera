@@ -188,6 +188,15 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
             continue;
         }
 
+        /* A deferred directory notification retains the parent until CREATE
+         * resumes. Disconnect cancels that continuation, so release it here. */
+        if (request->smb2_hdr.command == SMB2_CREATE &&
+            request->create.parent_handle) {
+            chimera_vfs_release(thread->vfs_thread, request->create.parent_handle);
+            request->create.parent_handle     = NULL;
+            request->create.dir_break_pending = 0;
+        }
+
         /* A parked CREATE holds an open_file reference (taken when it deferred
         * on the lease/oplock break it triggered) that only its resume path
         * would drop -- and with the deadline timer cancelled above, no resume

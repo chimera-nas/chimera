@@ -49,6 +49,31 @@ chimera_smb_set_info_callback(
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_callback */
 
+/* Size mutations are made through an authorized open. Preserve its cache
+ * owner so resizing never recalls the caller's own shared lease. */
+static void
+chimera_smb_set_info_size(struct chimera_smb_request *request)
+{
+    struct chimera_smb_open_file *open_file = request->set_info.open_file;
+    struct chimera_claim_actor    actor     = {
+        .owner          = {
+            .proto      = CHIMERA_CLAIM_PROTO_SMB2,
+            .client_key = request->session_handle->session->client_key,
+            .owner_lo   = open_file->file_id.pid,
+            .owner_hi   = open_file->file_id.vid,
+        },
+        .op_handle      = open_file->handle,
+    };
+
+    if (open_file->grant) {
+        actor.owner = open_file->grant->claim.owner;
+    }
+    chimera_vfs_fsetattr_owned(request->compound->thread->vfs_thread,
+                               &request->session_handle->session->cred,
+                               open_file->handle, &request->set_info.vfs_attrs,
+                               0, 0, chimera_smb_set_info_callback, request, &actor);
+} /* chimera_smb_set_info_size */
+
 /* Map a VFS error from a SetInfo operation (hard link, rename, etc.) to the
  * SMB2 status the client expects, instead of collapsing every failure to
  * INTERNAL_ERROR (which surfaces as EIO).  A hard link onto an existing name is
@@ -239,15 +264,7 @@ chimera_smb_set_info_allocation_getattr_callback(
         request->set_info.vfs_attrs.va_size = cur_size;
     }
 
-    chimera_vfs_setattr(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->set_info.open_file->handle,
-        &request->set_info.vfs_attrs,
-        0,
-        0,
-        chimera_smb_set_info_callback,
-        request);
+    chimera_smb_set_info_size(request);
 } /* chimera_smb_set_info_allocation_getattr_callback */
 
 /* Completion for the delete-on-close caching-lease recall: the recall has
@@ -638,15 +655,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request->set_info.vfs_attrs.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
                     }
 
-                    chimera_vfs_setattr(
-                        request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        request->set_info.open_file->handle,
-                        &request->set_info.vfs_attrs,
-                        0,
-                        0,
-                        chimera_smb_set_info_callback,
-                        request);
+                    chimera_smb_set_info_size(request);
                     break;
                 case SMB2_FILE_ALLOCATION_INFO:
 

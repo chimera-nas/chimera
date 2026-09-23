@@ -2235,14 +2235,26 @@ chimera_smb_create_issue_truncate(struct chimera_smb_request *request)
      * authorized by that open's grant (POSIX rights retention) rather than
      * re-evaluated against the file's current mode -- which is what riding
      * inside the open used to give it for free. */
-    chimera_vfs_fsetattr(vfs_thread,
-                         &request->session_handle->session->cred,
-                         open_file->handle,
-                         &request->create.trunc_attr,
-                         0,
-                         CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
-                         chimera_smb_create_truncate_cb,
-                         request);
+    struct chimera_claim_actor actor = {
+        .owner          = {
+            .proto      = CHIMERA_CLAIM_PROTO_SMB2,
+            .client_key = request->session_handle->session->client_key,
+            .owner_lo   = open_file->file_id.pid,
+            .owner_hi   = open_file->file_id.vid,
+        },
+        .op_handle      = open_file->handle,
+    };
+    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
+        memcpy(actor.owner.key, request->create.rqls.key, 16);
+    }
+    chimera_vfs_fsetattr_owned(vfs_thread,
+                               &request->session_handle->session->cred,
+                               open_file->handle,
+                               &request->create.trunc_attr,
+                               0,
+                               CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+                               chimera_smb_create_truncate_cb,
+                               request, &actor);
 } /* chimera_smb_create_issue_truncate */
 
 /* Abandon a CREATE that is parked on a share-acquire ticket because its
@@ -4013,12 +4025,9 @@ chimera_smb_create_resume_doorbell_callback(
     }
 } /* chimera_smb_create_resume_doorbell_callback */
 
-/* Ring every PEER SMB thread's resume doorbell so each re-scans its own
- * connections for parked CREATEs the just-settled lease break unblocked.
- * `origin` is skipped because the ack handler already swept its own connection
- * inline; the per-CREATE ack_pending() re-check would make a re-sweep of
- * `origin` harmless anyway.  The deferred CREATE responses' iovecs are
- * thread-local, so each thread must complete its own. */
+/* Ring every SMB thread's resume doorbell, including the origin: another
+ * connection on that thread may own a CREATE unblocked by this ACK or CLOSE.
+ * Each thread rechecks ack_pending() and completes its own responses locally. */
 void
 chimera_smb_create_resume_parked_broadcast(struct chimera_server_smb_thread *origin)
 {
@@ -4027,9 +4036,6 @@ chimera_smb_create_resume_parked_broadcast(struct chimera_server_smb_thread *ori
 
     pthread_mutex_lock(&shared->threads_lock);
     for (t = shared->threads; t; t = t->next_thread) {
-        if (t == origin) {
-            continue;
-        }
         evpl_ring_doorbell(&t->lease_resume_doorbell);
     }
     pthread_mutex_unlock(&shared->threads_lock);
@@ -4695,7 +4701,7 @@ chimera_smb_create_overwrite_check_callback(
 } /* chimera_smb_create_overwrite_check_callback */
 
 static inline void
-chimera_smb_create_open_parent_callback(
+chimera_smb_create_open_parent_checked(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
@@ -4755,6 +4761,58 @@ chimera_smb_create_open_parent_callback(
     } else {
         chimera_smb_create_issue_open(request);
     }
+} /* chimera_smb_create_open_parent_checked */
+
+
+/* A bound lease key must be rejected before a new directory entry is
+ * materialized. The post-open check still handles existing objects by FH. */
+static void
+chimera_smb_create_lease_name_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    (void) attr;
+    (void) dir_attr;
+
+    if (error_code == CHIMERA_VFS_ENOENT &&
+        request->create.create_disposition != SMB2_FILE_OPEN &&
+        request->create.create_disposition != SMB2_FILE_OVERWRITE &&
+        chimera_smb_session_lease_key_conflict(request->session_handle->session,
+                                               request->create.rqls.key, NULL, 0)) {
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    chimera_smb_create_open_parent_checked(CHIMERA_VFS_OK,
+                                           request->create.parent_handle, request);
+} /* chimera_smb_create_lease_name_callback */
+
+static void
+chimera_smb_create_open_parent_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request       *request = private_data;
+    struct chimera_server_smb_thread *thread  = request->compound->thread;
+
+    if (error_code == CHIMERA_VFS_OK && !request->create.has_stream &&
+        thread->shared->config.leases &&
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+        chimera_smb_session_lease_key_conflict(request->session_handle->session,
+                                               request->create.rqls.key, NULL, 0)) {
+        request->create.parent_handle = oh;
+        chimera_vfs_lookup_at(thread->vfs_thread,
+                              &request->session_handle->session->cred, oh,
+                              request->create.name, request->create.name_len,
+                              CHIMERA_VFS_ATTR_FH, 0,
+                              chimera_smb_create_lease_name_callback, request);
+        return;
+    }
+    chimera_smb_create_open_parent_checked(error_code, oh, request);
 } /* chimera_smb_create_open_parent_callback */
 
 
@@ -5302,14 +5360,10 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
             if ((of->ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) &&
                 !(of->flags & (CHIMERA_SMB_OPEN_FILE_CLOSED |
                                CHIMERA_SMB_OPEN_FILE_PARKED)) &&
-                /* Only a replayed create returns the existing live open, and only
-                 * while it remains replay-eligible.  A non-replay create with a
-                 * matching create_guid, or a replay after a non-replay op cleared
-                 * eligibility, is NOT returned here (MS-SMB2 3.3.5.9.10): it falls
-                 * to the registry classification below (DUPLICATE_OBJECTID for a
-                 * non-replay collision, or a fresh open for an ineligible replay).
-                 * smb2.replay.replay-twice-durable, replay6. */
-                request->is_replay &&
+                /* Eligible opens reserve their CreateGuid even when they did
+                 * not receive a durable grant. Replay returns that open; a
+                 * non-replay collision is rejected below (MS-SMB2 3.3.5.9.10).
+                 * Ineligible opens fall through to the durable registry. */
                 (of->flags & CHIMERA_SMB_OPEN_FILE_REPLAY_ELIGIBLE) &&
                 memcmp(of->create_guid, request->create.dh2q.create_guid, 16) == 0) {
                 of->refcnt++;   /* held for this request; getattr cb releases it */
@@ -5435,6 +5489,15 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
             } /* switch */
         }
         return 0;
+    }
+
+    /* The DH2Q identity also belongs to an eligible open that was refused a
+     * durable grant. Such opens have no durable-registry entry, but a second
+     * non-replay CREATE must still reject their duplicate CreateGuid. */
+    if (!request->is_replay) {
+        chimera_smb_open_file_release(request, match);
+        chimera_smb_complete_request(request, SMB2_STATUS_DUPLICATE_OBJECTID);
+        return 1;
     }
 
     /* A replay that asks for a different handle type (oplock vs lease), or a

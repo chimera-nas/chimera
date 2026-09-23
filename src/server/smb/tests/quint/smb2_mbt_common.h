@@ -520,6 +520,15 @@ struct smb2_conn {
     uint8_t                        *sbuf; /* request scratch */
     uint8_t                        *rbuf; /* last reply (framed, NetBIOS included) */
     uint8_t                        *xbuf; /* receive scratch (breaks land here) */
+    /* Optional CREATE mailbox for a model-controlled in-flight request.
+     * ECHO and ACK replies must not overwrite its completion. */
+    uint8_t                        *create_reply;
+    uint64_t                        create_mid;
+    uint64_t                        create_async_id;
+    int                             capture_create;
+    int                             create_ready;
+    int                             create_pending;
+    int                             create_len;
     int                             rlen;
     int                             reply_ready;
     /* Identity and count of FINAL replies (not interims, not breaks) promoted
@@ -952,6 +961,27 @@ smb2c_notify(
                     c->ninterim++;
                     c->interim_pending = 1;
                     c->last_async_id   = g64(c->xbuf + 4, 32);
+                    if (cmd == SMB2_CREATE && c->capture_create &&
+                        g64(c->xbuf + 4, 24) == c->create_mid) {
+                        c->create_pending  = 1;
+                        c->create_async_id = c->last_async_id;
+                    }
+                    break;
+                }
+                if (cmd == SMB2_CREATE && c->capture_create &&
+                    g64(c->xbuf + 4, 24) == c->create_mid) {
+                    if (off > SMB2C_BUFSZ || c->create_ready ||
+                        (c->create_pending &&
+                         (!(hflags & SMB2_FLAGS_ASYNC_COMMAND) ||
+                          g64(c->xbuf + 4, 32) != c->create_async_id))) {
+                        fprintf(stderr, "invalid or duplicate CREATE completion\n");
+                        exit(4);
+                    }
+                    memcpy(c->create_reply, c->xbuf, (size_t) off);
+                    c->create_len   = off;
+                    c->create_ready = 1;
+                    c->nreply++;
+                    c->nreply_app++;
                     break;
                 }
                 /* The FINAL response to a parked CHANGE_NOTIFY: an async
@@ -1292,6 +1322,7 @@ smb2_conn_reset(struct smb2_env *env)
     for (int i = 0; i < env->nconns; i++) {
         free(env->conns[i]->sbuf);
         free(env->conns[i]->rbuf);
+        free(env->conns[i]->create_reply);
         /* xbuf too -- smb2_conn_open allocates three buffers per connection,
          * plus ebuf/dbuf for an encrypting profile.  Missing one leaks
          * SMB2C_BUFSZ per connection, which a batched run that resets its
@@ -1317,6 +1348,7 @@ smb2_env_stop(struct smb2_env *env)
     for (int i = 0; i < env->nconns; i++) {
         free(env->conns[i]->sbuf);
         free(env->conns[i]->rbuf);
+        free(env->conns[i]->create_reply);
         free(env->conns[i]->xbuf);
         free(env->conns[i]->ebuf);
         free(env->conns[i]->dbuf);

@@ -1009,9 +1009,9 @@ chimera_vfs_claim_batch_escape(
  * The legacy-oplock and the RqLs-lease cases differ:
  *  - Legacy oplock probe: CW|H is sole-access against any OTHER client's
  *    open (same-client opens coalesce / are this requester's own).
- *  - RqLs (or dir-lease) probe: the WRITE cache is enforced by the
- *    cache-vs-cache CW rows (not here), so the open path only caps the
- *    HANDLE bit, and only against a NON-lease-backed open (a legacy oplock
+ *  - RqLs (or dir-lease) probe: WRITE caching requires data opens to share
+ *    the same object-store lease key, including opens whose cache is NONE.
+ *    HANDLE caching is capped only against a NON-lease-backed open (a legacy oplock
  *    or a plain open, which owns the handle exclusively --
  *    smb2.lease.oplock: hold an s/x/b oplock, request a lease -> R only,
  *    even same-client).  Two RqLs leases coexist at CR+H, whether two
@@ -1023,7 +1023,7 @@ chimera_vfs_claim_batch_escape(
  *
  * Exemptions mirrored from the old arm: an inert (0,0) attribute-only
  * registration is not a real opener; a parked (disconnected durable)
- * holder is courtesy-held and caps nobody (keep-disconnected-rh-*).
+ * holder is courtesy-held and does not cap H (keep-disconnected-rh-*).
  * Caller holds file->lock.  Returns the blocking ACCESS claim, or NULL. */
 static struct chimera_vfs_claim *
 chimera_vfs_claim_sole_opener_blocker_locked(
@@ -1053,15 +1053,28 @@ chimera_vfs_claim_sole_opener_blocker_locked(
             return NULL;
     } /* switch */
 
-    sole_mask = probe_is_rqls
-        ? CHIMERA_CLAIM_H
-        : (CHIMERA_CLAIM_CW | CHIMERA_CLAIM_H);
+    sole_mask = CHIMERA_CLAIM_CW | CHIMERA_CLAIM_H;
 
     if (!(probe->used & sole_mask)) {
         return NULL;
     }
 
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_ACCESS]; cur; cur = cur->next) {
+        /* Preserve stat-open transparency: an inert attribute registration
+         * does not participate in data-cache arbitration. */
+        if (cur->used == 0 && cur->denied == 0) {
+            continue;
+        }
+        /* A different lease's open still precludes a write cache after its
+        * cache has been broken to NONE. Cache-vs-cache checks alone miss it.
+        * The object store uses LeaseKey as ClientLeaseId, so equal raw keys
+        * remain compatible even across distinct protocol lease records. */
+        if (probe_is_rqls && (probe->used & CHIMERA_CLAIM_CW) &&
+            !chimera_claim_owner_equal(&cur->owner, &probe->owner) &&
+            !chimera_claim_owner_same_key(&cur->owner, &probe->owner)) {
+            return cur;
+        }
+
         if (cur->owner.client_key == probe->owner.client_key) {
             /* A legacy-oplock probe's own client's opens never cap it.
              * An RqLs lease probe is likewise never capped by its own
@@ -1077,10 +1090,8 @@ chimera_vfs_claim_sole_opener_blocker_locked(
         if (cur->used == 0 && cur->denied == 0) {
             continue;
         }
-        /* A parked (disconnected durable) holder is courtesy-held: it
-         * does not cap a new opener's lease.  If it genuinely conflicts
-         * (a write cache) the cache-vs-cache rows already forced a
-         * break/deny; otherwise the new open coexists with it. */
+        /* A parked holder does not cap HANDLE caching. The write-cache
+         * restriction was checked above; other compatible grants coexist. */
         if (cur->parked) {
             continue;
         }
