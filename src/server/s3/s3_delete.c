@@ -23,14 +23,13 @@ chimera_s3_delete_status(enum chimera_vfs_error error_code)
     return chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
 } /* chimera_s3_delete_status */
 
-static void
-chimera_s3_delete_remove_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_delete_remove_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *pre_attr,
+                             struct chimera_vfs_attrs *post_attr,
+                             void *private_data),
+                            (error_code, pre_attr, post_attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -60,13 +59,12 @@ chimera_s3_delete_remove_callback(
 
 } /* chimera_s3_delete_remove_callback */
 
-static void
-chimera_s3_delete_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_delete_open_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -99,13 +97,12 @@ chimera_s3_delete_open_callback(
 
 } /* chimera_s3_put_create_callback */
 
-static void
-chimera_s3_get_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_lookup_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -140,7 +137,7 @@ chimera_s3_delete(
     const char *dirpath = request->path;
     int         dirpathlen;
 
-    slash = rindex(request->path, '/');
+    slash = strrchr(request->path, '/');
 
     if (slash) {
 

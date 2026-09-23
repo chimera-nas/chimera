@@ -39,8 +39,12 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
-#include <getopt.h>
+#endif /* ifdef _WIN32 */
+#include "common/getopt.h"
 #include <jansson.h>
 
 #include "nfs3_mbt_common.h"
@@ -1207,7 +1211,11 @@ main(
      * boundary, including the line naming the trace that was executing and
      * the fatal log message itself.  That is exactly what made a CI abort
      * here undiagnosable from its artifacts. */
-    setvbuf(stdout, NULL, _IOLBF, 0);
+#ifdef _WIN32
+    setvbuf(stdout, NULL, _IONBF, 0);
+#else  /* ifdef _WIN32 */
+    setvbuf(stdout, NULL, _IONBF, 0);
+#endif /* ifdef _WIN32 */
 
     umask(0);
 

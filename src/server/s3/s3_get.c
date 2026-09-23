@@ -2,9 +2,13 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <time.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include "common/format.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -235,13 +239,12 @@ chimera_s3_get_metadata_done(
     }
 } /* chimera_s3_get_metadata_done */
 
-static void
-chimera_s3_get_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_open_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_open_handle *oh,
+                             void *private_data),
+                            (error_code, oh, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -263,13 +266,12 @@ chimera_s3_get_open_callback(
 
 } /* chimera_s3_get_open_callback */
 
-static void
-chimera_s3_get_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_lookup_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -416,13 +418,12 @@ chimera_s3_get(
  * intentionally omitted; clients that request only those attributes still get
  * a well-formed 200 response.
  */
-static void
-chimera_s3_get_object_attributes_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_get_object_attributes_lookup_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -472,7 +473,7 @@ chimera_s3_get_object_attributes_lookup_callback(
     bp += sprintf(bp, "<GetObjectAttributesOutput xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
     bp += sprintf(bp, "  <ETag>%s</ETag>\n", etag_hex);
     bp += sprintf(bp, "  <StorageClass>STANDARD</StorageClass>\n");
-    bp += sprintf(bp, "  <ObjectSize>%ld</ObjectSize>\n", (long) attr->va_size);
+    bp += sprintf(bp, "  <ObjectSize>%" PRIu64 "</ObjectSize>\n", attr->va_size);
     bp += sprintf(bp, "</GetObjectAttributesOutput>\n");
 
     evpl_iovec_set_length(&request->multipart.response, bp - body_start);

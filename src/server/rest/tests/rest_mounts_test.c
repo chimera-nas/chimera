@@ -27,8 +27,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
+#include "common/test_http.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #define REST_PORT 18081
 
@@ -57,42 +61,8 @@ curl_get_code(
     const char *body,
     long       *http_code)
 {
-    char  cmd[8192];
-    char  output[4096];
-    FILE *fp;
-    int   rc;
-
-    if (body) {
-        snprintf(cmd, sizeof(cmd),
-                 "curl -s -o /dev/null -w '%%{http_code}' "
-                 "-X %s -H 'Content-Type: application/json' "
-                 "-d '%s' http://localhost:%d%s 2>&1",
-                 method, body, REST_PORT, path);
-    } else {
-        snprintf(cmd, sizeof(cmd),
-                 "curl -s -o /dev/null -w '%%{http_code}' "
-                 "-X %s http://localhost:%d%s 2>&1",
-                 method, REST_PORT, path);
-    }
-
-    fp = popen(cmd, "r");
-    if (!fp) {
-        return -1;
-    }
-
-    output[0] = '\0';
-    if (fgets(output, sizeof(output), fp) == NULL) {
-        output[0] = '\0';
-    }
-
-    rc = pclose(fp);
-
-    if (WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
-        *http_code = strtol(output, NULL, 10);
-        return 0;
-    }
-
-    return -1;
+    return chimera_test_http(REST_PORT, method, path, body,
+                             NULL, NULL, NULL, 0, http_code);
 } /* curl_get_code */
 
 /* Issue a request and capture both the response body and the status code. */
@@ -105,57 +75,8 @@ curl_get_body(
     int         response_size,
     long       *http_code)
 {
-    char  cmd[8192];
-    char  output[8192];
-    FILE *fp;
-    int   rc;
-
-    if (body) {
-        snprintf(cmd, sizeof(cmd),
-                 "curl -s -w '\\n%%{http_code}' "
-                 "-X %s -H 'Content-Type: application/json' "
-                 "-d '%s' http://localhost:%d%s 2>&1",
-                 method, body, REST_PORT, path);
-    } else {
-        snprintf(cmd, sizeof(cmd),
-                 "curl -s -w '\\n%%{http_code}' "
-                 "-X %s http://localhost:%d%s 2>&1",
-                 method, REST_PORT, path);
-    }
-
-    fp = popen(cmd, "r");
-    if (!fp) {
-        return -1;
-    }
-
-    output[0] = '\0';
-    {
-        int total = 0;
-        while (fgets(output + total, sizeof(output) - total, fp) != NULL) {
-            total += strlen(output + total);
-        }
-    }
-
-    rc = pclose(fp);
-
-    if (!WIFEXITED(rc) || WEXITSTATUS(rc) != 0) {
-        return -1;
-    }
-
-    /* Last line is the HTTP code */
-    {
-        char *last_newline = strrchr(output, '\n');
-        if (last_newline && last_newline > output) {
-            *http_code    = strtol(last_newline + 1, NULL, 10);
-            *last_newline = '\0';
-        } else {
-            *http_code = 0;
-        }
-    }
-
-    snprintf(response, response_size, "%s", output);
-
-    return 0;
+    return chimera_test_http(REST_PORT, method, path, body,
+                             NULL, NULL, response, response_size, http_code);
 } /* curl_get_body */
 
 /* Assert that a POST returns the expected status code. */
@@ -234,11 +155,6 @@ main(
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "REST API VFS Mounts Test\n");
     fprintf(stderr, "========================================\n");
-
-    if (system("which curl >/dev/null 2>&1") != 0) {
-        fprintf(stderr, "\nERROR: curl not found in PATH\n");
-        return EXIT_FAILURE;
-    }
 
     ChimeraLogLevel = CHIMERA_LOG_INFO;
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);

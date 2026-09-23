@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <uthash.h>
 
 struct s3_bucket {
@@ -16,7 +16,7 @@ struct s3_bucket {
 
 struct s3_bucket_map {
     struct s3_bucket *buckets;
-    pthread_rwlock_t  rwlock;
+    evpl_rwlock_t     rwlock;
 };
 
 struct s3_bucket_map *
@@ -25,7 +25,7 @@ s3_bucket_map_create(void)
     struct s3_bucket_map *map = calloc(1, sizeof(struct s3_bucket_map));
 
     map->buckets = NULL;
-    pthread_rwlock_init(&map->rwlock, NULL);
+    evpl_rwlock_init(&map->rwlock, NULL);
     return map;
 } /* s3_bucket_map_create */
 
@@ -45,7 +45,7 @@ s3_bucket_map_destroy(struct s3_bucket_map *map)
     }
 #endif /* ifndef __clang_analyzer__ */
 
-    pthread_rwlock_destroy(&map->rwlock);
+    chimera_rwlock_destroy(&map->rwlock);
 
     free(map);
 } /* s3_bucket_map_destroy */
@@ -58,7 +58,7 @@ s3_bucket_map_get(
 {
     struct s3_bucket *bucket;
 
-    pthread_rwlock_rdlock(&map->rwlock);
+    evpl_rwlock_rdlock(&map->rwlock);
 
     HASH_FIND(hh, map->buckets, name, namelen, bucket);
 
@@ -68,7 +68,7 @@ s3_bucket_map_get(
 void
 s3_bucket_map_release(struct s3_bucket_map *map)
 {
-    pthread_rwlock_unlock(&map->rwlock);
+    evpl_rwlock_unlock(&map->rwlock);
 } /* s3_bucket_map_release */
 
 void
@@ -80,7 +80,7 @@ s3_bucket_map_put(
 {
     struct s3_bucket *bucket;
 
-    pthread_rwlock_wrlock(&map->rwlock);
+    evpl_rwlock_wrlock(&map->rwlock);
     HASH_FIND(hh, map->buckets, name, namelen, bucket);
     if (bucket == NULL) {
         bucket       = calloc(1, sizeof(struct s3_bucket));
@@ -95,7 +95,7 @@ s3_bucket_map_put(
         bucket->path    = strdup(path);
         bucket->pathlen = strlen(path);
     }
-    pthread_rwlock_unlock(&map->rwlock);
+    evpl_rwlock_unlock(&map->rwlock);
 } /* s3_bucket_map_put */
 
 
@@ -108,7 +108,7 @@ s3_bucket_map_remove(
     struct s3_bucket *bucket;
     int               found = 0;
 
-    pthread_rwlock_wrlock(&map->rwlock);
+    evpl_rwlock_wrlock(&map->rwlock);
     HASH_FIND(hh, map->buckets, name, namelen, bucket);
     if (bucket != NULL) {
         HASH_DEL(map->buckets, bucket);
@@ -117,7 +117,7 @@ s3_bucket_map_remove(
         free(bucket);
         found = 1;
     }
-    pthread_rwlock_unlock(&map->rwlock);
+    evpl_rwlock_unlock(&map->rwlock);
 
     return found ? 0 : -1;
 } /* s3_bucket_map_remove */
@@ -134,7 +134,7 @@ s3_bucket_map_iterate(
 {
     struct s3_bucket *bucket, *tmp;
 
-    pthread_rwlock_rdlock(&map->rwlock);
+    evpl_rwlock_rdlock(&map->rwlock);
 #ifndef __clang_analyzer__
     /* uthash blows clangs mind */
     HASH_ITER(hh, map->buckets, bucket, tmp)
@@ -144,7 +144,7 @@ s3_bucket_map_iterate(
         }
     }
 #endif /* ifndef __clang_analyzer__ */
-    pthread_rwlock_unlock(&map->rwlock);
+    evpl_rwlock_unlock(&map->rwlock);
 } /* s3_bucket_map_iterate */
 
 

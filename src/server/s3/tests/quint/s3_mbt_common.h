@@ -25,18 +25,25 @@
 
 #pragma once
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <stdint.h>
 #include <inttypes.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
 
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
+#include "common/crypto.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
@@ -130,7 +137,7 @@ struct s3_mbt_req {
     size_t         body_len;
 };
 
-/* ---- crypto helpers (OpenSSL, same library the server verifies with) ---- */
+/* ---- crypto helpers (protocol encoding remains independent of the server) ---- */
 
 static inline void
 s3_mbt_sha256_hex(
@@ -139,13 +146,10 @@ s3_mbt_sha256_hex(
     char       *hex65)
 {
     unsigned char hash[32];
-    unsigned int  hl  = sizeof(hash);
-    EVP_MD_CTX   *ctx = EVP_MD_CTX_new();
 
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, hash, &hl);
-    EVP_MD_CTX_free(ctx);
+    if (!chimera_crypto_digest(CHIMERA_CRYPTO_SHA256, data, len, hash, sizeof(hash))) {
+        abort();
+    }
 
     for (int i = 0; i < 32; i++) {
         sprintf(hex65 + i * 2, "%02x", hash[i]);
@@ -160,9 +164,9 @@ s3_mbt_hmac256(
     size_t        datalen,
     unsigned char out[32])
 {
-    unsigned int hl = 32;
-
-    HMAC(EVP_sha256(), key, (int) keylen, data, datalen, out, &hl);
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA256, key, keylen, data, datalen, out, 32)) {
+        abort();
+    }
 } /* s3_mbt_hmac256 */
 
 /* AWS SigV4 Authorization header for one request as the harness sends it:
@@ -253,8 +257,8 @@ s3_mbt_sign_v2(
     char          sts[4096];
     unsigned char sig[20];
     unsigned char sig_b64[64];
-    unsigned int  siglen = sizeof(sig);
-    size_t        off    = 0;
+
+    size_t        off = 0;
     size_t        plen;
     const char   *method;
 
@@ -300,9 +304,12 @@ s3_mbt_sign_v2(
         off += snprintf(sts + off, sizeof(sts) - off, "/");
     }
 
-    HMAC(EVP_sha1(), secret_key, (int) strlen(secret_key),
-         (const unsigned char *) sts, off, sig, &siglen);
-    EVP_EncodeBlock(sig_b64, sig, (int) siglen);
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_SHA1, secret_key, strlen(secret_key),
+                             sts, off, sig, sizeof(sig)) || chimera_crypto_base64(sig, sizeof(sig),
+                                                                                  (char *) sig_b64, sizeof(sig_b64)) < 0
+        ) {
+        abort();
+    }
 
     snprintf(authorization, authorization_len, "AWS %s:%s", access_key,
              sig_b64);
@@ -636,7 +643,7 @@ s3_mbt_env_open_module(
         char dir[300], cfg[512];
 
         snprintf(dir, sizeof(dir), "%s/cairn", env->session_dir);
-        if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "cairn dir %s: %s\n", dir, strerror(errno));
             exit(1);
         }
@@ -657,7 +664,7 @@ s3_mbt_env_open_module(
         if (!scratch || !scratch[0]) {
             scratch = ".";
         }
-        abs_scratch = realpath(scratch, NULL);
+        abs_scratch = chimera_test_absolute_path(scratch);
         if (!abs_scratch) {
             fprintf(stderr, "realpath(%s) failed: %s\n", scratch,
                     strerror(errno));
@@ -734,7 +741,7 @@ s3_mbt_env_fs_setup(
         int  mrc;
 
         snprintf(dir, sizeof(dir), "%s/%s", env->pt_root, fsname);
-        if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+        if (chimera_test_mkdir(dir, 0777) != 0 && errno != EEXIST) {
             fprintf(stderr, "failed to create %s backing dir %s: %s\n",
                     env->module, dir, strerror(errno));
             exit(1);
@@ -825,7 +832,7 @@ s3_mbt_env_fs_teardown(
 static inline void
 s3_mbt_env_stop(struct s3_mbt_env *env)
 {
-    char cmd[340];
+
 
     evpl_http_client_close(env->agent, env->conn);
     evpl_http_destroy(env->agent);
@@ -837,8 +844,7 @@ s3_mbt_env_stop(struct s3_mbt_env *env)
 
     free(env->body_buf);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-    if (system(cmd) != 0) {
+    if (chimera_test_remove_tree(env->session_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
     }
     if (env->pt_root[0]) {
@@ -847,8 +853,7 @@ s3_mbt_env_stop(struct s3_mbt_env *env)
         if (getenv("S3_MBT_KEEP_SCRATCH")) {
             fprintf(stderr, "keeping passthrough scratch %s\n", env->pt_root);
         } else {
-            snprintf(cmd, sizeof(cmd), "rm -rf %s", env->pt_root);
-            if (system(cmd) != 0) {
+            if (chimera_test_remove_tree(env->pt_root) != 0) {
                 fprintf(stderr, "warning: failed to remove %s\n",
                         env->pt_root);
             }

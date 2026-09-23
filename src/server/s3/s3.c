@@ -490,13 +490,12 @@ s3_server_notify(
     } /* switch */
 } /* chimera_metrics_notify */
 
-static void
-chimera_s3_dispatch_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_dispatch_callback,
+                            (enum chimera_vfs_error error_code,
+                             struct chimera_vfs_attrs *attr,
+                             void *private_data),
+                            (error_code, attr, private_data))
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *s3_request = private_data;
     struct chimera_server_s3_thread *thread     = s3_request->thread;
     struct evpl                     *evpl       = thread->evpl;
@@ -654,6 +653,7 @@ s3_server_dispatch(
     const char                      *urlp, *slash, *dot, *host_header;
     int                              host_pathing = 0;
     const char                      *range_str;
+    char                            *bucket_path;
     enum chimera_s3_auth_result      auth_result;
 
     s3_request = chimera_s3_request_alloc(thread);
@@ -1197,6 +1197,17 @@ s3_server_dispatch(
             }
         }
 
+        /* Lookup can complete inline and dispatch CopyObject, which looks up
+         * a second bucket. Snapshot the path and release the map lock before
+         * entering VFS so callbacks never recursively acquire that lock. */
+        bucket_path = strdup(bucket->path);
+        s3_bucket_map_release(shared->bucket_map);
+        if (!bucket_path) {
+            s3_request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            return;
+        }
+
         /* Parent the bucket lookup (and, via propagation, every VFS op this
          * request issues) under the S3 span. */
         thread->vfs->otel_parent = &s3_request->otel;
@@ -1207,14 +1218,14 @@ s3_server_dispatch(
                            &s3_request->cred,
                            shared->root_fh,
                            shared->root_fh_len,
-                           bucket->path,
-                           strlen(bucket->path),
+                           bucket_path,
+                           strlen(bucket_path),
                            CHIMERA_VFS_ATTR_FH,
                            CHIMERA_VFS_LOOKUP_FOLLOW,
                            chimera_s3_dispatch_callback,
                            s3_request);
 
-        s3_bucket_map_release(shared->bucket_map);
+        free(bucket_path);
     }
 
 } /* s3_server_dispatch */
