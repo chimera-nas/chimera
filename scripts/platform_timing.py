@@ -35,6 +35,9 @@ def run(name, command):
         raise SystemExit(process.returncode)
 
 try:
+    if windows:
+        pathlib.Path('/tmp').mkdir(exist_ok=True)
+        pathlib.Path('/build/test').mkdir(parents=True, exist_ok=True)
     args = ['cmake', '-S', '.', '-B', 'timing-build',
             '-DCMAKE_BUILD_TYPE=Release', '-DCAIRN_ENABLED=OFF',
             '-DURCU_SUPPORT=OFF', '-DCHIMERA_GSSAPI=OFF',
