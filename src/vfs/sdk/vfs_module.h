@@ -232,7 +232,15 @@ struct chimera_vfs_handle_state {
  * mode-only backend would invite a user to set per-user ACEs that then
  * collapse to owner/group/other, losing the policy they came to set, so the
  * hidden tab is the honest answer.  Do not widen this to cover mode-mapped
- * backends, and do not add a second capability for them. */
+ * backends, and do not add a second capability for them.
+ *
+ * Setting this bit also obliges the module to set CHIMERA_VFS_ATTR_ACL on
+ * every reply whose va_req_mask asks for it, synthesizing one from the mode
+ * (chimera_acl_from_mode) when none is stored or the stored one cannot be
+ * mapped, as memfs and cairn do.  For such a module the ACL, not the mode, is
+ * the authority, so the engine's open gates refuse (EIO) a reply that omits
+ * it rather than fall back to the mode bits; see
+ * chimera_vfs_gate_attrs_missing(). */
 #define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 23)
 
 /* If set, the module delegates discretionary access control to a real
@@ -246,7 +254,14 @@ struct chimera_vfs_handle_state {
  * engine is their sole authorization point and the gate enforces the canonical
  * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
  * and "enforces the ACL" are different properties (memfs/cairn store but do not
- * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
+ * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL).
+ *
+ * Whatever its DAC capabilities, a module must return mode, uid and gid
+ * whenever va_req_mask asks for them.  The engine's open-time gates, which run
+ * for DELEGATES_DAC and REMOTE_DAC modules too (chimera_vfs_open_gate_needed),
+ * refuse with EIO an open whose reply lacks them, and chimera_vfs_access_check
+ * grants nothing on such attrs: a zero read in place of a missing uid or gid
+ * would evaluate the object as if owned by root:root. */
 #define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
 
 /* Refinement of CHIMERA_VFS_CAP_DELEGATES_DAC for PROXY modules (nfs, smb):
