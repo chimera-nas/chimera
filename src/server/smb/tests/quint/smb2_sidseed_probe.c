@@ -133,8 +133,8 @@ principals_of(
     struct smb2_sd         d;
     uint32_t               st;
 
-    st = smb2_create_opts(c, name, FILE_OPEN, READ_CONTROL_ACCESS | FILE_READ_ATTRIBUTES,
-                          FILE_SHARE_RWD, create_options, NULL, &co);
+    st = smb2_create_opts(c, name, MBT_FILE_OPEN, READ_CONTROL_ACCESS | MBT_FILE_READ_ATTRIBUTES,
+                          MBT_FILE_SHARE_RWD, create_options, NULL, &co);
 
     if (st != ST_SUCCESS) {
         return -1;
@@ -193,8 +193,8 @@ make_objects(struct smb2_conn *c)
 
     printf("# --- the creator makes a file and a directory ---\n");
 
-    st = smb2_create(c, "owned.bin", FILE_CREATE, FILE_ALL_ACCESS_MASK,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "owned.bin", MBT_FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "CREATE owned.bin -> 0x%08x", st);
 
     if (st == ST_SUCCESS) {
@@ -202,8 +202,8 @@ make_objects(struct smb2_conn *c)
         smb2_close(c, co.file_id);
     }
 
-    st = smb2_create_opts(c, "owneddir", FILE_CREATE, FILE_ALL_ACCESS_MASK,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &co);
+    st = smb2_create_opts(c, "owneddir", MBT_FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &co);
     CHECK(st == ST_SUCCESS, "CREATE owneddir (directory) -> 0x%08x", st);
 
     if (st == ST_SUCCESS) {
@@ -214,8 +214,8 @@ make_objects(struct smb2_conn *c)
      * base is this session's creation and owes it a stored owner exactly as a
      * plain create would; it is only the STREAM half that must never touch
      * an existing base's ownership (probe_stream_create_leaves_base_owner). */
-    st = smb2_create(c, "streamed.bin:meta", FILE_CREATE, FILE_ALL_ACCESS_MASK,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "streamed.bin:meta", MBT_FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS,
           "CREATE streamed.bin:meta (the base file made by a stream create) "
           "-> 0x%08x", st);
@@ -240,8 +240,8 @@ make_setgid_objects(struct smb2_conn *c)
 
     printf("# --- the creator makes a set-group-ID directory of another group ---\n");
 
-    st = smb2_create_opts(c, "sgdir", FILE_CREATE, FILE_ALL_ACCESS_MASK,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &co);
+    st = smb2_create_opts(c, "sgdir", MBT_FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &co);
     CHECK(st == ST_SUCCESS, "CREATE sgdir (directory) -> 0x%08x", st);
 
     if (st != ST_SUCCESS) {
@@ -270,16 +270,16 @@ make_setgid_objects(struct smb2_conn *c)
 
     smb2_close(c, co.file_id);
 
-    st = smb2_create(c, "sgdir\\child.bin", FILE_CREATE, FILE_ALL_ACCESS_MASK,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "sgdir\\child.bin", MBT_FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "CREATE sgdir\\child.bin -> 0x%08x", st);
 
     if (st == ST_SUCCESS) {
         smb2_close(c, co.file_id);
     }
 
-    st = smb2_create_opts(c, "sgdir\\childdir", FILE_CREATE, FILE_ALL_ACCESS_MASK,
-                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &co);
+    st = smb2_create_opts(c, "sgdir\\childdir", MBT_FILE_CREATE, FILE_ALL_ACCESS_MASK,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &co);
     CHECK(st == ST_SUCCESS, "CREATE sgdir\\childdir (directory) -> 0x%08x", st);
 
     if (st == ST_SUCCESS) {
@@ -301,7 +301,7 @@ probe_setgid_child_group_follows_parent(struct smb2_conn *c)
 
     printf("# --- a set-group-ID parent's group wins over the creator's ---\n");
 
-    if (principals_of(c, "sgdir\\child.bin", FILE_NON_DIRECTORY_FILE, owner,
+    if (principals_of(c, "sgdir\\child.bin", MBT_FILE_NON_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(group, OTHER_GROUP_SID) == 0,
               "the child file carries the parent's group (%s)", group);
@@ -311,7 +311,7 @@ probe_setgid_child_group_follows_parent(struct smb2_conn *c)
         CHECK(0, "the child file's principals can be read back");
     }
 
-    if (principals_of(c, "sgdir\\childdir", FILE_DIRECTORY_FILE, owner,
+    if (principals_of(c, "sgdir\\childdir", MBT_FILE_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(group, OTHER_GROUP_SID) == 0,
               "the child directory carries the parent's group (%s)", group);
@@ -350,7 +350,7 @@ probe_stored_not_resolved(
     chimera_server_remove_group(env->server, CREATOR_GROUP);
     chimera_server_remove_group(env->server, OTHER_GROUP);
 
-    if (principals_of(c, "owned.bin", FILE_NON_DIRECTORY_FILE, owner,
+    if (principals_of(c, "owned.bin", MBT_FILE_NON_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(owner, CREATOR_SID) == 0,
               "with the account evicted, the file still reports the stored "
@@ -364,7 +364,7 @@ probe_stored_not_resolved(
         CHECK(0, "the file's principals can be read back after eviction");
     }
 
-    if (principals_of(c, "owneddir", FILE_DIRECTORY_FILE, owner,
+    if (principals_of(c, "owneddir", MBT_FILE_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(owner, CREATOR_SID) == 0,
               "with the account evicted, the directory still reports the "
@@ -376,7 +376,7 @@ probe_stored_not_resolved(
         CHECK(0, "the directory's principals can be read back after eviction");
     }
 
-    if (principals_of(c, "streamed.bin", FILE_NON_DIRECTORY_FILE, owner,
+    if (principals_of(c, "streamed.bin", MBT_FILE_NON_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(owner, CREATOR_SID) == 0,
               "with the account evicted, the base file a stream create made "
@@ -393,7 +393,7 @@ probe_stored_not_resolved(
      * correct answer: the creator's stored group SID here would mean the seed
      * ignored inheritance, and S-1-5-88-2-4001 would mean the set-group-ID bit
      * never took. */
-    if (principals_of(c, "sgdir\\child.bin", FILE_NON_DIRECTORY_FILE, owner,
+    if (principals_of(c, "sgdir\\child.bin", MBT_FILE_NON_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(group, OTHER_GID_UNIX_SID) == 0,
               "with every group evicted, the set-group-ID child reports its "
@@ -419,10 +419,10 @@ probe_overwrite_by_other_is_allowed(struct smb2_conn *other)
 
     printf("# --- a non-owner may still overwrite ---\n");
 
-    st = smb2_create(other, "owned.bin", FILE_OVERWRITE_IF,
-                     FILE_ALL_ACCESS_MASK, FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(other, "owned.bin", MBT_FILE_OVERWRITE_IF,
+                     FILE_ALL_ACCESS_MASK, MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS,
-          "a second account's FILE_OVERWRITE_IF on another user's file "
+          "a second account's MBT_FILE_OVERWRITE_IF on another user's file "
           "succeeds -> 0x%08x", st);
 
     if (st != ST_SUCCESS) {
@@ -431,7 +431,7 @@ probe_overwrite_by_other_is_allowed(struct smb2_conn *other)
 
     smb2_close(other, co.file_id);
 
-    if (principals_of(other, "owned.bin", FILE_NON_DIRECTORY_FILE, owner,
+    if (principals_of(other, "owned.bin", MBT_FILE_NON_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(owner, CREATOR_SID) == 0,
               "  ... and the file still belongs to its creator (%s)", owner);
@@ -455,8 +455,8 @@ probe_stream_create_leaves_base_owner(struct smb2_conn *other)
 
     printf("# --- a stream create leaves the base file's owner alone ---\n");
 
-    st = smb2_create(other, "owned.bin:meta", FILE_OVERWRITE_IF,
-                     FILE_ALL_ACCESS_MASK, FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(other, "owned.bin:meta", MBT_FILE_OVERWRITE_IF,
+                     FILE_ALL_ACCESS_MASK, MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "a second account creates owned.bin:meta -> 0x%08x",
           st);
 
@@ -466,7 +466,7 @@ probe_stream_create_leaves_base_owner(struct smb2_conn *other)
 
     smb2_close(other, co.file_id);
 
-    if (principals_of(other, "owned.bin", FILE_NON_DIRECTORY_FILE, owner,
+    if (principals_of(other, "owned.bin", MBT_FILE_NON_DIRECTORY_FILE, owner,
                       sizeof(owner), group, sizeof(group)) == 0) {
         CHECK(strcmp(owner, CREATOR_SID) == 0,
               "  ... the base file still belongs to its creator (%s)", owner);
@@ -515,9 +515,9 @@ probe_sd_context_owner_wins(struct smb2_conn *c)
     ctx.data     = built;
     ctx.data_len = nlen;
 
-    smb2c_send(c, smb2c_build_create_full(c, "sdowned.bin", FILE_CREATE,
-                                          FILE_ALL_ACCESS_MASK, FILE_SHARE_RWD,
-                                          FILE_NON_DIRECTORY_FILE, NULL,
+    smb2c_send(c, smb2c_build_create_full(c, "sdowned.bin", MBT_FILE_CREATE,
+                                          FILE_ALL_ACCESS_MASK, MBT_FILE_SHARE_RWD,
+                                          MBT_FILE_NON_DIRECTORY_FILE, NULL,
                                           &ctx, 1));
     smb2c_wait(c);
     smb2c_parse_create(c, &co);
