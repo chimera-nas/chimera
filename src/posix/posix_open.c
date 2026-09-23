@@ -60,7 +60,7 @@ chimera_posix_open(
 
     chimera_posix_completion_init(&comp, &req);
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode            = CHIMERA_CLIENT_OP_OPEN;
     req.open.callback     = chimera_posix_open_callback;
@@ -112,7 +112,7 @@ chimera_posix_open(
      * This runs even when the file is already empty: O_TRUNC marks
      * mtime/ctime and clears set-user/group-ID regardless of the size. */
     if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
-        struct stat st;
+        chimera_posix_stat_t st;
 
         if (chimera_posix_fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
             (void) chimera_posix_ftruncate(fd, 0);

@@ -3,9 +3,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #define _GNU_SOURCE
+#include "common/thread.h"
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <errno.h>
 #include <assert.h>
 #include <jansson.h>
@@ -36,7 +41,7 @@
         chimera_abort_if(cond, "fio", __FILE__, __LINE__, __VA_ARGS__)
 
 
-pthread_mutex_t               ChimeraClientMutex  = PTHREAD_MUTEX_INITIALIZER;
+evpl_mutex_t                  ChimeraClientMutex  = EVPL_MUTEX_INITIALIZER;
 int                           ChimeraNumClients   = 0;
 struct prometheus_metrics    *ChimeraMetrics      = NULL;
 struct chimera_client_config *ChimeraClientConfig = NULL;
@@ -246,7 +251,7 @@ static void
 fio_chimera_atexit(void)
 {
 
-    pthread_mutex_lock(&ChimeraClientMutex);
+    evpl_mutex_lock(&ChimeraClientMutex);
 
     if (ChimeraNumClients == 0) {
 
@@ -263,7 +268,7 @@ fio_chimera_atexit(void)
         ChimeraMetricsFile = NULL;
     }
 
-    pthread_mutex_unlock(&ChimeraClientMutex);
+    evpl_mutex_unlock(&ChimeraClientMutex);
 } /* fio_chimera_atexit */
 
 struct mount_ctx {
@@ -315,7 +320,7 @@ fio_chimera_init(struct thread_data *td)
     struct chimera_client_thread *client_thread;
 
 
-    pthread_mutex_lock(&ChimeraClientMutex);
+    evpl_mutex_lock(&ChimeraClientMutex);
 
     if (ChimeraClient == NULL) {
 
@@ -324,7 +329,7 @@ fio_chimera_init(struct thread_data *td)
 
             if (!logfp) {
                 fprintf(stderr, "Failed to open chimera log file %s\n", o->logfile);
-                pthread_mutex_unlock(&ChimeraClientMutex);
+                evpl_mutex_unlock(&ChimeraClientMutex);
                 return EINVAL;
             }
 
@@ -577,7 +582,7 @@ fio_chimera_init(struct thread_data *td)
 
     ChimeraNumClients++;
 
-    pthread_mutex_unlock(&ChimeraClientMutex);
+    evpl_mutex_unlock(&ChimeraClientMutex);
 
     chimera_thread = calloc(1, sizeof(*chimera_thread));
 
@@ -785,9 +790,9 @@ fio_chimera_cleanup(struct thread_data *td)
     free(chimera_thread->handles);
     free(chimera_thread);
 
-    pthread_mutex_lock(&ChimeraClientMutex);
+    evpl_mutex_lock(&ChimeraClientMutex);
     ChimeraNumClients--;
-    pthread_mutex_unlock(&ChimeraClientMutex);
+    evpl_mutex_unlock(&ChimeraClientMutex);
 } /* fio_chimera_file_cleanup */
 
 /*

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -7,6 +7,7 @@
 //
 // Recursively walks a directory tree, statting all entries
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 static int stats = 0;
@@ -79,10 +80,10 @@ main(
 static void
 statit(const char *name)
 {
-    struct stat    statb;
-    struct dirent *di;
-    CHIMERA_DIR   *dirp;
-    char           fullpath[MAXPATHLEN];
+    chimera_posix_stat_t statb;
+    struct dirent       *di;
+    CHIMERA_DIR         *dirp;
+    char                 fullpath[MAXPATHLEN];
 
     if (chimera_posix_lstat(name, &statb) < 0) {
         cthon_error("can't stat %s: %s", name, strerror(errno));

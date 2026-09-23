@@ -12,6 +12,9 @@
 /* Ported from pjdfstest tests/utimensat/02.t: UTIME_OMIT leaves that timestamp unchanged. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 int
 main(
     int    argc,

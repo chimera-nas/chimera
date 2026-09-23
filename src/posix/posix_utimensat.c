@@ -5,6 +5,9 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 
 #include "posix_internal.h"
 #include "../client/client_setattr.h"

@@ -53,7 +53,7 @@ chimera_posix_symlink(
     chimera_posix_completion_init(&comp, &req);
 
     target_len = strlen(target);
-    slash      = rindex(path, '/');
+    slash      = strrchr(path, '/');
 
     req.opcode               = CHIMERA_CLIENT_OP_SYMLINK;
     req.symlink.callback     = chimera_posix_symlink_callback;

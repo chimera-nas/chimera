@@ -7,6 +7,8 @@
 // lock conflict detection (requires fork-before-chimera-init so each
 // process owns independent worker threads).
 
+#include "common/test_host.h"
+#include "common/getopt.h"
 #include "posix_test_common.h"
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -284,8 +286,8 @@ main(
              posix_test_session_root(),
              getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
 
-    (void) mkdir(posix_test_session_root(), 0755);
-    (void) mkdir(env.session_dir, 0755);
+    (void) chimera_test_mkdir(posix_test_session_root(), 0755);
+    (void) chimera_test_mkdir(env.session_dir, 0755);
 
     rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
     if (rc < 0) {

@@ -70,7 +70,7 @@ chimera_posix_unlinkat(
         }
 
         req.remove.path[path_len] = '\0';
-        slash                     = rindex(req.remove.path, '/');
+        slash                     = strrchr(req.remove.path, '/');
 
         req.remove.parent_handle = NULL;
         req.remove.path_len      = path_len;

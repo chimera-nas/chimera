@@ -59,8 +59,8 @@ main(
     fprintf(stderr, "Readlink successful: '%s'\n", target);
 
     if (env.cred.uid == 0) {
-        struct stat st;
-        gid_t       inherited_gid = env.cred.gid == 12345 ? 12346 : 12345;
+        chimera_posix_stat_t st;
+        gid_t                inherited_gid = env.cred.gid == 12345 ? 12346 : 12345;
 
         if (chimera_posix_mkdir("/test/sgid", 0777) != 0 ||
             chimera_posix_chown("/test/sgid", 0, inherited_gid) != 0 ||

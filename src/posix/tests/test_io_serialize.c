@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <pthread.h>
+#include "common/thread.h"
 #include <stdatomic.h>
 #include "posix_test_common.h"
 
@@ -10,7 +10,7 @@
 #define WRITES_PER_THREAD 64
 #define BLOCK_SIZE        256
 #define TOTAL_WRITES      (NUM_THREADS * WRITES_PER_THREAD)
-#define EXPECTED_SIZE     ((off_t) TOTAL_WRITES * BLOCK_SIZE)
+#define EXPECTED_SIZE     ((chimera_off_t) TOTAL_WRITES * BLOCK_SIZE)
 
 struct worker_args {
     int         fd;
@@ -79,8 +79,8 @@ main(
     struct posix_test_env env;
     int                   fd;
     int                   rc;
-    struct stat           st;
-    pthread_t             threads[NUM_THREADS];
+    chimera_posix_stat_t  st;
+    evpl_native_thread_t  threads[NUM_THREADS];
     struct worker_args    args[NUM_THREADS];
     atomic_int            error_count;
     atomic_int            success_count;
@@ -117,7 +117,7 @@ main(
         args[i].error_count   = &error_count;
         args[i].success_count = &success_count;
 
-        rc = pthread_create(&threads[i], NULL, write_worker, &args[i]);
+        rc = evpl_native_thread_create(&threads[i], NULL, write_worker, &args[i]);
         if (rc != 0) {
             fprintf(stderr, "Failed to create thread %d: %s\n", i, strerror(rc));
             chimera_posix_close(fd);
@@ -127,7 +127,7 @@ main(
 
     // Wait for all threads to complete
     for (i = 0; i < NUM_THREADS; i++) {
-        pthread_join(threads[i], NULL);
+        evpl_native_thread_join(threads[i], NULL);
     }
 
     fprintf(stderr, "Write phase complete: %d successful writes, %d errors\n",
@@ -186,7 +186,7 @@ main(
         args[i].error_count   = &error_count;
         args[i].success_count = &success_count;
 
-        rc = pthread_create(&threads[i], NULL, read_worker, &args[i]);
+        rc = evpl_native_thread_create(&threads[i], NULL, read_worker, &args[i]);
         if (rc != 0) {
             fprintf(stderr, "Failed to create read thread %d: %s\n", i, strerror(rc));
             chimera_posix_close(fd);
@@ -196,7 +196,7 @@ main(
 
     // Wait for all read threads to complete
     for (i = 0; i < NUM_THREADS; i++) {
-        pthread_join(threads[i], NULL);
+        evpl_native_thread_join(threads[i], NULL);
     }
 
     fprintf(stderr, "Read phase complete: %d successful reads, %d errors\n",

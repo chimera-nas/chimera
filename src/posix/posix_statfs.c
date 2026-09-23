@@ -4,7 +4,7 @@
 
 #include <errno.h>
 #include <string.h>
-#include <sys/statvfs.h>
+#include "posix/posix_types.h"
 
 #include "common/platform.h"
 #include "posix_internal.h"

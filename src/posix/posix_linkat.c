@@ -88,7 +88,7 @@ chimera_posix_linkat(
     }
 
     req.link.dest_path[new_path_len] = '\0';
-    new_slash                        = rindex(req.link.dest_path, '/');
+    new_slash                        = strrchr(req.link.dest_path, '/');
 
     req.link.dest_path_len   = new_path_len;
     req.link.dest_parent_len = new_slash ? new_slash - req.link.dest_path : new_path_len;

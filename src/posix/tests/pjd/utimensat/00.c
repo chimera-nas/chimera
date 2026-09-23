@@ -13,6 +13,9 @@
  * given explicit values on any type of file. */
 #include "../../pjd_common.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 static const enum pjd_ftype types[] = { PJD_FT_REGULAR, PJD_FT_DIR, PJD_FT_FIFO, PJD_FT_BLOCK, PJD_FT_CHAR,
                                         PJD_FT_SOCKET };
 int

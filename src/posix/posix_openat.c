@@ -82,7 +82,7 @@ chimera_posix_openat(
         }
 
         req.open.path[path_len] = '\0';
-        slash                   = rindex(req.open.path, '/');
+        slash                   = strrchr(req.open.path, '/');
 
         req.open.parent_handle = NULL;
         req.open.path_len      = path_len;

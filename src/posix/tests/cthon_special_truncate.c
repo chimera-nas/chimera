@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -7,6 +7,7 @@
 //
 // Verifies that ftruncate can both shrink and extend a file
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int
@@ -19,7 +20,7 @@ main(
     int                   opt;
     char                  str[MAXPATHLEN];
     int                   fd;
-    struct stat           statb;
+    chimera_posix_stat_t  statb;
 
     cthon_Myname = "cthon_special_truncate";
 

@@ -3,9 +3,17 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/platform.h"
 
 #include <sys/types.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/uio.h>
+#endif // ifdef _WIN32
 
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -184,7 +192,7 @@ chimera_mknod(
     const char                   *path,
     int                           path_len,
     mode_t                        mode,
-    dev_t                         dev,
+    chimera_dev_t                 dev,
     chimera_mknod_callback_t      callback,
     void                         *private_data);
 
@@ -394,7 +402,11 @@ chimera_rename(
     chimera_rename_callback_t     callback,
     void                         *private_data);
 
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/time.h>
+#endif // ifdef _WIN32
 #include <stdint.h>
 
 struct chimera_stat {

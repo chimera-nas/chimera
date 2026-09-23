@@ -3,13 +3,23 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+#include "common/test_host.h"
+#include "common/getopt.h"
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif // ifdef _WIN32
 #include <errno.h>
 #include <jansson.h>
 #include "client/client.h"
@@ -120,18 +130,19 @@ client_test_init(
                                                : "/tmp/chimera_test";
     }
     snprintf(env->session_dir, sizeof(env->session_dir),
-             "%s/session_%d_%lu_%lu", test_root,
-             getpid(), tv.tv_sec, tv.tv_nsec);
+             "%s/session_%d_%" PRId64 "_%ld", test_root,
+             getpid(), (int64_t) tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-    (void) mkdir(test_root, 0755);
-    (void) mkdir(env->session_dir, 0755);
+    (void) chimera_test_mkdir(test_root, 0755);
+    (void) chimera_test_mkdir(env->session_dir, 0755);
     /* Hand the dir to the test credential so the linux-passthrough backend,
      * where the server acts on the host fs as that uid, can create in it.
      * Needs CAP_CHOWN, which only the privileged CI runs have; everywhere
      * else the backends in play are virtual and access the dir as the
      * invoking user, so ownership does not matter. */
+#ifndef _WIN32
     if (geteuid() == 0) {
         rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
         if (rc < 0) {
@@ -139,6 +150,7 @@ client_test_init(
             exit(EXIT_FAILURE);
         }
     }
+#endif // ifndef _WIN32
     if (env->use_nfs || env->use_smb) {
         server_config = chimera_server_config_init();
 
@@ -416,18 +428,6 @@ client_test_cleanup(
     struct test_env *env,
     int              remove_session)
 {
-    int rc;
-
-    if (remove_session && env->session_dir[0] != '\0') {
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-        rc = system(cmd);
-        if (rc < 0) {
-            fprintf(stderr, "Failed to remove session directory %s: %s\n", env->session_dir, strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-    }
-
     /* Direct named-filesystem backend: unmount and remove filesystem "fs0"
      * before the client goes away (best-effort). */
     if (env->fs_module) {
@@ -473,6 +473,12 @@ client_test_cleanup(
 
     prometheus_metrics_destroy(env->server_metrics);
     prometheus_metrics_destroy(env->client_metrics);
+    if (remove_session && env->session_dir[0] != '\0' &&
+        chimera_test_remove_tree(env->session_dir) != 0) {
+        fprintf(stderr, "Failed to remove session directory %s: %s\n",
+                env->session_dir, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
 } /* client_test_cleanup */
 
 static inline void

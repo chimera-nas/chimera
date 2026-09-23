@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -11,15 +11,16 @@
 // - server's returning bogus file attributes, confusing the client
 // - client and server not propagating "filesystem full" errors
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
-static int   Tflag = 0;
+static int           Tflag = 0;
 
-static off_t file_size   = 30 * 1024 * 1024; // 30MB default
-static int   buffer_size = 8192;
+static chimera_off_t file_size   = 30 * 1024 * 1024; // 30MB default
+static int           buffer_size = 8192;
 
 static unsigned char
-testval(off_t offset)
+testval(chimera_off_t offset)
 {
     return 'a' + (offset % 26);
 } /* testval */
@@ -71,7 +72,7 @@ main(
     long                  numbufs;
     int                   i;
     struct timeval        time = { 0, 0 };
-    off_t                 size;
+    chimera_off_t         size;
 
     cthon_Myname = "cthon_special_bigfile";
 
@@ -187,7 +188,7 @@ main(
         unsigned char val = testval(i);
         int           bytes_read;
 
-        if (chimera_posix_lseek(fd, (off_t) i * buffer_size, SEEK_SET) < 0) {
+        if (chimera_posix_lseek(fd, (chimera_off_t) i * buffer_size, SEEK_SET) < 0) {
             cthon_error("seek to %ld failed", (long) i * buffer_size);
             chimera_posix_close(fd);
             free(buf);

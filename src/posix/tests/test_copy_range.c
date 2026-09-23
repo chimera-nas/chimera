@@ -116,12 +116,12 @@ test_basic_copy(void)
 static void
 test_copy_with_offsets(void)
 {
-    char    src_buf[PATTERN_LEN];
-    char    verify[PATTERN_LEN];
-    int     src_fd, dst_fd;
-    off_t   src_off = 1024;
-    off_t   dst_off = 2048;
-    ssize_t n;
+    char          src_buf[PATTERN_LEN];
+    char          verify[PATTERN_LEN];
+    int           src_fd, dst_fd;
+    chimera_off_t src_off = 1024;
+    chimera_off_t dst_off = 2048;
+    ssize_t       n;
 
     fprintf(stderr, "Testing copy_file_range with explicit offsets...\n");
 
@@ -529,8 +529,8 @@ test_clone_self(void)
 
     /* Identical and partially overlapping ranges must fail without changing
      * either half.  Exercise both overlap directions before the valid clone. */
-    const off_t overlap_src[] = { 0, 0, 4096 };
-    const off_t overlap_dst[] = { 0, 4096, 0 };
+    const chimera_off_t overlap_src[] = { 0, 0, 4096 };
+    const chimera_off_t overlap_dst[] = { 0, 4096, 0 };
     for (size_t i = 0; i < 3; i++) {
         errno = 0;
         rc    = chimera_posix_clone_file_range(fd, overlap_dst[i], fd,

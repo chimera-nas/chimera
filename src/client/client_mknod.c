@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/platform.h"
 #include "client_mknod.h"
 
 SYMBOL_EXPORT void
@@ -10,14 +11,14 @@ chimera_mknod(
     const char                   *path,
     int                           path_len,
     mode_t                        mode,
-    dev_t                         dev,
+    chimera_dev_t                 dev,
     chimera_mknod_callback_t      callback,
     void                         *private_data)
 {
     struct chimera_client_request *request;
     const char                    *slash;
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     request = chimera_client_request_alloc(thread);
 

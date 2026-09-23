@@ -22,7 +22,7 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include <jansson.h>
 
 #include "client/client.h"
@@ -34,7 +34,7 @@
 
 /* ---- process-global state (one shared chimera_client for all workers) ---- */
 
-static pthread_mutex_t            g_mutex        = PTHREAD_MUTEX_INITIALIZER;
+static evpl_mutex_t               g_mutex        = EVPL_MUTEX_INITIALIZER;
 static struct chimera_client     *g_client       = NULL;
 static struct prometheus_metrics *g_metrics      = NULL;
 static int                        g_refcount     = 0;
@@ -370,7 +370,7 @@ elb_chimera_backend_init(
         return -EINVAL;
     }
 
-    pthread_mutex_lock(&g_mutex);
+    evpl_mutex_lock(&g_mutex);
 
     if (g_client == NULL) {
         rc = elb_chimera_load_config(config_json);
@@ -381,7 +381,7 @@ elb_chimera_backend_init(
         *out_priv = g_client;
     }
 
-    pthread_mutex_unlock(&g_mutex);
+    evpl_mutex_unlock(&g_mutex);
 
     return rc;
 } /* elb_chimera_backend_init */
@@ -391,7 +391,7 @@ elb_chimera_backend_destroy(elbencho_backend_priv priv)
 {
     (void) priv;
 
-    pthread_mutex_lock(&g_mutex);
+    evpl_mutex_lock(&g_mutex);
 
     if (--g_refcount == 0 && g_client) {
         /* Report the peak number of chimera ops that were in flight at once. A value > 1
@@ -407,7 +407,7 @@ elb_chimera_backend_destroy(elbencho_backend_priv priv)
         }
     }
 
-    pthread_mutex_unlock(&g_mutex);
+    evpl_mutex_unlock(&g_mutex);
 } /* elb_chimera_backend_destroy */
 
 /* ---- per-worker lifecycle ---- */
@@ -459,11 +459,11 @@ elb_chimera_worker_destroy(elbencho_worker_ctx octx)
     }
 
     /* fold this worker's peak concurrency into the process-wide maximum */
-    pthread_mutex_lock(&g_mutex);
+    evpl_mutex_lock(&g_mutex);
     if (ctx->max_inflight > g_max_inflight) {
         g_max_inflight = ctx->max_inflight;
     }
-    pthread_mutex_unlock(&g_mutex);
+    evpl_mutex_unlock(&g_mutex);
 
     /* release any registered I/O buffers elbencho didn't free (must precede
      * evpl_destroy, since releasing an iovec needs the loop) */

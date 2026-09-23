@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -7,6 +7,7 @@
 //
 // Creates files in a subdirectory and stats them multiple times
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int
@@ -23,7 +24,7 @@ main(
     int                   pass, filenum;
     char                  dirname[MAXPATHLEN];
     char                  name[MAXPATHLEN];
-    struct stat           statb;
+    chimera_posix_stat_t  statb;
     int                   stats = 0;
     int                   fd;
 

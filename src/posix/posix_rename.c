@@ -49,8 +49,8 @@ chimera_posix_rename(
 
     chimera_posix_completion_init(&comp, &req);
 
-    source_slash = rindex(oldpath, '/');
-    dest_slash   = rindex(newpath, '/');
+    source_slash = strrchr(oldpath, '/');
+    dest_slash   = strrchr(newpath, '/');
 
     req.opcode                   = CHIMERA_CLIENT_OP_RENAME;
     req.rename.callback          = chimera_posix_rename_callback;

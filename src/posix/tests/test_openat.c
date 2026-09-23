@@ -147,7 +147,7 @@ static void
 test_failed_unlink_then_open_io(struct posix_test_env *env)
 {
     struct chimera_vfs_cred other;
-    struct stat             st;
+    chimera_posix_stat_t    st;
     char                    byte;
     int                     first, second;
 

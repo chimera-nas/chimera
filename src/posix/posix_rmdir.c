@@ -44,7 +44,7 @@ chimera_posix_rmdir(const char *path)
 
     chimera_posix_completion_init(&comp, &req);
 
-    slash = rindex(path, '/');
+    slash = strrchr(path, '/');
 
     req.opcode              = CHIMERA_CLIENT_OP_REMOVE;
     req.remove.flags        = CHIMERA_VFS_REMOVE_ISDIR; /* rmdir(2): must be a directory */

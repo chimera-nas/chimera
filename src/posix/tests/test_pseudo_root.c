@@ -81,7 +81,7 @@ main(
     struct posix_test_env env;
     CHIMERA_DIR          *dir;
     struct dirent        *entry;
-    struct stat           st;
+    chimera_posix_stat_t  st;
     int                   rc;
     int                   fd;
     int                   num_entries = 0;

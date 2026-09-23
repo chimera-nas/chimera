@@ -663,6 +663,12 @@ main(
              * raced on macOS), and none of it can change the answer.  Leaving
              * by the shortest path makes the result of this test depend on the
              * refusal alone. */
+#ifdef _WIN32
+            /* The CRT's _exit still invokes DLL detach callbacks on Windows.
+             * TerminateProcess also skips those callbacks, which cannot safely
+             * dismantle the running worker pools in this partial setup. */
+            TerminateProcess(GetCurrentProcess(), 0);
+#endif /* ifdef _WIN32 */
             _exit(0);
         }
         fprintf(stderr, "smb_loopback_probe: SMB loopback setup failed (vers=%s)\n",

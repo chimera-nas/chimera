@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -35,8 +35,8 @@ chimera_posix_fstat_exec(
 
 SYMBOL_EXPORT int
 chimera_posix_fstat(
-    int          fd,
-    struct stat *st)
+    int                   fd,
+    chimera_posix_stat_t *st)
 {
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);

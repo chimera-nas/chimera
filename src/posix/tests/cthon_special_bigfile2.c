@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -9,6 +9,7 @@
 
 #define _LARGEFILE64_SOURCE 1
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define HIGH_WORD(n) ((unsigned int) (((unsigned int) ((n) >> 32)) & 0xffffffff))
@@ -18,15 +19,15 @@ static char *filename;
 
 static void
 check_around(
-    int   fd,
-    off_t where)
+    int           fd,
+    chimera_off_t where)
 {
-    char        buf;
-    int         i;
-    off_t       start    = where - 2;
-    int         numbytes = 5;
-    struct stat statbuf;
-    char        basechar = '0';
+    char                 buf;
+    int                  i;
+    chimera_off_t        start    = where - 2;
+    int                  numbytes = 5;
+    chimera_posix_stat_t statbuf;
+    char                 basechar = '0';
 
     if (chimera_posix_lseek(fd, start, SEEK_SET) < 0) {
         fprintf(stderr, "can't do initial seek to 0x%x%08x: %s\n",
@@ -126,7 +127,7 @@ main(
 
     // Test around 2GB boundary
     fprintf(stdout, "\tTesting around 2GB boundary...\n");
-    check_around(fd, ((off_t) 0x7fffffff) + 1);
+    check_around(fd, ((chimera_off_t) 0x7fffffff) + 1);
 
     if (chimera_posix_ftruncate(fd, 0) < 0) {
         cthon_error("can't truncate %s", str);
@@ -136,7 +137,7 @@ main(
 
     // Test around 4GB boundary
     fprintf(stdout, "\tTesting around 4GB boundary...\n");
-    check_around(fd, ((off_t) (0xffffffffU)) + 1);
+    check_around(fd, ((chimera_off_t) (0xffffffffU)) + 1);
 
     chimera_posix_close(fd);
     chimera_posix_unlink(str);

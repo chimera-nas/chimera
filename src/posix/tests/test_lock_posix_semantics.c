@@ -32,9 +32,9 @@
 
 static struct flock
 lock_desc(
-    short type,
-    off_t start,
-    off_t len)
+    short         type,
+    chimera_off_t start,
+    chimera_off_t len)
 {
     struct flock fl;
 

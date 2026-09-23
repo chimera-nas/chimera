@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -18,8 +18,8 @@ chimera_posix_rewinddir(CHIMERA_DIR *dirp)
 
 SYMBOL_EXPORT void
 chimera_posix_seekdir(
-    CHIMERA_DIR *dirp,
-    long         loc)
+    CHIMERA_DIR     *dirp,
+    chimera_dirpos_t loc)
 {
     if (!dirp) {
         return;
@@ -30,7 +30,7 @@ chimera_posix_seekdir(
     dirp->buf_valid = 0;
 } /* chimera_posix_seekdir */
 
-SYMBOL_EXPORT long
+SYMBOL_EXPORT chimera_dirpos_t
 chimera_posix_telldir(CHIMERA_DIR *dirp)
 {
     if (!dirp) {
@@ -38,5 +38,5 @@ chimera_posix_telldir(CHIMERA_DIR *dirp)
         return -1;
     }
 
-    return (long) dirp->cookie;
+    return (chimera_dirpos_t) dirp->cookie;
 } /* chimera_posix_telldir */

@@ -41,7 +41,7 @@ check_uidgid_follow(
     long        uid,
     long        gid)
 {
-    struct stat st;
+    chimera_posix_stat_t st;
 
     if (pjd_stat(name, &st) != 0) {
         PJD_CHECK(0, "stat %s for uid/gid", name);

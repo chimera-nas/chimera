@@ -4,7 +4,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #include "posix.h"
 #include "posix_internal.h"
@@ -12,9 +16,9 @@
 
 SYMBOL_EXPORT int
 chimera_posix_lockf(
-    int   fd,
-    int   cmd,
-    off_t len)
+    int           fd,
+    int           cmd,
+    chimera_off_t len)
 {
     struct chimera_posix_client   *posix = chimera_posix_get_global();
     struct chimera_posix_fd_entry *entry;

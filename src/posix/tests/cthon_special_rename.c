@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 // Test rename a file n times
 // Based on cthon/special/rename.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 int

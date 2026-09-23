@@ -4,9 +4,15 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef _WIN32
 #include <sys/resource.h>
-#include <pthread.h>
+#endif /* ifndef _WIN32 */
+#include "common/thread.h"
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <utlist.h>
 
 #include <jansson.h>
@@ -182,17 +188,23 @@ chimera_client_init(
     struct prometheus_metrics          *metrics)
 {
     struct chimera_client *client;
+
+#ifndef _WIN32
     struct rlimit          rl;
+#endif /* ifndef _WIN32 */
 
     client = calloc(1, sizeof(struct chimera_client));
 
     chimera_log_init();
 
+#ifndef _WIN32
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         chimera_client_info("Effective file descriptor limit: %ld", rl.rlim_cur);
     } else {
         chimera_client_error("Failed to get file descriptor limit");
     }
+
+#endif /* ifndef _WIN32 */
 
     client->config = config;
 

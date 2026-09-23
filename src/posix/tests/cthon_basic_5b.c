@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 // Test read only
 // Based on cthon/basic/test5b.c from Connectathon 2004
 
+#include "common/getopt.h"
 #include "cthon_common.h"
 
 #define BUFSZ 8192
@@ -23,10 +24,10 @@ main(
     int                   rc;
     int                   count = CTHON_DCOUNT;
     int                   ct;
-    off_t                 size = DSIZE;
-    off_t                 si;
+    chimera_off_t         size = DSIZE;
+    chimera_off_t         si;
     int                   fd;
-    off_t                 bytes   = 0;
+    chimera_off_t         bytes   = 0;
     char                 *bigfile = "bigfile";
     struct timeval        time;
     int                   opt;

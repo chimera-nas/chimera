@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 // SPDX-FileCopyrightText: 2000-2002 Silicon Graphics, Inc.
 //
 // SPDX-License-Identifier: GPL-2.0-only
@@ -14,9 +14,14 @@
  * This is a simplified version focusing on POSIX-portable operations.
  */
 
+#include "common/getopt.h"
 #include <sys/wait.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/uio.h>
-#include <dirent.h>
+#endif /* ifdef _WIN32 */
+#include "common/dirent.h"
 #include "posix_test_common.h"
 
 /* Operation types */
@@ -507,13 +512,13 @@ read_f(
     opnum_t opno,
     long    r)
 {
-    fent_t     *fent;
-    pathname_t  path;
-    int         fd;
-    char        buf[FILELEN_MAX];
-    struct stat statb;
-    off_t       off;
-    ssize_t     len;
+    fent_t              *fent;
+    pathname_t           path;
+    int                  fd;
+    char                 buf[FILELEN_MAX];
+    chimera_posix_stat_t statb;
+    chimera_off_t        off;
+    ssize_t              len;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
         return;
@@ -634,10 +639,10 @@ stat_f(
     opnum_t opno,
     long    r)
 {
-    fent_t     *fent;
-    pathname_t  path;
-    struct stat statb;
-    int         ft;
+    fent_t              *fent;
+    pathname_t           path;
+    chimera_posix_stat_t statb;
+    int                  ft;
 
     ft = random() % FT_NTYPE;
     if (get_random_fent(ft, &fent) < 0) {
@@ -685,10 +690,10 @@ truncate_f(
     opnum_t opno,
     long    r)
 {
-    fent_t     *fent;
-    pathname_t  path;
-    off_t       len;
-    struct stat statb;
+    fent_t              *fent;
+    pathname_t           path;
+    chimera_off_t        len;
+    chimera_posix_stat_t statb;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
         return;
@@ -763,13 +768,13 @@ write_f(
     opnum_t opno,
     long    r)
 {
-    fent_t    *fent;
-    pathname_t path;
-    int        fd;
-    char       buf[FILELEN_MAX];
-    off_t      off;
-    size_t     len;
-    ssize_t    ret;
+    fent_t       *fent;
+    pathname_t    path;
+    int           fd;
+    char          buf[FILELEN_MAX];
+    chimera_off_t off;
+    size_t        len;
+    ssize_t       ret;
 
     if (get_random_fent(FT_REG, &fent) < 0) {
         return;
@@ -852,10 +857,10 @@ do_stress(int noperations)
 static void
 do_cleanup(void)
 {
-    CHIMERA_DIR   *dir;
-    struct dirent *de;
-    char           path[PATH_MAX_LEN];
-    struct stat    statb;
+    CHIMERA_DIR         *dir;
+    struct dirent       *de;
+    char                 path[PATH_MAX_LEN];
+    chimera_posix_stat_t statb;
 
     dir = chimera_posix_opendir(homedir);
     if (dir) {
