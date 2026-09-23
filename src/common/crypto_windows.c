@@ -98,7 +98,8 @@ chimera_crypto_hash_new(
     struct chimera_crypto_hash *ctx;
     BCRYPT_ALG_HANDLE           provider;
 
-    if (algorithm < CHIMERA_CRYPTO_MD4 || algorithm > CHIMERA_CRYPTO_AES_GMAC || key_len > ULONG_MAX) {
+    if ((!key && key_len) || algorithm < CHIMERA_CRYPTO_MD4 || algorithm > CHIMERA_CRYPTO_AES_GMAC || key_len >
+        ULONG_MAX) {
         return NULL;
     }
     ctx = calloc(1, sizeof(*ctx));
@@ -295,7 +296,8 @@ chimera_crypto_aead_crypt(
     unsigned char                         empty  = 0;
     void                                 *buffer = data ? data : &empty;
 
-    if (!ctx || (key_len != 16 && key_len != 32) || nonce_len != (ccm ? 11u : 12u) ||
+    if (!ctx || !key || !nonce || !tag || (!data && data_len) || (!aad && aad_len) ||
+        (key_len != 16 && key_len != 32) || nonce_len != (ccm ? 11u : 12u) ||
         aad_len > ULONG_MAX || data_len > ULONG_MAX) {
         goto done;
     }
@@ -341,7 +343,7 @@ chimera_crypto_rc4(
     ULONG             written;
     int               ok;
 
-    if (key_len != 16 || len > ULONG_MAX) {
+    if (!key || (!input && len) || (!output && len) || key_len != 16 || len > ULONG_MAX) {
         return 0;
     }
     provider = provider_get(&rc4_provider);
@@ -371,7 +373,7 @@ chimera_crypto_base64(
 {
     DWORD size;
 
-    if (len > INT_MAX / 4 * 3 || capacity <= 4 * ((len + 2) / 3) || capacity > ULONG_MAX) {
+    if (!out || (!data && len) || len > INT_MAX / 4 * 3 || capacity <= 4 * ((len + 2) / 3) || capacity > ULONG_MAX) {
         return -1;
     }
     size = (DWORD) capacity;

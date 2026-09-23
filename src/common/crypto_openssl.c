@@ -57,7 +57,7 @@ chimera_crypto_hash_new(
     EVP_MAC                    *mac;
     OSSL_PARAM                  params[2];
 
-    if (!ctx || !(ctx->size = chimera_crypto_size(algorithm))) {
+    if (!ctx || (!key && key_len) || !(ctx->size = chimera_crypto_size(algorithm))) {
         free(ctx);
         return NULL;
     }
@@ -80,7 +80,7 @@ chimera_crypto_hash_new(
             }
             break;
         case CHIMERA_CRYPTO_AES_GMAC:
-            if (key_len != 16 || nonce_len != 12) {
+            if (key_len != 16 || nonce_len != 12 || !nonce) {
                 goto fail;
             }
             ctx->gmac = EVP_CIPHER_CTX_new();
@@ -268,7 +268,8 @@ chimera_crypto_aead_crypt(
     unsigned char   empty[16];
     unsigned char  *bytes = data ? data : empty;
 
-    if (!ctx || (key_len != 16 && key_len != 32) || data_len > INT_MAX || aad_len > INT_MAX ||
+    if (!ctx || !key || !nonce || !tag || (!data && data_len) || (!aad && aad_len) ||
+        (key_len != 16 && key_len != 32) || data_len > INT_MAX || aad_len > INT_MAX ||
         nonce_len != (ccm ? 11u : 12u)) {
         goto done;
     }
@@ -317,7 +318,10 @@ chimera_crypto_rc4(
     EVP_CIPHER_CTX *ctx;
     int             outl, ok;
 
-    if (key_len != 16 || len > INT_MAX || !CRYPTO_THREAD_run_once(&legacy_once, load_legacy) || !legacy_provider || !
+    if (!key || (!input && len) || (!output && len) || key_len != 16 || len > INT_MAX || !CRYPTO_THREAD_run_once(&
+                                                                                                                 legacy_once,
+                                                                                                                 load_legacy)
+        || !legacy_provider || !
         default_provider) {
         return 0;
     }
@@ -346,7 +350,7 @@ chimera_crypto_base64(
     char       *out,
     size_t      capacity)
 {
-    if (len > INT_MAX / 4 * 3 || capacity <= 4 * ((len + 2) / 3)) {
+    if (!out || (!data && len) || len > INT_MAX / 4 * 3 || capacity <= 4 * ((len + 2) / 3)) {
         return -1;
     }
     return EVP_EncodeBlock((unsigned char *) out, data, (int) len);

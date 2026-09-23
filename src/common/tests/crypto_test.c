@@ -184,6 +184,9 @@ main(void)
     aad[0] ^= 1;
     assert(!chimera_crypto_aead_crypt(aead, 0, 1, key, 32, nonce, 11, aad, sizeof(aad), data, sizeof(data), tag));
     aad[0] ^= 1;
+    assert(!chimera_crypto_aead_crypt(aead, 1, 0, NULL, 16, nonce, 12, aad, sizeof(aad), data, sizeof(data), tag));
+    assert(!chimera_crypto_aead_crypt(aead, 1, 0, key, 16, NULL, 12, aad, sizeof(aad), data, sizeof(data), tag));
+    assert(!chimera_crypto_aead_crypt(aead, 1, 0, key, 16, nonce, 12, aad, sizeof(aad), NULL, sizeof(data), tag));
     chimera_crypto_aead_free(aead);
     /* RFC 6229, 128-bit key 01..10, first sixteen bytes of RC4 output. */
     for (int i = 0; i < 16; i++) {
