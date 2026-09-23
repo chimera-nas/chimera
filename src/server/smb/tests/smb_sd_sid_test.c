@@ -39,26 +39,26 @@
 
 #define TEST_PASS(name) fprintf(stderr, "  PASS: %s\n", name)
 
-#define SID_OWNER_REAL    "S-1-5-21-1-2-3-500"
-#define SID_GROUP_REAL    "S-1-5-21-1-2-3-513"
-#define SID_OPAQUE        "S-1-5-21-1-2-3-1001"
-#define SID_OPAQUE2       "S-1-5-21-1-2-3-9999"
-#define SID_ALICE         "S-1-5-21-1-2-3-1105"
-#define SID_EVERYONE      "S-1-1-0"
-#define SID_UNIX_UID1000  "S-1-5-88-1-1000"
-#define SID_UNIX_GID1000  "S-1-5-88-2-1000"
+#define SID_OWNER_REAL        "S-1-5-21-1-2-3-500"
+#define SID_GROUP_REAL        "S-1-5-21-1-2-3-513"
+#define SID_OPAQUE            "S-1-5-21-1-2-3-1001"
+#define SID_OPAQUE2           "S-1-5-21-1-2-3-9999"
+#define SID_ALICE             "S-1-5-21-1-2-3-1105"
+#define SID_EVERYONE          "S-1-1-0"
+#define SID_UNIX_UID1000      "S-1-5-88-1-1000"
+#define SID_UNIX_GID1000      "S-1-5-88-2-1000"
 
 /* SD control bits (mirrors smb_proc_security.c). */
-#define SE_SELF_RELATIVE  0x8000
-#define SE_DACL_PRESENT   0x0004
-#define SE_DACL_PROTECTED 0x1000
+#define MBT_SE_SELF_RELATIVE  0x8000
+#define MBT_SE_DACL_PRESENT   0x0004
+#define MBT_SE_DACL_PROTECTED 0x1000
 
-#define ACE_ALLOWED       0
-#define MASK_READ         0x00000001
-#define MASK_RW           0x00000003
+#define ACE_ALLOWED           0
+#define MASK_READ             0x00000001
+#define MASK_RW               0x00000003
 
-#define MAX_ACES          8
-#define ACL_BUF_SIZE      (sizeof(struct chimera_acl) + MAX_ACES * sizeof(struct chimera_ace))
+#define MAX_ACES              8
+#define ACL_BUF_SIZE          (sizeof(struct chimera_acl) + MAX_ACES * sizeof(struct chimera_ace))
 
 static void
 put_le16(
@@ -221,7 +221,7 @@ test_opaque_roundtrip_no_authority(void)
     assert(chimera_sid_from_str(&owner, SID_OWNER_REAL) == 0);
 
     sd_len = build_sd(sd, sizeof(sd),
-                      SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_DACL_PROTECTED,
+                      MBT_SE_SELF_RELATIVE | MBT_SE_DACL_PRESENT | MBT_SE_DACL_PROTECTED,
                       SID_OWNER_REAL, SID_GROUP_REAL, 3, masks, sids);
 
     memset(&attrs, 0, sizeof(attrs));
@@ -266,7 +266,7 @@ test_opaque_roundtrip_no_authority(void)
     assert(strcmp(str, SID_EVERYONE) == 0);
     sd_ace_sid(out, 2, str, sizeof(str), &mask);
     assert(strcmp(str, SID_UNIX_UID1000) == 0 && mask == MASK_RW);
-    assert((out[2] | (out[3] << 8)) & SE_DACL_PROTECTED);
+    assert((out[2] | (out[3] << 8)) & MBT_SE_DACL_PROTECTED);
     TEST_PASS("emit writes stored owner SID and opaque ACE SID verbatim");
 
     /* And the emitted descriptor decodes back to the same principals. */
@@ -327,7 +327,7 @@ test_with_identity_authority(void)
     assert(chimera_sid_from_str(&alice, SID_ALICE) == 0);
     assert(chimera_sid_from_str(&opaque2, SID_OPAQUE2) == 0);
 
-    sd_len = build_sd(sd, sizeof(sd), SE_SELF_RELATIVE | SE_DACL_PRESENT,
+    sd_len = build_sd(sd, sizeof(sd), MBT_SE_SELF_RELATIVE | MBT_SE_DACL_PRESENT,
                       SID_ALICE, NULL, 2, masks, sids);
 
     /* --- first pass: the uncached SID is recorded, its ACE skipped --- */

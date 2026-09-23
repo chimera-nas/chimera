@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -109,7 +111,7 @@ chimera_smb_send_oplock_break_lease(
     p += SMB2_OPLOCK_BREAK_NOTIFY_LEASE_SIZE;
 
     /* NetBIOS header = big-endian length of everything after it. */
-    nb_len = __builtin_bswap32((uint32_t) (p - (buf + 4)));
+    nb_len = chimera_bswap32((uint32_t) (p - (buf + 4)));
     memcpy(buf, &nb_len, 4);
 
     iov.length = (int) (p - buf);
@@ -149,7 +151,7 @@ chimera_smb_send_oplock_break_legacy(
 
     p += SMB2_OPLOCK_BREAK_NOTIFY_LEGACY_SIZE;
 
-    nb_len = __builtin_bswap32((uint32_t) (p - (buf + 4)));
+    nb_len = chimera_bswap32((uint32_t) (p - (buf + 4)));
     memcpy(buf, &nb_len, 4);
 
     iov.length = (int) (p - buf);
@@ -219,7 +221,7 @@ chimera_smb_lease_break_cb(
      * then, or the conn itself can be recycled and reused for a new connection.
      * Snapshot all per-open fields needed after the lock here to close this
      * window. */
-    pthread_mutex_lock(&file->lock);
+    evpl_mutex_lock(&file->lock);
     conn        = NULL;
     conn_thread = NULL;
     for (open_file = grant->members; open_file;
@@ -347,7 +349,7 @@ chimera_smb_lease_break_cb(
             }
         }
     }
-    pthread_mutex_unlock(&file->lock);
+    evpl_mutex_unlock(&file->lock);
 
     /* No live member can notify the client; the pragmatic recovery is to forcibly
      * revoke the lease so the pending acquire (or future acquires) can proceed.
@@ -373,7 +375,7 @@ chimera_smb_lease_break_cb(
         struct chimera_smb_lease_break_msg *msg;
         bool                                ring = false;
 
-        pthread_mutex_lock(&conn_thread->lease_break_lock);
+        evpl_mutex_lock(&conn_thread->lease_break_lock);
         if (!conn->lease_break_tearing_down) {
             msg           = calloc(1, sizeof(*msg));
             msg->conn     = conn;
@@ -404,7 +406,7 @@ chimera_smb_lease_break_cb(
             ring = claim->construct != CHIMERA_CONSTRUCT_DIR_LEASE ||
                 conn->in_compound == 0;
         }
-        pthread_mutex_unlock(&conn_thread->lease_break_lock);
+        evpl_mutex_unlock(&conn_thread->lease_break_lock);
         if (ring) {
             evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
         }
@@ -412,7 +414,7 @@ chimera_smb_lease_break_cb(
         /* Legacy oplock — §2.2.23.1 notification keyed by FileId. */
         struct chimera_smb_lease_break_msg *msg;
 
-        pthread_mutex_lock(&conn_thread->lease_break_lock);
+        evpl_mutex_lock(&conn_thread->lease_break_lock);
         if (!conn->lease_break_tearing_down) {
             msg                            = calloc(1, sizeof(*msg));
             msg->conn                      = conn;
@@ -422,12 +424,12 @@ chimera_smb_lease_break_cb(
             msg->new_oplock_level          = new_oplock_level;
             msg->next                      = conn_thread->lease_break_ready;
             conn_thread->lease_break_ready = msg;
-            pthread_mutex_unlock(&conn_thread->lease_break_lock);
+            evpl_mutex_unlock(&conn_thread->lease_break_lock);
             /* Legacy oplocks are never directory leases and may be waited on
              * by a parking open, so always wake the thread immediately. */
             evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
         } else {
-            pthread_mutex_unlock(&conn_thread->lease_break_lock);
+            evpl_mutex_unlock(&conn_thread->lease_break_lock);
         }
     }
 
@@ -479,10 +481,10 @@ chimera_smb_lease_break_flush(struct chimera_server_smb_thread *thread)
         thread->vfs_thread->vfs->vfs_state;
     bool                                sent_lease = false;
 
-    pthread_mutex_lock(&thread->lease_break_lock);
+    evpl_mutex_lock(&thread->lease_break_lock);
     list                      = thread->lease_break_ready;
     thread->lease_break_ready = NULL;
-    pthread_mutex_unlock(&thread->lease_break_lock);
+    evpl_mutex_unlock(&thread->lease_break_lock);
 
     /* The queue is built by prepending (LIFO).  Reverse it so notifications are
      * sent in the order they were triggered (FIFO) — a cross-directory rename
@@ -553,7 +555,7 @@ void
 chimera_smb_lease_break_thread_init(struct chimera_server_smb_thread *thread)
 {
     thread->lease_break_ready = NULL;
-    pthread_mutex_init(&thread->lease_break_lock, NULL);
+    evpl_mutex_init(&thread->lease_break_lock, NULL);
     evpl_add_doorbell(thread->evpl, &thread->lease_break_doorbell,
                       chimera_smb_lease_break_doorbell_callback);
 } /* chimera_smb_lease_break_thread_init */
@@ -570,7 +572,7 @@ chimera_smb_lease_break_thread_destroy(struct chimera_server_smb_thread *thread)
         thread->lease_break_ready = msg->next;
         free(msg);
     }
-    pthread_mutex_destroy(&thread->lease_break_lock);
+    evpl_mutex_destroy(&thread->lease_break_lock);
 } /* chimera_smb_lease_break_thread_destroy */
 
 /* ----------------------------------------------------------------------

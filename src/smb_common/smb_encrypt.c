@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
-#include <openssl/evp.h>
+#include "common/crypto.h"
 
 #include "smb_encrypt.h"
 #include "smb_common.h"
@@ -15,11 +15,7 @@
 #include "smb_common/smb2.h"
 
 struct chimera_smb_encrypt_ctx {
-    EVP_CIPHER     *aes_128_ccm;
-    EVP_CIPHER     *aes_128_gcm;
-    EVP_CIPHER     *aes_256_ccm;
-    EVP_CIPHER     *aes_256_gcm;
-    EVP_CIPHER_CTX *cctx;
+    struct chimera_crypto_aead *aead;
 };
 
 SYMBOL_EXPORT struct chimera_smb_encrypt_ctx *
@@ -30,20 +26,10 @@ chimera_smb_encrypt_ctx_create(void)
     if (!ctx) {
         return NULL;
     }
-
-    ctx->aes_128_ccm = EVP_CIPHER_fetch(NULL, "AES-128-CCM", NULL);
-    ctx->aes_128_gcm = EVP_CIPHER_fetch(NULL, "AES-128-GCM", NULL);
-    ctx->aes_256_ccm = EVP_CIPHER_fetch(NULL, "AES-256-CCM", NULL);
-    ctx->aes_256_gcm = EVP_CIPHER_fetch(NULL, "AES-256-GCM", NULL);
-
-    chimera_smb2_abort_if(!ctx->aes_128_ccm || !ctx->aes_128_gcm ||
-                          !ctx->aes_256_ccm || !ctx->aes_256_gcm,
-                          "Failed to fetch SMB3 AEAD ciphers");
-
-    ctx->cctx = EVP_CIPHER_CTX_new();
-
-    chimera_smb2_abort_if(!ctx->cctx, "Failed to allocate SMB3 cipher context");
-
+    ctx->aead = chimera_crypto_aead_new();
+    if (!ctx->aead) {
+        free(ctx); return NULL;
+    }
     return ctx;
 } /* chimera_smb_encrypt_ctx_create */
 
@@ -53,38 +39,33 @@ chimera_smb_encrypt_ctx_destroy(struct chimera_smb_encrypt_ctx *ctx)
     if (!ctx) {
         return;
     }
-    EVP_CIPHER_CTX_free(ctx->cctx);
-    EVP_CIPHER_free(ctx->aes_128_ccm);
-    EVP_CIPHER_free(ctx->aes_128_gcm);
-    EVP_CIPHER_free(ctx->aes_256_ccm);
-    EVP_CIPHER_free(ctx->aes_256_gcm);
+    chimera_crypto_aead_free(ctx->aead);
     free(ctx);
 } /* chimera_smb_encrypt_ctx_destroy */
 
-/* Map a negotiated cipher id to its EVP cipher, key length and nonce length. */
-static EVP_CIPHER *
+/* Map a negotiated cipher id to its key length, nonce length and AEAD mode. */
+static int
 smb_cipher_for_id(
-    struct chimera_smb_encrypt_ctx *ctx,
-    uint16_t                        cipher_id,
-    size_t                         *key_len,
-    int                            *nonce_len,
-    int                            *is_ccm)
+    uint16_t cipher_id,
+    size_t  *key_len,
+    int     *nonce_len,
+    int     *is_ccm)
 {
     switch (cipher_id) {
         case SMB2_ENCRYPTION_AES_128_CCM:
             *key_len = 16; *nonce_len = 11; *is_ccm = 1;
-            return ctx->aes_128_ccm;
+            return 1;
         case SMB2_ENCRYPTION_AES_128_GCM:
             *key_len = 16; *nonce_len = 12; *is_ccm = 0;
-            return ctx->aes_128_gcm;
+            return 1;
         case SMB2_ENCRYPTION_AES_256_CCM:
             *key_len = 32; *nonce_len = 11; *is_ccm = 1;
-            return ctx->aes_256_ccm;
+            return 1;
         case SMB2_ENCRYPTION_AES_256_GCM:
             *key_len = 32; *nonce_len = 12; *is_ccm = 0;
-            return ctx->aes_256_gcm;
+            return 1;
         default:
-            return NULL;
+            return 0;
     } /* switch */
 } /* smb_cipher_for_id */
 
@@ -205,14 +186,13 @@ chimera_smb_encrypt_compound(
 {
     struct smb2_transform_header *th;
     struct evpl_iovec_cursor      cursor;
-    EVP_CIPHER                   *cipher;
-    EVP_CIPHER_CTX               *c = ctx->cctx;
+    int                           cipher;
     uint8_t                      *out, *ct;
     uint8_t                       nonce[16];
     size_t                        ck_len;
-    int                           nonce_len, is_ccm, outl, total;
+    int                           nonce_len, is_ccm, total;
 
-    cipher = smb_cipher_for_id(ctx, cipher_id, &ck_len, &nonce_len, &is_ccm);
+    cipher = smb_cipher_for_id(cipher_id, &ck_len, &nonce_len, &is_ccm);
 
     if (!cipher || ck_len != key_len) {
         chimera_smb2_error("Invalid cipher/key for SMB3 encryption (id 0x%x)", cipher_id);
@@ -249,33 +229,10 @@ chimera_smb_encrypt_compound(
     th->flags                 = SMB2_TRANSFORM_FLAGS_ENCRYPTED;
     th->session_id            = session_id;
 
-    if (EVP_EncryptInit_ex(c, cipher, NULL, NULL, NULL) != 1) {
+    if (!chimera_crypto_aead_crypt(ctx->aead, 1, is_ccm, key, key_len,
+                                   nonce, nonce_len, ((uint8_t *) th) + SMB2_TRANSFORM_AAD_OFFSET,
+                                   SMB2_TRANSFORM_AAD_SIZE, ct, plain_len, th->signature)) {
         goto err;
-    }
-
-    if (is_ccm) {
-        if (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_IVLEN, nonce_len, NULL) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_TAG, 16, NULL) != 1 ||
-            EVP_EncryptInit_ex(c, NULL, NULL, key, nonce) != 1 ||
-            /* CCM: declare total plaintext length, then AAD length, up front. */
-            EVP_EncryptUpdate(c, NULL, &outl, NULL, plain_len) != 1 ||
-            EVP_EncryptUpdate(c, NULL, &outl, ((uint8_t *) th) + SMB2_TRANSFORM_AAD_OFFSET,
-                              SMB2_TRANSFORM_AAD_SIZE) != 1 ||
-            EVP_EncryptUpdate(c, ct, &outl, ct, plain_len) != 1 ||
-            EVP_EncryptFinal_ex(c, ct + outl, &outl) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_GET_TAG, 16, th->signature) != 1) {
-            goto err;
-        }
-    } else {
-        if (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, nonce_len, NULL) != 1 ||
-            EVP_EncryptInit_ex(c, NULL, NULL, key, nonce) != 1 ||
-            EVP_EncryptUpdate(c, NULL, &outl, ((uint8_t *) th) + SMB2_TRANSFORM_AAD_OFFSET,
-                              SMB2_TRANSFORM_AAD_SIZE) != 1 ||
-            EVP_EncryptUpdate(c, ct, &outl, ct, plain_len) != 1 ||
-            EVP_EncryptFinal_ex(c, ct + outl, &outl) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, th->signature) != 1) {
-            goto err;
-        }
     }
 
     evpl_iovec_set_length(out_iov, total);
@@ -301,13 +258,12 @@ chimera_smb_decrypt_message(
 {
     struct smb2_transform_header th;
     static const uint8_t         proto[4] = SMB2_TRANSFORM_PROTO_ID;
-    EVP_CIPHER                  *cipher;
-    EVP_CIPHER_CTX              *c = ctx->cctx;
+    int                          cipher;
     uint8_t                     *pt;
     size_t                       ck_len;
-    int                          nonce_len, is_ccm, outl, ct_len;
+    int                          nonce_len, is_ccm, ct_len;
 
-    cipher = smb_cipher_for_id(ctx, cipher_id, &ck_len, &nonce_len, &is_ccm);
+    cipher = smb_cipher_for_id(cipher_id, &ck_len, &nonce_len, &is_ccm);
 
     if (!cipher || ck_len != key_len) {
         chimera_smb2_error("Invalid cipher/key for SMB3 decryption (id 0x%x)", cipher_id);
@@ -344,36 +300,10 @@ chimera_smb_decrypt_message(
     /* Gather ciphertext into the output buffer; AEAD decrypts it in place. */
     evpl_iovec_cursor_copy(cursor, pt, ct_len);
 
-    if (EVP_DecryptInit_ex(c, cipher, NULL, NULL, NULL) != 1) {
+    if (!chimera_crypto_aead_crypt(ctx->aead, 0, is_ccm, key, key_len,
+                                   th.nonce, nonce_len, ((uint8_t *) &th) + SMB2_TRANSFORM_AAD_OFFSET,
+                                   SMB2_TRANSFORM_AAD_SIZE, pt, ct_len, th.signature)) {
         goto err;
-    }
-
-    if (is_ccm) {
-        if (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_IVLEN, nonce_len, NULL) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_TAG, 16, th.signature) != 1 ||
-            EVP_DecryptInit_ex(c, NULL, NULL, key, th.nonce) != 1 ||
-            EVP_DecryptUpdate(c, NULL, &outl, NULL, ct_len) != 1 ||
-            EVP_DecryptUpdate(c, NULL, &outl, ((uint8_t *) &th) + SMB2_TRANSFORM_AAD_OFFSET,
-                              SMB2_TRANSFORM_AAD_SIZE) != 1) {
-            goto err;
-        }
-        /* For CCM the ciphertext-processing update returns <=0 on tag failure. */
-        if (EVP_DecryptUpdate(c, pt, &outl, pt, ct_len) <= 0) {
-            goto err;
-        }
-    } else {
-        if (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, nonce_len, NULL) != 1 ||
-            EVP_DecryptInit_ex(c, NULL, NULL, key, th.nonce) != 1 ||
-            EVP_DecryptUpdate(c, NULL, &outl, ((uint8_t *) &th) + SMB2_TRANSFORM_AAD_OFFSET,
-                              SMB2_TRANSFORM_AAD_SIZE) != 1 ||
-            EVP_DecryptUpdate(c, pt, &outl, pt, ct_len) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_TAG, 16, th.signature) != 1) {
-            goto err;
-        }
-        /* GCM verifies the tag at finalization. */
-        if (EVP_DecryptFinal_ex(c, pt + outl, &outl) <= 0) {
-            goto err;
-        }
     }
 
     evpl_iovec_set_length(plain_out, ct_len);

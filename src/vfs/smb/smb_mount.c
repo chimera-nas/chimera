@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,20 +93,20 @@ chimera_smb_client_server_alloc(struct chimera_smb_client_shared *shared)
     struct chimera_smb_client_server *server = NULL;
     int                               i;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     for (i = 0; i < shared->max_servers; i++) {
         if (!shared->servers[i]) {
             server         = calloc(1, sizeof(*server));
             server->index  = i;
             server->in_use = 1;
-            pthread_mutex_init(&server->path_lock, NULL);
+            evpl_mutex_init(&server->path_lock, NULL);
             shared->servers[i] = server;
             break;
         }
     }
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     return server;
 } /* chimera_smb_client_server_alloc */

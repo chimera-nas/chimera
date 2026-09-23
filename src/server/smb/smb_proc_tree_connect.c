@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/atomic.h"
+#include "common/thread.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "common/misc.h"
@@ -37,7 +39,7 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
 
     if (!request->tree_connect.is_ipc) {
 
-        pthread_mutex_lock(&shared->shares_lock);
+        evpl_mutex_lock(&shared->shares_lock);
 
         LL_FOREACH(shared->shares, cur_share)
         {
@@ -51,10 +53,10 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
          * cannot race chimera_smb_remove_share unlinking and releasing the
          * share between the lookup and the store into tree->share. */
         if (share) {
-            __atomic_fetch_add(&share->refcnt, 1, __ATOMIC_RELAXED);
+            chimera_atomic_fetch_add(&share->refcnt, 1, CHIMERA_MEMORY_RELAXED);
         }
 
-        pthread_mutex_unlock(&shared->shares_lock);
+        evpl_mutex_unlock(&shared->shares_lock);
 
         if (!share) {
             chimera_smb_error("Received SMB2 TREE_CONNECT request for unknown share '%s'", request->tree_connect.path);
@@ -72,7 +74,7 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
     tree->type  = request->tree_connect.is_ipc ? CHIMERA_SMB_TREE_TYPE_PIPE : CHIMERA_SMB_TREE_TYPE_SHARE;
     tree->share = share;
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
 
     for (i = 1; i < session->max_trees; i++) {
 
@@ -95,7 +97,7 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
         if (unlikely(!grown)) {
             /* realloc failed: the original array is intact (not freed); reject
              * the tree connect rather than dereferencing NULL (MS-SMB2 3.3.5.7). */
-            pthread_mutex_unlock(&session->lock);
+            evpl_mutex_unlock(&session->lock);
             chimera_smb_complete_request(request, SMB2_STATUS_INSUFFICIENT_RESOURCES);
             return;
         }
@@ -112,7 +114,7 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
         session->trees[tree->tree_id] = tree;
     }
 
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
 
     request->tree = tree;
 

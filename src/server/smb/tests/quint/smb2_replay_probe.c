@@ -32,7 +32,7 @@
  * was applied once are indistinguishable if the only thing asserted is the
  * status code -- both say STATUS_SUCCESS.  Every exactly-once claim below is
  * therefore asserted on the EFFECT:
- *   - a replayed FILE_CREATE reports CreateAction = CREATED, which a second
+ *   - a replayed MBT_FILE_CREATE reports CreateAction = CREATED, which a second
  *     application could not (it would collide), and leaves exactly ONE open,
  *     proved by handing the file to a share-conflicting opener after a single
  *     CLOSE (R3);
@@ -48,7 +48,7 @@
  *                          a replay must carry a fresh one
  *   R2  eligibility     -- what makes a CREATE replayable at all: the DH2Q
  *                          context, or the durable GRANT?
- *   R3  exactly once    -- the core: a replayed FILE_CREATE is answered from
+ *   R3  exactly once    -- the core: a replayed MBT_FILE_CREATE is answered from
  *                          the original open and is NOT re-applied
  *   R4  classifier      -- the four outcomes of chimera's create_guid replay
  *                          classification: RECLAIM / DUPLICATE / DENIED / NONE
@@ -168,7 +168,7 @@ wait_parked(
     memcpy(dur.file_id, file_id, 16);
     memset(dur.create_guid, 0xFE, 16);   /* cannot match any real create */
 
-    st = smb2_create_dur(c, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(c, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     EXPECT(st == ST_OBJECT_NAME_NOT_FOUND,
            "park barrier: a wrong-CreateGuid DH2C is refused (0x%08x)", st);
@@ -184,8 +184,8 @@ file_size(
     uint32_t         *r_status)
 {
     struct smb2_create_out o;
-    uint32_t               st = smb2_create(c, name, FILE_OPEN, FILE_READ_ACCESS,
-                                            FILE_SHARE_RWD, NULL, &o);
+    uint32_t               st = smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                                            MBT_FILE_SHARE_RWD, NULL, &o);
 
     if (r_status) {
         *r_status = st;
@@ -246,7 +246,7 @@ sec_r1(struct smb2_env *env)
     c = smb2_conn_open(env);
     smb2_handshake(c);
 
-    st = smb2_create(c, "r1", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(c, "r1", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "R1 setup CREATE (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -258,7 +258,7 @@ sec_r1(struct smb2_env *env)
     /* A fresh MessageId carrying the replay flag is ACCEPTED -- establish that
      * first, so the drop below cannot be blamed on the flag. */
     smb2c_set_next_flags(c, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create(c, "r1", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(c, "r1", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS,
            "R1 a replay-flagged request with a FRESH MessageId is answered"
@@ -272,7 +272,7 @@ sec_r1(struct smb2_env *env)
 
     smb2c_pin_msg_id(c, reused);
     smb2c_set_next_flags(c, SMB2_FLAGS_REPLAY_OPERATION);
-    smb2_create_post(c, "r1", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD, NULL);
+    smb2_create_post(c, "r1", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL);
 
     r = pump_reply_or_drop(c);
     NOTE("R1 re-sent MessageId %" PRIu64 " -> %s", reused,
@@ -323,7 +323,7 @@ sec_r2(struct smb2_env *env)
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x21);
 
-    st = smb2_create_dur(a, "r2", FILE_CREATE, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(a, "r2", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &o);
     EXPECT(st == ST_SUCCESS, "R2 non-caching create with a DH2Q (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -331,20 +331,20 @@ sec_r2(struct smb2_env *env)
     }
     EXPECT(!o.has_dh2q,
            "R2 the durable request is REFUSED (no caching precondition)");
-    EXPECT(o.action == FILE_ACT_CREATED, "R2 the original action is CREATED");
+    EXPECT(o.action == MBT_FILE_ACT_CREATED, "R2 the original action is CREATED");
 
     /* ... and yet the create IS replayable. */
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r2", FILE_CREATE, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(a, "r2", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &dur, &r);
     NOTE("R2 replay of a NON-durable DH2Q create -> 0x%08x, same fid %d,"
          " action %u", st, memcmp(r.file_id, o.file_id, 16) == 0, r.action);
     EXPECT(st == ST_SUCCESS && memcmp(r.file_id, o.file_id, 16) == 0,
            "R2 a DH2Q create is replay-eligible even when NO durable handle was"
            " granted (0x%08x)", st);
-    EXPECT(r.action == FILE_ACT_CREATED,
+    EXPECT(r.action == MBT_FILE_ACT_CREATED,
            "R2 the replay echoes the ORIGINAL CreateAction (%u), which a"
-           " re-applied FILE_CREATE could not produce", r.action);
+           " re-applied MBT_FILE_CREATE could not produce", r.action);
     NOTE("R2 the replay reply: dh2q %d, %d context(s)", r.has_dh2q, r.nctx);
     EXPECT(!r.has_dh2q,
            "R2 ... and it advertises no durable grant, because none was made"
@@ -355,7 +355,7 @@ sec_r2(struct smb2_env *env)
 } /* sec_r2 */
 
 /* ------------------------------------------------------------------------
- * R3  EXACTLY ONCE: a replayed FILE_CREATE is answered, not re-applied.
+ * R3  EXACTLY ONCE: a replayed MBT_FILE_CREATE is answered, not re-applied.
  *
  * This is the property the whole ReplayCreate* family exists to test, and it
  * is the one place where asserting the status code alone would be worthless:
@@ -363,7 +363,7 @@ sec_r2(struct smb2_env *env)
  * independent effect-level oracles are used instead.
  *
  *   1. CreateAction.  The replay reports CREATED.  A genuine second
- *      application of FILE_CREATE against a file that now exists could not
+ *      application of MBT_FILE_CREATE against a file that now exists could not
  *      report CREATED -- it would report OBJECT_NAME_COLLISION.  R3a proves
  *      that premise on the same server before relying on it.
  *   2. Handle identity.  The reply carries the ORIGINAL FileId.
@@ -390,17 +390,17 @@ sec_r3(struct smb2_env *env)
     smb2_handshake(a);
     smb2_handshake(b);
 
-    /* (a) The premise: FILE_CREATE is NOT idempotent on this server. */
-    st = smb2_create(a, "r3ctl", FILE_CREATE, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    /* (a) The premise: MBT_FILE_CREATE is NOT idempotent on this server. */
+    st = smb2_create(a, "r3ctl", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
-    EXPECT(st == ST_SUCCESS && o.action == FILE_ACT_CREATED,
-           "R3a control: the first FILE_CREATE succeeds with action CREATED"
+    EXPECT(st == ST_SUCCESS && o.action == MBT_FILE_ACT_CREATED,
+           "R3a control: the first MBT_FILE_CREATE succeeds with action CREATED"
            " (0x%08x action %u)", st, o.action);
     smb2_close(a, o.file_id);
-    st = smb2_create(a, "r3ctl", FILE_CREATE, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r3ctl", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o2);
     EXPECT(st == ST_OBJECT_NAME_COLLISION,
-           "R3a control: a SECOND FILE_CREATE collides -- so 'action CREATED'"
+           "R3a control: a SECOND MBT_FILE_CREATE collides -- so 'action CREATED'"
            " below can only come from a cached reply (0x%08x)", st);
 
     /* (b) The original: durable, batch-oplocked, ShareAccess NONE. */
@@ -409,10 +409,10 @@ sec_r3(struct smb2_env *env)
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x31);
 
-    st = smb2_create_dur(a, "r3", FILE_CREATE, FILE_ALL_ACCESS,
+    st = smb2_create_dur(a, "r3", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                          0 /* ShareAccess NONE */, &oreq, &dur, &o);
-    EXPECT(st == ST_SUCCESS && o.action == FILE_ACT_CREATED && o.has_dh2q,
-           "R3b original durable FILE_CREATE (0x%08x action %u dh2q %d)",
+    EXPECT(st == ST_SUCCESS && o.action == MBT_FILE_ACT_CREATED && o.has_dh2q,
+           "R3b original durable MBT_FILE_CREATE (0x%08x action %u dh2q %d)",
            st, o.action, o.has_dh2q);
     if (st != ST_SUCCESS) {
         return;
@@ -420,14 +420,14 @@ sec_r3(struct smb2_env *env)
 
     /* (c) The replay: byte-identical request, fresh MessageId, replay flag. */
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r3", FILE_CREATE, FILE_ALL_ACCESS, 0, &oreq,
+    st = smb2_create_dur(a, "r3", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, 0, &oreq,
                          &dur, &r);
     EXPECT(st == ST_SUCCESS,
            "R3c the replay is answered SUCCESS, not OBJECT_NAME_COLLISION"
            " (0x%08x)", st);
     EXPECT(memcmp(r.file_id, o.file_id, 16) == 0,
            "R3c the replay returns the ORIGINAL FileId");
-    EXPECT(r.action == FILE_ACT_CREATED,
+    EXPECT(r.action == MBT_FILE_ACT_CREATED,
            "R3c the replay echoes CreateAction = CREATED (%u): the create was"
            " NOT re-evaluated", r.action);
     /* Whether the replay's reply re-advertises the durable grant is a wire
@@ -448,7 +448,7 @@ sec_r3(struct smb2_env *env)
            "R3d a SECOND close finds nothing -- the replay produced no second"
            " handle (0x%08x)", st);
     smb2_quiesce(env);
-    st = smb2_create(b, "r3", FILE_OPEN, FILE_ALL_ACCESS,
+    st = smb2_create(b, "r3", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
                      0 /* ShareAccess NONE */, NULL, &o2);
     EXPECT(st == ST_SUCCESS,
            "R3d ... and one CLOSE released the ShareAccess-NONE reservation:"
@@ -462,12 +462,12 @@ sec_r3(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x32);
-    st = smb2_create_dur(a, "r3e", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &o);
+    st = smb2_create_dur(a, "r3e", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q, "R3e original (0x%08x)", st);
 
-    st = smb2_create_dur(a, "r3e", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &r);
+    st = smb2_create_dur(a, "r3e", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &r);
     NOTE("R3e the identical create WITHOUT the replay flag -> 0x%08x", st);
     EXPECT(st == ST_DUPLICATE_OBJECTID,
            "R3e a NON-replay create colliding on CreateGuid is"
@@ -507,8 +507,8 @@ sec_r4(struct smb2_env *env)
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x44);
 
-    st = smb2_create_dur(a, "r4", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &o);
+    st = smb2_create_dur(a, "r4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q && o.has_lease,
            "R4 durable leased open (0x%08x dh2q %d lease %d)", st, o.has_dh2q,
            o.has_lease);
@@ -521,8 +521,8 @@ sec_r4(struct smb2_env *env)
     wait_parked(b, o.file_id);
 
     /* (1) DUPLICATE: a NON-replay create whose guid matches a parked open. */
-    st = smb2_create_dur(b, "r4", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &r);
+    st = smb2_create_dur(b, "r4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &r);
     EXPECT(st == ST_DUPLICATE_OBJECTID,
            "R4/DUPLICATE a non-replay create colliding with a PARKED open"
            " (0x%08x)", st);
@@ -530,8 +530,8 @@ sec_r4(struct smb2_env *env)
     /* (2) DENIED: a replay whose handle TYPE differs from the parked open's --
      * the parked open is leased, this replay carries no lease context. */
     smb2c_set_next_flags(b, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(b, "r4", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, NULL, &dur, &r);
+    st = smb2_create_dur(b, "r4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, NULL, &dur, &r);
     EXPECT(st == ST_ACCESS_DENIED,
            "R4/DENIED a replay of a LEASED parked open that carries no lease"
            " context -> ACCESS_DENIED (0x%08x)", st);
@@ -539,8 +539,8 @@ sec_r4(struct smb2_env *env)
     /* (2b) DENIED: right type, wrong lease key. */
     mk_lease(&wrongkey, 0x45, SMB2_LEASE_RWH);
     smb2c_set_next_flags(b, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(b, "r4", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &wrongkey, &dur, &r);
+    st = smb2_create_dur(b, "r4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &wrongkey, &dur, &r);
     EXPECT(st == ST_ACCESS_DENIED,
            "R4/DENIED a replay with the WRONG LeaseKey -> ACCESS_DENIED"
            " (0x%08x)", st);
@@ -557,9 +557,9 @@ sec_r4(struct smb2_env *env)
 
         fill_guid(other.create_guid, 0x46);
         smb2c_set_next_flags(b, SMB2_FLAGS_REPLAY_OPERATION);
-        st = smb2_create_dur(b, "r4b", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                             FILE_SHARE_RWD, NULL, &other, &r);
-        EXPECT(st == ST_SUCCESS && r.action == FILE_ACT_CREATED,
+        st = smb2_create_dur(b, "r4b", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, NULL, &other, &r);
+        EXPECT(st == ST_SUCCESS && r.action == MBT_FILE_ACT_CREATED,
                "R4/NONE a replay whose CreateGuid matches nothing is an"
                " ORDINARY create (0x%08x action %u)", st, r.action);
         if (st == ST_SUCCESS) {
@@ -569,8 +569,8 @@ sec_r4(struct smb2_env *env)
 
     /* (4) RECLAIM: the replay that matches, with the right handle type. */
     smb2c_set_next_flags(b, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(b, "r4", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &lreq, &dur, &r);
+    st = smb2_create_dur(b, "r4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &lreq, &dur, &r);
     EXPECT(st == ST_SUCCESS,
            "R4/RECLAIM a matching replay reclaims the parked open (0x%08x)",
            st);
@@ -617,15 +617,15 @@ sec_r5(struct smb2_env *env)
     a = smb2_conn_open(env);
     smb2_handshake(a);
 
-    st = smb2_create(a, "r5", FILE_CREATE, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r5", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
-    EXPECT(st == ST_SUCCESS && o.action == FILE_ACT_CREATED,
-           "R5 original FILE_CREATE, no create context (0x%08x)", st);
+    EXPECT(st == ST_SUCCESS && o.action == MBT_FILE_ACT_CREATED,
+           "R5 original MBT_FILE_CREATE, no create context (0x%08x)", st);
 
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create(a, "r5", FILE_CREATE, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r5", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &r);
-    NOTE("R5 replay-flagged FILE_CREATE without a DH2Q -> 0x%08x", st);
+    NOTE("R5 replay-flagged MBT_FILE_CREATE without a DH2Q -> 0x%08x", st);
     EXPECT(st == ST_OBJECT_NAME_COLLISION,
            "R5 the replay is EXECUTED, not answered: with no CreateGuid there"
            " is no key to answer from (0x%08x)", st);
@@ -666,7 +666,7 @@ sec_r6(struct smb2_env *env)
     smb2_handshake(a);
 
     /* The CREATE carries ChannelSequence 0, which seeds the Open. */
-    st = smb2_create(a, "r6", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r6", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "R6 open, seeding ChannelSequence 0 (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -772,7 +772,7 @@ sec_r7(struct smb2_env *env)
     smb2_handshake(a);
     smb2_handshake(w);
 
-    st = smb2_create(a, "r7", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r7", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "R7 open (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -866,10 +866,10 @@ sec_r8(struct smb2_env *env)
     a = smb2_conn_open(env);
     smb2_handshake(a);
 
-    st = smb2_create(a, "r8", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r8", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o1);
     EXPECT(st == ST_SUCCESS, "R8 first open (0x%08x)", st);
-    st = smb2_create(a, "r8", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r8", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o2);
     EXPECT(st == ST_SUCCESS, "R8 second open of the same file (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -923,7 +923,7 @@ sec_r9(struct smb2_env *env)
     a = smb2_conn_open(env);
     smb2_handshake(a);
 
-    st = smb2_create(a, "r9", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r9", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "R9 open (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -990,7 +990,7 @@ sec_r10(struct smb2_env *env)
     a = smb2_conn_open(env);
     smb2_handshake(a);
 
-    st = smb2_create(a, "r10", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r10", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "R10 open, mark seeded at 0 (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -1053,7 +1053,7 @@ sec_r11(struct smb2_env *env)
 
     /* The CREATE itself carries ChannelSequence 0x0100. */
     smb2c_set_next_channel_sequence(a, 0x0100);
-    st = smb2_create(a, "r11", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r11", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &o);
     EXPECT(st == ST_SUCCESS, "R11 CREATE at CS 0x0100 (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -1103,10 +1103,10 @@ sec_r12(struct smb2_env *env)
     /* Two handles on one file: one read-only, one writable.  Both are seeded
      * at ChannelSequence 0 by their CREATEs, so a request at 0x9000 is a jump
      * of +0x9000 -- STALE under the modular rule (R10a). */
-    st = smb2_create(a, "r12", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r12", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &rw);
     EXPECT(st == ST_SUCCESS, "R12 writable open (0x%08x)", st);
-    st = smb2_create(a, "r12", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r12", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &ro);
     EXPECT(st == ST_SUCCESS, "R12 read-only open of the same file (0x%08x)",
            st);
@@ -1184,8 +1184,8 @@ sec_r13(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x61);
-    st = smb2_create_dur(a, "r13a", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, NULL, &dur, &o);
+    st = smb2_create_dur(a, "r13a", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, NULL, &dur, &o);
     EXPECT(st == ST_SUCCESS, "R13/1 replay-eligible create (0x%08x)", st);
     {
         char     txt[8];
@@ -1194,8 +1194,8 @@ sec_r13(struct smb2_env *env)
         smb2_read(a, o.file_id, 0, 4, (uint8_t *) txt, &n);
     }
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r13a", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, NULL, &dur, &r);
+    st = smb2_create_dur(a, "r13a", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, NULL, &dur, &r);
     NOTE("R13/1 replay after a READ -> 0x%08x", st);
     EXPECT(st != ST_SUCCESS || memcmp(r.file_id, o.file_id, 16) != 0,
            "R13/1 a plain READ closes the window: the replay no longer"
@@ -1211,8 +1211,8 @@ sec_r13(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x62);
-    st = smb2_create_dur(a, "r13b", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &o);
+    st = smb2_create_dur(a, "r13b", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.oplock == SMB2_OPLOCK_LEVEL_BATCH,
            "R13/2 batch-oplocked replay-eligible create (0x%08x opl 0x%02x)",
            st, o.oplock);
@@ -1221,7 +1221,7 @@ sec_r13(struct smb2_env *env)
     }
 
     /* B's conflicting open breaks A's batch oplock. */
-    smb2_create_post(b, "r13b", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    smb2_create_post(b, "r13b", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL);
     smb2_quiesce(env);
     got = smb2_conn_pop_break(a, &brk);
@@ -1241,8 +1241,8 @@ sec_r13(struct smb2_env *env)
     smb2_quiesce(env);
 
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r13b", FILE_CREATE, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &r);
+    st = smb2_create_dur(a, "r13b", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &r);
     NOTE("R13/2 replay after an OPLOCK-form break ack -> 0x%08x, same fid %d",
          st, st == ST_SUCCESS ? memcmp(r.file_id, o.file_id, 16) == 0 : -1);
     EXPECT(st != ST_SUCCESS || memcmp(r.file_id, o.file_id, 16) != 0,
@@ -1280,10 +1280,10 @@ sec_r14(struct smb2_env *env)
     smb2_handshake(a);
     smb2_handshake(b);
 
-    st = smb2_create(a, "r14", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r14", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &oa);
     EXPECT(st == ST_SUCCESS, "R14 opener A (0x%08x)", st);
-    st = smb2_create(b, "r14", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(b, "r14", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &ob);
     EXPECT(st == ST_SUCCESS, "R14 opener B (0x%08x)", st);
     if (st != ST_SUCCESS) {
@@ -1362,13 +1362,13 @@ sec_r15(struct smb2_env *env)
     smb2_handshake(a);
 
     /* The control first: on a WRITABLE handle a SET_EOF really does resize. */
-    st = smb2_create(a, "r15", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r15", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &rw);
     EXPECT(st == ST_SUCCESS, "R15 writable open (0x%08x)", st);
     st = smb2_set_eof(a, rw.file_id, 4096);
     EXPECT(st == ST_SUCCESS, "R15 control: SET_EOF on a writable handle "
            "(0x%08x)", st);
-    st = smb2_create(a, "r15", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &chk);
     EXPECT(st == ST_SUCCESS && chk.end_of_file == 4096,
            "R15 control: the file is %llu bytes, expected 4096",
@@ -1376,7 +1376,7 @@ sec_r15(struct smb2_env *env)
     smb2_close(a, chk.file_id);
 
     /* A handle with FILE_READ_DATA and no FILE_WRITE_DATA. */
-    st = smb2_create(a, "r15", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &ro);
     EXPECT(st == ST_SUCCESS, "R15 read-only open (0x%08x)", st);
     st = smb2_set_eof(a, ro.file_id, 8192);
@@ -1389,7 +1389,7 @@ sec_r15(struct smb2_env *env)
                   "answered 0x%08x; MS-FSA 2.1.5.14 mandates "
                   "STATUS_ACCESS_DENIED", st);
     }
-    st = smb2_create(a, "r15", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &chk);
     if (st == ST_SUCCESS) {
         if (chk.end_of_file == 4096) {
@@ -1403,12 +1403,12 @@ sec_r15(struct smb2_env *env)
     }
     smb2_close(a, ro.file_id);
 
-    /* And an ATTRIBUTE-ONLY handle: FILE_READ_ATTRIBUTES alone, which is the
+    /* And an ATTRIBUTE-ONLY handle: MBT_FILE_READ_ATTRIBUTES alone, which is the
      * shape the generated corpus drew (an open whose DesiredAccess carries no
      * R/W/D at all).  It has strictly less access than the read-only handle
      * above, so a server that refuses one must refuse this. */
-    st = smb2_create(a, "r15", FILE_OPEN, FILE_READ_ATTRIBUTES,
-                     FILE_SHARE_RWD, NULL, &at);
+    st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
+                     MBT_FILE_SHARE_RWD, NULL, &at);
     EXPECT(st == ST_SUCCESS, "R15 attribute-only open (0x%08x)", st);
     if (st == ST_SUCCESS) {
         st = smb2_set_eof(a, at.file_id, 16384);
@@ -1465,8 +1465,8 @@ sec_r16(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x61);
-    st = smb2_create_dur(a, "r16", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &o);
+    st = smb2_create_dur(a, "r16", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.oplock == SMB2_OPLOCK_LEVEL_BATCH &&
            o.has_dh2q,
            "R16 original: BATCH + durable v2 (0x%08x oplock 0x%02x dh2q %d)",
@@ -1477,8 +1477,8 @@ sec_r16(struct smb2_env *env)
 
     /* The replay, same CreateGuid, asking for NO oplock at all. */
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r16", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, NULL, &dur, &r);
+    st = smb2_create_dur(a, "r16", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, NULL, &dur, &r);
     EXPECT(st == ST_SUCCESS && memcmp(r.file_id, o.file_id, 16) == 0,
            "R16 the replay returns the ORIGINAL handle (0x%08x)", st);
     EXPECT(r.oplock == SMB2_OPLOCK_LEVEL_NONE,
@@ -1491,8 +1491,8 @@ sec_r16(struct smb2_env *env)
     /* The same replay asking for BATCH: both come back. */
     mk_oplock(&oreq, SMB2_OPLOCK_LEVEL_BATCH);
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r16", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &r);
+    st = smb2_create_dur(a, "r16", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &r);
     EXPECT(st == ST_SUCCESS && memcmp(r.file_id, o.file_id, 16) == 0 &&
            r.oplock == SMB2_OPLOCK_LEVEL_BATCH && r.has_dh2q,
            "R16 asking for BATCH again reports BATCH and the durable grant "
@@ -1502,8 +1502,8 @@ sec_r16(struct smb2_env *env)
      * still no durable response -- LEVEL_II could not have earned one. */
     mk_oplock(&oreq, SMB2_OPLOCK_LEVEL_II);
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r16", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &r);
+    st = smb2_create_dur(a, "r16", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &r);
     EXPECT(st == ST_SUCCESS && r.oplock == SMB2_OPLOCK_LEVEL_II && !r.has_dh2q,
            "R16 a LEVEL_II replay echoes LEVEL_II with no durable response "
            "(0x%08x oplock 0x%02x dh2q %d)", st, r.oplock, r.has_dh2q);
@@ -1516,16 +1516,16 @@ sec_r16(struct smb2_env *env)
     fill_guid(dur.create_guid, 0x62);
     mk_lease(&oreq, 0x62, SMB2_LEASE_READ | SMB2_LEASE_HANDLE |
              SMB2_LEASE_WRITE);
-    st = smb2_create_dur(a, "r16b", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &o);
+    st = smb2_create_dur(a, "r16b", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.oplock == SMB2_OPLOCK_LEVEL_LEASE &&
            o.has_dh2q,
            "R16 lease original: RWH + durable v2 (0x%08x lease 0x%02x dh2q %d)",
            st, o.lease_state, o.has_dh2q);
     mk_lease(&oreq, 0x62, SMB2_LEASE_READ);
     smb2c_set_next_flags(a, SMB2_FLAGS_REPLAY_OPERATION);
-    st = smb2_create_dur(a, "r16b", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &r);
+    st = smb2_create_dur(a, "r16b", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &r);
     EXPECT(st == ST_SUCCESS && memcmp(r.file_id, o.file_id, 16) == 0,
            "R16 the lease replay returns the ORIGINAL handle (0x%08x)", st);
     EXPECT(r.lease_state == o.lease_state,
@@ -1571,8 +1571,8 @@ sec_r17(struct smb2_env *env)
     memset(&dur, 0, sizeof(dur));
     dur.dh2q = 1;
     fill_guid(dur.create_guid, 0x71);
-    st = smb2_create_dur(a, "r17", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                         FILE_SHARE_RWD, &oreq, &dur, &o);
+    st = smb2_create_dur(a, "r17", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                         MBT_FILE_SHARE_RWD, &oreq, &dur, &o);
     EXPECT(st == ST_SUCCESS && o.has_dh2q,
            "R17 durable batch open, seeded at ChannelSequence 0 (0x%08x)", st);
     if (st != ST_SUCCESS || !o.has_dh2q) {
@@ -1599,7 +1599,7 @@ sec_r17(struct smb2_env *env)
     memcpy(rec.file_id, o.file_id, 16);
     fill_guid(rec.create_guid, 0x71);
     smb2c_set_next_channel_sequence(b, 5);
-    st = smb2_create_dur(b, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    st = smb2_create_dur(b, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                          NULL, &rec, &r);
     EXPECT(st == ST_SUCCESS && memcmp(r.file_id, o.file_id, 16) == 0,
            "R17 the DH2C reclaim returns the original handle (0x%08x)", st);

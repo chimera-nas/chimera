@@ -187,7 +187,7 @@ sec_o1(
      * supported at all is the config-gated discretion -- enabled here). */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
-    smb2_create(a, "o1a", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o1a", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &o);
     EXPECT(o.status == ST_SUCCESS, "O1a CREATE(batch) -> 0x%08x", o.status);
     NOTE("O1a granted oplock level = %s (0x%02x)", oplock_name(o.oplock),
@@ -204,7 +204,7 @@ sec_o1(
     req.lease_key[0] = 0xA1;
     req.lease_state  = SMB2_LEASE_RWH;
     req.lease_epoch  = 1;
-    smb2_create(a, "o1b", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o1b", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &o);
     EXPECT(o.status == ST_SUCCESS, "O1b CREATE(lease RWH) -> 0x%08x", o.status);
     EXPECT(o.oplock == SMB2_OPLOCK_LEVEL_LEASE,
@@ -235,7 +235,7 @@ sec_o2(
     /* Holder A takes a batch oplock on a fresh file, sole opener. */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
-    smb2_create(a, "o2", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o2", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS && oa.oplock == SMB2_OPLOCK_LEVEL_BATCH,
            "O2 holder A granted BATCH");
@@ -243,8 +243,8 @@ sec_o2(
     /* Opener B does a conflicting read open.  MS-SMB2 3.3.4.6 / MS-FSA
      * 2.1.5.1.2: the batch oplock MUST break; the holder is notified and the
      * opener is deferred (STATUS_PENDING) until the holder acks. */
-    ob.status = conflicting_open(env, b, a, "o2", FILE_OPEN, FILE_READ_ACCESS,
-                                 FILE_SHARE_RWD, NULL, &ob, breaks, &nbreaks);
+    ob.status = conflicting_open(env, b, a, "o2", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                                 MBT_FILE_SHARE_RWD, NULL, &ob, breaks, &nbreaks);
 
     EXPECT(nbreaks >= 1, "O2 holder A received a break notification (%d)",
            nbreaks);
@@ -288,7 +288,7 @@ sec_o3(
     /* Writer B opens first with write access and NO caching request, so it
      * holds a writable handle but no cache to break. */
     memset(&req, 0, sizeof(req));
-    smb2_create(b, "o3", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(b, "o3", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 NULL, &ob);
     EXPECT(ob.status == ST_SUCCESS, "O3 writer B opened (no cache)");
 
@@ -298,7 +298,7 @@ sec_o3(
      * 3.3.5.9.9); RECORD it. */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_II;
-    smb2_create(a, "o3", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o3", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS, "O3 reader A opened");
     NOTE("O3 reader A granted oplock = %s while a writer is open",
@@ -402,7 +402,7 @@ sec_o4(
     req.lease_key[0] = 0xB4;
     req.lease_state  = SMB2_LEASE_RWH;
     req.lease_epoch  = 1;
-    smb2_create(a, "o4", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o4", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS && oa.has_lease &&
            oa.lease_state == SMB2_LEASE_RWH, "O4 holder A granted RWH lease");
@@ -417,8 +417,8 @@ sec_o4(
     breq.lease_key[0] = 0xB5;
     breq.lease_state  = SMB2_LEASE_RH;
     breq.lease_epoch  = 1;
-    conflicting_open(env, b, a, "o4", FILE_OPEN, FILE_READ_ACCESS,
-                     FILE_SHARE_RWD, &breq, &ob, breaks, &nbreaks);
+    conflicting_open(env, b, a, "o4", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, &breq, &ob, breaks, &nbreaks);
 
     EXPECT(nbreaks >= 1, "O4 holder A received a lease break (%d)", nbreaks);
     if (nbreaks >= 1) {
@@ -473,7 +473,7 @@ sec_o5(
 
     /* A holds a plain read open (no oplock), so there is a peer open but no
      * cache to break. */
-    smb2_create(a, "o5", FILE_OPEN_IF, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o5", MBT_FILE_OPEN_IF, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                 NULL, &oa);
     EXPECT(oa.status == ST_SUCCESS, "O5 peer A opened (no oplock)");
 
@@ -486,8 +486,8 @@ sec_o5(
      * plain (non-parking) open; use the driving helper regardless. */
     struct smb2_break breaks[8];
     int               nbr = 0;
-    conflicting_open(env, b, a, "o5", FILE_OPEN, FILE_READ_ACCESS,
-                     FILE_SHARE_RWD, &req, &ob, breaks, &nbr);
+    conflicting_open(env, b, a, "o5", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, &req, &ob, breaks, &nbr);
     EXPECT(ob.status == ST_SUCCESS, "O5 B's CREATE(batch request) succeeds");
     NOTE("O5 B granted oplock = %s while peer A is open", oplock_name(ob.oplock));
     /* MS-FSA 2.1.5.17.2: an exclusive/batch oplock is granted only when the
@@ -575,14 +575,14 @@ sec_o6(
     /* --- O6a: batch holder, share-compatible conflicting open --- */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
-    smb2_create(a, "o6a", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o6a", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS && oa.oplock == SMB2_OPLOCK_LEVEL_BATCH,
            "O6a holder A granted BATCH");
 
     ninterim0 = b->ninterim;
     nreply0   = b->nreply_app;
-    smb2_create_post(b, "o6a", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    smb2_create_post(b, "o6a", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL);
     /* Drive the whole server to quiescence (smb2_mbt_common.h): B's thread has
      * to run the CREATE before A's thread has a break to flush, so this is a
@@ -629,14 +629,14 @@ sec_o6(
      * caching wait, and that path emits NO async interim. --- */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
-    smb2_create(a, "o6b", FILE_OPEN_IF, FILE_ALL_ACCESS, 0 /* share NONE */,
+    smb2_create(a, "o6b", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, 0 /* share NONE */,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS && oa.oplock == SMB2_OPLOCK_LEVEL_BATCH,
            "O6b holder A granted BATCH with ShareAccess=NONE");
 
     ninterim0 = b->ninterim;
     nreply0   = b->nreply_app;
-    smb2_create_post(b, "o6b", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    smb2_create_post(b, "o6b", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL);
     smb2_quiesce(env);
     got_reply = (b->nreply_app > nreply0);
@@ -706,7 +706,7 @@ sec_o7(
     req.lease_key[0] = 0xC7;
     req.lease_state  = SMB2_LEASE_RWH;
     req.lease_epoch  = 1;
-    smb2_create(a, "o7", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o7", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &o1);
     EXPECT(o1.status == ST_SUCCESS && o1.lease_state == SMB2_LEASE_RWH,
            "O7 first open under key C7 granted RWH");
@@ -717,7 +717,7 @@ sec_o7(
     req.lease_key[0] = 0xC7;
     req.lease_state  = SMB2_LEASE_READ;
     req.lease_epoch  = 1;
-    smb2_create(a, "o7", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o7", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &o2);
     EXPECT(o2.status == ST_SUCCESS, "O7 second open under key C7 succeeds");
     NOTE("O7 second same-key open reports lease=%s epoch=%u (first: %s epoch=%u)",
@@ -736,8 +736,8 @@ sec_o7(
     breq.lease_key[0] = 0xC8;
     breq.lease_state  = SMB2_LEASE_RH;
     breq.lease_epoch  = 1;
-    conflicting_open(env, b, a, "o7", FILE_OPEN, FILE_READ_ACCESS,
-                     FILE_SHARE_RWD, &breq, &ob, breaks, &nbreaks);
+    conflicting_open(env, b, a, "o7", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, &breq, &ob, breaks, &nbreaks);
     NOTE("O7 conflicting open produced %d break notification(s) for the "
          "coalesced lease", nbreaks);
     EXPECT(nbreaks == 1,
@@ -774,13 +774,13 @@ sec_o8(
     /* A takes a LEVEL_II (read-cache-only) oplock as the sole opener. */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_II;
-    smb2_create(a, "o8", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o8", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS, "O8 holder A opened");
     NOTE("O8 A granted oplock = %s", oplock_name(oa.oplock));
 
     /* B opens for write and writes: A's read cache must be invalidated. */
-    smb2_create(b, "o8", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD, NULL, &ob);
+    smb2_create(b, "o8", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &ob);
     EXPECT(ob.status == ST_SUCCESS, "O8 writer B opened");
 
     smb2_write_post(b, ob.file_id, 0, data, 1);
@@ -828,7 +828,7 @@ sec_o9(
     req.force_v1     = 1;
     req.lease_key[0] = 0xD9;
     req.lease_state  = SMB2_LEASE_RWH;
-    smb2_create(a, "o9", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "o9", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     EXPECT(oa.status == ST_SUCCESS && oa.has_lease,
            "O9 v1 RqLs open granted a lease");
@@ -840,8 +840,8 @@ sec_o9(
     breq.force_v1     = 1;
     breq.lease_key[0] = 0xDA;
     breq.lease_state  = SMB2_LEASE_RH;
-    conflicting_open(env, b, a, "o9", FILE_OPEN, FILE_READ_ACCESS,
-                     FILE_SHARE_RWD, &breq, &ob, breaks, &nbreaks);
+    conflicting_open(env, b, a, "o9", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, &breq, &ob, breaks, &nbreaks);
     EXPECT(nbreaks >= 1, "O9 the v1 write lease breaks (%d)", nbreaks);
     if (nbreaks >= 1) {
         NOTE("O9 v1 break: cur=%s new=%s epoch=%u",
@@ -880,7 +880,7 @@ sec_o10(void)
 
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
-    smb2_create(a, "f1", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "f1", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &o);
     EXPECT(o.status == ST_SUCCESS, "O10 CREATE(batch) on a force-level-2 share");
     NOTE("O10 batch request granted %s", oplock_name(o.oplock));
@@ -894,7 +894,7 @@ sec_o10(void)
     req.lease_key[0] = 0xF2;
     req.lease_state  = SMB2_LEASE_RWH;
     req.lease_epoch  = 1;
-    smb2_create(a, "f2", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "f2", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &o);
     EXPECT(o.status == ST_SUCCESS, "O10 CREATE(lease RWH) on a force-level-2 share");
     NOTE("O10 RWH lease request granted %s", lease_str(o.lease_state));
@@ -909,7 +909,7 @@ sec_o10(void)
 
 /* A generated trace draws DesiredAccess / ShareAccess / CreateDisposition
  * independently of the oplock request, so the model must know the grant rule
- * for the whole matrix, not just for the FILE_ALL_ACCESS / share-everything
+ * for the whole matrix, not just for the MBT_FILE_ALL_ACCESS / share-everything
  * corner O1 pins.  Every open here is the SOLE open of a FRESH file, so
  * MS-FSA 2.1.5.17.1 says the requested oplock is grantable in every row; the
  * probe RECORDS what chimera returns (the grant level is discretion --
@@ -925,23 +925,23 @@ sec_o11(
         uint32_t    access;
         uint32_t    share;
     } rows[] = {
-        { "OPEN_IF  RA|RD|WD  share RWD",  FILE_OPEN_IF,
-          0x80u | 0x01u | 0x02u, FILE_SHARE_RWD },
-        { "OPEN_IF  RA|WD     share RWD",  FILE_OPEN_IF,
-          0x80u | 0x02u, FILE_SHARE_RWD },
-        { "OPEN_IF  RA|RD     share RWD",  FILE_OPEN_IF,
-          0x80u | 0x01u, FILE_SHARE_RWD },
-        { "OPEN_IF  RA|RD|WD  share R",    FILE_OPEN_IF,
-          0x80u | 0x01u | 0x02u, FILE_SHARE_READ },
-        { "OPEN_IF  RA|RD|WD  share -",    FILE_OPEN_IF,
+        { "OPEN_IF  RA|RD|WD  share RWD",  MBT_FILE_OPEN_IF,
+          0x80u | 0x01u | 0x02u, MBT_FILE_SHARE_RWD },
+        { "OPEN_IF  RA|WD     share RWD",  MBT_FILE_OPEN_IF,
+          0x80u | 0x02u, MBT_FILE_SHARE_RWD },
+        { "OPEN_IF  RA|RD     share RWD",  MBT_FILE_OPEN_IF,
+          0x80u | 0x01u, MBT_FILE_SHARE_RWD },
+        { "OPEN_IF  RA|RD|WD  share R",    MBT_FILE_OPEN_IF,
+          0x80u | 0x01u | 0x02u, MBT_FILE_SHARE_READ },
+        { "OPEN_IF  RA|RD|WD  share -",    MBT_FILE_OPEN_IF,
           0x80u | 0x01u | 0x02u, 0 },
-        { "OVERWRITE_IF RA|WD share R",    FILE_OVERWRITE_IF,
-          0x80u | 0x02u, FILE_SHARE_READ },
-        { "OPEN_IF  RA|RD|WD|DEL sh RW",   FILE_OPEN_IF,
+        { "OVERWRITE_IF RA|WD share R",    MBT_FILE_OVERWRITE_IF,
+          0x80u | 0x02u, MBT_FILE_SHARE_READ },
+        { "OPEN_IF  RA|RD|WD|DEL sh RW",   MBT_FILE_OPEN_IF,
           0x80u | 0x01u | 0x02u | 0x00010000u,
-          FILE_SHARE_READ | FILE_SHARE_WRITE },
-        { "OPEN_IF  ALL_ACCESS share RWD", FILE_OPEN_IF,        FILE_ALL_ACCESS,
-          FILE_SHARE_RWD },
+          MBT_FILE_SHARE_READ | MBT_FILE_SHARE_WRITE },
+        { "OPEN_IF  ALL_ACCESS share RWD", MBT_FILE_OPEN_IF,        MBT_FILE_ALL_ACCESS,
+          MBT_FILE_SHARE_RWD },
     };
     int n = (int) (sizeof(rows) / sizeof(rows[0]));
 
@@ -1203,8 +1203,8 @@ sec_o12(
         struct smb2_oplock_req *peer_reqp = NULL;
         struct smb2_break       breaks[8];
         int                     nbreaks     = 0;
-        uint32_t                peer_access = FILE_READ_ACCESS;
-        uint32_t                req_access  = FILE_READ_ACCESS;
+        uint32_t                peer_access = MBT_FILE_READ_ACCESS;
+        uint32_t                req_access  = MBT_FILE_READ_ACCESS;
         char                    name[32];
         int                     has_w;
 
@@ -1234,8 +1234,8 @@ sec_o12(
         snprintf(name, sizeof(name), "o12_%d", i);
 
         if (peer) {
-            smb2_create(peer, name, FILE_OPEN_IF, peer_access,
-                        FILE_SHARE_RWD, peer_reqp, &po);
+            smb2_create(peer, name, MBT_FILE_OPEN_IF, peer_access,
+                        MBT_FILE_SHARE_RWD, peer_reqp, &po);
             EXPECT(po.status == ST_SUCCESS,
                    "O12[%d] peer open (%s) -> 0x%08x", i,
                    o12_peer_name(rows[i].peer), po.status);
@@ -1282,8 +1282,8 @@ sec_o12(
          * behind a break still completes (and the break is counted) instead of
          * hanging the probe.  No row here is expected to break anything: every
          * peer holds an open, never a cache. */
-        conflicting_open(env, a, peer ? peer : a, name, FILE_OPEN_IF,
-                         req_access, FILE_SHARE_RWD, &req, &o,
+        conflicting_open(env, a, peer ? peer : a, name, MBT_FILE_OPEN_IF,
+                         req_access, MBT_FILE_SHARE_RWD, &req, &o,
                          breaks, &nbreaks);
         EXPECT(o.status == ST_SUCCESS, "O12[%d] requester CREATE -> 0x%08x", i,
                o.status);

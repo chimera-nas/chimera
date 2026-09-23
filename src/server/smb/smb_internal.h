@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include "common/atomic.h"
+#include "common/thread.h"
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -11,9 +14,15 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <utlist.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <netinet/in.h>
+#endif // ifdef _WIN32
+#ifdef CHIMERA_HAVE_GSSAPI
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_krb5.h>
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "common/macros.h"
@@ -276,9 +285,11 @@ struct chimera_smb_config {
     struct chimera_smb_auth_config auth;
 };
 
+#pragma pack(push, 1)
 struct netbios_header {
     uint32_t word;
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 struct chimera_smb_share {
     /* References keeping this share alive: one for its place on
@@ -334,7 +345,7 @@ chimera_smb_share_release(struct chimera_smb_share *share)
         return;
     }
 
-    if (__atomic_sub_fetch(&share->refcnt, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (chimera_atomic_sub_fetch(&share->refcnt, 1, CHIMERA_MEMORY_ACQ_REL) == 0) {
         chimera_smb_sharemode_destroy(&share->sharemode);
         free(share);
     }
@@ -1287,7 +1298,9 @@ struct chimera_smb_session_handle {
     uint8_t                            is_channel;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
+#ifdef CHIMERA_HAVE_GSSAPI
     gss_ctx_id_t                       ctx;
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 };
 
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
@@ -1328,11 +1341,13 @@ struct chimera_smb_notify_request;
 #define CHIMERA_SMB_MAX_CREDITS                     8192
 
 struct chimera_smb_conn {
+#ifdef CHIMERA_HAVE_GSSAPI
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
     OM_uint32                          gss_flags;
     gss_ctx_id_t                       nascent_ctx;
     gss_buffer_desc                    gss_output;
+#endif // ifdef CHIMERA_HAVE_GSSAPI
     struct smb_ntlm_ctx                ntlm_ctx;
     struct smb_gssapi_ctx              gssapi_ctx;
     uint8_t                           *ntlm_output;
@@ -1445,7 +1460,7 @@ struct chimera_smb_conn {
         uint16_t preauth_hash_alg;          /* 0 or SMB2_PREAUTH_HASH_SHA_512 */
         uint16_t cipher_id;                 /* 0 or SMB2_ENCRYPTION_* */
         uint16_t signing_alg;               /* SMB2_SIGNING_* */
-        uint16_t compression_flags;         /* SMB2_COMPRESSION_FLAG_* */
+        uint32_t compression_flags;         /* SMB2_COMPRESSION_FLAG_* */
         uint8_t  preauth_salt[32];          /* server-generated; Phase 2 will hash */
         uint8_t  compression_alg_count;
         uint8_t  rdma_transform_count;
@@ -1686,7 +1701,7 @@ struct chimera_smb_durable_entry {
 };
 
 struct chimera_smb_durable_table {
-    pthread_mutex_t                   lock;
+    evpl_mutex_t                      lock;
     struct chimera_smb_durable_entry *by_pid;
 };
 
@@ -1722,8 +1737,10 @@ struct chimera_server_smb_shared {
      * at startup from a stable per-host id (see chimera_smb_server_init).  The
      * LSARPC/SAMR services issue domain-relative SIDs under this. */
     uint32_t                          machine_domain_sub[3];
+#ifdef CHIMERA_HAVE_GSSAPI
     gss_name_t                        svc;
     gss_cred_id_t                     srv_cred;
+#endif // ifdef CHIMERA_HAVE_GSSAPI
     struct chimera_vfs               *vfs;
     struct prometheus_metrics        *metrics;
     struct evpl_endpoint             *endpoint;
@@ -1731,16 +1748,16 @@ struct chimera_server_smb_shared {
     struct evpl_listener             *listener;
     struct chimera_smb_session       *sessions;
     struct chimera_smb_session       *free_sessions;
-    pthread_mutex_t                   sessions_lock;
+    evpl_mutex_t                      sessions_lock;
     struct chimera_smb_share         *shares;
-    pthread_mutex_t                   shares_lock;
+    evpl_mutex_t                      shares_lock;
     /* Set when any share has encrypt_data enabled.  Used by SESSION_SETUP to
      * decide whether to derive per-session encryption keys even when the global
      * smb_encryption knob is off (a client may still tree-connect to a
      * per-share-encrypted share). */
     int                               any_share_encrypt;
     struct chimera_smb_tree          *free_trees;
-    pthread_mutex_t                   trees_lock;
+    evpl_mutex_t                      trees_lock;
     /* Monotonic, process-global allocator for file persistent ids.  Replaces
      * the old per-tree counter so persistent ids stay unique across tree
      * teardowns — a precondition for durable-handle reconnect lookup. */
@@ -1752,7 +1769,7 @@ struct chimera_server_smb_shared {
      * OPLOCK_BREAK ack settles a lease that a CREATE parked on another thread is
      * waiting for. */
     struct chimera_server_smb_thread *threads;
-    pthread_mutex_t                   threads_lock;
+    evpl_mutex_t                      threads_lock;
 };
 
 /* Forward decl so the inline open_file release paths can call into
@@ -2011,7 +2028,7 @@ struct chimera_server_smb_thread {
      * then ring the doorbell so the SMB thread processes them. */
     struct evpl_doorbell                notify_doorbell;
     struct chimera_smb_notify_request  *notify_ready;
-    pthread_mutex_t                     notify_ready_lock;
+    evpl_mutex_t                        notify_ready_lock;
 
     /* Lease-break doorbell: a lease break_cb may fire on any thread (the
      * breaker's), but the OPLOCK_BREAK notification must be sent on the holder
@@ -2022,7 +2039,7 @@ struct chimera_server_smb_thread {
      * run on this thread, so draining on disconnect needs no extra sync. */
     struct evpl_doorbell                lease_break_doorbell;
     struct chimera_smb_lease_break_msg *lease_break_ready;
-    pthread_mutex_t                     lease_break_lock;
+    evpl_mutex_t                        lease_break_lock;
     /* Count of compounds this thread is currently processing (dispatch ..
      * reply).  A break_cb that queues a notification while this is non-zero
      * skips the doorbell: the in-flight request's reply path flushes the queue
@@ -2183,7 +2200,7 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
 {
     struct chimera_smb_session *session;
 
-    pthread_mutex_lock(&shared->sessions_lock);
+    evpl_mutex_lock(&shared->sessions_lock);
 
     session = shared->free_sessions;
 
@@ -2191,7 +2208,7 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
         LL_DELETE(shared->free_sessions, session);
     } else {
         session = chimera_smb_session_create();
-        pthread_mutex_init(&session->lock, NULL);
+        evpl_mutex_init(&session->lock, NULL);
     }
 
     /* Keep the session id within 32 bits (non-zero).  The wire field is 64
@@ -2206,7 +2223,7 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
     session->refcnt       = 1;
     session->num_channels = 0;
 
-    pthread_mutex_unlock(&shared->sessions_lock);
+    evpl_mutex_unlock(&shared->sessions_lock);
 
 
     return session;
@@ -2217,13 +2234,13 @@ chimera_smb_session_authorize(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_session       *session)
 {
-    pthread_mutex_lock(&shared->sessions_lock);
+    evpl_mutex_lock(&shared->sessions_lock);
 
     session->flags |= CHIMERA_SMB_SESSION_AUTHORIZED;
 
     HASH_ADD(hh, shared->sessions, session_id, sizeof(uint64_t), session);
 
-    pthread_mutex_unlock(&shared->sessions_lock);
+    evpl_mutex_unlock(&shared->sessions_lock);
 
 
 } // chimera_smb_session_authorize
@@ -2235,14 +2252,14 @@ chimera_smb_session_lookup(
 {
     struct chimera_smb_session *session;
 
-    pthread_mutex_lock(&shared->sessions_lock);
+    evpl_mutex_lock(&shared->sessions_lock);
     HASH_FIND(hh, shared->sessions, &session_id, sizeof(uint64_t), session);
 
     if (session) {
         session->refcnt++;
     }
 
-    pthread_mutex_unlock(&shared->sessions_lock);
+    evpl_mutex_unlock(&shared->sessions_lock);
 
     return session;
 } /* chimera_smb_session_lookup */
@@ -2263,7 +2280,7 @@ chimera_smb_session_release(
      * set, increment, or HASH_ADD.  Releasing under session->lock instead would
      * race the lookup refcnt++ (lost update -> premature free) and modify the
      * shared hash unprotected (double HASH_DEL on an emptied table crashes). */
-    pthread_mutex_lock(&shared->sessions_lock);
+    evpl_mutex_lock(&shared->sessions_lock);
 
     chimera_smb_abort_if(session->refcnt == 0, "session refcnt is 0 at release");
 
@@ -2276,7 +2293,7 @@ chimera_smb_session_release(
         }
     }
 
-    pthread_mutex_unlock(&shared->sessions_lock);
+    evpl_mutex_unlock(&shared->sessions_lock);
 
     if (destroy) {
 
@@ -2289,11 +2306,11 @@ chimera_smb_session_release(
             }
         }
 
-        pthread_mutex_lock(&shared->sessions_lock);
+        evpl_mutex_lock(&shared->sessions_lock);
 
         LL_PREPEND(shared->free_sessions, session);
 
-        pthread_mutex_unlock(&shared->sessions_lock);
+        evpl_mutex_unlock(&shared->sessions_lock);
     }
 } /* chimera_smb_session_free */
 
@@ -2311,7 +2328,7 @@ chimera_smb_session_mark_deleted(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_session       *session)
 {
-    pthread_mutex_lock(&shared->sessions_lock);
+    evpl_mutex_lock(&shared->sessions_lock);
 
     if (session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) {
         session->flags |= CHIMERA_SMB_SESSION_DELETED;
@@ -2319,7 +2336,7 @@ chimera_smb_session_mark_deleted(
         HASH_DEL(shared->sessions, session);
     }
 
-    pthread_mutex_unlock(&shared->sessions_lock);
+    evpl_mutex_unlock(&shared->sessions_lock);
 } /* chimera_smb_session_mark_deleted */
 
 /* MS-SMB2 3.3.4.4 open-preservation rule: a durable open holding byte-range
@@ -2386,7 +2403,7 @@ chimera_smb_session_park_durables(
 {
     int i, b;
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
 
     for (i = 0; i < session->max_trees; i++) {
         struct chimera_smb_tree      *tree = session->trees[i];
@@ -2397,7 +2414,7 @@ chimera_smb_session_park_durables(
         }
 
         for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
-            pthread_mutex_lock(&tree->open_files_lock[b]);
+            evpl_mutex_lock(&tree->open_files_lock[b]);
             HASH_ITER(hh, tree->open_files[b], open_file, tmp)
             {
                 if ((!open_file->durable_flags && !open_file->resilient) ||
@@ -2414,11 +2431,11 @@ chimera_smb_session_park_durables(
                 open_file->create_conn = NULL;
                 chimera_smb_durable_park(shared, open_file);
             }
-            pthread_mutex_unlock(&tree->open_files_lock[b]);
+            evpl_mutex_unlock(&tree->open_files_lock[b]);
         }
     }
 
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
 } /* chimera_smb_session_park_durables */
 
 /* Complete every parked CHANGE_NOTIFY held by `session`'s opens with
@@ -2436,7 +2453,7 @@ chimera_smb_session_flush_notifies(struct chimera_smb_session *session)
 {
     int i, b;
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
 
     for (i = 0; i < session->max_trees; i++) {
         struct chimera_smb_tree      *tree = session->trees[i];
@@ -2447,18 +2464,18 @@ chimera_smb_session_flush_notifies(struct chimera_smb_session *session)
         }
 
         for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
-            pthread_mutex_lock(&tree->open_files_lock[b]);
+            evpl_mutex_lock(&tree->open_files_lock[b]);
             HASH_ITER(hh, tree->open_files[b], open_file, tmp)
             {
                 if (open_file->notify_state) {
                     chimera_smb_notify_queue_cleanup(open_file);
                 }
             }
-            pthread_mutex_unlock(&tree->open_files_lock[b]);
+            evpl_mutex_unlock(&tree->open_files_lock[b]);
         }
     }
 
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
 } /* chimera_smb_session_flush_notifies */
 
 /* MS-SMB2 3.3.5.5.3: a SESSION_SETUP carrying a non-zero PreviousSessionId asks
@@ -2484,7 +2501,7 @@ chimera_smb_session_invalidate_previous(
         return 0;
     }
 
-    pthread_mutex_lock(&shared->sessions_lock);
+    evpl_mutex_lock(&shared->sessions_lock);
 
     HASH_FIND(hh, shared->sessions, &prev_session_id, sizeof(uint64_t), prev);
 
@@ -2495,7 +2512,7 @@ chimera_smb_session_invalidate_previous(
          * the previous session's MUST be rejected.  Leave the previous session
          * intact and signal the caller to fail with USER_SESSION_DELETED. */
         if (prev->dialect != cur_dialect) {
-            pthread_mutex_unlock(&shared->sessions_lock);
+            evpl_mutex_unlock(&shared->sessions_lock);
             return 1;
         }
         /* Clear AUTHORIZED and unlink here so the later refcnt-driven
@@ -2509,7 +2526,7 @@ chimera_smb_session_invalidate_previous(
         prev = NULL;
     }
 
-    pthread_mutex_unlock(&shared->sessions_lock);
+    evpl_mutex_unlock(&shared->sessions_lock);
 
     if (prev) {
         chimera_smb_session_park_durables(shared, prev);
@@ -2666,7 +2683,7 @@ chimera_smb_conn_free(
      * a send against the bind we're about to free.  This runs on conn->thread,
      * the same thread as the lease-break doorbell handler, so the two never
      * interleave; only the cross-thread enqueue needs the lock. */
-    pthread_mutex_lock(&thread->lease_break_lock);
+    evpl_mutex_lock(&thread->lease_break_lock);
     conn->lease_break_tearing_down = 1;
     bpp                            = &thread->lease_break_ready;
     while (*bpp) {
@@ -2678,7 +2695,7 @@ chimera_smb_conn_free(
             bpp = &(*bpp)->next;
         }
     }
-    pthread_mutex_unlock(&thread->lease_break_lock);
+    evpl_mutex_unlock(&thread->lease_break_lock);
 
     /* Clear create_conn pointers on every open_file that references
      * this conn.  When the session refcount drops to zero below, the
@@ -2718,9 +2735,9 @@ chimera_smb_conn_free(
 
         /* num_channels still counts this channel here -- conn_free does not
          * release the session handles (and decrement it) until below. */
-        pthread_mutex_lock(&thread->shared->sessions_lock);
+        evpl_mutex_lock(&thread->shared->sessions_lock);
         sibling_channel = s->num_channels > 1;
-        pthread_mutex_unlock(&thread->shared->sessions_lock);
+        evpl_mutex_unlock(&thread->shared->sessions_lock);
 
         /* Walk the session's trees under session->lock, matching
          * chimera_smb_session_park_durables / _flush_notifies: a concurrent
@@ -2728,7 +2745,7 @@ chimera_smb_conn_free(
          * frees the tree under session->lock, so reading the slot and taking
          * tree->open_files_lock without it can touch a freed/recycled tree.  The
          * lock order session->lock -> open_files_lock matches those iterators. */
-        pthread_mutex_lock(&s->lock);
+        evpl_mutex_lock(&s->lock);
         for (i = 0; i < s->max_trees; i++) {
             struct chimera_smb_tree      *t = s->trees[i];
             struct chimera_smb_open_file *of;
@@ -2739,7 +2756,7 @@ chimera_smb_conn_free(
                 continue;
             }
             for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
-                pthread_mutex_lock(&t->open_files_lock[b]);
+                evpl_mutex_lock(&t->open_files_lock[b]);
                 HASH_ITER(hh, t->open_files[b], of, tmp_of)
                 {
                     if (of->create_conn == conn) {
@@ -2763,10 +2780,10 @@ chimera_smb_conn_free(
                         }
                     }
                 }
-                pthread_mutex_unlock(&t->open_files_lock[b]);
+                evpl_mutex_unlock(&t->open_files_lock[b]);
             }
         }
-        pthread_mutex_unlock(&s->lock);
+        evpl_mutex_unlock(&s->lock);
     }
 
     /* Resolve the undeliverable breaks collected above, now that no tree or
@@ -2805,6 +2822,7 @@ chimera_smb_conn_free(
     {
         HASH_DELETE(hh, conn->session_handles, session_handle);
 
+#ifdef CHIMERA_HAVE_GSSAPI
         if (session_handle->ctx != GSS_C_NO_CONTEXT) {
 
             chimera_smb_debug("chimera_smb_conn_free freeing context for "
@@ -2814,16 +2832,17 @@ chimera_smb_conn_free(
                                    &session_handle->ctx, NULL);
             session_handle->ctx = GSS_C_NO_CONTEXT;
         }
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 
         if (session_handle->session) {
             /* A bound additional channel is going away; free its slot so the
              * session can accept another channel later (MS-SMB2 §3.3.5.5.3). */
             if (session_handle->bound_channel) {
-                pthread_mutex_lock(&thread->shared->sessions_lock);
+                evpl_mutex_lock(&thread->shared->sessions_lock);
                 if (session_handle->session->num_channels > 0) {
                     session_handle->session->num_channels--;
                 }
-                pthread_mutex_unlock(&thread->shared->sessions_lock);
+                evpl_mutex_unlock(&thread->shared->sessions_lock);
                 session_handle->bound_channel = 0;
             }
 
@@ -2845,6 +2864,7 @@ chimera_smb_conn_free(
      * current session -- which then aborts in chimera_smb_logoff. */
     conn->last_session_handle = NULL;
 
+#ifdef CHIMERA_HAVE_GSSAPI
     if (conn->nascent_ctx != GSS_C_NO_CONTEXT) {
         gss_delete_sec_context(&conn->gss_minor, &conn->nascent_ctx, NULL);
         conn->nascent_ctx = GSS_C_NO_CONTEXT;
@@ -2855,6 +2875,7 @@ chimera_smb_conn_free(
         conn->gss_output.value  = NULL;
         conn->gss_output.length = 0;
     }
+#endif // ifdef CHIMERA_HAVE_GSSAPI
 
     if (conn->ntlm_output) {
         free(conn->ntlm_output);
@@ -2884,7 +2905,7 @@ chimera_smb_tree_alloc(struct chimera_server_smb_shared *shared)
 {
     struct chimera_smb_tree *tree;
 
-    pthread_mutex_lock(&shared->trees_lock);
+    evpl_mutex_lock(&shared->trees_lock);
 
     tree = shared->free_trees;
 
@@ -2894,16 +2915,16 @@ chimera_smb_tree_alloc(struct chimera_server_smb_shared *shared)
         tree = calloc(1, sizeof(*tree));
 
         for (int i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
-            pthread_mutex_init(&tree->open_files_lock[i], NULL);
+            evpl_mutex_init(&tree->open_files_lock[i], NULL);
         }
-        pthread_mutex_init(&tree->pending_creates_lock, NULL);
+        evpl_mutex_init(&tree->pending_creates_lock, NULL);
     }
 
     tree->fh_expiration.tv_sec  = 0;
     tree->fh_expiration.tv_nsec = 0;
     tree->refcnt                = 1;
 
-    pthread_mutex_unlock(&shared->trees_lock);
+    evpl_mutex_unlock(&shared->trees_lock);
     return tree;
 } /* chimera_smb_tree_alloc */
 
@@ -2925,7 +2946,7 @@ chimera_smb_tree_free(
 
     for (i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
 
-        pthread_mutex_lock(&tree->open_files_lock[i]);
+        evpl_mutex_lock(&tree->open_files_lock[i]);
 
         HASH_ITER(hh, tree->open_files[i], open_file, tmp)
         {
@@ -3045,7 +3066,7 @@ chimera_smb_tree_free(
             }
         }
 
-        pthread_mutex_unlock(&tree->open_files_lock[i]);
+        evpl_mutex_unlock(&tree->open_files_lock[i]);
     }
 
     /* Tear down notify state detached above, now that no bucket lock is held.
@@ -3092,13 +3113,13 @@ chimera_smb_tree_free(
      * FILE_NOT_AVAILABLE (a client's two tree connects share one client_guid).
      * Clear each entry's link as well, so the unregister those requests still run
      * when they resolve is a no-op instead of a walk against a recycled list. */
-    pthread_mutex_lock(&tree->pending_creates_lock);
+    evpl_mutex_lock(&tree->pending_creates_lock);
     while ((pcreate = tree->pending_creates)) {
         tree->pending_creates          = pcreate->create.pending_link;
         pcreate->create.pending_link   = NULL;
         pcreate->create.pending_linked = 0;
     }
-    pthread_mutex_unlock(&tree->pending_creates_lock);
+    evpl_mutex_unlock(&tree->pending_creates_lock);
 
     /* Every open on this tree has now released its sharemode reservation, so
      * the tree is done with the share: drop the reference taken at
@@ -3110,11 +3131,11 @@ chimera_smb_tree_free(
         tree->share = NULL;
     }
 
-    pthread_mutex_lock(&shared->trees_lock);
+    evpl_mutex_lock(&shared->trees_lock);
 
     LL_PREPEND(shared->free_trees, tree);
 
-    pthread_mutex_unlock(&shared->trees_lock);
+    evpl_mutex_unlock(&shared->trees_lock);
 } /* chimera_smb_tree_free */
 
 static inline struct chimera_smb_compound *
@@ -3182,7 +3203,7 @@ chimera_smb_open_file_resolve(
 
     open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
-    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
     HASH_FIND(hh, tree->open_files[open_file_bucket], file_id, sizeof(*file_id), open_file);
 
@@ -3201,7 +3222,7 @@ chimera_smb_open_file_resolve(
         }
     }
 
-    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
     /* Record the FileId this op resolved so a subsequent compound-related
      * request can inherit it (FileId 0xFFFF.../0xFFFF...).  Only CREATE used to
@@ -3286,7 +3307,7 @@ chimera_smb_open_file_resolve_by_lease_key(
     session = request->session_handle->session;
     chimera_smb_abort_if(!session, "session is NULL");
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
     for (t = 0; t < session->max_trees && !found; t++) {
         struct chimera_smb_tree *tree = session->trees[t];
 
@@ -3294,7 +3315,7 @@ chimera_smb_open_file_resolve_by_lease_key(
             continue;
         }
         for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !found; b++) {
-            pthread_mutex_lock(&tree->open_files_lock[b]);
+            evpl_mutex_lock(&tree->open_files_lock[b]);
             HASH_ITER(hh, tree->open_files[b], open_file, tmp)
             {
                 if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
@@ -3306,10 +3327,10 @@ chimera_smb_open_file_resolve_by_lease_key(
                     break;
                 }
             }
-            pthread_mutex_unlock(&tree->open_files_lock[b]);
+            evpl_mutex_unlock(&tree->open_files_lock[b]);
         }
     }
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
 
     return found;
 } /* chimera_smb_open_file_resolve_by_lease_key */
@@ -3334,7 +3355,7 @@ chimera_smb_session_lease_key_conflict(
     bool conflict = false;
     int  t;
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
     for (t = 0; t < session->max_trees && !conflict; t++) {
         struct chimera_smb_tree      *tree = session->trees[t];
         struct chimera_smb_open_file *of, *tmp;
@@ -3344,7 +3365,7 @@ chimera_smb_session_lease_key_conflict(
             continue;
         }
         for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !conflict; b++) {
-            pthread_mutex_lock(&tree->open_files_lock[b]);
+            evpl_mutex_lock(&tree->open_files_lock[b]);
             HASH_ITER(hh, tree->open_files[b], of, tmp)
             {
                 if (!(of->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
@@ -3357,10 +3378,10 @@ chimera_smb_session_lease_key_conflict(
                     break;
                 }
             }
-            pthread_mutex_unlock(&tree->open_files_lock[b]);
+            evpl_mutex_unlock(&tree->open_files_lock[b]);
         }
     }
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
     return conflict;
 } /* chimera_smb_session_lease_key_conflict */
 
@@ -3376,10 +3397,10 @@ chimera_smb_grant_add_member(
     struct chimera_vfs_claim_grant *grant,
     struct chimera_smb_open_file   *open_file)
 {
-    pthread_mutex_lock(&grant->file->lock);
+    evpl_mutex_lock(&grant->file->lock);
     open_file->grant_member_next = grant->members;
     grant->members               = open_file;
-    pthread_mutex_unlock(&grant->file->lock);
+    evpl_mutex_unlock(&grant->file->lock);
 } /* chimera_smb_grant_add_member */
 
 static inline void
@@ -3389,7 +3410,7 @@ chimera_smb_grant_remove_member(
 {
     struct chimera_smb_open_file **pp;
 
-    pthread_mutex_lock(&grant->file->lock);
+    evpl_mutex_lock(&grant->file->lock);
     for (pp = (struct chimera_smb_open_file **) &grant->members; *pp;
          pp = &(*pp)->grant_member_next) {
         if (*pp == open_file) {
@@ -3398,7 +3419,7 @@ chimera_smb_grant_remove_member(
         }
     }
     open_file->grant_member_next = NULL;
-    pthread_mutex_unlock(&grant->file->lock);
+    evpl_mutex_unlock(&grant->file->lock);
 } /* chimera_smb_grant_remove_member */
 
 static inline void
@@ -3419,7 +3440,7 @@ chimera_smb_open_file_release(
 
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
-    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
     chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at release");
 
@@ -3441,7 +3462,7 @@ chimera_smb_open_file_release(
         open_file_to_free = open_file;
     }
 
-    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
     if (open_file_to_free) {
         chimera_smb_open_file_free(request->compound->thread, open_file_to_free);
@@ -3467,7 +3488,7 @@ chimera_smb_open_file_release_nr(
 
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
-    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
     chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at release");
 
@@ -3486,7 +3507,7 @@ chimera_smb_open_file_release_nr(
         open_file_to_free = open_file;
     }
 
-    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
     if (open_file_to_free) {
         chimera_smb_open_file_free(thread, open_file_to_free);
@@ -3522,7 +3543,7 @@ chimera_smb_open_file_close(
 
     open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
-    pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_lock(&tree->open_files_lock[open_file_bucket]);
 
     HASH_FIND(hh, tree->open_files[open_file_bucket], file_id, sizeof(*file_id), open_file);
 
@@ -3540,7 +3561,7 @@ chimera_smb_open_file_close(
         }
     }
 
-    pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+    evpl_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
 
 
     return open_file;

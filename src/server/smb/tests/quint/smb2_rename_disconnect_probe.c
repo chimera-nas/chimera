@@ -96,16 +96,16 @@ main(void)
     smb2_handshake(renamer);
     smb2_handshake(peer);
 
-    st = smb2_create(renamer, "before", FILE_CREATE, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &original);
+    st = smb2_create(renamer, "before", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &original);
     CHECK(st == ST_SUCCESS, "create source: 0x%08x", st);
     if (st != ST_SUCCESS) {
         goto out;
     }
     st = smb2_write(renamer, original.file_id, 0, payload, sizeof(payload), &count);
     CHECK(st == ST_SUCCESS && count == sizeof(payload), "write source: 0x%08x", st);
-    st = smb2_create(peer, "before", FILE_OPEN, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &sibling);
+    st = smb2_create(peer, "before", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &sibling);
     CHECK(st == ST_SUCCESS, "open peer handle: 0x%08x", st);
     if (st != ST_SUCCESS) {
         goto out;
@@ -134,7 +134,7 @@ main(void)
      * updated, even though the operating handle was closed by disconnect. */
     st = smb2_rename(peer, sibling.file_id, "final", 0);
     CHECK(st == ST_SUCCESS, "rename through the surviving peer: 0x%08x", st);
-    st = smb2_create(peer, "final", FILE_OPEN, FILE_ALL_ACCESS,
+    st = smb2_create(peer, "final", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
                      0, NULL, &reopened);
     CHECK(st == ST_SHARING_VIOLATION,
           "surviving peer still enforces sharing after rename: 0x%08x", st);
@@ -142,8 +142,8 @@ main(void)
         smb2_close(peer, reopened.file_id);
     }
     smb2_close(peer, sibling.file_id);
-    st = smb2_create(peer, "final", FILE_OPEN, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &reopened);
+    st = smb2_create(peer, "final", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &reopened);
     CHECK(st == ST_SUCCESS, "open final name: 0x%08x", st);
     if (st == ST_SUCCESS) {
         st = smb2_read(peer, reopened.file_id, 0, sizeof(data), data, &length);
@@ -152,8 +152,8 @@ main(void)
               "renamed file retains its data: 0x%08x", st);
         smb2_close(peer, reopened.file_id);
     }
-    st = smb2_create(peer, "before", FILE_OPEN, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &reopened);
+    st = smb2_create(peer, "before", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &reopened);
     CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "old name is gone: 0x%08x", st);
     if (st == ST_SUCCESS) {
         smb2_close(peer, reopened.file_id);

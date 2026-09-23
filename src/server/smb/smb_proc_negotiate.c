@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <openssl/rand.h>
+#include "common/crypto.h"
 
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -889,8 +889,8 @@ chimera_smb_select_negotiated_algorithms(
     if (conn->dialect == SMB2_DIALECT_3_1_1 &&
         (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH)) {
         conn->negotiated.preauth_hash_alg = SMB2_PREAUTH_HASH_SHA_512;
-        if (RAND_bytes(conn->negotiated.preauth_salt,
-                       sizeof(conn->negotiated.preauth_salt)) != 1) {
+        if (chimera_crypto_random(conn->negotiated.preauth_salt,
+                                  sizeof(conn->negotiated.preauth_salt)) != 1) {
             memset(conn->negotiated.preauth_salt, 0, sizeof(conn->negotiated.preauth_salt));
         }
     }

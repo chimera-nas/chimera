@@ -5,7 +5,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <pthread.h>
+#include "common/thread.h"
 #include "vfs/vfs.h"
 #include "smb_common/smb2.h"
 
@@ -48,7 +48,7 @@ struct chimera_smb_sharemode_file {
 };
 
 struct chimera_smb_sharemode_table {
-    pthread_mutex_t                    lock;
+    evpl_mutex_t                       lock;
     struct chimera_smb_sharemode_file *buckets[CHIMERA_SMB_SHAREMODE_BUCKETS];
 };
 

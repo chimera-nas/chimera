@@ -46,10 +46,16 @@
 #ifndef SMB2_MBT_COMMON_H
 #define SMB2_MBT_COMMON_H
 
+#include "common/test_host.h"
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <stdint.h>
 #include <inttypes.h>
 #include <time.h>
@@ -177,30 +183,30 @@
 #define NTLMSSP_NEGOTIATE_UNICODE               0x00000001u
 
 /* CREATE dispositions / access / options (MS-SMB2 2.2.13) */
-#define FILE_SUPERSEDE                          0x00000000u
-#define FILE_OPEN                               0x00000001u
-#define FILE_CREATE                             0x00000002u
-#define FILE_OPEN_IF                            0x00000003u
-#define FILE_OVERWRITE                          0x00000004u
-#define FILE_OVERWRITE_IF                       0x00000005u
-#define FILE_ALL_ACCESS                         0x001F01FFu
-#define FILE_READ_ATTRIBUTES                    0x00000080u /* attribute-only access */
-#define FILE_READ_ACCESS                        0x00120089u /* R data/attr/EA + SYNC */
-#define FILE_WRITE_ACCESS                       0x00120116u /* W data/attr/EA + SYNC */
-#define FILE_ATTRIBUTE_NORMAL                   0x00000080u
-#define FILE_DIRECTORY_FILE                     0x00000001u
-#define FILE_DELETE_ON_CLOSE                    0x00001000u
-#define FILE_NON_DIRECTORY_FILE                 0x00000040u
-#define FILE_SHARE_READ                         0x00000001u
-#define FILE_SHARE_WRITE                        0x00000002u
-#define FILE_SHARE_DELETE                       0x00000004u
-#define FILE_SHARE_RWD                          0x00000007u
+#define MBT_FILE_SUPERSEDE                      0x00000000u
+#define MBT_FILE_OPEN                           0x00000001u
+#define MBT_FILE_CREATE                         0x00000002u
+#define MBT_FILE_OPEN_IF                        0x00000003u
+#define MBT_FILE_OVERWRITE                      0x00000004u
+#define MBT_FILE_OVERWRITE_IF                   0x00000005u
+#define MBT_FILE_ALL_ACCESS                     0x001F01FFu
+#define MBT_FILE_READ_ATTRIBUTES                0x00000080u     /* attribute-only access */
+#define MBT_FILE_READ_ACCESS                    0x00120089u     /* R data/attr/EA + SYNC */
+#define MBT_FILE_WRITE_ACCESS                   0x00120116u     /* W data/attr/EA + SYNC */
+#define MBT_FILE_ATTRIBUTE_NORMAL               0x00000080u
+#define MBT_FILE_DIRECTORY_FILE                 0x00000001u
+#define MBT_FILE_DELETE_ON_CLOSE                0x00001000u
+#define MBT_FILE_NON_DIRECTORY_FILE             0x00000040u
+#define MBT_FILE_SHARE_READ                     0x00000001u
+#define MBT_FILE_SHARE_WRITE                    0x00000002u
+#define MBT_FILE_SHARE_DELETE                   0x00000004u
+#define MBT_FILE_SHARE_RWD                      0x00000007u
 
 /* CreateAction (smb2.h) */
-#define FILE_ACT_SUPERSEDED                     0
-#define FILE_ACT_OPENED                         1
-#define FILE_ACT_CREATED                        2
-#define FILE_ACT_OVERWRITTEN                    3
+#define MBT_FILE_ACT_SUPERSEDED                 0
+#define MBT_FILE_ACT_OPENED                     1
+#define MBT_FILE_ACT_CREATED                    2
+#define MBT_FILE_ACT_OVERWRITTEN                3
 
 /* Durable-handle context Flags (MS-SMB2 2.2.13.2.11). */
 #define SMB2_DHANDLE_FLAG_PERSISTENT            0x00000002u
@@ -281,11 +287,11 @@
 #define SMB2_NOTIFY_CHANGE_STREAM_WRITE         0x00000800
 
 /* FILE_ACTION_* (MS-FSCC 2.7.1) */
-#define FILE_ACTION_ADDED                       0x00000001
-#define FILE_ACTION_REMOVED                     0x00000002
-#define FILE_ACTION_MODIFIED                    0x00000003
-#define FILE_ACTION_RENAMED_OLD_NAME            0x00000004
-#define FILE_ACTION_RENAMED_NEW_NAME            0x00000005
+#define MBT_FILE_ACTION_ADDED                   0x00000001
+#define MBT_FILE_ACTION_REMOVED                 0x00000002
+#define MBT_FILE_ACTION_MODIFIED                0x00000003
+#define MBT_FILE_ACTION_RENAMED_OLD_NAME        0x00000004
+#define MBT_FILE_ACTION_RENAMED_NEW_NAME        0x00000005
 
 /* Little-endian field access (p16/p32/p64, g16/g32/g64) and utf16le live in
  * smb2_mbt_wire.h alongside the protection cryptography that uses them. */
@@ -1340,7 +1346,7 @@ smb2_conn_reset(struct smb2_env *env)
 static inline void
 smb2_env_stop(struct smb2_env *env)
 {
-    char cmd[300];
+
 
     /* evpl_destroy sends a final DISCONNECTED to each still-registered bind,
      * so the conn structs must outlive it. */
@@ -1358,8 +1364,7 @@ smb2_env_stop(struct smb2_env *env)
     mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
-    if (system(cmd) != 0) {
+    if (chimera_test_remove_tree(env->session_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
     }
 } /* smb2_env_stop */
@@ -1442,7 +1447,7 @@ smb2c_set_context(const char *ctx)
  * the reader and the static analyzer know the dereference below it is
  * unreachable with a NULL connection -- otherwise every builder that touches
  * c->sbuf after calling smb2c_begin looks like a null dereference. */
-__attribute__((noreturn))
+CHIMERA_NORETURN
 static inline void
 smb2c_no_conn(uint16_t command)
 {
@@ -2651,7 +2656,7 @@ smb2c_build_create_full(
     body[3] = oplevel;                /* RequestedOplockLevel */
     p32(body, 4, 2);                  /* ImpersonationLevel = Impersonation */
     p32(body, 24, access);
-    p32(body, 28, FILE_ATTRIBUTE_NORMAL);
+    p32(body, 28, MBT_FILE_ATTRIBUTE_NORMAL);
     p32(body, 32, share);
     p32(body, 36, disp);
     p32(body, 40, create_options);
@@ -2736,7 +2741,7 @@ smb2_create_post(
     const struct smb2_oplock_req *req)
 {
     smb2_create_post_opts(c, name, disp, access, share,
-                          FILE_NON_DIRECTORY_FILE, req);
+                          MBT_FILE_NON_DIRECTORY_FILE, req);
 } /* smb2_create_post */
 
 /* Blocking CREATE with explicit CreateOptions. */
@@ -2769,7 +2774,7 @@ smb2_create(
     struct smb2_create_out       *out)
 {
     return smb2_create_opts(c, name, disp, access, share,
-                            FILE_NON_DIRECTORY_FILE, req, out);
+                            MBT_FILE_NON_DIRECTORY_FILE, req, out);
 } /* smb2_create */
 
 /* ---- CREATE with durable-handle contexts -------------------------------- */
@@ -2831,7 +2836,7 @@ smb2_create_dur(
     struct smb2_create_out        *out)
 {
     return smb2_create_dur_opts(c, name, disp, access, share,
-                                FILE_NON_DIRECTORY_FILE, req, dur, out);
+                                MBT_FILE_NON_DIRECTORY_FILE, req, dur, out);
 } /* smb2_create_dur */
 
 /* ---- WRITE / READ / CLOSE ----------------------------------------------- */

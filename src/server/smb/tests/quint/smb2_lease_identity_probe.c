@@ -77,12 +77,12 @@ run_case(
     CHECK(a->session_id != b->session_id, "connections have distinct sessions");
 
     req.lease_key[0] = 0xc7;
-    smb2_create(a, "samekey", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+    smb2_create(a, "samekey", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                 &req, &oa);
     CHECK(oa.status == ST_SUCCESS && oa.lease_state == SMB2_LEASE_RWH,
           "first open gets RWH");
     req.force_v1 = second_v1;
-    smb2_create_post(b, "samekey", FILE_OPEN_IF, FILE_ALL_ACCESS, FILE_SHARE_RWD, &req);
+    smb2_create_post(b, "samekey", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, &req);
     deadline = smb2c_now_ms() + SMB2C_HANG_MS;
     while (!b->reply_ready) {
         smb2_pump(&env);
@@ -130,7 +130,7 @@ run_case(
     req.lease_key[0] = 0xc8;
     req.lease_state  = SMB2_LEASE_RH;
     req.force_v1     = 0;
-    smb2_create_post(peer, "samekey", FILE_OPEN, FILE_READ_ACCESS, FILE_SHARE_RWD, &req);
+    smb2_create_post(peer, "samekey", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD, &req);
     deadline = smb2c_now_ms() + SMB2C_HANG_MS;
     while (!got_a || !got_b) {
         smb2_pump(&env);

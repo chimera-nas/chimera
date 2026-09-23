@@ -892,7 +892,7 @@ chimera_smb_parse_rename_info(
     }
 
     /* Split into parent path and name, similar to chimera_smb_parse_create */
-    char *slash = rindex(rename_info->new_parent, '\\');
+    char *slash = strrchr(rename_info->new_parent, '\\');
 
     if (slash) {
         *slash                      = '\0';
