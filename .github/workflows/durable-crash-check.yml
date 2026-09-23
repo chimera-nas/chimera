@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+name: Temporary Windows durable crash check
+on:
+  push:
+    branches: [windows-durable-crash-check]
+permissions:
+  contents: read
+jobs:
+  test:
+    name: Durable probe Windows x64 Release
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_USE_NUGET_CACHE: 'false'
+      X_VCPKG_NUGET_ID_PREFIX: chimera-
+      VS_VERSION_RANGE: ${{ matrix.vs }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, arch: x64, config: Release, generator: Visual Studio 17 2022, vs: '[17.0,18.0)'}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install model generator and prepare scratch directories
+        shell: pwsh
+        run: |
+          $version = (Get-Content ext/specs/.quint-version).Trim()
+          npm install -g "@informalsystems/quint@$version"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force /tmp, /build/test | Out-Null
+      - name: Read pinned vcpkg revision
+        id: manifest
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'Expected a pinned vcpkg baseline' }
+          "baseline=$baseline" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v5
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.manifest.outputs.baseline }}
+          path: _vcpkg
+          persist-credentials: false
+      - name: Select the publisher's toolchain and bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -version $env:VS_VERSION_RANGE -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio $env:VS_VERSION_RANGE is required" }
+          "VCPKG_VISUAL_STUDIO_PATH=$vs" >> $env:GITHUB_ENV
+          & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure read-only package access
+        shell: pwsh
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $nuget = & ./_vcpkg/vcpkg.exe fetch nuget | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
+          $feed = "https://nuget.pkg.github.com/$($env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant())/index.json"
+          '<configuration><packageSources><clear /></packageSources></configuration>' | Set-Content $config
+          & $nuget sources Add -Name Chimera -Source $feed -UserName $env:GITHUB_ACTOR -Password $env:GH_PACKAGES_TOKEN -StorePasswordInClearText -ConfigFile $config -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,read" >> $env:GITHUB_ENV
+      - name: Restore prebuilt dependencies
+        shell: pwsh
+        run: |
+          $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          & ./_vcpkg/vcpkg.exe install --triplet $triplet --host-triplet $triplet "--x-install-root=$pwd/build/vcpkg_installed" --only-binarycaching
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'Binary dependency restore failed. Check package access and run Publish Windows dependencies on main for this manifest/toolchain.'
+            exit 1
+          }
+          $timer.Stop()
+          "Prebuilt dependency restore ($triplet): $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds; no dependency source builds permitted." >> $env:GITHUB_STEP_SUMMARY
+      - name: Verify Windows dependencies do not include OpenSSL
+        shell: pwsh
+        run: |
+          $status = Get-Content build/vcpkg_installed/vcpkg/status -Raw
+          if ($status -match '(?m)^Package: openssl\r?$') { throw 'Windows must use native TLS and crypto' }
+      - name: Install parser generators
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP/winflexbison.zip"
+          Invoke-WebRequest https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip -OutFile $archive -MaximumRetryCount 5 -RetryIntervalSec 10
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135') { throw 'WinFlexBison checksum mismatch' }
+          Expand-Archive $archive "$env:RUNNER_TEMP/winflexbison"
+      - name: Configure native Windows with symbols
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DCHIMERA_MBT_CORPUS=OFF "-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Zi" "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF /MAP" "-DCMAKE_SHARED_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF /MAP"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build durable probe
+        run: cmake --build build --target smb2_durable_probe --config Release --parallel 4
+      - name: Repeat durable probe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ctest-results | Out-Null
+          ctest --test-dir build -C Release -R '^chimera/server/smb/mbt/durable_probe_memfs$' --repeat until-fail:100 --output-on-failure --no-tests=error --timeout 120 --test-output-size-failed 131072 --output-junit "$pwd/ctest-results/results.xml"
+          exit $LASTEXITCODE
+      - name: Upload diagnostic results and symbols
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: durable-crash-check
+          path: |
+            ctest-results/
+            build/Testing/Temporary/
+            build/**/*.map
+            build/bin/Release/smb2_durable_probe.exe
+            build/bin/Release/smb2_durable_probe.pdb
+            build/bin/Release/evpl.dll
+            build/bin/Release/evpl.pdb
+            build/**/smb2_durable_probe_memfs/**
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove temporary package credentials
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue
