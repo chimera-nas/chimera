@@ -69,7 +69,7 @@ struct chimera_nfs4_layout {
     _Atomic int                        layoutcommit_needed;
     /* A recall fences new DS I/O, then drains outstanding DS RPCs before
      * reporting their combined high-water size to the MDS. */
-    evpl_mutex_t                    io_lock;
+    evpl_mutex_t                       io_lock;
     unsigned int                       io_active;
     struct chimera_nfs4_recall_task   *recall_task;
     struct chimera_nfs4_recall_waiter *recall_waiters;
@@ -102,7 +102,7 @@ struct chimera_nfs4_layout {
      * out-of-order seqid (NFS4ERR_SEQ_MISORDERED).  They are replayed once
      * acquisition resolves.  acq_thread/shared/private are the dispatch context
      * captured when acquisition started, used to replay parked requests. */
-    evpl_mutex_t                    acq_lock;
+    evpl_mutex_t                       acq_lock;
     struct chimera_vfs_request        *acq_waiters;
     struct chimera_nfs_thread         *acq_thread;
     struct chimera_nfs_shared         *acq_shared;

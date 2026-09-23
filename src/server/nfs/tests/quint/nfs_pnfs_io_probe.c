@@ -4,6 +4,7 @@
 
 /* Regression checks for metadata authorization and backing-file consistency. */
 #include "nfs3_mbt_common.h"
+#include "common/mbt_watchdog.h"
 #include "vfs/vfs_pnfs.h"
 
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); exit(1); \
@@ -44,7 +45,7 @@ main(
     char                name[MBT_NAME_MAX] = { 0 };
     int                 remote             = argc > 2 && strcmp(argv[2], "remote") == 0;
 
-    alarm(60);
+    mbt_watchdog_arm(60);
     opts.module          = argc > 1 ? argv[1] : "memfs";
     opts.pnfs_num_ds     = remote ? 2 : 0;
     opts.pnfs_ds_version = 3;

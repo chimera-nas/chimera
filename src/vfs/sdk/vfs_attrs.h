@@ -7,6 +7,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include "vfs_sid.h"
+#include "vfs_mode.h"
 
 struct chimera_acl;
 

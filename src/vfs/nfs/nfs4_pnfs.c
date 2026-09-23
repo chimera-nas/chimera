@@ -676,10 +676,10 @@ chimera_nfs4_recall_resume_waiter(void *arg)
 
     if (waiter->request->opcode == CHIMERA_VFS_OP_READ) {
         chimera_vfs_nfs4_read(waiter->thread, waiter->shared,
-                          waiter->request, waiter->private_data);
+                              waiter->request, waiter->private_data);
     } else if (waiter->request->opcode == CHIMERA_VFS_OP_WRITE) {
         chimera_vfs_nfs4_write(waiter->thread, waiter->shared,
-                           waiter->request, waiter->private_data);
+                               waiter->request, waiter->private_data);
     } else {
         waiter->request->status = CHIMERA_VFS_OK;
         waiter->request->complete(waiter->request);

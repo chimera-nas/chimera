@@ -71,7 +71,7 @@ chimera_nfs4_open_fh_callback(
     }
     if (open_file_status != 0) {
         chimera_vfs_nfs4_open_fh(ctx->thread, ctx->shared, request,
-                             ctx->dispatch_private);
+                                 ctx->dispatch_private);
         return;
     }
 

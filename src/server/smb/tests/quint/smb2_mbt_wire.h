@@ -289,9 +289,9 @@ smb2w_sign(
     int            msg_len,
     uint8_t       *sig16)
 {
-    int                           use_gmac  = dialect == 0x0311 && signing_alg == SMB2W_SIGN_AES_GMAC;
-    int                           use_cmac  = dialect >= 0x0300 && !use_gmac && !(dialect == 0x0311 && signing_alg ==
-                                                                                  SMB2W_SIGN_HMAC_SHA256);
+    int                           use_gmac = dialect == 0x0311 && signing_alg == SMB2W_SIGN_AES_GMAC;
+    int                           use_cmac = dialect >= 0x0300 && !use_gmac && !(dialect == 0x0311 && signing_alg ==
+                                                                                 SMB2W_SIGN_HMAC_SHA256);
     enum chimera_crypto_algorithm algorithm = use_gmac ? CHIMERA_CRYPTO_AES_GMAC :
         (use_cmac ? CHIMERA_CRYPTO_AES_CMAC : CHIMERA_CRYPTO_HMAC_SHA256);
     uint8_t                       iv[12] = { 0 }, out[32];
