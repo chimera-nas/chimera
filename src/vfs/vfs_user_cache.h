@@ -706,7 +706,7 @@ chimera_vfs_group_cache_remove(
         return -1;
     }
 
-    pthread_mutex_lock(&cache->write_lock);
+    evpl_mutex_lock(&cache->write_lock);
 
     for (i = 0; i < cache->num_buckets; i++) {
         group = cache->group_gid_buckets[i].head;
@@ -720,7 +720,7 @@ chimera_vfs_group_cache_remove(
         }
     }
 
-    pthread_mutex_unlock(&cache->write_lock);
+    evpl_mutex_unlock(&cache->write_lock);
     return found;
 } // chimera_vfs_group_cache_remove
 
