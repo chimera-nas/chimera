@@ -50,6 +50,9 @@
  *                          persistent reclaim, and what a parked PERSISTENT
  *                          holder does to a conflicting opener
  *
+ * D12 is an implementation lifetime regression: server shutdown with live
+ * durable connections spread across multiple workers.
+ *
  * Each connection gets its own ClientGuid unless it is deliberately reopened
  * as the same client (smb2_conn_reopen inherits guid_tag) -- chimera derives
  * both the lease owner's client key and the durable reclaim's identity check
@@ -1579,6 +1582,44 @@ sec_d11(void)
     smb2_env_stop(&env);
 } /* sec_d11 */
 
+/* Shutdown must not reclaim a durable open while another server thread still
+ * owns its connection and tree.  Leave clients connected so each worker must
+ * close its own binds during server shutdown. */
+static void
+sec_d12(void)
+{
+    struct smb2_env         env;
+    struct smb2_env_opts    opts = { .oplocks = 1, .persistent_handles = 1 };
+    struct smb2_oplock_req  breq;
+    struct smb2_durable_req dur;
+    struct smb2_create_out  out;
+    struct smb2_conn       *conn;
+    uint32_t                st;
+    char                    name[32];
+    int                     i;
+
+    printf("\n# D12 shutdown with live durable handles on multiple workers\n");
+    smb2_env_start_opts(&env, &opts);
+    mk_oplock(&breq, SMB2_OPLOCK_LEVEL_BATCH);
+    for (i = 0; i < 32; i++) {
+        conn = smb2_conn_open(&env);
+        smb2_handshake(conn);
+        snprintf(name, sizeof(name), "shutdown-%d", i);
+        memset(&dur, 0, sizeof(dur));
+        dur.dh2q = 1;
+        fill_guid(dur.create_guid, i + 1);
+        st = smb2_create_dur(conn, name, MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                             MBT_FILE_SHARE_RWD, &breq, &dur, &out);
+        EXPECT(st == ST_SUCCESS && out.has_dh2q,
+               "D12 live durable handle %d (0x%08x)", i, st);
+    }
+
+    chimera_server_destroy(env.server);
+    env.server = NULL;
+    smb2_env_stop(&env);
+    EXPECT(1, "D12 server and clients shut down with live durable handles");
+} /* sec_d12 */
+
 int
 main(
     int   argc,
@@ -1625,6 +1666,7 @@ main(
     smb2_env_stop(&env);
 
     sec_d11();
+    sec_d12();
 
     printf("\n# summary: %d recorded deviation(s) (see DEVIATIONS-SMB.md)\n",
            ndev);

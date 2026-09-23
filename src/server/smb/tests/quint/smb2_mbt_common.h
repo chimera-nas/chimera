@@ -1360,7 +1360,9 @@ smb2_env_stop(struct smb2_env *env)
         free(env->conns[i]->dbuf);
         free(env->conns[i]);
     }
-    chimera_server_destroy(env->server);
+    if (env->server) {
+        chimera_server_destroy(env->server);
+    }
     mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
 

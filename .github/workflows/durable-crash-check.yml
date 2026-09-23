@@ -122,7 +122,7 @@ jobs:
             build/bin/Release/smb2_durable_probe.pdb
             build/bin/Release/evpl.dll
             build/bin/Release/evpl.pdb
-            build/**/smb2_durable_probe_memfs/**
+            build/**/*.debug.log
           if-no-files-found: warn
           retention-days: 14
       - name: Remove temporary package credentials
