@@ -11,7 +11,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <openssl/evp.h>
 
 #include "smb_common/smb_signing.h"
 #include "smb_internal.h"

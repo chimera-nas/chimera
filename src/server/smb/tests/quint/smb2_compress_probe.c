@@ -596,8 +596,8 @@ probe_profile(
     st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
     CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", label, st);
 
-    st = smb2_create(c, "comp.dat", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "comp.dat", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", label, st);
 
     /* Write in chunks the server will accept, then read back in chunks large
@@ -693,8 +693,8 @@ probe_compressed_requests(
     st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
     CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", label, st);
 
-    st = smb2_create(c, "creq.dat", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "creq.dat", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", label, st);
 
     /* Only now: the handshake itself must go out in the clear, since the
@@ -766,8 +766,8 @@ probe_not_negotiated(void)
     st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
     CHECK(st == ST_SUCCESS, "no-compression: TREE_CONNECT -> 0x%08x", st);
 
-    st = smb2_create(c, "plain.dat", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "plain.dat", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "no-compression: CREATE -> 0x%08x", st);
 
     st = smb2_write(c, co.file_id, 0, payload, (uint32_t) len, &count);

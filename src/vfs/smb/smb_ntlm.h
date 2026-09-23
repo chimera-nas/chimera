@@ -14,7 +14,7 @@
  * are produced/consumed (no SPNEGO wrapper) -- the chimera SMB server accepts
  * bare NTLMSSP and replies in kind.
  *
- * Crypto (OpenSSL): NT hash = MD4(UTF16LE(password)); ntlmv2_hash =
+ * Crypto: NT hash = MD4(UTF16LE(password)); ntlmv2_hash =
  * HMAC-MD5(NT, UTF16LE(UPPER(user)) || UTF16LE(domain)); NTProofStr =
  * HMAC-MD5(ntlmv2_hash, server_challenge || client_blob); the session base key
  * (== SMB2 session key, no key exchange) = HMAC-MD5(ntlmv2_hash, NTProofStr).

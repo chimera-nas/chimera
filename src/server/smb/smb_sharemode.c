@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
 #include "smb_sharemode.h"
@@ -153,7 +154,7 @@ chimera_smb_sharemode_check_conflict(
 SYMBOL_EXPORT void
 chimera_smb_sharemode_init(struct chimera_smb_sharemode_table *table)
 {
-    pthread_mutex_init(&table->lock, NULL);
+    evpl_mutex_init(&table->lock, NULL);
     memset(table->buckets, 0, sizeof(table->buckets));
 } /* chimera_smb_sharemode_init */
 
@@ -184,7 +185,7 @@ chimera_smb_sharemode_destroy(struct chimera_smb_sharemode_table *table)
         table->buckets[i] = NULL;
     }
 
-    pthread_mutex_destroy(&table->lock);
+    evpl_mutex_destroy(&table->lock);
 } /* chimera_smb_sharemode_destroy */
 
 SYMBOL_EXPORT int
@@ -214,7 +215,7 @@ chimera_smb_sharemode_acquire(
                                         name, name_len) &
         CHIMERA_SMB_SHAREMODE_BUCKET_MASK;
 
-    pthread_mutex_lock(&table->lock);
+    evpl_mutex_lock(&table->lock);
 
     /* Find existing file node */
     file = table->buckets[bucket];
@@ -235,7 +236,7 @@ chimera_smb_sharemode_acquire(
             if (chimera_smb_sharemode_check_conflict(
                     entry->desired_access, entry->share_access,
                     desired_access, share_access)) {
-                pthread_mutex_unlock(&table->lock);
+                evpl_mutex_unlock(&table->lock);
                 return -1;
             }
             entry = entry->next;
@@ -273,7 +274,7 @@ chimera_smb_sharemode_acquire(
     file->entries         = entry;
     file->num_entries++;
 
-    pthread_mutex_unlock(&table->lock);
+    evpl_mutex_unlock(&table->lock);
 
     return 0;
 } /* chimera_smb_sharemode_acquire */
@@ -294,7 +295,7 @@ chimera_smb_sharemode_release(
         open_file->name_len) &
         CHIMERA_SMB_SHAREMODE_BUCKET_MASK;
 
-    pthread_mutex_lock(&table->lock);
+    evpl_mutex_lock(&table->lock);
 
     /* Find file node */
     file_prev = &table->buckets[bucket];
@@ -313,7 +314,7 @@ chimera_smb_sharemode_release(
     }
 
     if (!file) {
-        pthread_mutex_unlock(&table->lock);
+        evpl_mutex_unlock(&table->lock);
         return;
     }
 
@@ -338,5 +339,5 @@ chimera_smb_sharemode_release(
         free(file);
     }
 
-    pthread_mutex_unlock(&table->lock);
+    evpl_mutex_unlock(&table->lock);
 } /* chimera_smb_sharemode_release */

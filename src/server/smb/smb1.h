@@ -1,11 +1,13 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
 
+#include "common/compiler.h"
 #include <stdint.h>
 
+#pragma pack(push, 1)
 struct smb1_header {
     uint8_t  protocol_id[4];
     uint8_t  command;
@@ -19,4 +21,5 @@ struct smb1_header {
     uint16_t pid_low;
     uint16_t user_id;
     uint16_t multiplex_id;
-} __attribute__((packed));
+};
+#pragma pack(pop)

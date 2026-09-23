@@ -2,15 +2,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/compiler.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 
-#include <openssl/evp.h>
-#include <openssl/core_names.h>
-#include <openssl/params.h>
-#include <openssl/kdf.h>
+#include "common/crypto.h"
+#include "smb_common/smb_signing.h"
 #include <stdatomic.h>
 
 #include "smb.h"
@@ -36,23 +35,11 @@ chimera_smb_client_preauth_extend(
     const void *msg,
     uint32_t    msg_len)
 {
-    EVP_MD_CTX  *md      = EVP_MD_CTX_new();
-    unsigned int out_len = 0;
-
-    chimera_smbclient_abort_if(!md, "EVP_MD_CTX_new failed");
-
-    if (EVP_DigestInit_ex(md, EVP_sha512(), NULL) != 1 ||
-        EVP_DigestUpdate(md, hash, SMB2_PREAUTH_HASH_SIZE) != 1 ||
-        EVP_DigestUpdate(md, msg, msg_len) != 1 ||
-        EVP_DigestFinal_ex(md, hash, &out_len) != 1) {
-        chimera_smbclient_fatal("SHA-512 preauth hash update failed");
-    }
-    EVP_MD_CTX_free(md);
+    chimera_smb_preauth_extend(hash, msg, msg_len);
 } /* chimera_smb_client_preauth_extend */
 
-/* SP800-108 counter-mode KDF with HMAC-SHA256 (OpenSSL KBKDF).  Identical to
- * the server's kdf_counter_hmac_sha256_ossl3: USE_L + USE_SEPARATOR on, label
- * passed as SALT, context as INFO.  Shared with smb_encrypt.c, which derives
+/* SP800-108 counter-mode KDF with HMAC-SHA256, including the length
+ * suffix and label/context separator.  Shared with smb_encrypt.c, which derives
  * the transport-encryption key pair from the same primitive. */
 int
 chimera_smb_client_kbkdf(
@@ -65,42 +52,7 @@ chimera_smb_client_kbkdf(
     uint8_t       *out,
     size_t         out_len)
 {
-    EVP_KDF     *kdf = EVP_KDF_fetch(NULL, "KBKDF", NULL);
-    EVP_KDF_CTX *kctx;
-    OSSL_PARAM   params[10];
-    size_t       n       = 0;
-    int          use_l   = 1;
-    int          use_sep = 1;
-    int          ok      = 0;
-
-    if (!kdf) {
-        return -1;
-    }
-    kctx = EVP_KDF_CTX_new(kdf);
-    EVP_KDF_free(kdf);
-    if (!kctx) {
-        return -1;
-    }
-
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE, (char *) "counter", 0);
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC, (char *) "HMAC", 0);
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char *) "SHA256", 0);
-    params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *) key, key_len);
-    if (label && label_len) {
-        params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *) label, label_len);
-    }
-    if (context && ctx_len) {
-        params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, (void *) context, ctx_len);
-    }
-    params[n++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &use_l);
-    params[n++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &use_sep);
-    params[n++] = OSSL_PARAM_construct_end();
-
-    if (EVP_KDF_derive(kctx, out, out_len, params) == 1) {
-        ok = 1;
-    }
-    EVP_KDF_CTX_free(kctx);
-    return ok ? 0 : -1;
+    return chimera_crypto_kdf(key, key_len, label, label_len, context, ctx_len, out, out_len) ? 0 : -1;
 } /* chimera_smb_client_kbkdf */
 
 int
@@ -152,35 +104,30 @@ chimera_smb_client_hmac_sha256(
     const uint8_t            *key,
     uint8_t                  *out_sig16)
 {
-    EVP_MAC      *mac;
-    EVP_MAC_CTX  *mctx;
-    OSSL_PARAM    params[] = {
-        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, (char *) "SHA256", 0),
-        OSSL_PARAM_construct_end()
-    };
-    unsigned char macbuf[32];
-    size_t        maclen = 0;
-    int           rc     = -1;
+    uint8_t                     mac[32], iv[12] = { 0 };
+    struct chimera_crypto_hash *ctx;
+    int                         ok;
+    uint32_t                    high = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
 
-    mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-    if (!mac) {
+    if (body_len < 0) {
         return -1;
     }
-    mctx = EVP_MAC_CTX_new(mac);
-    EVP_MAC_free(mac);
-    if (!mctx) {
+    if (hdr->command == SMB2_CANCEL) {
+        high |= SMB2_FLAGS_ASYNC_COMMAND;
+    }
+    memcpy(iv, &hdr->message_id, 8);
+    for (int i = 0; i < 4; i++) {
+        iv[8 + i] = (uint8_t) (high >> (i * 8));
+    }
+    ctx = chimera_crypto_hash_new(CHIMERA_CRYPTO_HMAC_SHA256, key, 16, iv, sizeof(iv));
+    ok  = ctx && chimera_crypto_update(ctx, hdr, sizeof(*hdr)) &&
+        chimera_crypto_update(ctx, body, body_len) && chimera_crypto_final(ctx, mac, sizeof(mac));
+    chimera_crypto_hash_free(ctx);
+    if (!ok) {
         return -1;
     }
-    if (EVP_MAC_init(mctx, key, 16, params) == 1 &&
-        EVP_MAC_update(mctx, (const uint8_t *) hdr, sizeof(*hdr)) == 1 &&
-        (body_len == 0 || EVP_MAC_update(mctx, body, body_len) == 1) &&
-        EVP_MAC_final(mctx, macbuf, &maclen, sizeof(macbuf)) == 1 &&
-        maclen >= 16) {
-        memcpy(out_sig16, macbuf, 16);
-        rc = 0;
-    }
-    EVP_MAC_CTX_free(mctx);
-    return rc;
+    memcpy(out_sig16, mac, 16);
+    return 0;
 } /* chimera_smb_client_hmac_sha256 */
 
 /* AES-128-CMAC (3.0 / 3.0.2 / 3.1.1-CMAC) over hdr||body -> out_sig16. */
@@ -192,33 +139,30 @@ chimera_smb_client_cmac_aes128(
     const uint8_t            *key,
     uint8_t                  *out_sig16)
 {
-    EVP_MAC     *mac;
-    EVP_MAC_CTX *mctx;
-    OSSL_PARAM   params[] = {
-        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_CIPHER, (char *) "AES-128-CBC", 0),
-        OSSL_PARAM_construct_end()
-    };
-    size_t       maclen = 0;
-    int          rc     = -1;
+    uint8_t                     mac[32], iv[12] = { 0 };
+    struct chimera_crypto_hash *ctx;
+    int                         ok;
+    uint32_t                    high = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
 
-    mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
-    if (!mac) {
+    if (body_len < 0) {
         return -1;
     }
-    mctx = EVP_MAC_CTX_new(mac);
-    EVP_MAC_free(mac);
-    if (!mctx) {
+    if (hdr->command == SMB2_CANCEL) {
+        high |= SMB2_FLAGS_ASYNC_COMMAND;
+    }
+    memcpy(iv, &hdr->message_id, 8);
+    for (int i = 0; i < 4; i++) {
+        iv[8 + i] = (uint8_t) (high >> (i * 8));
+    }
+    ctx = chimera_crypto_hash_new(CHIMERA_CRYPTO_AES_CMAC, key, 16, iv, sizeof(iv));
+    ok  = ctx && chimera_crypto_update(ctx, hdr, sizeof(*hdr)) &&
+        chimera_crypto_update(ctx, body, body_len) && chimera_crypto_final(ctx, mac, sizeof(mac));
+    chimera_crypto_hash_free(ctx);
+    if (!ok) {
         return -1;
     }
-    if (EVP_MAC_init(mctx, key, 16, params) == 1 &&
-        EVP_MAC_update(mctx, (const uint8_t *) hdr, sizeof(*hdr)) == 1 &&
-        (body_len == 0 || EVP_MAC_update(mctx, body, body_len) == 1) &&
-        EVP_MAC_final(mctx, out_sig16, &maclen, 16) == 1 &&
-        maclen == 16) {
-        rc = 0;
-    }
-    EVP_MAC_CTX_free(mctx);
-    return rc;
+    memcpy(out_sig16, mac, 16);
+    return 0;
 } /* chimera_smb_client_cmac_aes128 */
 
 /* AES-128-GMAC (3.1.1-GMAC) over hdr||body -> out_sig16 (MS-SMB2 §3.1.4.1).
@@ -233,46 +177,30 @@ chimera_smb_client_gmac_aes128(
     const uint8_t            *key,
     uint8_t                  *out_sig16)
 {
-    EVP_CIPHER     *gcm;
-    EVP_CIPHER_CTX *c;
-    uint8_t         iv[12];
-    uint32_t        high_bits;
-    int             outl;
-    int             rc = -1;
+    uint8_t                     mac[32], iv[12] = { 0 };
+    struct chimera_crypto_hash *ctx;
+    int                         ok;
+    uint32_t                    high = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
 
-    high_bits = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
+    if (body_len < 0) {
+        return -1;
+    }
     if (hdr->command == SMB2_CANCEL) {
-        high_bits |= SMB2_FLAGS_ASYNC_COMMAND;
+        high |= SMB2_FLAGS_ASYNC_COMMAND;
     }
-
-    memset(iv, 0, sizeof(iv));
     memcpy(iv, &hdr->message_id, 8);
-    iv[8]  = (uint8_t) (high_bits & 0xff);
-    iv[9]  = (uint8_t) ((high_bits >> 8) & 0xff);
-    iv[10] = (uint8_t) ((high_bits >> 16) & 0xff);
-    iv[11] = (uint8_t) ((high_bits >> 24) & 0xff);
-
-    gcm = EVP_CIPHER_fetch(NULL, "AES-128-GCM", NULL);
-    if (!gcm) {
+    for (int i = 0; i < 4; i++) {
+        iv[8 + i] = (uint8_t) (high >> (i * 8));
+    }
+    ctx = chimera_crypto_hash_new(CHIMERA_CRYPTO_AES_GMAC, key, 16, iv, sizeof(iv));
+    ok  = ctx && chimera_crypto_update(ctx, hdr, sizeof(*hdr)) &&
+        chimera_crypto_update(ctx, body, body_len) && chimera_crypto_final(ctx, mac, sizeof(mac));
+    chimera_crypto_hash_free(ctx);
+    if (!ok) {
         return -1;
     }
-    c = EVP_CIPHER_CTX_new();
-    if (!c) {
-        EVP_CIPHER_free(gcm);
-        return -1;
-    }
-    if (EVP_EncryptInit_ex(c, gcm, NULL, NULL, NULL) == 1 &&
-        EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), NULL) == 1 &&
-        EVP_EncryptInit_ex(c, NULL, NULL, key, iv) == 1 &&
-        EVP_EncryptUpdate(c, NULL, &outl, (const uint8_t *) hdr, sizeof(*hdr)) == 1 &&
-        (body_len == 0 || EVP_EncryptUpdate(c, NULL, &outl, body, body_len) == 1) &&
-        EVP_EncryptFinal_ex(c, NULL, &outl) == 1 &&
-        EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, out_sig16) == 1) {
-        rc = 0;
-    }
-    EVP_CIPHER_CTX_free(c);
-    EVP_CIPHER_free(gcm);
-    return rc;
+    memcpy(out_sig16, mac, 16);
+    return 0;
 } /* chimera_smb_client_gmac_aes128 */
 
 /* Dispatch to the negotiated algorithm.  `dialect`/`signing_alg` come from the
@@ -378,7 +306,7 @@ chimera_smb_client_init(
     (void) cfgdata;
     (void) metrics;
 
-    pthread_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
 
     shared->max_servers  = CHIMERA_SMB_CLIENT_MAX_SERVERS;
     shared->servers      = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -400,12 +328,12 @@ chimera_smb_client_destroy(void *private_data)
                 evpl_endpoint_close(shared->servers[i]->endpoint);
             }
             chimera_smb_path_table_clear(shared->servers[i]);
-            pthread_mutex_destroy(&shared->servers[i]->path_lock);
+            evpl_mutex_destroy(&shared->servers[i]->path_lock);
             free(shared->servers[i]);
         }
     }
 
-    pthread_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->lock);
     free(shared->servers);
     free(shared);
 } /* chimera_smb_client_destroy */
@@ -567,7 +495,7 @@ chimera_smb_client_sign_frame_send(
 
         /* Frame the PLAINTEXT length for the gather, then reframe over the
          * ciphertext below; the transform header is transport payload too. */
-        netbios->word = __builtin_bswap32((uint32_t) smb2_len);
+        netbios->word = chimera_bswap32((uint32_t) smb2_len);
         evpl_iovec_set_length(iov, total);
 
         if (chimera_smb_encrypt_compound(
@@ -586,7 +514,7 @@ chimera_smb_client_sign_frame_send(
             struct smb_client_netbios_header *enc_nb    = evpl_iovec_data(&enc_iov);
             int                               enc_total = evpl_iovec_length(&enc_iov);
 
-            enc_nb->word = __builtin_bswap32(
+            enc_nb->word = chimera_bswap32(
                 (uint32_t) (enc_total - (int) sizeof(*enc_nb)));
 
             evpl_sendv(conn->evpl, conn->bind, &enc_iov, 1, enc_total,
@@ -595,7 +523,7 @@ chimera_smb_client_sign_frame_send(
         return;
     }
 
-    netbios->word = __builtin_bswap32((uint32_t) smb2_len);
+    netbios->word = chimera_bswap32((uint32_t) smb2_len);
 
     evpl_iovec_set_length(iov, total);
 
@@ -1113,7 +1041,7 @@ chimera_smb_client_segment(
         return 0;
     }
 
-    hdr  = __builtin_bswap32(hdr);
+    hdr  = chimera_bswap32(hdr);
     hdr &= 0x00ffffff;
 
     return 4 + hdr;

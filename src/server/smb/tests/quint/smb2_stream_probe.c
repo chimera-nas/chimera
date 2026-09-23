@@ -110,8 +110,8 @@ probe_stream_lifecycle(struct smb2_conn *c)
     printf("# --- ADS lifecycle ---\n");
 
     /* Base file with its own data stream. */
-    st = smb2_create(c, "ads.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &base);
+    st = smb2_create(c, "ads.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &base);
     CHECK(st == ST_SUCCESS, "CREATE base ads.bin -> 0x%08x", st);
     if (st != ST_SUCCESS) {
         return;
@@ -126,8 +126,8 @@ probe_stream_lifecycle(struct smb2_conn *c)
 
     /* Create an alternate named stream via the file:stream CREATE syntax and
      * give it content distinct from the base. */
-    st = smb2_create(c, "ads.bin:alt", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &alt);
+    st = smb2_create(c, "ads.bin:alt", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &alt);
     CHECK(st == ST_SUCCESS, "CREATE ads.bin:alt -> 0x%08x", st);
     if (st == ST_SUCCESS) {
         st = smb2_write(c, alt.file_id, 0, "ALTERNATE", 9, &cnt);
@@ -148,8 +148,8 @@ probe_stream_lifecycle(struct smb2_conn *c)
           (unsigned long long) sz);
 
     /* A second named stream is independent again. */
-    st = smb2_create(c, "ads.bin:beta", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &beta);
+    st = smb2_create(c, "ads.bin:beta", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &beta);
     CHECK(st == ST_SUCCESS, "CREATE ads.bin:beta -> 0x%08x", st);
     if (st == ST_SUCCESS) {
         smb2_write(c, beta.file_id, 0, "BB", 2, &cnt);
@@ -168,9 +168,9 @@ probe_stream_lifecycle(struct smb2_conn *c)
           "the base data stream is intact after the stream writes (%u)", rlen);
 
     /* Delete :alt via delete-on-close disposition on its own handle
-     * (FILE_ALL_ACCESS already includes the DELETE right). */
-    st = smb2_create(c, "ads.bin:alt", FILE_OPEN, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &reopen);
+     * (MBT_FILE_ALL_ACCESS already includes the DELETE right). */
+    st = smb2_create(c, "ads.bin:alt", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &reopen);
     CHECK(st == ST_SUCCESS, "re-open :alt for delete -> 0x%08x", st);
     if (st == ST_SUCCESS) {
         st = smb2_set_disposition(c, reopen.file_id, 1);
@@ -185,8 +185,8 @@ probe_stream_lifecycle(struct smb2_conn *c)
     CHECK(!found, ":alt no longer appears in the enumeration");
 
     /* Opening the deleted stream by name is refused. */
-    st = smb2_create(c, "ads.bin:alt", FILE_OPEN, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &reopen);
+    st = smb2_create(c, "ads.bin:alt", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &reopen);
     CHECK(st != ST_SUCCESS, "opening the deleted stream :alt is refused (0x%08x)",
           st);
     if (st == ST_SUCCESS) {

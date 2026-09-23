@@ -120,8 +120,8 @@ run_profile(const struct smb2_wire_profile *w)
            "signing_on=%d encrypt_on=%d\n",
            c->dialect, c->signing_alg, c->cipher, c->signing_on, c->encrypt_on);
 
-    st = smb2_create(c, "wire.txt", FILE_OPEN_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "wire.txt", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", w->name, st);
 
     st = smb2_write(c, co.file_id, 0, payload, 9, &count);

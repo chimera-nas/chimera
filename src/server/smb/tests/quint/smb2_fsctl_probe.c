@@ -65,8 +65,8 @@ make_file(
     uint32_t       st, count = 0;
     int            off, chunk, i;
 
-    st = smb2_create(c, name, FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
-                     FILE_SHARE_RWD, NULL, out);
+    st = smb2_create(c, name, MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, out);
     CHECK(st == ST_SUCCESS, "setup: CREATE %s -> 0x%08x", name, st);
 
     for (off = 0; off < len; off += chunk) {
@@ -268,8 +268,8 @@ probe_sparse(struct smb2_conn *c)
 
     /* Access control: SET_SPARSE and SET_ZERO_DATA both write, so a
      * read-only handle must be refused. */
-    st = smb2_create(c, "sparse_ro.bin", FILE_OPEN_IF, FILE_READ_ACCESS,
-                     FILE_SHARE_RWD, NULL, &co);
+    st = smb2_create(c, "sparse_ro.bin", MBT_FILE_OPEN_IF, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
     if (st == ST_SUCCESS) {
         in[0] = 1;
         st    = smb2_ioctl(c, SMB2_FSCTL_SET_SPARSE, co.file_id, in, 1);
@@ -623,12 +623,12 @@ probe_reparse(struct smb2_conn *c)
     /* And a fresh open of the link, taken WITHOUT following it, reports the
      * same thing -- which is the path a client actually uses. */
     /* Opening a reparse point takes ATTRIBUTE-ONLY access: the server turns a
-     * metadata-only FILE_OPEN into an O_PATH-style handle, and only that form
+     * metadata-only MBT_FILE_OPEN into an O_PATH-style handle, and only that form
      * may name a symlink under NOFOLLOW -- asking for data access instead gets
      * ELOOP from the backend and STATUS_STOPPED_ON_SYMLINK on the wire, which
      * is correct (a symlink has no data to read). */
-    st = smb2_create_opts(c, "rp_link.bin", FILE_OPEN, FILE_READ_ATTRIBUTES,
-                          FILE_SHARE_RWD, SMB2_FILE_OPEN_REPARSE_POINT,
+    st = smb2_create_opts(c, "rp_link.bin", MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
+                          MBT_FILE_SHARE_RWD, SMB2_FILE_OPEN_REPARSE_POINT,
                           NULL, &ro);
     CHECK(st == ST_SUCCESS,
           "re-open the link with FILE_OPEN_REPARSE_POINT -> 0x%08x", st);
@@ -651,8 +651,8 @@ probe_reparse(struct smb2_conn *c)
      * as-is rather than fixed: the change is small but it moves behavior the
      * extended-tier pike/smbtorture reparse cases exercise, which this tier
      * cannot run. */
-    st = smb2_create_opts(c, "rp_link.bin", FILE_OPEN, FILE_READ_ATTRIBUTES,
-                          FILE_SHARE_RWD, SMB2_FILE_OPEN_REPARSE_POINT,
+    st = smb2_create_opts(c, "rp_link.bin", MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
+                          MBT_FILE_SHARE_RWD, SMB2_FILE_OPEN_REPARSE_POINT,
                           NULL, &ro);
     if (st == ST_SUCCESS) {
         (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, ro.file_id, NULL,

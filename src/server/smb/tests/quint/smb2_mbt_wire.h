@@ -21,7 +21,7 @@
  * server's own reading of them (src/server/smb/smb_signing.c, smb_encrypt.c,
  * smb_ntlm.c).  Deliberately independent code -- shared helpers would let a
  * server-side error cancel out and prove nothing -- but pinned to the same
- * OpenSSL primitives, since agreeing on AES is not what is under test.
+ * platform crypto primitives, validated separately with fixed vectors.
  */
 
 #pragma once
@@ -32,13 +32,7 @@
 #include <string.h>
 #include <ctype.h>
 
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
-#include <openssl/kdf.h>
-#include <openssl/params.h>
-#include <openssl/core_names.h>
-#include <openssl/provider.h>
+#include "common/crypto.h"
 
 /* ---- little-endian field put/get ---------------------------------------- */
 
@@ -184,23 +178,6 @@ smb2w_die(const char *what)
     exit(6);
 } /* smb2w_die */
 
-/* MD4 (the NT hash) lives in OpenSSL 3's legacy provider; the server loads it
- * the same way (smb_ntlm.c ensure_legacy_provider).  Both providers must be
- * held: fetching "legacy" alone displaces the default one that supplies every
- * other digest and cipher here. */
-static inline void
-smb2w_need_legacy(void)
-{
-    static int done = 0;
-
-    if (done) {
-        return;
-    }
-    done = 1;
-    OSSL_PROVIDER_load(NULL, "legacy");
-    OSSL_PROVIDER_load(NULL, "default");
-} /* smb2w_need_legacy */
-
 /* ---- SP800-108 counter-mode KDF (MS-SMB2 3.1.4.2) ----------------------- */
 
 /* HMAC-SHA256 counter KDF with the [L]2 length suffix and the 0x00 separator
@@ -218,36 +195,9 @@ smb2w_kdf(
     uint8_t       *out,
     size_t         out_len)
 {
-    EVP_KDF     *kdf = EVP_KDF_fetch(NULL, "KBKDF", NULL);
-    EVP_KDF_CTX *kctx;
-    OSSL_PARAM   params[10];
-    size_t       n       = 0;
-    int          use_l   = 1;
-    int          use_sep = 1;
-
-    if (!kdf) {
-        smb2w_die("EVP_KDF_fetch(KBKDF)");
+    if (!chimera_crypto_kdf(key, key_len, label, label_len, context, ctx_len, out, out_len)) {
+        smb2w_die("SP800-108 KDF");
     }
-    kctx = EVP_KDF_CTX_new(kdf);
-    EVP_KDF_free(kdf);
-    if (!kctx) {
-        smb2w_die("EVP_KDF_CTX_new");
-    }
-
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE, (char *) "counter", 0);
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC, (char *) "HMAC", 0);
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char *) "SHA256", 0);
-    params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *) key, key_len);
-    params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *) label, label_len);
-    params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, (void *) context, ctx_len);
-    params[n++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &use_l);
-    params[n++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &use_sep);
-    params[n++] = OSSL_PARAM_construct_end();
-
-    if (EVP_KDF_derive(kctx, out, out_len, params) != 1) {
-        smb2w_die("EVP_KDF_derive");
-    }
-    EVP_KDF_CTX_free(kctx);
 } /* smb2w_kdf */
 
 /* preauth = SHA512(preauth || msg), updated in place (MS-SMB2 3.1.4.4). */
@@ -257,19 +207,13 @@ smb2w_preauth_extend(
     const void *msg,
     uint32_t    msg_len)
 {
-    EVP_MD_CTX  *md = EVP_MD_CTX_new();
-    unsigned int out_len;
+    struct chimera_crypto_hash *md = chimera_crypto_hash_new(CHIMERA_CRYPTO_SHA512, NULL, 0, NULL, 0);
 
-    if (!md) {
-        smb2w_die("EVP_MD_CTX_new");
-    }
-    if (EVP_DigestInit_ex(md, EVP_sha512(), NULL) != 1 ||
-        EVP_DigestUpdate(md, hash, SMB2W_PREAUTH_HASH_SIZE) != 1 ||
-        EVP_DigestUpdate(md, msg, msg_len) != 1 ||
-        EVP_DigestFinal_ex(md, hash, &out_len) != 1) {
+    if (!md || !chimera_crypto_update(md, hash, SMB2W_PREAUTH_HASH_SIZE) ||
+        !chimera_crypto_update(md, msg, msg_len) || !chimera_crypto_final(md, hash, SMB2W_PREAUTH_HASH_SIZE)) {
         smb2w_die("SHA-512 preauth extend");
     }
-    EVP_MD_CTX_free(md);
+    chimera_crypto_hash_free(md);
 } /* smb2w_preauth_extend */
 
 /* Signing key: 2.x uses the session key verbatim, 3.0/3.0.2 derive it from a
@@ -345,80 +289,31 @@ smb2w_sign(
     int            msg_len,
     uint8_t       *sig16)
 {
-    int use_gmac = (dialect == 0x0311 && signing_alg == SMB2W_SIGN_AES_GMAC);
-    int use_cmac = (dialect >= 0x0300 && !use_gmac &&
-                    !(dialect == 0x0311 && signing_alg == SMB2W_SIGN_HMAC_SHA256));
+    int                           use_gmac = dialect == 0x0311 && signing_alg == SMB2W_SIGN_AES_GMAC;
+    int                           use_cmac = dialect >= 0x0300 && !use_gmac && !(dialect == 0x0311 && signing_alg ==
+                                                                                 SMB2W_SIGN_HMAC_SHA256);
+    enum chimera_crypto_algorithm algorithm = use_gmac ? CHIMERA_CRYPTO_AES_GMAC :
+        (use_cmac ? CHIMERA_CRYPTO_AES_CMAC : CHIMERA_CRYPTO_HMAC_SHA256);
+    uint8_t                       iv[12] = { 0 }, out[32];
+    uint32_t                      high = g32(msg, 16) & 1u;
+    struct chimera_crypto_hash   *ctx;
 
-    if (use_gmac) {
-        /* AES-GMAC signs with the whole message as associated data and an IV
-         * built from the MessageId plus two header flag bits (MS-SMB2
-         * 3.1.4.1); the resulting GCM tag is the signature. */
-        EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
-        uint8_t         iv[12];
-        uint32_t        high_bits;
-        int             outl;
-
-        if (!c) {
-            smb2w_die("EVP_CIPHER_CTX_new");
-        }
-
-        high_bits = g32(msg, 16) & 0x00000001u;      /* SERVER_TO_REDIR */
-        if (g16(msg, 12) == 0x000C) {                /* SMB2_CANCEL */
-            high_bits |= 0x00000002u;                /* ASYNC_COMMAND */
-        }
-
-        memset(iv, 0, sizeof(iv));
-        memcpy(iv, msg + 24, 8);                     /* MessageId */
-        p32(iv, 8, high_bits);
-
-        if (EVP_EncryptInit_ex(c, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), NULL) != 1 ||
-            EVP_EncryptInit_ex(c, NULL, NULL, key, iv) != 1 ||
-            EVP_EncryptUpdate(c, NULL, &outl, msg, msg_len) != 1 ||
-            EVP_EncryptFinal_ex(c, NULL, &outl) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, sig16) != 1) {
-            smb2w_die("AES-GMAC signature");
-        }
-        EVP_CIPHER_CTX_free(c);
-    } else if (use_cmac) {
-        EVP_MAC     *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
-        EVP_MAC_CTX *mctx;
-        OSSL_PARAM   params[2];
-        size_t       maclen = 0;
-        uint8_t      out[16];
-
-        if (!mac) {
-            smb2w_die("EVP_MAC_fetch(CMAC)");
-        }
-        mctx = EVP_MAC_CTX_new(mac);
-        EVP_MAC_free(mac);
-        params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_CIPHER,
-                                                     (char *) "AES-128-CBC", 0);
-        params[1] = OSSL_PARAM_construct_end();
-
-        if (!mctx ||
-            EVP_MAC_init(mctx, key, 16, params) != 1 ||
-            EVP_MAC_update(mctx, msg, msg_len) != 1 ||
-            EVP_MAC_final(mctx, out, &maclen, sizeof(out)) != 1) {
-            smb2w_die("AES-CMAC signature");
-        }
-        EVP_MAC_CTX_free(mctx);
-        memcpy(sig16, out, 16);
-    } else {
-        uint8_t      out[32];
-        unsigned int outlen = 0;
-
-        if (!HMAC(EVP_sha256(), key, 16, msg, msg_len, out, &outlen) ||
-            outlen < 16) {
-            smb2w_die("HMAC-SHA256 signature");
-        }
-        memcpy(sig16, out, 16);
+    if (g16(msg, 12) == 0x000C) {
+        high |= 2u;
     }
+    memcpy(iv, msg + 24, 8);
+    p32(iv, 8, high);
+    ctx = chimera_crypto_hash_new(algorithm, key, 16, iv, sizeof(iv));
+    if (!ctx || !chimera_crypto_update(ctx, msg, msg_len) || !chimera_crypto_final(ctx, out, sizeof(out))) {
+        smb2w_die("SMB signature");
+    }
+    chimera_crypto_hash_free(ctx);
+    memcpy(sig16, out, 16);
 } /* smb2w_sign */
 
 /* ---- SMB3 transport encryption ------------------------------------------ */
 
-static inline const EVP_CIPHER *
+static inline int
 smb2w_cipher(
     uint16_t cipher,
     int     *nonce_len,
@@ -426,15 +321,15 @@ smb2w_cipher(
 {
     switch (cipher) {
         case SMB2W_CIPHER_AES128_CCM:
-            *nonce_len = 11; *is_ccm = 1; return EVP_aes_128_ccm();
+            *nonce_len = 11; *is_ccm = 1; return 1;
         case SMB2W_CIPHER_AES128_GCM:
-            *nonce_len = 12; *is_ccm = 0; return EVP_aes_128_gcm();
+            *nonce_len = 12; *is_ccm = 0; return 1;
         case SMB2W_CIPHER_AES256_CCM:
-            *nonce_len = 11; *is_ccm = 1; return EVP_aes_256_ccm();
+            *nonce_len = 11; *is_ccm = 1; return 1;
         case SMB2W_CIPHER_AES256_GCM:
-            *nonce_len = 12; *is_ccm = 0; return EVP_aes_256_gcm();
+            *nonce_len = 12; *is_ccm = 0; return 1;
         default:
-            return NULL;
+            return 0;
     } /* switch */
 } /* smb2w_cipher */
 
@@ -452,11 +347,11 @@ smb2w_encrypt(
     int            plain_len,
     uint8_t       *out)
 {
-    const EVP_CIPHER *cipher;
-    EVP_CIPHER_CTX   *c;
-    uint8_t          *ct = out + SMB2W_XFORM_SIZE;
-    uint8_t           nonce[16];
-    int               nonce_len, is_ccm, outl;
+    int                         cipher;
+    struct chimera_crypto_aead *c;
+    uint8_t                    *ct = out + SMB2W_XFORM_SIZE;
+    uint8_t                     nonce[16];
+    int                         nonce_len, is_ccm;
 
     cipher = smb2w_cipher(cipher_id, &nonce_len, &is_ccm);
     if (!cipher) {
@@ -477,37 +372,12 @@ smb2w_encrypt(
 
     memcpy(ct, plain, plain_len);
 
-    c = EVP_CIPHER_CTX_new();
-    if (!c) {
-        smb2w_die("EVP_CIPHER_CTX_new");
+    c = chimera_crypto_aead_new();
+    if (!c || !chimera_crypto_aead_crypt(c, 1, is_ccm, key, key_len, nonce, nonce_len,
+                                         out + SMB2W_XFORM_AAD_OFF, SMB2W_XFORM_AAD_LEN, ct, plain_len, out + 4)) {
+        smb2w_die("AEAD encrypt");
     }
-    if (EVP_EncryptInit_ex(c, cipher, NULL, NULL, NULL) != 1) {
-        smb2w_die("EncryptInit");
-    }
-    if (is_ccm) {
-        if (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_IVLEN, nonce_len, NULL) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_TAG, 16, NULL) != 1 ||
-            EVP_EncryptInit_ex(c, NULL, NULL, key, nonce) != 1 ||
-            EVP_EncryptUpdate(c, NULL, &outl, NULL, plain_len) != 1 ||
-            EVP_EncryptUpdate(c, NULL, &outl, out + SMB2W_XFORM_AAD_OFF,
-                              SMB2W_XFORM_AAD_LEN) != 1 ||
-            EVP_EncryptUpdate(c, ct, &outl, ct, plain_len) != 1 ||
-            EVP_EncryptFinal_ex(c, ct + outl, &outl) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_GET_TAG, 16, out + 4) != 1) {
-            smb2w_die("AES-CCM encrypt");
-        }
-    } else {
-        if (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, nonce_len, NULL) != 1 ||
-            EVP_EncryptInit_ex(c, NULL, NULL, key, nonce) != 1 ||
-            EVP_EncryptUpdate(c, NULL, &outl, out + SMB2W_XFORM_AAD_OFF,
-                              SMB2W_XFORM_AAD_LEN) != 1 ||
-            EVP_EncryptUpdate(c, ct, &outl, ct, plain_len) != 1 ||
-            EVP_EncryptFinal_ex(c, ct + outl, &outl) != 1 ||
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, out + 4) != 1) {
-            smb2w_die("AES-GCM encrypt");
-        }
-    }
-    EVP_CIPHER_CTX_free(c);
+    chimera_crypto_aead_free(c);
 
     (void) key_len;
     return SMB2W_XFORM_SIZE + plain_len;
@@ -525,12 +395,12 @@ smb2w_decrypt(
     int            xform_len,
     uint8_t       *out)
 {
-    const EVP_CIPHER *cipher;
-    EVP_CIPHER_CTX   *c;
-    const uint8_t    *ct = xform + SMB2W_XFORM_SIZE;
-    uint8_t           nonce[16], tag[16];
-    int               nonce_len, is_ccm, outl, ct_len, ok;
-    uint32_t          orig_len;
+    int                         cipher;
+    struct chimera_crypto_aead *c;
+    const uint8_t              *ct = xform + SMB2W_XFORM_SIZE;
+    uint8_t                     nonce[16], tag[16];
+    int                         nonce_len, is_ccm, ct_len, ok;
+    uint32_t                    orig_len;
 
     if (xform_len < SMB2W_XFORM_SIZE) {
         return -1;
@@ -550,33 +420,14 @@ smb2w_decrypt(
     memcpy(nonce, xform + 20, (size_t) nonce_len);
     memcpy(tag, xform + 4, 16);
 
-    c = EVP_CIPHER_CTX_new();
+    c = chimera_crypto_aead_new();
     if (!c) {
         return -1;
     }
-    ok = EVP_DecryptInit_ex(c, cipher, NULL, NULL, NULL) == 1;
-    if (is_ccm) {
-        ok = ok &&
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_IVLEN, nonce_len, NULL) == 1 &&
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_TAG, 16, tag) == 1 &&
-            EVP_DecryptInit_ex(c, NULL, NULL, key, nonce) == 1 &&
-            EVP_DecryptUpdate(c, NULL, &outl, NULL, ct_len) == 1 &&
-            EVP_DecryptUpdate(c, NULL, &outl, xform + SMB2W_XFORM_AAD_OFF,
-                              SMB2W_XFORM_AAD_LEN) == 1 &&
-            /* CCM reports authentication through DecryptUpdate's return; there
-             * is no Final step. */
-            EVP_DecryptUpdate(c, out, &outl, ct, ct_len) == 1;
-    } else {
-        ok = ok &&
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, nonce_len, NULL) == 1 &&
-            EVP_DecryptInit_ex(c, NULL, NULL, key, nonce) == 1 &&
-            EVP_DecryptUpdate(c, NULL, &outl, xform + SMB2W_XFORM_AAD_OFF,
-                              SMB2W_XFORM_AAD_LEN) == 1 &&
-            EVP_DecryptUpdate(c, out, &outl, ct, ct_len) == 1 &&
-            EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_TAG, 16, tag) == 1 &&
-            EVP_DecryptFinal_ex(c, out + outl, &outl) == 1;
-    }
-    EVP_CIPHER_CTX_free(c);
+    memcpy(out, ct, ct_len);
+    ok = chimera_crypto_aead_crypt(c, 0, is_ccm, key, key_len, nonce, nonce_len,
+                                   xform + SMB2W_XFORM_AAD_OFF, SMB2W_XFORM_AAD_LEN, out, ct_len, tag);
+    chimera_crypto_aead_free(c);
 
     (void) key_len;
     return ok ? ct_len : -1;
@@ -592,26 +443,18 @@ smb2w_ntowfv2(
     const char *domain,
     uint8_t    *out16)
 {
-    uint8_t      nt_hash[16];
-    uint8_t      pw16[512], id16[512];
-    char         upper[128];
-    int          pwlen, idlen = 0;
-    unsigned int len;
-    EVP_MD_CTX  *md;
-    size_t       i;
+    uint8_t nt_hash[16];
+    uint8_t pw16[512], id16[512];
+    char    upper[128];
+    int     pwlen, idlen = 0;
+    size_t  i;
 
-    smb2w_need_legacy();
 
     pwlen = utf16le(password, pw16);
 
-    md = EVP_MD_CTX_new();
-    if (!md ||
-        EVP_DigestInit_ex(md, EVP_md4(), NULL) != 1 ||
-        EVP_DigestUpdate(md, pw16, pwlen) != 1 ||
-        EVP_DigestFinal_ex(md, nt_hash, &len) != 1) {
-        smb2w_die("MD4 NT hash (is the OpenSSL legacy provider available?)");
+    if (!chimera_crypto_digest(CHIMERA_CRYPTO_MD4, pw16, pwlen, nt_hash, sizeof(nt_hash))) {
+        smb2w_die("MD4 NT hash");
     }
-    EVP_MD_CTX_free(md);
 
     for (i = 0; i < sizeof(upper) - 1 && user[i]; i++) {
         upper[i] = (char) toupper((unsigned char) user[i]);
@@ -621,7 +464,7 @@ smb2w_ntowfv2(
     idlen  = utf16le(upper, id16);
     idlen += utf16le(domain ? domain : "", id16 + idlen);
 
-    if (!HMAC(EVP_md5(), nt_hash, 16, id16, idlen, out16, &len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, nt_hash, 16, id16, idlen, out16, 16)) {
         smb2w_die("HMAC-MD5 NTOWFv2");
     }
 } /* smb2w_ntowfv2 */
@@ -694,7 +537,6 @@ smb2w_ntlm_auth_ntlmv2(
     uint16_t       ti_len;
     uint32_t       ti_off;
     int            blob_len = 0, nt_len, off, dlen, ulen, elen;
-    unsigned int   len;
 
     if (challenge_len < 48) {
         smb2w_die("NTLM CHALLENGE too short");
@@ -711,8 +553,8 @@ smb2w_ntlm_auth_ntlmv2(
 
     smb2w_ntowfv2(user, password, domain, ntowf);
 
-    if (RAND_bytes(client_chal, sizeof(client_chal)) != 1) {
-        smb2w_die("RAND_bytes");
+    if (chimera_crypto_random(client_chal, sizeof(client_chal)) != 1) {
+        smb2w_die("chimera_crypto_random");
     }
 
     /* NTLMv2_CLIENT_CHALLENGE (MS-NLMP 2.2.2.7). */
@@ -732,7 +574,7 @@ smb2w_ntlm_auth_ntlmv2(
     /* NTProofStr = HMAC-MD5(NTOWFv2, ServerChallenge || blob) */
     memcpy(hmac_in, server_chal, 8);
     memcpy(hmac_in + 8, blob, blob_len);
-    if (!HMAC(EVP_md5(), ntowf, 16, hmac_in, 8 + blob_len, proof, &len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntowf, 16, hmac_in, 8 + blob_len, proof, 16)) {
         smb2w_die("HMAC-MD5 NTProofStr");
     }
 
@@ -742,11 +584,11 @@ smb2w_ntlm_auth_ntlmv2(
 
     /* Key-exchange key = HMAC-MD5(NTOWFv2, NTProofStr); the exported session
      * key rides RC4-wrapped under it. */
-    if (!HMAC(EVP_md5(), ntowf, 16, proof, 16, kxkey, &len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntowf, 16, proof, 16, kxkey, 16)) {
         smb2w_die("HMAC-MD5 key-exchange key");
     }
-    if (RAND_bytes(session_key16, 16) != 1) {
-        smb2w_die("RAND_bytes");
+    if (chimera_crypto_random(session_key16, 16) != 1) {
+        smb2w_die("chimera_crypto_random");
     }
 
     memset(o, 0, 88);
@@ -780,16 +622,10 @@ smb2w_ntlm_auth_ntlmv2(
 
     /* EncryptedRandomSessionKey = RC4(kxkey, session key) */
     {
-        EVP_CIPHER_CTX *rc4  = EVP_CIPHER_CTX_new();
-        int             outl = 0;
-
-        if (!rc4 ||
-            EVP_EncryptInit_ex(rc4, EVP_rc4(), NULL, kxkey, NULL) != 1 ||
-            EVP_EncryptUpdate(rc4, o + off, &outl, session_key16, 16) != 1 ||
-            outl != 16) {
-            smb2w_die("RC4 session-key wrap");
+        /* Independent wire fixture for NTLM's negotiated key exchange. */
+        if (!chimera_crypto_ntlm_key_exchange(kxkey, session_key16, o + off)) {
+            smb2w_die("RC4 key exchange");
         }
-        EVP_CIPHER_CTX_free(rc4);
     }
     elen = 16;
     p16(o, 52, (uint16_t) elen); p16(o, 54, (uint16_t) elen); p32(o, 56, off);

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "common/misc.h"
@@ -21,7 +22,7 @@ chimera_smb_tree_disconnect(struct chimera_smb_request *request)
         return;
     }
 
-    pthread_mutex_lock(&session->lock);
+    evpl_mutex_lock(&session->lock);
 
     request->tree->refcnt--;
 
@@ -33,7 +34,7 @@ chimera_smb_tree_disconnect(struct chimera_smb_request *request)
         chimera_smb_tree_free(thread, thread->shared, request->tree, false);
     }
 
-    pthread_mutex_unlock(&session->lock);
+    evpl_mutex_unlock(&session->lock);
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include "smb_srvsvc.h"
 #include "smb_dcerpc.h"
 #include "srvsvc_ndr.h"
@@ -67,7 +68,7 @@ chimera_smb_srvsvc_impl(
 
             /* Snapshot the share names under the lock into dbuf storage (which
             * outlives the lock and the marshalling), plus a synthetic IPC$. */
-            pthread_mutex_lock(&shared->shares_lock);
+            evpl_mutex_lock(&shared->shares_lock);
             LL_FOREACH(shared->shares, cur)
             {
                 count++;
@@ -80,7 +81,7 @@ chimera_smb_srvsvc_impl(
                 arr[i].comment = "";
                 i++;
             }
-            pthread_mutex_unlock(&shared->shares_lock);
+            evpl_mutex_unlock(&shared->shares_lock);
 
             arr[i].name    = chimera_smb_srvsvc_dbuf_strdup(dbuf, "IPC$");
             arr[i].type    = SRV_STYPE_IPC_HIDDEN;
@@ -123,7 +124,7 @@ chimera_smb_srvsvc_impl(
                 info->comment = "Remote IPC";
                 found         = 1;
             } else if (netname) {
-                pthread_mutex_lock(&shared->shares_lock);
+                evpl_mutex_lock(&shared->shares_lock);
                 LL_FOREACH(shared->shares, cur)
                 {
                     if (strcasecmp(cur->name, netname) == 0) {
@@ -134,7 +135,7 @@ chimera_smb_srvsvc_impl(
                         break;
                     }
                 }
-                pthread_mutex_unlock(&shared->shares_lock);
+                evpl_mutex_unlock(&shared->shares_lock);
             }
 
             if (found) {

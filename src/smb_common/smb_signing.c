@@ -4,10 +4,7 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <openssl/evp.h>
-#include <openssl/core_names.h>
-#include <openssl/params.h>
-#include <openssl/kdf.h>
+#include "common/crypto.h"
 
 #include "smb_signing.h"
 #include "smb_common.h"
@@ -15,53 +12,30 @@
 #include "smb2.h"
 
 struct chimera_smb_signing_ctx {
-    EVP_MAC    *hmac_mac;
-    EVP_MAC    *cmac_mac;
-    EVP_CIPHER *gcm;        /* AES-128-GCM, used as GMAC for AES-128-GMAC signing */
+    int reserved;
 };
 
 SYMBOL_EXPORT struct chimera_smb_signing_ctx *
 chimera_smb_signing_ctx_create(void)
 {
-    struct chimera_smb_signing_ctx *ctx = calloc(1, sizeof(struct chimera_smb_signing_ctx));
-
-    if (!ctx) {
-        return NULL;
-    }
-
-    ctx->hmac_mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-
-    chimera_smb2_abort_if(!ctx->hmac_mac, "Failed to fetch HMAC MAC");
-
-    ctx->cmac_mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
-
-    chimera_smb2_abort_if(!ctx->cmac_mac, "Failed to fetch CMAC MAC");
-
-    ctx->gcm = EVP_CIPHER_fetch(NULL, "AES-128-GCM", NULL);
-
-    chimera_smb2_abort_if(!ctx->gcm, "Failed to fetch AES-128-GCM cipher");
-
-    return ctx;
+    return calloc(1, sizeof(struct chimera_smb_signing_ctx));
 } /* chimera_smb_signing_ctx_new */
 
 SYMBOL_EXPORT void
 chimera_smb_signing_ctx_destroy(struct chimera_smb_signing_ctx *ctx)
 {
-    EVP_MAC_free(ctx->hmac_mac);
-    EVP_MAC_free(ctx->cmac_mac);
-    EVP_CIPHER_free(ctx->gcm);
     free(ctx);
 } /* chimera_smb_signing_ctx_destroy */
 
 
 /*
- * SP800-108 KDF (Counter mode) with HMAC-SHA256 using OpenSSL 3.x EVP_KDF "KBKDF".
+ * SP800-108 KDF (Counter mode) with HMAC-SHA256.
  * out_len is typically 16 for SMB signing keys (128 bits), but any length is allowed.
  *
  * Notes:
  *  - 'label' and 'context' are raw byte strings. If your protocol (e.g., SMB 3.0)
  *    requires the trailing NUL to be included, pass label_len/context_len INCLUDING '\0'.
- *  - For SMB 3.1.1 signing key: label = "SMBSigningKey" (no NUL), context = PreauthHash (SHA-512), 64 bytes.
+ *  - For SMB 3.1.1 signing key: label = "SMBSigningKey" (including NUL), context = PreauthHash (SHA-512), 64 bytes.
  *  - For SMB 3.0/3.0.2 signing key: label = "SMB2AESCMAC\0", context = "SmbSign\0".
  */
 SYMBOL_EXPORT int
@@ -75,51 +49,7 @@ chimera_smb_kbkdf(
     uint8_t       *out,
     size_t         out_len)
 {
-    int          ok = 0;
-
-    EVP_KDF     *kdf = EVP_KDF_fetch(NULL, "KBKDF", NULL);
-
-    if (!kdf) {
-        return 0;
-    }
-
-    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
-    EVP_KDF_free(kdf);
-    if (!kctx) {
-        return 0;
-    }
-
-/* KBKDF parameters */
-    OSSL_PARAM   params[10];
-    size_t       n       = 0;
-    const char  *mode    = "counter";
-    const char  *mac     = "HMAC";
-    const char  *digest  = "SHA256";
-    int          use_l   = 1; /* include [L]2 */
-    int          use_sep = 1; /* include 0x00 separator between label and context */
-
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,   (char *) mode,   0);
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,    (char *) mac,    0);
-    params[n++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char *) digest, 0);
-    params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,   (void *) key,    key_len);
-
-    if (label && label_len) {
-        params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *) label, label_len);
-    }
-    if (context && ctx_len) {
-        params[n++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, (void *) context, ctx_len);
-    }
-
-    params[n++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L,            &use_l);
-    params[n++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR,    &use_sep);
-    params[n++] = OSSL_PARAM_construct_end();
-
-    if (EVP_KDF_derive(kctx, out, out_len, params) == 1) {
-        ok = 1;
-    }
-
-    EVP_KDF_CTX_free(kctx);
-    return ok;
+    return chimera_crypto_kdf(key, key_len, label, label_len, context, ctx_len, out, out_len);
 } /* kdf_counter_hmac_sha256_ossl3 */
 
 /* Extend an SMB 3.1.1 preauth-integrity hash: hash = SHA512(hash || msg).
@@ -130,18 +60,13 @@ chimera_smb_preauth_extend(
     const void *msg,
     uint32_t    msg_len)
 {
-    EVP_MD_CTX  *md      = EVP_MD_CTX_new();
-    unsigned int out_len = 0;
+    struct chimera_crypto_hash *md = chimera_crypto_hash_new(CHIMERA_CRYPTO_SHA512, NULL, 0, NULL, 0);
 
-    chimera_smb2_abort_if(!md, "EVP_MD_CTX_new failed");
-
-    if (EVP_DigestInit_ex(md, EVP_sha512(), NULL) != 1 ||
-        EVP_DigestUpdate(md, hash, SMB2_PREAUTH_HASH_SIZE) != 1 ||
-        EVP_DigestUpdate(md, msg, msg_len) != 1 ||
-        EVP_DigestFinal_ex(md, hash, &out_len) != 1) {
-        chimera_smb2_abort("SHA-512 preauth hash update failed");
-    }
-    EVP_MD_CTX_free(md);
+    chimera_smb2_abort_if(!md || !chimera_crypto_update(md, hash, SMB2_PREAUTH_HASH_SIZE) ||
+                          !chimera_crypto_update(md, msg, msg_len) || !chimera_crypto_final(md, hash,
+                                                                                            SMB2_PREAUTH_HASH_SIZE),
+                          "SHA-512 preauth hash update failed");
+    chimera_crypto_hash_free(md);
 } /* chimera_smb_preauth_extend */
 
 SYMBOL_EXPORT int
@@ -196,259 +121,62 @@ chimera_smb_derive_signing_key(
 } /* chimera_smb_derive_smb3_signing_key */
 
 
-/*
- * Basic: HMAC-SHA256 over cursor input
- * Copies first 16 bytes of the HMAC into out_sig16.
- */
-static inline int
-chimera_smb_request_hmac_sha256(
-    struct chimera_smb_signing_ctx *ctx,
-    struct smb2_header             *hdr,
-    struct evpl_iovec_cursor       *cursor,
-    int                             length,
-    const uint8_t                  *key,
-    size_t                          keylen,
-    uint8_t                        *out_sig16)
+/* Sign the header and scatter/gather body without changing protocol framing. */
+static int
+chimera_smb_request_mac(
+    enum chimera_crypto_algorithm algorithm,
+    struct smb2_header           *hdr,
+    struct evpl_iovec_cursor     *cursor,
+    int                           length,
+    const uint8_t                *key,
+    size_t                        keylen,
+    uint8_t                      *out_sig16)
 {
-    int           ok     = -1, chunk, left = length;
-    size_t        maclen = 0;
-    unsigned char macbuf[32];
-    EVP_MAC_CTX  *mctx     = NULL;
-    OSSL_PARAM    params[] = {
-        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, (char *) "SHA256", 0),
-        OSSL_PARAM_construct_end()
-    };
+    uint8_t                     iv[12] = { 0 }, mac[32];
+    uint32_t                    high_bits = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
+    struct chimera_crypto_hash *ctx;
+    int                         left = length, ok = -1;
 
-    mctx = EVP_MAC_CTX_new(ctx->hmac_mac);
-    if (!mctx) {
-        goto done;
+    if (length < 0) {
+        return -1;
     }
-
-    if (EVP_MAC_init(mctx, key, keylen, params) != 1) {
-        goto done;
-    }
-
-    EVP_MAC_update(mctx, (uint8_t *) hdr, sizeof(*hdr));
-
-    while (left && cursor->niov) {
-
-        chunk = cursor->iov->length - cursor->offset;
-
-        if (left < chunk) {
-            chunk = left;
-        }
-
-        if (EVP_MAC_update(mctx, cursor->iov->data + cursor->offset, chunk) != 1) {
-            goto done;
-        }
-
-        left             -= chunk;
-        cursor->offset   += chunk;
-        cursor->consumed += chunk;
-
-        if (cursor->offset == cursor->iov->length) {
-            cursor->iov++;
-            cursor->niov--;
-            cursor->offset = 0;
-        }
-    }
-
-    if (left) {
-        goto done;
-    }
-
-    if (EVP_MAC_final(mctx, macbuf, &maclen, sizeof(macbuf)) != 1) {
-        goto done;
-    }
-    if (maclen < 16) {
-        goto done;
-    }
-
-    memcpy(out_sig16, macbuf, 16);
-
-    ok = 0;
-
- done:
-    EVP_MAC_CTX_free(mctx);
-    return ok;
-}  // evpl_iovec_cursor_hmac_sha256
-
-
-/*
- * Basic: CMAC-AES-128-CBC over cursor input
- * Copies first 16 bytes of the HMAC into out_sig16.
- */
-static inline int
-chimera_smb_request_cmac_aes_128_cbc(
-    struct chimera_smb_signing_ctx *ctx,
-    struct smb2_header             *hdr,
-    struct evpl_iovec_cursor       *cursor,
-    int                             length,
-    const uint8_t                  *key,
-    size_t                          keylen,
-    uint8_t                        *out_sig16)
-{
-    int          ok     = -1, chunk, left = length;
-    size_t       maclen   = 0;
-    EVP_MAC_CTX *mctx     = NULL;
-    OSSL_PARAM   params[] = {
-        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_CIPHER, (char *) "AES-128-CBC", 0),
-        OSSL_PARAM_construct_end()
-    };
-
-    mctx = EVP_MAC_CTX_new(ctx->cmac_mac);
-    if (!mctx) {
-        chimera_smb2_error("Failed to allocate CMAC-AES-128-CBC context");
-        goto done;
-    }
-
-    if (EVP_MAC_init(mctx, key, keylen, params) != 1) {
-        chimera_smb2_error("Failed to initialize CMAC-AES-128-CBC context");
-        goto done;
-    }
-
-    EVP_MAC_update(mctx, (uint8_t *) hdr, sizeof(*hdr));
-
-    while (left && cursor->niov) {
-
-        chunk = cursor->iov->length - cursor->offset;
-
-        if (left < chunk) {
-            chunk = left;
-        }
-
-        if (EVP_MAC_update(mctx, cursor->iov->data + cursor->offset, chunk) != 1) {
-            chimera_smb2_error("Failed to update CMAC-AES-128-CBC context");
-            goto done;
-        }
-
-        left             -= chunk;
-        cursor->offset   += chunk;
-        cursor->consumed += chunk;
-
-        if (cursor->offset == cursor->iov->length) {
-            cursor->iov++;
-            cursor->niov--;
-            cursor->offset = 0;
-        }
-    }
-
-    if (left) {
-        chimera_smb2_error("Left is not 0 after updating CMAC-AES-128-CBC context");
-        goto done;
-    }
-
-    if (EVP_MAC_final(mctx, out_sig16, &maclen, 16) != 1) {
-        chimera_smb2_error("Failed to finalize CMAC-AES-128-CBC context");
-        goto done;
-    }
-
-    ok = (maclen != 16);
-
- done:
-    EVP_MAC_CTX_free(mctx);
-    return ok;
-}   // evpl_iovec_cursor_cmac_aes_128_cbc
-
-/*
- * AES-128-GMAC over the SMB2 message (MS-SMB2 §3.1.4.1).  GMAC is AES-128-GCM
- * used purely as a MAC: the entire message is fed as associated data with no
- * plaintext, and the 16-byte authentication tag is the signature.
- *
- * The 12-byte IV is the 64-bit MessageId followed by a 32-bit value carrying
- * the SERVER_TO_REDIR flag (and ASYNC for CANCEL).  The associated data is the
- * SMB2 header with its signature field zeroed, followed by the message body —
- * identical to feeding the full 64-byte header (signature already zero) plus
- * the body, which is how the HMAC/CMAC paths above operate.
- */
-static inline int
-chimera_smb_request_gmac_aes_128(
-    struct chimera_smb_signing_ctx *ctx,
-    struct smb2_header             *hdr,
-    struct evpl_iovec_cursor       *cursor,
-    int                             length,
-    const uint8_t                  *key,
-    size_t                          keylen,
-    uint8_t                        *out_sig16)
-{
-    int             ok = -1, chunk, left = length, outl;
-    EVP_CIPHER_CTX *c = NULL;
-    uint8_t         iv[12];
-    uint32_t        high_bits;
-
-    high_bits = hdr->flags & SMB2_FLAGS_SERVER_TO_REDIR;
     if (hdr->command == SMB2_CANCEL) {
         high_bits |= SMB2_FLAGS_ASYNC_COMMAND;
     }
-
-    memset(iv, 0, sizeof(iv));
-    memcpy(iv, &hdr->message_id, 8);   /* MessageId, little-endian on host */
-    iv[8]  = (uint8_t) (high_bits & 0xff);
-    iv[9]  = (uint8_t) ((high_bits >> 8) & 0xff);
-    iv[10] = (uint8_t) ((high_bits >> 16) & 0xff);
-    iv[11] = (uint8_t) ((high_bits >> 24) & 0xff);
-
-    c = EVP_CIPHER_CTX_new();
-    if (!c) {
+    memcpy(iv, &hdr->message_id, 8);
+    for (int i = 0; i < 4; i++) {
+        iv[8 + i] = (uint8_t) (high_bits >> (8 * i));
+    }
+    ctx = chimera_crypto_hash_new(algorithm, key, keylen, iv, sizeof(iv));
+    if (!ctx || !chimera_crypto_update(ctx, hdr, sizeof(*hdr))) {
         goto done;
     }
-
-    if (EVP_EncryptInit_ex(c, ctx->gcm, NULL, NULL, NULL) != 1 ||
-        EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), NULL) != 1 ||
-        EVP_EncryptInit_ex(c, NULL, NULL, key, iv) != 1) {
-        goto done;
-    }
-
-    if (keylen < 16) {
-        goto done;
-    }
-
-    /* AAD: the 64-byte header (signature field zero) ... */
-    if (EVP_EncryptUpdate(c, NULL, &outl, (uint8_t *) hdr, sizeof(*hdr)) != 1) {
-        goto done;
-    }
-
-    /* ... followed by the message body. */
     while (left && cursor->niov) {
-
-        chunk = cursor->iov->length - cursor->offset;
-
+        int chunk = cursor->iov->length - cursor->offset;
         if (left < chunk) {
             chunk = left;
         }
-
-        if (EVP_EncryptUpdate(c, NULL, &outl, cursor->iov->data + cursor->offset, chunk) != 1) {
+        if (!chimera_crypto_update(ctx, (const uint8_t *) cursor->iov->data + cursor->offset, chunk)) {
             goto done;
         }
-
         left             -= chunk;
         cursor->offset   += chunk;
         cursor->consumed += chunk;
-
         if (cursor->offset == cursor->iov->length) {
             cursor->iov++;
             cursor->niov--;
             cursor->offset = 0;
         }
     }
-
-    if (left) {
+    if (left || !chimera_crypto_final(ctx, mac, sizeof(mac))) {
         goto done;
     }
-
-    if (EVP_EncryptFinal_ex(c, NULL, &outl) != 1 ||
-        EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, out_sig16) != 1) {
-        goto done;
-    }
-
+    memcpy(out_sig16, mac, 16);
     ok = 0;
-
  done:
-    if (c) {
-        EVP_CIPHER_CTX_free(c);
-    }
+    chimera_crypto_hash_free(ctx);
     return ok;
-} /* chimera_smb_request_gmac_aes_128 */
+} /* chimera_smb_request_mac */
 
 /*
  * Compute the SMB2 signature for a message using the algorithm negotiated for
@@ -466,21 +194,22 @@ chimera_smb_compute_signature_alg(
     const uint8_t                  *key,
     uint8_t                        *out_sig16)
 {
+    (void) ctx;
     switch (dialect) {
         case SMB2_DIALECT_2_0_2:
         case SMB2_DIALECT_2_1:
-            return chimera_smb_request_hmac_sha256(ctx, hdr, cursor, length, key, 16, out_sig16);
+            return chimera_smb_request_mac(CHIMERA_CRYPTO_HMAC_SHA256, hdr, cursor, length, key, 16, out_sig16);
         case SMB2_DIALECT_3_0:
         case SMB2_DIALECT_3_0_2:
-            return chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, cursor, length, key, 16, out_sig16);
+            return chimera_smb_request_mac(CHIMERA_CRYPTO_AES_CMAC, hdr, cursor, length, key, 16, out_sig16);
         case SMB2_DIALECT_3_1_1:
             switch (signing_alg) {
                 case SMB2_SIGNING_AES_GMAC:
-                    return chimera_smb_request_gmac_aes_128(ctx, hdr, cursor, length, key, 16, out_sig16);
+                    return chimera_smb_request_mac(CHIMERA_CRYPTO_AES_GMAC, hdr, cursor, length, key, 16, out_sig16);
                 case SMB2_SIGNING_HMAC_SHA256:
-                    return chimera_smb_request_hmac_sha256(ctx, hdr, cursor, length, key, 16, out_sig16);
+                    return chimera_smb_request_mac(CHIMERA_CRYPTO_HMAC_SHA256, hdr, cursor, length, key, 16, out_sig16);
                 default:
-                    return chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, cursor, length, key, 16, out_sig16);
+                    return chimera_smb_request_mac(CHIMERA_CRYPTO_AES_CMAC, hdr, cursor, length, key, 16, out_sig16);
             } /* switch */
         default:
             return -1;
@@ -508,6 +237,7 @@ chimera_smb_sign_message(
     uint8_t                        *smb2_buf,
     int                             smb2_len)
 {
+    (void) ctx;
     struct smb2_header      *hdr = (struct smb2_header *) smb2_buf;
     struct evpl_iovec        body_iov;
     struct evpl_iovec_cursor cursor;
@@ -529,32 +259,32 @@ chimera_smb_sign_message(
     switch (dialect) {
         case SMB2_DIALECT_2_0_2:
         case SMB2_DIALECT_2_1:
-            rc = chimera_smb_request_hmac_sha256(ctx, hdr, &cursor,
-                                                 body_len,
-                                                 signing_key, 16, signature);
+            rc = chimera_smb_request_mac(CHIMERA_CRYPTO_HMAC_SHA256, hdr, &cursor,
+                                         body_len,
+                                         signing_key, 16, signature);
             break;
         case SMB2_DIALECT_3_0:
         case SMB2_DIALECT_3_0_2:
-            rc = chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, &cursor,
-                                                      body_len,
-                                                      signing_key, 16, signature);
+            rc = chimera_smb_request_mac(CHIMERA_CRYPTO_AES_CMAC, hdr, &cursor,
+                                         body_len,
+                                         signing_key, 16, signature);
             break;
         case SMB2_DIALECT_3_1_1:
             switch (signing_alg) {
                 case SMB2_SIGNING_AES_GMAC:
-                    rc = chimera_smb_request_gmac_aes_128(ctx, hdr, &cursor,
-                                                          body_len,
-                                                          signing_key, 16, signature);
+                    rc = chimera_smb_request_mac(CHIMERA_CRYPTO_AES_GMAC, hdr, &cursor,
+                                                 body_len,
+                                                 signing_key, 16, signature);
                     break;
                 case SMB2_SIGNING_HMAC_SHA256:
-                    rc = chimera_smb_request_hmac_sha256(ctx, hdr, &cursor,
-                                                         body_len,
-                                                         signing_key, 16, signature);
+                    rc = chimera_smb_request_mac(CHIMERA_CRYPTO_HMAC_SHA256, hdr, &cursor,
+                                                 body_len,
+                                                 signing_key, 16, signature);
                     break;
                 default:
-                    rc = chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, &cursor,
-                                                              body_len,
-                                                              signing_key, 16, signature);
+                    rc = chimera_smb_request_mac(CHIMERA_CRYPTO_AES_CMAC, hdr, &cursor,
+                                                 body_len,
+                                                 signing_key, 16, signature);
                     break;
             } /* switch */
             break;

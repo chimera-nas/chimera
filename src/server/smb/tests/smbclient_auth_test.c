@@ -22,6 +22,7 @@
  * For Winbind:  Run via scripts/ad_test_wrapper.sh
  */
 
+#include "common/test_host.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 #include "server/server.h"
@@ -32,9 +33,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <sys/wait.h>
 #include <time.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #define TEST_DIR     "smbclient_test"
 #define TEST_FILE    "smbclient_test/test.txt"
@@ -835,7 +843,7 @@ main(
     snprintf(env.session_dir, sizeof(env.session_dir),
              "/tmp/smbclient_test_%d_%lu", getpid(), tv.tv_sec);
 
-    if (mkdir(env.session_dir, 0755) < 0 && errno != EEXIST) {
+    if (chimera_test_mkdir(env.session_dir, 0755) < 0 && errno != EEXIST) {
         fprintf(stderr, "Failed to create session directory: %s\n", strerror(errno));
         return EXIT_FAILURE;
     }

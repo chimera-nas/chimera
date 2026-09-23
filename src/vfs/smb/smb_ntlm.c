@@ -7,10 +7,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
-#include <openssl/provider.h>
+#include "common/crypto.h"
 
 #include "smb_ntlm.h"
 #include "smb_internal.h"
@@ -28,30 +25,16 @@
 #define NTLMSSP_REQUEST_TARGET                     0x00000004
 #define NTLMSSP_NEGOTIATE_UNICODE                  0x00000001
 
-/* OpenSSL 3.0 requires the legacy provider for MD4 (the NT hash). */
-static OSSL_PROVIDER *smb_ntlm_legacy_provider;
-static OSSL_PROVIDER *smb_ntlm_default_provider;
-static int            smb_ntlm_providers_loaded;
 
-static void
-smb_ntlm_ensure_legacy_provider(void)
-{
-    if (smb_ntlm_providers_loaded) {
-        return;
-    }
-    smb_ntlm_legacy_provider  = OSSL_PROVIDER_load(NULL, "legacy");
-    smb_ntlm_default_provider = OSSL_PROVIDER_load(NULL, "default");
-    smb_ntlm_providers_loaded = 1;
-} /* smb_ntlm_ensure_legacy_provider */
 
 /* Convert an ASCII/UTF-8 string to UTF-16LE.  Writes 2*len bytes to out (which
  * must be large enough) and returns the byte count. */
 static size_t
 smb_ntlm_utf16le(
     const char *in,
+    size_t      len,
     uint8_t    *out)
 {
-    size_t len = in ? strlen(in) : 0;
     size_t i;
 
     for (i = 0; i < len; i++) {
@@ -67,32 +50,18 @@ smb_ntlm_nt_hash(
     const char *password,
     uint8_t     nt_hash[16])
 {
-    uint8_t       utf16[512];
-    size_t        utf16_len;
-    EVP_MD_CTX   *ctx;
-    const EVP_MD *md4;
-    unsigned int  hash_len;
-    int           rc = -1;
+    uint8_t utf16[512];
+    size_t  len;
+    int     ok;
 
-    smb_ntlm_ensure_legacy_provider();
-
-    utf16_len = smb_ntlm_utf16le(password, utf16);
-
-    ctx = EVP_MD_CTX_new();
-    if (!ctx) {
+    len = password ? strlen(password) : 0;
+    if (len > sizeof(utf16) / 2) {
         return -1;
     }
-
-    md4 = EVP_md4();
-    if (md4 &&
-        EVP_DigestInit_ex(ctx, md4, NULL) == 1 &&
-        EVP_DigestUpdate(ctx, utf16, utf16_len) == 1 &&
-        EVP_DigestFinal_ex(ctx, nt_hash, &hash_len) == 1) {
-        rc = 0;
-    }
-
-    EVP_MD_CTX_free(ctx);
-    return rc;
+    len = smb_ntlm_utf16le(password, len, utf16);
+    ok  = chimera_crypto_digest(CHIMERA_CRYPTO_MD4, utf16, len, nt_hash, 16);
+    chimera_crypto_clear(utf16, sizeof(utf16));
+    return ok ? 0 : -1;
 } /* smb_ntlm_nt_hash */
 
 /* ntlmv2_hash = HMAC-MD5(NT_hash, UTF16LE(UPPER(user)) || UTF16LE(domain)). */
@@ -103,12 +72,12 @@ smb_ntlm_v2_hash(
     const char *domain,
     uint8_t     ntlmv2_hash[16])
 {
-    uint8_t      nt_hash[16];
-    char         user_upper[256];
-    uint8_t      concat[1024];
-    size_t       user_len, concat_len;
-    unsigned int hmac_len;
-    size_t       i;
+    uint8_t nt_hash[16];
+    char    user_upper[256];
+    uint8_t concat[1024];
+    size_t  user_len, concat_len;
+
+    size_t  i;
 
     if (smb_ntlm_nt_hash(password, nt_hash) < 0) {
         return -1;
@@ -123,10 +92,10 @@ smb_ntlm_v2_hash(
     }
     user_upper[user_len] = '\0';
 
-    concat_len  = smb_ntlm_utf16le(user_upper, concat);
-    concat_len += smb_ntlm_utf16le(domain, concat + concat_len);
+    concat_len  = smb_ntlm_utf16le(user_upper, user_len, concat);
+    concat_len += smb_ntlm_utf16le(domain, domain ? strlen(domain) : 0, concat + concat_len);
 
-    if (!HMAC(EVP_md5(), nt_hash, 16, concat, concat_len, ntlmv2_hash, &hmac_len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, nt_hash, 16, concat, concat_len, ntlmv2_hash, 16)) {
         return -1;
     }
     return 0;
@@ -217,22 +186,22 @@ smb_ntlm_client_build_authenticate(
     size_t                  out_max,
     size_t                 *out_len)
 {
-    uint8_t      ntlmv2_hash[16];
-    uint8_t      client_blob[64 + SMB_NTLM_CLIENT_TARGET_INFO_MAX];
-    size_t       blob_len;
-    uint8_t      nt_proof[16];
-    uint8_t     *hmac_input;
-    size_t       hmac_input_len;
-    unsigned int hmac_len;
-    uint64_t     filetime;
-    uint32_t     flags;
+    uint8_t  ntlmv2_hash[16];
+    uint8_t  client_blob[64 + SMB_NTLM_CLIENT_TARGET_INFO_MAX];
+    size_t   blob_len;
+    uint8_t  nt_proof[16];
+    uint8_t *hmac_input;
+    size_t   hmac_input_len;
 
-    uint8_t      dom16[512], user16[512];
-    size_t       dom16_len, user16_len;
+    uint64_t filetime;
+    uint32_t flags;
 
-    size_t       domain_off, user_off, ws_off, lm_off, nt_off;
-    size_t       nt_response_len;
-    size_t       pos;
+    uint8_t  dom16[512], user16[512];
+    size_t   dom16_len, user16_len;
+
+    size_t   domain_off, user_off, ws_off, lm_off, nt_off;
+    size_t   nt_response_len;
+    size_t   pos;
 
     if (smb_ntlm_v2_hash(c->user, c->password, c->domain, ntlmv2_hash) < 0) {
         return -1;
@@ -252,7 +221,7 @@ smb_ntlm_client_build_authenticate(
     blob_len += 6;
     smb_wire_set_le64(client_blob + blob_len, filetime);
     blob_len += 8;
-    if (RAND_bytes(client_blob + blob_len, 8) != 1) {
+    if (chimera_crypto_random(client_blob + blob_len, 8) != 1) {
         return -1;
     }
     blob_len += 8;
@@ -272,7 +241,7 @@ smb_ntlm_client_build_authenticate(
     memcpy(hmac_input, c->server_challenge, SMB_NTLM_CLIENT_CHALLENGE_SIZE);
     memcpy(hmac_input + SMB_NTLM_CLIENT_CHALLENGE_SIZE, client_blob, blob_len);
 
-    if (!HMAC(EVP_md5(), ntlmv2_hash, 16, hmac_input, hmac_input_len, nt_proof, &hmac_len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntlmv2_hash, 16, hmac_input, hmac_input_len, nt_proof, 16)) {
         free(hmac_input);
         return -1;
     }
@@ -280,7 +249,7 @@ smb_ntlm_client_build_authenticate(
 
     /* Session base key (== SMB2 session key; no key exchange negotiated) =
      * HMAC-MD5(ntlmv2_hash, NTProofStr). */
-    if (!HMAC(EVP_md5(), ntlmv2_hash, 16, nt_proof, 16, c->session_key, &hmac_len)) {
+    if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntlmv2_hash, 16, nt_proof, 16, c->session_key, 16)) {
         return -1;
     }
     c->have_session_key = 1;
@@ -288,8 +257,8 @@ smb_ntlm_client_build_authenticate(
     /* NtChallengeResponse = NTProofStr(16) || client_blob. */
     nt_response_len = 16 + blob_len;
 
-    dom16_len  = smb_ntlm_utf16le(c->domain, dom16);
-    user16_len = smb_ntlm_utf16le(c->user, user16);
+    dom16_len  = smb_ntlm_utf16le(c->domain, strlen(c->domain), dom16);
+    user16_len = smb_ntlm_utf16le(c->user, strlen(c->user), user16);
 
     /* Lay out the AUTHENTICATE message.  Fixed header is 64 bytes (offsets the
      * server reads in validate_authenticate), followed by the payload. */
