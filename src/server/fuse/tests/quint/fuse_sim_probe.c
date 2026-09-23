@@ -15,6 +15,9 @@
  */
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 
 #include "fuse_sim.h"
 

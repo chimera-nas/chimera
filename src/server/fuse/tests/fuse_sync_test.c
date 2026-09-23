@@ -21,14 +21,22 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <sys/wait.h>
 
 static int failures;
@@ -242,7 +250,7 @@ main(
     snprintf(a, sizeof(a), "%s/s_dir", argv[1]);
     snprintf(b, sizeof(b), "%s/s_dir", argv[2]);
 
-    CHECK(mkdir(a, 0755) == 0, "A makes a directory");
+    CHECK(chimera_test_mkdir(a, 0755) == 0, "A makes a directory");
     prime_stat(b);
     CHECK(stat(b, &st) == 0, "B primes the directory's attrs");
 

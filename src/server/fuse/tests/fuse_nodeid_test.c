@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#include "common/thread.h"
 
 #include "server/fuse/fuse_node_table.h"
 
@@ -77,7 +77,7 @@ main(
     uint32_t                        fh_len;
     uint64_t                        id_a, id_a2, id_b, id_gone;
     struct worker_args              args[NUM_THREADS];
-    pthread_t                       threads[NUM_THREADS];
+    evpl_native_thread_t            threads[NUM_THREADS];
     int                             i;
 
     table = chimera_fuse_node_table_create();
@@ -146,11 +146,11 @@ main(
     for (i = 0; i < NUM_THREADS; i++) {
         args[i].table = table;
         args[i].id    = i;
-        pthread_create(&threads[i], NULL, worker, &args[i]);
+        evpl_native_thread_create(&threads[i], NULL, worker, &args[i]);
     }
 
     for (i = 0; i < NUM_THREADS; i++) {
-        pthread_join(threads[i], NULL);
+        evpl_native_thread_join(threads[i], NULL);
     }
 
     /* Every worker forgot exactly what it inserted, so nothing remains. */

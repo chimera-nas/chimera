@@ -39,15 +39,32 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <unistd.h>
+#endif // ifdef _WIN32
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/socket.h>
+#endif // ifdef _WIN32
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/uio.h>
+#endif // ifdef _WIN32
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
 #include <sys/sysmacros.h>
+#endif // ifdef _WIN32
 #include <linux/fuse.h>
 #include <linux/falloc.h>
 
@@ -366,7 +383,7 @@ fuse_sim_open(
 
     snprintf(sim->session_dir, sizeof(sim->session_dir),
              "/tmp/fuse_sim_%d", (int) getpid());
-    mkdir(sim->session_dir, 0755);
+    chimera_test_mkdir(sim->session_dir, 0755);
 
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) != 0) {
         fuse_sim_fail("socketpair");

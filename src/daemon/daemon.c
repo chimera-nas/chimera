@@ -2,21 +2,37 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/getopt.h"
+#include "common/host_file.h"
+#include "common/compiler.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <strings.h>
+#endif /* ifdef _WIN32 */
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <jansson.h>
+#ifndef _WIN32
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
+#endif /* ifndef _WIN32 */
 
 #include "evpl/evpl.h"
 
@@ -31,7 +47,7 @@
 #include "metrics/metrics.h"
 #include "daemon.h"
 
-int SigInt = 0;
+static volatile sig_atomic_t SigInt;
 
 void
 signal_handler(int sig)
@@ -48,13 +64,20 @@ signal_handler(int sig)
  * and leave a hung daemon that ignores SIGTERM.  Nothing needs unwinding on
  * a bad config: flush the log buffer so the error reaches the user, then
  * exit without running atexit handlers. */
-static void __attribute__((noreturn))
+static void CHIMERA_NORETURN
 startup_validation_fail(void)
 {
     chimera_log_flush();
+#ifdef _WIN32
+    /* The CRT's _exit still reaches DLL process-detach callbacks. They cannot
+     * safely tear down a partially started server whose threads have not been
+     * joined. TerminateProcess skips those callbacks, like _exit on Unix. */
+    TerminateProcess(GetCurrentProcess(), 1);
+#endif /* ifdef _WIN32 */
     _exit(1);
 } /* startup_validation_fail */
 
+#ifndef _WIN32
 static int
 generate_self_signed_cert(
     const char *cert_path,
@@ -140,7 +163,7 @@ generate_self_signed_cert(
      * /tmp path is rejected rather than overwritten (CWE-377).
      */
     {
-        int key_fd = open(key_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        int key_fd = chimera_host_create_private(key_path);
 
         if (key_fd < 0) {
             chimera_server_error("Failed to open key file: %s (%s)",
@@ -149,7 +172,7 @@ generate_self_signed_cert(
         }
 
         /* Belt-and-suspenders: enforce 0600 explicitly (defense in depth). */
-        if (fchmod(key_fd, 0600) < 0) {
+        if (chimera_host_fchmod(key_fd, 0600) < 0) {
             chimera_server_error("Failed to set key file permissions: %s (%s)",
                                  key_path, strerror(errno));
             close(key_fd);
@@ -196,6 +219,7 @@ generate_self_signed_cert(
     }
     return rc;
 } /* generate_self_signed_cert */
+#endif /* ifndef _WIN32 */
 
 /*
  * Translate a human-friendly pNFS data-server address into the RFC 5665
@@ -267,8 +291,11 @@ main(
     const char                          *rest_ssl_cert   = NULL;
     const char                          *rest_ssl_key    = NULL;
     int                                  rest_https_port = 0;
-    static char                          auto_cert_path[256];
-    static char                          auto_key_path[256];
+
+#ifndef _WIN32
+    static char                          auto_cert_path[PATH_MAX];
+    static char                          auto_key_path[PATH_MAX];
+#endif /* ifndef _WIN32 */
 
     chimera_log_init();
 
@@ -374,11 +401,21 @@ main(
             evpl_global_config_set_tls_cert(evpl_global_config, rest_ssl_cert);
             evpl_global_config_set_tls_key(evpl_global_config, rest_ssl_key);
         } else {
-            /* Generate self-signed certificate */
-            snprintf(auto_cert_path, sizeof(auto_cert_path),
-                     "/tmp/chimera-rest-%d.crt", getpid());
-            snprintf(auto_key_path, sizeof(auto_key_path),
-                     "/tmp/chimera-rest-%d.key", getpid());
+#ifdef _WIN32
+            /* With no supplied identity, libevpl creates a self-signed certificate
+             * and CNG key for Schannel. No PEM files or OpenSSL are required. */
+#else  /* ifdef _WIN32 */
+            /* Use the host temporary directory. */
+            char temp_directory[PATH_MAX];
+            if (chimera_host_temp_directory(temp_directory, sizeof(temp_directory)) ||
+                snprintf(auto_cert_path, sizeof(auto_cert_path),
+                         "%schimera-rest-%d.crt", temp_directory, getpid()) >= sizeof(auto_cert_path) ||
+                snprintf(auto_key_path, sizeof(auto_key_path),
+                         "%schimera-rest-%d.key", temp_directory, getpid()) >= sizeof(auto_key_path)) {
+                fprintf(stderr, "Temporary certificate path is too long\n");
+                json_decref(config);
+                return 1;
+            }
 
             if (generate_self_signed_cert(auto_cert_path, auto_key_path) != 0) {
                 fprintf(stderr, "Failed to generate self-signed certificate\n");
@@ -390,6 +427,7 @@ main(
             evpl_global_config_set_tls_key(evpl_global_config, auto_key_path);
             rest_ssl_cert = auto_cert_path;
             rest_ssl_key  = auto_key_path;
+#endif /* ifdef _WIN32 */
         }
     }
 
@@ -406,6 +444,9 @@ main(
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+#ifdef _WIN32
+    signal(SIGBREAK, signal_handler);
+#endif /* ifdef _WIN32 */
 
     chimera_server_info("Initializing server...");
 
@@ -1647,6 +1688,11 @@ main(
     }
 
     chimera_metrics_destroy(metrics);
+#ifdef _WIN32
+    /* Schannel/CNG cleanup must run before Windows unloads RPC and crypto DLLs.
+     * All server and exporter event loops have been joined above. */
+    evpl_cleanup();
+#endif /* ifdef _WIN32 */
 
     chimera_server_info("Server shutdown complete.");
 

@@ -11,14 +11,22 @@
 
 #define _GNU_SOURCE 1
 
+#include "common/test_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
-#include <dirent.h>
+#include "common/dirent.h"
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#endif /* ifdef _WIN32 */
 #include <sys/statvfs.h>
 #include <sys/xattr.h>
 
@@ -157,8 +165,8 @@ main(
 
     /* --- directories: ENOTEMPTY, ENOENT --- */
 
-    CHECK(mkdir("d", 0755) == 0, "mkdir");
-    CHECK(mkdir("d/e", 0755) == 0, "nested mkdir");
+    CHECK(chimera_test_mkdir("d", 0755) == 0, "mkdir");
+    CHECK(chimera_test_mkdir("d/e", 0755) == 0, "nested mkdir");
     CHECK(rmdir("d") < 0 && errno == ENOTEMPTY, "rmdir non-empty ENOTEMPTY");
     CHECK(rmdir("d/e") == 0 && rmdir("d") == 0, "rmdir bottom-up");
     CHECK(unlink("d") < 0 && errno == ENOENT, "unlink missing ENOENT");
@@ -254,7 +262,7 @@ main(
 
     /* --- readdir past one FUSE reply buffer --- */
 
-    CHECK(mkdir("many", 0755) == 0, "mkdir for large readdir");
+    CHECK(chimera_test_mkdir("many", 0755) == 0, "mkdir for large readdir");
 
     for (i = 0; i < 2000; i++) {
         char name[64];

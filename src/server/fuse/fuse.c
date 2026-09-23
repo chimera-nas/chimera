@@ -2,9 +2,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <utlist.h>
 
 #include "fuse.h"
@@ -31,9 +36,9 @@ fuse_server_init(
     shared->vfs     = vfs;
     shared->metrics = metrics;
 
-    pthread_mutex_init(&shared->lock, NULL);
-    pthread_mutex_init(&shared->notifier_lock, NULL);
-    pthread_cond_init(&shared->notifier_cond, NULL);
+    evpl_mutex_init(&shared->lock, NULL);
+    evpl_mutex_init(&shared->notifier_lock, NULL);
+    evpl_cond_init(&shared->notifier_cond, NULL);
 
     return shared;
 } /* fuse_server_init */
@@ -60,14 +65,14 @@ fuse_server_destroy(void *data)
             chimera_fuse_node_table_destroy(mount->node_table);
         }
 
-        pthread_mutex_destroy(&mount->open_lock);
-        pthread_mutex_destroy(&mount->lock_lock);
-        pthread_mutex_destroy(&mount->grant_lock);
+        evpl_mutex_destroy(&mount->open_lock);
+        evpl_mutex_destroy(&mount->lock_lock);
+        evpl_mutex_destroy(&mount->grant_lock);
     }
 
-    pthread_mutex_destroy(&shared->lock);
-    pthread_mutex_destroy(&shared->notifier_lock);
-    pthread_cond_destroy(&shared->notifier_cond);
+    evpl_mutex_destroy(&shared->lock);
+    evpl_mutex_destroy(&shared->notifier_lock);
+    evpl_cond_destroy(&shared->notifier_cond);
 
     free(shared);
 } /* fuse_server_destroy */
@@ -190,7 +195,7 @@ fuse_server_thread_init(
     thread->vfs_thread = vfs_thread;
     thread->shared     = shared;
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
 
     chimera_fuse_abort_if(shared->num_threads >= CHIMERA_FUSE_MAX_THREADS,
                           "too many core threads for FUSE server (max %d)",
@@ -201,9 +206,9 @@ fuse_server_thread_init(
     shared->num_threads++;
     shared->threads_alive++;
 
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
-    pthread_mutex_init(&thread->resume_lock, NULL);
+    evpl_mutex_init(&thread->resume_lock, NULL);
 
     evpl_add_doorbell(evpl, &thread->attach_doorbell, chimera_fuse_attach_channels);
     evpl_add_doorbell(evpl, &thread->resume_doorbell, chimera_fuse_resume_doorbell);
@@ -228,10 +233,10 @@ chimera_fuse_sweep_open_files(
     for (m = 0; m < shared->num_mounts; m++) {
         mount = &shared->mounts[m];
 
-        pthread_mutex_lock(&mount->open_lock);
+        evpl_mutex_lock(&mount->open_lock);
         files             = mount->open_files;
         mount->open_files = NULL;
-        pthread_mutex_unlock(&mount->open_lock);
+        evpl_mutex_unlock(&mount->open_lock);
 
         while (files) {
             file = files;
@@ -278,11 +283,11 @@ fuse_server_thread_destroy(void *data)
     evpl_remove_doorbell(thread->evpl, &thread->attach_doorbell);
     evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
 
-    pthread_mutex_destroy(&thread->resume_lock);
+    evpl_mutex_destroy(&thread->resume_lock);
 
-    pthread_mutex_lock(&shared->lock);
+    evpl_mutex_lock(&shared->lock);
     last = (--shared->threads_alive == 0);
-    pthread_mutex_unlock(&shared->lock);
+    evpl_mutex_unlock(&shared->lock);
 
     if (last) {
         chimera_fuse_sweep_open_files(shared, thread->vfs_thread);
@@ -391,11 +396,11 @@ chimera_fuse_add_mount(
             mount->coherence_sync ? mount->entry_timeout_ms : 0;
     }
 
-    pthread_mutex_init(&mount->open_lock, NULL);
-    pthread_mutex_init(&mount->dir_notifier_lock, NULL);
-    pthread_cond_init(&mount->dir_notifier_cond, NULL);
-    pthread_mutex_init(&mount->lock_lock, NULL);
-    pthread_mutex_init(&mount->grant_lock, NULL);
+    evpl_mutex_init(&mount->open_lock, NULL);
+    evpl_mutex_init(&mount->dir_notifier_lock, NULL);
+    evpl_cond_init(&mount->dir_notifier_cond, NULL);
+    evpl_mutex_init(&mount->lock_lock, NULL);
+    evpl_mutex_init(&mount->grant_lock, NULL);
 
     shared->num_mounts++;
 

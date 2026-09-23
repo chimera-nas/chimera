@@ -16,12 +16,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <unistd.h>
+#endif /* ifdef _WIN32 */
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <sys/time.h>
+#endif /* ifdef _WIN32 */
 
 static int failures;
 
