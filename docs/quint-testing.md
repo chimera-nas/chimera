@@ -15,7 +15,7 @@ SPDX-License-Identifier: Unlicense
   attributes; the harness can issue GETATTR and compare it to the model state.
 * Keep C tests for wire reference vectors, malformed frames and controlled
   internal faults or races. Label these `functional`/`probe` or `fault_injection`.
-  They may remain in the quick tier; the tier and the kind of test are separate.
+  Keep these supporting tests in quick; the tier and the kind of test are separate.
 * Do not remove a probe until its assertions have equivalent live replay
   coverage. Model self-tests alone do not execute the server.
 
@@ -47,6 +47,21 @@ against direct storage, a local pNFS data server and remote data servers.
 Only backing-file fault injection remains in `nfs_pnfs_io_probe.c`.
 
 ## Coverage and execution
+
+The default quick tier includes all model replays, their strict twins, behavior
+and deviation-liveness gates, and supporting C probes. Extended adds the larger
+integration suites. Strict replays disable model-configured deviations and must
+pass; all currently registered strict twins pass without expected-failure rules.
+A future known conformance failure needs a narrowly checked expectation that
+still rejects unrelated failures, crashes and timeouts. Do not move a replay to
+extended or use a blanket `WILL_FAIL` to hide that failure. Existing harness
+allowances and capability skips still apply; a strict pass does not establish
+conformance for skipped behavior.
+
+CI source coverage runs plain `ctest`, selecting this whole quick tier. The
+`quint` label selects model tests within that tier and excludes the separately
+labeled probes; it is not the selection for the main coverage report. Reproduce
+that report with `make coverage CTEST_ARGS="--output-on-failure"`.
 
 ```sh
 ctest --test-dir build/Release -L model_coverage --output-on-failure

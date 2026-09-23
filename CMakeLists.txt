@@ -246,10 +246,10 @@ if (NOT DISABLE_TESTS)
 endif()
 
 # Test tiers.  Plain `ctest` runs the *quick* tier: the quint model-based
-# tests.  They are cheap and are meant to be a pre-flight proxy for the full
+# tests (including strict twins) and supporting probes. They proxy the full
 # suite, so they are what you get when you ask for nothing.  `ctest -C
 # extended` runs the quick tier plus everything else; that is the tier the
-# merge queue and the Extended workflow use.
+# Extended workflow uses. The merge queue runs quick.
 #
 # CTest can only withhold a test from the default run through the
 # CONFIGURATIONS keyword of add_test().  The CONFIGURATIONS *test property* is
