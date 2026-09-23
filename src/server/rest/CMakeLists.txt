@@ -2,11 +2,14 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-find_package(PkgConfig REQUIRED)
-find_package(OpenSSL REQUIRED)
-pkg_check_modules(JANSSON REQUIRED jansson)
+if(NOT WIN32)
+    find_package(PkgConfig REQUIRED)
+endif()
+if(NOT WIN32)
+    pkg_check_modules(JANSSON REQUIRED jansson)
+endif()
 
-add_library(chimera_rest SHARED
+add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
     rest.c
     rest_users.c
     rest_exports.c
@@ -25,7 +28,10 @@ target_include_directories(chimera_rest PRIVATE ${JANSSON_INCLUDE_DIRS})
 # in the crypt(5) $-schemes ($6$ SHA-512 etc.) cannot verify with it.  Use
 # libxcrypt when present (brew install libxcrypt; keg-only, hence the explicit
 # paths) for full scheme support plus the reentrant crypt_r().
-if (CHIMERA_LINUX)
+if(WIN32)
+    target_sources(chimera_rest PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/crypt/crypt_sha512.c)
+    set(CHIMERA_CRYPT_LIB "")
+elseif (CHIMERA_LINUX)
     set(CHIMERA_CRYPT_LIB crypt)
 else()
     find_library(CHIMERA_XCRYPT_LIB crypt
@@ -46,7 +52,7 @@ else()
 endif()
 
 target_link_libraries(chimera_rest chimera_vfs evpl_http evpl
-                      OpenSSL::Crypto ${CHIMERA_CRYPT_LIB})
+                      chimera_crypto ${CHIMERA_CRYPT_LIB})
 
 # Embed Swagger UI files at build time
 set(SWAGGER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/swagger)
@@ -55,7 +61,7 @@ set(OPENAPI_JSON ${CMAKE_SOURCE_DIR}/docs/openapi.json)
 
 add_custom_command(
     OUTPUT ${SWAGGER_EMBEDDED_C}
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py
             ${SWAGGER_DIR} ${OPENAPI_JSON} ${SWAGGER_EMBEDDED_C}
     DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py

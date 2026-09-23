@@ -52,7 +52,7 @@ endif()
 # quint and node are what generation needs.  Probed here rather than left to
 # fail inside ext/specs, so a machine without them gets one clear line instead
 # of a configure error in a subdirectory.
-find_program(QUINT_BIN quint)
+find_program(QUINT_BIN NAMES quint.cmd quint)
 find_program(NODE_BIN NAMES node nodejs)
 if(NOT QUINT_BIN OR NOT NODE_BIN)
     message(STATUS

@@ -28,6 +28,8 @@ project(chimera LANGUAGES C)
 # off there rather than hard-failing configure.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CHIMERA_LINUX TRUE)
+elseif(WIN32)
+    set(CHIMERA_LINUX FALSE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(CHIMERA_LINUX FALSE)
 
@@ -222,7 +224,11 @@ endif()
 
 set(CHIMERA_VERSION "0.1.0")
 
-execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
+if(NOT WIN32)
+    execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
+endif()
+
+include(cmake/Platform.cmake)
 
 add_definitions(-DCHIMERA_VERSION="${CHIMERA_VERSION}")
 add_definitions(-DCHIMERA_STATE_DIR="${CMAKE_INSTALL_PREFIX}/share/state")
@@ -249,7 +255,11 @@ endif()
 set(URCU_ENABLED FALSE)
 set(CHIMERA_RCU_LIBS "")
 
-if(NOT URCU_SUPPORT STREQUAL "OFF")
+if(WIN32 AND URCU_SUPPORT STREQUAL "ON")
+    message(FATAL_ERROR "Native Windows uses the domain-lock fallback; liburcu is unavailable")
+endif()
+
+if(NOT WIN32 AND NOT URCU_SUPPORT STREQUAL "OFF")
     find_package(PkgConfig QUIET)
 
     if(PkgConfig_FOUND)
@@ -335,7 +345,22 @@ function(add_test)
     set(_args "")
     math(EXPR _last "${ARGC} - 1")
     foreach(_i RANGE ${_last})
-        string(REPLACE ";" "\;" _a "${ARGV${_i}}")
+        set(_a "${ARGV${_i}}")
+        if(WIN32 AND _a STREQUAL "${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh")
+            continue()
+        endif()
+        # Old test helpers pass build-directory paths instead of target names.
+        # Native multi-config generators put executables in bin/<config>.
+        if(WIN32 AND IS_ABSOLUTE "${_a}")
+            get_filename_component(_candidate "${_a}" NAME_WE)
+            if(TARGET "${_candidate}")
+                get_target_property(_kind "${_candidate}" TYPE)
+                if(_kind STREQUAL "EXECUTABLE")
+                    set(_a "$<TARGET_FILE:${_candidate}>")
+                endif()
+            endif()
+        endif()
+        string(REPLACE ";" "\;" _a "${_a}")
         list(APPEND _args "${_a}")
     endforeach()
 
@@ -357,10 +382,38 @@ function(add_test)
         set(_quick TRUE)
     endif()
 
-    if(_quick)
+    # An explicit configuration restriction overrides the directory's tier
+    # (for example, the extended-only Kerberos security-flavor probes).
+    list(FIND _args CONFIGURATIONS _config_index)
+    if(NOT _config_index EQUAL -1)
+        if(CMAKE_CONFIGURATION_TYPES)
+            math(EXPR _config_value "${_config_index} + 1")
+            list(GET _args ${_config_value} _configuration)
+            if(_configuration STREQUAL "extended")
+                list(REMOVE_AT _args ${_config_value})
+                list(INSERT _args ${_config_value} ${CMAKE_CONFIGURATION_TYPES})
+            endif()
+        endif()
+        _add_test(${_args})
+    elseif(_quick)
+        set_property(GLOBAL APPEND PROPERTY CHIMERA_QUICK_TESTS "${_name}")
         _add_test(${_args})
     else()
-        _add_test(${_args} CONFIGURATIONS extended)
+        if(CMAKE_CONFIGURATION_TYPES)
+            _add_test(${_args} CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES})
+        else()
+            _add_test(${_args} CONFIGURATIONS extended)
+        endif()
+    endif()
+
+    # Each diskfs fixture runs several polling/event-loop threads. On the
+    # four-core Windows runners, four concurrent fixtures starve one another:
+    # the smoke workload passes alone but times out during the full suite.
+    # Account for that CPU demand in CTest's scheduler while preserving the
+    # workloads and their timeouts. Larger -j values can still run multiple
+    # diskfs fixtures concurrently.
+    if(WIN32 AND _name MATCHES "^chimera/.*diskfs")
+        set_tests_properties("${_name}" PROPERTIES PROCESSORS 4)
     endif()
 endfunction()
 
@@ -377,7 +430,7 @@ endif()
 
 include_directories(3rdparty)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(STATUS "Enabling AddressSanitizer")
     add_definitions(-fsanitize=address -fno-omit-frame-pointer
                     -fno-optimize-sibling-calls -fstack-protector-all -DCHIMERA_SANITIZE=1)
@@ -387,7 +440,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DEVPL_IOVEC_TRACE=1)
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
+if(NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
 endif()
 
@@ -415,10 +468,9 @@ endif()
 # frame-pointer-based profilers can unwind call stacks (the cost at -O3 is
 # negligible and the unwind reliability is worth it for production profiling).
 # Mirrors the same setting in the bundled libevpl.
-add_definitions(-fno-omit-frame-pointer)
-
-add_definitions(-g -Wall -Werror -Wno-unused-function)
-add_definitions(-fvisibility=hidden)
+if(NOT MSVC)
+    add_definitions(-fno-omit-frame-pointer -g -Wall -Werror -Wno-unused-function -fvisibility=hidden)
+endif()
 
 # CMAKE_SYSTEM_PROCESSOR spells 64-bit ARM "aarch64" on Linux and "arm64" on
 # Darwin, so match on the family rather than a single string.  CHIMERA_ARCH_ARM64
@@ -442,7 +494,11 @@ else()
     set(CHIMERA_XXH_VECTOR XXH_AVX2)
 endif()
 
-add_definitions(${MARCH_FLAG})
+if(MSVC)
+    set(CHIMERA_XXH_VECTOR XXH_SCALAR)
+else()
+    add_definitions(${MARCH_FLAG})
+endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU")
     add_link_options(-Wl,--no-as-needed)
@@ -466,7 +522,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
                     -Wno-unknown-warning-option -Wno-absolute-value)
 endif()
 
-if(NOT CHIMERA_LINUX)
+if(APPLE)
     # Apple's <stdio.h> marks sprintf(3)/vsprintf(3) __deprecated, which -Werror
     # turns into ~90 hard errors across the S3 and SMB dump paths.  glibc does
     # not, so the Linux build never sees it.  Demote it here rather than let the
@@ -674,12 +730,14 @@ set(LIBEVPL_NETNS_TESTING ${CHIMERA_NETNS_TESTING})
 # Probing the two separately is what lets those tests run in an environment
 # that grants the limits but not CAP_NET_ADMIN: previously the netns probe was
 # the only gate, so no namespace meant no tests, whatever else was available.
+if(CHIMERA_LINUX)
 execute_process(
     COMMAND bash -c "set -e; ulimit -l unlimited; test -w /proc/sys/fs/aio-max-nr"
     RESULT_VARIABLE LIMITS_PROBE_RESULT
     OUTPUT_QUIET
     ERROR_QUIET
 )
+endif()
 
 if(NOT CHIMERA_LINUX)
     # The limits are Linux concepts backing Linux-only modules (io_uring
@@ -738,7 +796,24 @@ else()
     message(STATUS "PyNFS testing disabled")
 endif()
 
+if(WIN32)
+    set(CHIMERA_NULL_DEVICE NUL)
+else()
+    set(CHIMERA_NULL_DEVICE /dev/null)
+endif()
 add_subdirectory(ext)
+
+if(WIN32 AND TARGET oteltracing-c)
+    # The standalone tracing project sets its own runtime directory. Keep its
+    # DLLs (including the optional SQLite sink) and tools in our common runtime
+    # directory so every consumer can load them without a build-tree PATH.
+    get_property(_otel_targets DIRECTORY ext/libevpl/ext/oteltracing-c
+                 PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _otel_targets)
+        set_target_properties(${_target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    endforeach()
+endif()
 
 include_directories(ext/libevpl/include)
 
@@ -798,4 +873,14 @@ add_subdirectory(examples/vfs_module)
 # created until they are all known.
 if (CHIMERA_MBT_AVAILABLE)
     specs_corpus_finalize()
+endif()
+
+# Multi-config generators need CTest's -C for Debug/Release, so it cannot also
+# select our quick/extended tier. Export exactly the same quick test names the
+# add_test wrapper selects for single-config builds; no second naming policy.
+if(NOT DISABLE_TESTS)
+    get_property(_quick_tests GLOBAL PROPERTY CHIMERA_QUICK_TESTS)
+    list(REMOVE_DUPLICATES _quick_tests)
+    list(JOIN _quick_tests "\n" _quick_tests_text)
+    file(WRITE "${CMAKE_BINARY_DIR}/quick-tests.txt" "${_quick_tests_text}\n")
 endif()

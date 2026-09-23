@@ -18,5 +18,6 @@ target_include_directories(nfs_open_state_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src)
 add_dependencies(nfs_open_state_test chimera_nfs_common)
-target_link_libraries(nfs_open_state_test pthread)
+find_package(Threads REQUIRED)
+target_link_libraries(nfs_open_state_test Threads::Threads)
 add_test(chimera/vfs/nfs/open_state_test nfs_open_state_test)

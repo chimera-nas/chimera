@@ -4,7 +4,7 @@
 
 include_directories(${NFS_COMMON_INCLUDE_DIR})
 
-add_library(chimera_vfs_nfs SHARED
+add_library(chimera_vfs_nfs ${CHIMERA_LIBRARY_TYPE}
     nfs.c
     nfs3.c
     nfs4.c

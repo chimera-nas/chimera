@@ -38,3 +38,6 @@ venv/
 # Probe and replayer artifacts, written into whatever directory a test ran from.
 *.debug.log
 *.metrics.prom
+
+# Generated from the pinned vcpkg checkout by prepare-windows-vcpkg.ps1.
+/.vcpkg-overlays/

@@ -87,14 +87,16 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Suppress warnings for the generated source files
 set_source_files_properties(
-    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} ${SM_INTER_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-format-truncation"
+    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} ${SM_INTER_XDR_C} PROPERTIES COMPILE_OPTIONS "${CHIMERA_GENERATED_C_OPTIONS}"
 )
 
-add_definitions(-fvisibility=default)
+if(NOT MSVC)
+    add_definitions(-fvisibility=default)
+endif()
 
 
 # Create libraries for NFSv3 and NFSv4
-add_library(chimera_nfs_common  SHARED
+add_library(chimera_nfs_common  ${CHIMERA_LIBRARY_TYPE}
             ${NFS3_XDR_C} ${NFS3_XDR_H}
             ${NFS4_XDR_C} ${NFS4_XDR_H}
             ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H}

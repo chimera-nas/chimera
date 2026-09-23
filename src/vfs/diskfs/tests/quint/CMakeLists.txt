@@ -20,8 +20,12 @@ set(CHIMERA_TEST_TIER quick)
 #   diskfs_run.qnt   the profiles (reference depth vs. the deep-tree profile)
 #   diskfsTest.qnt   deterministic self-checks, run as a build gate
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JANSSON REQUIRED jansson)
+if(NOT WIN32)
+    find_package(PkgConfig REQUIRED)
+endif()
+if(NOT WIN32)
+    pkg_check_modules(JANSSON REQUIRED jansson)
+endif()
 
 add_executable(diskfs_mbt_replay diskfs_mbt_replay.c)
 target_include_directories(diskfs_mbt_replay PRIVATE
@@ -39,7 +43,7 @@ target_link_libraries(diskfs_mbt_replay
 # with a message.  -DREQUIRE_DISKFS_MBT=ON makes the absence a configure error.
 # ---------------------------------------------------------------------------
 
-find_program(QUINT_BIN quint)
+find_program(QUINT_BIN NAMES quint.cmd quint)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 if(NOT QUINT_BIN)
@@ -77,7 +81,7 @@ set(DFS_QUINT_BACKEND typescript)
 set(DFS_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/diskfsTest.stamp)
 add_custom_command(OUTPUT ${DFS_SELFTEST}
     COMMAND ${QUINT_BIN} test --backend=${DFS_QUINT_BACKEND}
-            --main=diskfsTestRef ${DFS_Q}/diskfsTest.qnt > /dev/null
+            --main=diskfsTestRef ${DFS_Q}/diskfsTest.qnt > ${CHIMERA_NULL_DEVICE}
     COMMAND ${CMAKE_COMMAND} -E touch ${DFS_SELFTEST}
     DEPENDS ${DFS_QNT} ${DFS_Q}/diskfsTest.qnt
     COMMENT "model self-test: diskfsTest"
@@ -125,7 +129,7 @@ foreach(b ${DFS_BATCHES})
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
                 --invariant=inv
-                --out-itf=${DFS_T}/${naming}.itf.json > /dev/null
+                --out-itf=${DFS_T}/${naming}.itf.json > ${CHIMERA_NULL_DEVICE}
         DEPENDS ${DFS_QNT} ${DFS_SELFTEST}
         COMMENT "generate ${ntraces} diskfs traces ${prof}/${flavor} steps=${steps}"
         VERBATIM)
@@ -140,3 +144,9 @@ add_test(NAME chimera/vfs/diskfs/mbt/batch
 set_tests_properties(chimera/vfs/diskfs/mbt/batch PROPERTIES
     LABELS "quint;diskfs_mbt"
     TIMEOUT 900)
+if(WIN32)
+    # Hosted ARM64 runners need more time for the same device-I/O workload:
+    # Release takes about 14 minutes, and Debug reaches trace 10 of 11 at
+    # the 15-minute limit while still completing recovery cycles.
+    set_tests_properties(chimera/vfs/diskfs/mbt/batch PROPERTIES TIMEOUT 1800)
+endif()

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_fuse SHARED
+add_library(chimera_fuse ${CHIMERA_LIBRARY_TYPE}
     fuse.c
     fuse_mount.c
     fuse_node_table.c
