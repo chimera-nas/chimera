@@ -398,6 +398,17 @@ chimera_vfs_claim_release(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim);
 
+/* Release an open's ACCESS claim and its reference to a cache grant under
+ * the same file lock, then pump waiters. The optional grant must belong to
+ * file; the caller must detach its protocol member before calling. A shared
+ * grant remains until its final reference is dropped. */
+void
+chimera_vfs_claim_release_open(
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim       *claim,
+    struct chimera_vfs_claim_grant *grant);
+
 /* Shrink an inserted ACCESS claim's masks in place (truncating-open W drop,
  * OPEN_DOWNGRADE).  Never conflicts; pumps waiters. */
 void

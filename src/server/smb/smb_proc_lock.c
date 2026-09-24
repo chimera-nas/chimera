@@ -144,13 +144,22 @@ chimera_smb_open_file_drain_locks(
     struct chimera_smb_lock_entry *entry, *tmp;
     struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
 
-    /* Drop the SHARE-mode reservation first.  Release any byte-range
-     * locks after — they may share the same file_state. */
-    if (open_file->share_lease_inserted) {
-        chimera_vfs_claim_release(vfs_state, open_file->share_file_state,
-                                  &open_file->share_lease);
-        open_file->share_lease_inserted = false;
+    /* A pending CREATE can resume as soon as the share reservation is removed.
+     * Drop the cache grant in the same critical section, so that CREATE cannot
+     * cap its oplock against a lease belonging to the closing open. Detach the
+     * protocol member first so a break cannot notify it during teardown. */
+    if (open_file->grant) {
+        chimera_smb_grant_remove_member(open_file->grant, open_file);
     }
+    if (open_file->share_lease_inserted) {
+        chimera_vfs_claim_release_open(vfs_state, open_file->share_file_state,
+                                       &open_file->share_lease, open_file->grant);
+        open_file->share_lease_inserted = false;
+    } else if (open_file->grant) {
+        chimera_vfs_claim_grant_release(vfs_state, open_file->grant, true /*pump*/);
+    }
+    open_file->grant                  = NULL;
+    open_file->caching_lease_inserted = false;
     if (open_file->share_file_state) {
         chimera_vfs_state_put(vfs_state, open_file->share_file_state);
         open_file->share_file_state = NULL;
@@ -169,19 +178,6 @@ chimera_smb_open_file_drain_locks(
         open_file->base_share_file_state = NULL;
     }
 
-    /* Drop this open's reference on the caching grant (oplock / SMB2 lease).
-     * On the grant's last reference the embedded lease is unlinked and the grant
-     * freed; the per-file state reference (caching_file_state) is balanced
-     * separately below. */
-    if (open_file->grant) {
-        /* Unthread this open from the grant's member list before dropping its
-         * reference: once removed, the break callback will not try to notify a
-         * closing open, and on the grant's last reference the lease is freed. */
-        chimera_smb_grant_remove_member(open_file->grant, open_file);
-        chimera_vfs_claim_grant_release(vfs_state, open_file->grant, true /*pump*/);
-        open_file->grant                  = NULL;
-        open_file->caching_lease_inserted = false;
-    }
     if (open_file->caching_file_state) {
         chimera_vfs_state_put(vfs_state, open_file->caching_file_state);
         open_file->caching_file_state = NULL;
