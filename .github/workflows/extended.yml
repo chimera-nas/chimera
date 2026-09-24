@@ -562,11 +562,14 @@ jobs:
           # kernel-accounted memory per ring (SQE128/CQE32 double both entry
           # sizes) and SQPOLL adds a kernel thread each; ctest -j nproc stacks
           # enough of them to be refused with ENOMEM, which is fatal to the
-          # process and takes an unrelated test with it.
+          # process and takes an unrelated test with it.  The VFS backend has
+          # separate rings: 256 in-flight requests reserve 1024 entries per
+          # worker, down from 4096; the request limit shrinks with the ring.
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e CCACHE_MAXSIZE \
             -e EVPL_IO_URING_ENTRIES=1024 \
+            -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
@@ -758,11 +761,14 @@ jobs:
           # kernel-accounted memory per ring (SQE128/CQE32 double both entry
           # sizes) and SQPOLL adds a kernel thread each; ctest -j nproc stacks
           # enough of them to be refused with ENOMEM, which is fatal to the
-          # process and takes an unrelated test with it.
+          # process and takes an unrelated test with it.  The VFS backend has
+          # separate rings: 256 in-flight requests reserve 1024 entries per
+          # worker, down from 4096; the request limit shrinks with the ring.
           docker run --rm --privileged \
             -e CATEGORY=${{ matrix.category }} \
             -e KVM_SHARDS="kvm-ubuntu2404 kvm-ubuntu2404-nfstest kvm-ubuntu2604 kvm-ubuntu2604-nfstest kvm-ubuntu2404_hwe kvm-ubuntu2204_hwe" \
             -e EVPL_IO_URING_ENTRIES=1024 \
+            -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -1244,10 +1250,13 @@ jobs:
           # kernel-accounted memory per ring (SQE128/CQE32 double both entry
           # sizes) and SQPOLL adds a kernel thread each; ctest -j nproc stacks
           # enough of them to be refused with ENOMEM, which is fatal to the
-          # process and takes an unrelated test with it.
+          # process and takes an unrelated test with it.  The VFS backend has
+          # separate rings: 256 in-flight requests reserve 1024 entries per
+          # worker, down from 4096; the request limit shrinks with the ring.
           docker run --rm --privileged \
             -e SMBTORTURE_BACKENDS \
             -e EVPL_IO_URING_ENTRIES=1024 \
+            -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
             -e SMBTORTURE_FILTER \
             -e SMBTORTURE_PARALLEL \
             -v "${{ github.workspace }}:/workspace" \

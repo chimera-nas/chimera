@@ -10,6 +10,20 @@ add_executable(vfs_clock_test vfs_clock_test.c)
 target_link_libraries(vfs_clock_test chimera_vfs)
 add_test(chimera/vfs/clock_test vfs_clock_test)
 
+if(CHIMERA_VFS_IO_URING AND CHIMERA_LIMITS_TESTING)
+    add_executable(vfs_io_uring_sizing_test vfs_io_uring_sizing_test.c)
+    target_link_libraries(vfs_io_uring_sizing_test
+        chimera_vfs_io_uring chimera_vfs evpl uring ${CMAKE_DL_LIBS})
+    # Resource sizing is outside the protocol models. Keep this initialization
+    # probe in the quick tier so an ignored size override is caught early.
+    set(_sizing_saved_tier "${CHIMERA_TEST_TIER}")
+    set(CHIMERA_TEST_TIER quick)
+    add_test(NAME chimera/vfs/io_uring_sizing
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
+                $<TARGET_FILE:vfs_io_uring_sizing_test>)
+    set(CHIMERA_TEST_TIER "${_sizing_saved_tier}")
+endif()
+
 add_executable(vfs_kv_test vfs_kv_test.c)
 target_link_libraries(vfs_kv_test chimera_vfs chimera_vfs_memkv evpl)
 if (SQLITE_ENABLED)
