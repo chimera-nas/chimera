@@ -101,6 +101,13 @@ target_link_libraries(nfs4_open_access_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_open_access_probe)
 
+add_executable(nfs4_setattr_stateid_probe nfs4_setattr_stateid_probe.c)
+target_include_directories(nfs4_setattr_stateid_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_setattr_stateid_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_setattr_stateid_probe)
+
 add_executable(nfs_aux_probe nfs_aux_probe.c)
 target_include_directories(nfs_aux_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -291,6 +298,24 @@ set_tests_properties(chimera/server/nfs/mbt4/open_access_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_open_access_probe_memfs"
     LABELS "quint;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
+# SETATTR(size) stateid probe: pins which stateids authorize a truncation --
+# an open stateid, or a lock stateid anchored to a write-capable open of the
+# same file, including the seqid-0 form a Linux client sends while it holds a
+# POSIX lock.  Runs on a passthrough backend as well, where the truncate is
+# applied through the open's own descriptor.  Needs no corpus.
+foreach(backend memfs linux)
+    if(backend STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt4/setattr_stateid_probe_${backend}
+        COMMAND $<TARGET_FILE:nfs4_setattr_stateid_probe> ${backend})
+    set_tests_properties(chimera/server/nfs/mbt4/setattr_stateid_probe_${backend}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_setattr_stateid_probe_${backend}"
+        LABELS "quint;nfs4_mbt;multiproto;${backend}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90)
+endforeach()
 # ---------------------------------------------------------------------------
 # The same ground truth again, called under Kerberos.
 #

@@ -67,9 +67,9 @@ nfs4_release_write_args(
  *
  * This gate covers only mutations reached through the current filehandle.  Ops
  * that mutate a handle carried by a stateid cannot use it to escape: ALLOCATE,
- * DEALLOCATE, and COPY call nfs_state_check_write_for_fh, and SETATTR performs
- * the same stateid-vs-current-filehandle check inline, so the stateid must
- * name the gated filehandle.  WRITE instead relies on its NFS4ERR_OPENMODE
+ * DEALLOCATE, COPY, and a size-changing SETATTR call
+ * nfs_state_check_write_for_fh, so the stateid must name the gated
+ * filehandle.  WRITE instead relies on its NFS4ERR_OPENMODE
  * check: a write-mode open can only have been granted through a writable
  * export.  (After a runtime flip to read-only, existing write-mode opens keep
  * writing -- the same window the COMMIT rationale in nfs4_rofs.h accepts.)
