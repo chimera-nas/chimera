@@ -3123,6 +3123,7 @@ cairn_lookup_at(
     if (namelen == 1 && name[0] == '.') {
         cairn_map_attrs(fs, &request->lookup_at.r_dir_attr, inode);
         cairn_map_attrs(fs, &request->lookup_at.r_attr, inode);
+        cairn_map_acl(thread, &request->lookup_at.r_attr, inode);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
@@ -3144,6 +3145,7 @@ cairn_lookup_at(
 
         child = child_ih.inode;
         cairn_map_attrs(fs, &request->lookup_at.r_attr, child);
+        cairn_map_acl(thread, &request->lookup_at.r_attr, child);
         cairn_inode_handle_release(&ih);
         cairn_inode_handle_release(&child_ih);
         request->status = CHIMERA_VFS_OK;
@@ -3181,6 +3183,7 @@ cairn_lookup_at(
     child = child_ih.inode;
 
     cairn_map_attrs(fs, &request->lookup_at.r_attr, child);
+    cairn_map_acl(thread, &request->lookup_at.r_attr, child);
 
     cairn_inode_handle_release(&ih);
     cairn_dirent_handle_release(&dh);

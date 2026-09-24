@@ -160,6 +160,24 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/acl_sid_cairn COMMAND vfs_acl_sid_test cairn)
 endif()
 
+# The stored ACL, not the mode, decides a non-root open on every open route,
+# parameterized by the backends that store the canonical ACL natively.
+add_executable(vfs_open_acl_test vfs_open_acl_test.c)
+target_link_libraries(vfs_open_acl_test chimera_vfs chimera_vfs_memfs
+    chimera_vfs_diskfs chimera_vfs_memkv evpl)
+add_test(NAME chimera/vfs/open_acl_memfs COMMAND vfs_open_acl_test memfs)
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/vfs/open_acl_diskfs_aio COMMAND vfs_open_acl_test diskfs_aio)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    target_link_libraries(vfs_open_acl_test chimera_vfs_io_uring)
+    add_test(NAME chimera/vfs/open_acl_diskfs_io_uring COMMAND vfs_open_acl_test diskfs_io_uring)
+endif()
+if(CAIRN_ENABLED)
+    target_link_libraries(vfs_open_acl_test chimera_vfs_cairn)
+    add_test(NAME chimera/vfs/open_acl_cairn COMMAND vfs_open_acl_test cairn)
+endif()
+
 # Tag every test registered above with the 'vfs' label so the suite can be run
 # independently via `ctest -L vfs`.
 get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
