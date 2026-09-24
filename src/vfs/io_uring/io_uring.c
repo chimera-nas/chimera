@@ -164,6 +164,7 @@ struct chimera_io_uring_range {
 struct chimera_io_uring_shared {
     struct io_uring                     ring;
     int                                 readdir_verifier;
+    unsigned int                        max_inflight;
 
     evpl_mutex_t                        range_lock;
     struct chimera_io_uring_range_file *range_files;
@@ -284,11 +285,53 @@ chimera_io_uring_init(
     (void) metrics;
     struct chimera_io_uring_shared *shared;
     struct io_uring_params          params = { 0 };
+    const char                     *env;
     int                             rc;
 
     shared = calloc(1, sizeof(*shared));
 
-    // Initialize the shared ring with default parameters
+    /* These VFS rings are separate from libevpl's event-loop rings and are
+     * not sized by EVPL_IO_URING_ENTRIES.  Bound requests as well as entries:
+     * a VFS request can consume up to four SQEs. */
+    shared->max_inflight = 1024;
+    env                  = getenv("CHIMERA_IO_URING_MAX_INFLIGHT");
+    if (env) {
+        char *end;
+        long  value;
+
+        errno = 0;
+        value = strtol(env, &end, 10);
+        chimera_io_uring_abort_if(errno || end == env || *end != '\0' ||
+                                  value < 1 || value > 8192,
+                                  "CHIMERA_IO_URING_MAX_INFLIGHT must be an integer from 1 to 8192: '%s'", env);
+        shared->max_inflight = value;
+    }
+
+    if (cfgdata && cfgdata[0] != '\0') {
+        json_error_t json_error;
+        json_t      *cfg = json_loads(cfgdata, 0, &json_error);
+
+        if (cfg) {
+            json_t *verf         = json_object_get(cfg, "readdir_verifier");
+            json_t *max_inflight = json_object_get(cfg, "max_inflight");
+
+            if (json_is_boolean(verf)) {
+                shared->readdir_verifier = json_boolean_value(verf);
+            }
+
+            if (max_inflight) {
+                chimera_io_uring_abort_if(!json_is_integer(max_inflight) ||
+                                          json_integer_value(max_inflight) < 1 ||
+                                          json_integer_value(max_inflight) > 8192,
+                                          "io_uring max_inflight must be an integer from 1 to 8192");
+                shared->max_inflight = json_integer_value(max_inflight);
+            }
+
+            json_decref(cfg);
+        }
+    }
+
+    /* This ring only supplies the shared worker pool, not request SQEs. */
     rc = io_uring_queue_init_params(256, &shared->ring, &params);
 
     if (rc < 0) {
@@ -299,21 +342,6 @@ chimera_io_uring_init(
 
     evpl_mutex_init(&shared->range_lock, NULL);
     evpl_mutex_init(&shared->mount_lock, NULL);
-
-    if (cfgdata && cfgdata[0] != '\0') {
-        json_error_t json_error;
-        json_t      *cfg = json_loads(cfgdata, 0, &json_error);
-
-        if (cfg) {
-            json_t *verf = json_object_get(cfg, "readdir_verifier");
-
-            if (json_is_boolean(verf)) {
-                shared->readdir_verifier = json_boolean_value(verf);
-            }
-
-            json_decref(cfg);
-        }
-    }
 
     return shared;
 } /* io_uring_init */ /* io_uring_init */
@@ -1129,12 +1157,13 @@ chimera_io_uring_thread_init(
     params.flags |= IORING_SETUP_ATTACH_WQ;
     params.wq_fd  = shared->ring.ring_fd;
 
-    thread->max_inflight = 1024;
+    thread->max_inflight = shared->max_inflight;
 
     // Initialize io_uring with params
     rc = io_uring_queue_init_params(4 * thread->max_inflight, &thread->ring, &params);
 
-    chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue: %s", strerror(-rc));
+    chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue (%u entries, %u max_inflight): %s",
+                              4 * shared->max_inflight, shared->max_inflight, strerror(-rc));
 
     evpl_add_doorbell(evpl, &thread->doorbell, chimera_io_uring_complete);
 
@@ -1448,8 +1477,11 @@ chimera_io_uring_mount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int   mount_fd, rc;
-    char *scratch = (char *) request->plugin_data;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             mount_fd, rc;
+    char                           *scratch = (char *) request->plugin_data;
+
+    --thread->inflight;
 
     TERM_STR(fullpath,
              request->mount.path,
@@ -1491,8 +1523,6 @@ chimera_io_uring_mount(
 
         if (fstat(mount_fd, &st) == 0 &&
             (root = calloc(1, sizeof(*root))) != NULL) {
-            struct chimera_io_uring_thread *thread = private_data;
-
             root->dev                      = st.st_dev;
             root->ino                      = st.st_ino;
             request->mount.r_mount_private = root;
@@ -1517,6 +1547,8 @@ chimera_io_uring_umount(
 {
     struct chimera_io_uring_thread  *thread = private_data;
     struct chimera_linux_mount_root *root   = request->umount.mount_private;
+
+    --thread->inflight;
 
     if (root) {
         evpl_mutex_lock(&thread->shared->mount_lock);
@@ -2350,9 +2382,12 @@ chimera_io_uring_allocate(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int fd   = (int) request->allocate.handle->vfs_private;
-    int mode = 0;
-    int rc;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd     = (int) request->allocate.handle->vfs_private;
+    int                             mode   = 0;
+    int                             rc;
+
+    --thread->inflight;
 
     if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
         mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
@@ -2493,9 +2528,12 @@ chimera_io_uring_seek(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    int   fd = (int) request->seek.handle->vfs_private;
-    int   whence;
-    off_t result;
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             fd     = (int) request->seek.handle->vfs_private;
+    int                             whence;
+    off_t                           result;
+
+    --thread->inflight;
 
     if (request->seek.what == 0) {
         whence = SEEK_DATA;

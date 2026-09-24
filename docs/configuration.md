@@ -87,7 +87,7 @@ the canonical place to set them.
 | `slab_size` | size | libevpl default | libevpl memory slab size. |
 | `preallocate_slabs` | int | libevpl default | Number of memory slabs to preallocate at startup. |
 | `preallocate_threads` | int | libevpl default | Threads used to preallocate slabs in parallel. |
-| `io_uring_entries` | int | `8192` | io_uring submission/completion ring depth, per event-loop thread. Each ring costs roughly 1.5 MB of kernel-accounted memory at the default (`SQE128`/`CQE32` double both entry sizes) and SQPOLL adds a kernel thread per ring, so a host running many threads or many Chimera processes can be refused with `ENOMEM`. The value is honoured or the ring fails; it is never reduced silently. Can also be set with `EVPL_IO_URING_ENTRIES`. |
+| `io_uring_entries` | int | `8192` | libevpl io_uring submission/completion ring depth, per event-loop thread; does not size the VFS io_uring rings (see `max_inflight` below). Each ring costs roughly 1.5 MB of kernel-accounted memory at the default (`SQE128`/`CQE32` double both entry sizes) and SQPOLL adds a kernel thread per ring, so a host running many threads or many Chimera processes can be refused with `ENOMEM`. The value is honoured or the ring fails; it is never reduced silently. Can also be set with `EVPL_IO_URING_ENTRIES`. |
 | `rdmacm_tos` | int | `0` | RoCEv2 traffic class stamped on every RDMA QP. ToS = DSCP x 4 (e.g. `104` for DSCP 26) so the fabric's lossless/PFC class carries Chimera traffic. |
 | `metrics_file` | string | - | On shutdown, write a final Prometheus scrape to this file (so short runs keep their metrics). |
 | `umount_timeout_ms` | int | `1000` | How long an unmount waits for the mount's open handles to be closed and released before giving up and returning `EBUSY`. Raise it for backends whose closes are slow; it exists so that unmounting a genuinely busy mount fails rather than hanging. |
@@ -536,6 +536,14 @@ for plugins, the `config` under `server.vfs.<name>`.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `readdir_verifier` | bool | `false` | Emit/validate a readdir cookie verifier. |
+| `max_inflight` | int | `1024` | `io_uring` only: maximum in-flight VFS requests per worker, from 1 to 8192. Each worker reserves four ring entries per request (the kernel rounds the entry count up to a power of two). Can also be set with `CHIMERA_IO_URING_MAX_INFLIGHT`; explicit module configuration takes precedence. Invalid values abort initialization; allocation failures do not silently reduce the requested size. |
+
+The VFS rings are independent of libevpl's `common.io_uring_entries` /
+`EVPL_IO_URING_ENTRIES`. CI sets `CHIMERA_IO_URING_MAX_INFLIGHT=256`, reducing
+each VFS worker ring from 4096 to 1024 entries together with its request limit.
+Pass `max_inflight` in the JSON module initialization configuration; it is
+not a per-mount option. The environment variable also reaches clients created
+by the POSIX layer. The shared worker-pool ring remains 256 entries.
 
 ### `cairn` (RocksDB-backed, plugin)
 

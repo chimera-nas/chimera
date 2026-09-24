@@ -529,10 +529,13 @@ jobs:
           # kernel-accounted memory per ring (SQE128/CQE32 double both entry
           # sizes) and SQPOLL adds a kernel thread each; ctest -j nproc stacks
           # enough of them to be refused with ENOMEM, which is fatal to the
-          # process and takes an unrelated test with it.
+          # process and takes an unrelated test with it.  The VFS backend has
+          # separate rings: 256 in-flight requests reserve 1024 entries per
+          # worker, down from 4096; the request limit shrinks with the ring.
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e EVPL_IO_URING_ENTRIES=1024 \
+            -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
             -e CCACHE_MAXSIZE \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
@@ -878,10 +881,13 @@ jobs:
           # kernel-accounted memory per ring (SQE128/CQE32 double both entry
           # sizes) and SQPOLL adds a kernel thread each; ctest -j nproc stacks
           # enough of them to be refused with ENOMEM, which is fatal to the
-          # process and takes an unrelated test with it.
+          # process and takes an unrelated test with it.  The VFS backend has
+          # separate rings: 256 in-flight requests reserve 1024 entries per
+          # worker, down from 4096; the request limit shrinks with the ring.
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e EVPL_IO_URING_ENTRIES=1024 \
+            -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
             -e CCACHE_MAXSIZE \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
