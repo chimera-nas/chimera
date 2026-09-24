@@ -352,6 +352,7 @@ chimera_vfs_open_lookup_complete(
 {
     struct chimera_vfs_request *request = private_data;
     struct chimera_vfs_thread  *thread  = request->thread;
+    struct chimera_vfs_module  *module;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_open_callback_t callback = request->open.callback;
@@ -360,6 +361,44 @@ chimera_vfs_open_lookup_complete(
         chimera_vfs_request_free(thread, request);
         callback(error_code, NULL, NULL, priv);
         return;
+    }
+
+    /* The gates below answer to the module serving the resolved object.
+     * request->module serves the fh the walk began at, which for the client
+     * library and the POSIX layer is the vfs root, not the file's backend. */
+    module = chimera_vfs_get_module(thread, attr->va_fh, attr->va_fh_len);
+
+    if (!module) {
+        chimera_vfs_open_callback_t callback = request->open.callback;
+        void                       *priv     = request->open.private_data;
+
+        chimera_vfs_request_free(thread, request);
+        callback(CHIMERA_VFS_ESTALE, NULL, NULL, priv);
+        return;
+    }
+
+    /* Fail closed on under-filled attrs, as chimera_vfs_open_at_hdl_callback
+     * does: without MODE the block below is skipped outright, and without
+     * uid/gid (or a native ACL) the gate would evaluate the object as if
+     * owned by root:root.  Opens by an exempt credential, and opens
+     * requesting no data access, are not the gate's to decide and pass. */
+    if (chimera_vfs_open_required_access(request->open.flags) &&
+        chimera_vfs_open_gate_needed(module->capabilities, request->cred)) {
+        uint64_t missing = chimera_vfs_gate_attrs_missing(
+            attr, module->capabilities);
+
+        if (missing) {
+            chimera_vfs_open_callback_t callback = request->open.callback;
+            void                       *priv     = request->open.private_data;
+
+            chimera_vfs_error("open: module %s replied without attrs 0x%llx "
+                              "the access gate needs; refusing the open",
+                              module->name,
+                              (unsigned long long) missing);
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_EIO, NULL, NULL, priv);
+            return;
+        }
     }
 
     /* POSIX open(2) semantics on the resolved final object: */
@@ -404,7 +443,7 @@ chimera_vfs_open_lookup_complete(
         }
 
         /* Authorize the requested read/write access against the file. */
-        if (chimera_vfs_open_gate_needed(request->module->capabilities,
+        if (chimera_vfs_open_gate_needed(module->capabilities,
                                          request->cred)) {
             if (chimera_vfs_gate(attr, request->cred,
                                  chimera_vfs_open_required_access(f)) != CHIMERA_VFS_OK) {
