@@ -213,8 +213,9 @@ chimera_nfs4_setattr(
         }
     }
 
-    /* RFC 7530 §16.32.3: when SETATTR carries FATTR4_SIZE the supplied
-     * stateid must identify an open with write access.  Special stateids
+    /* RFC 7530 section 16.32.4: when SETATTR carries FATTR4_SIZE the
+     * stateid provides the locking context of a WRITE -- an open with write
+     * access, or a lock stateid anchored to one.  Special stateids
      * (all-zero / all-ones) are exempt -- treated as anonymous, like the
      * pre-Phase-2 behavior. */
     /* RFC 7530 §9.1.4.3 / RFC 8881 §9.7: a size-changing SETATTR is a
@@ -239,13 +240,18 @@ chimera_nfs4_setattr(
     if (args->obj_attributes.num_attrmask >= 1 &&
         (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE)) &&
         !nfs4_stateid_is_special(&args->stateid)) {
-        struct nfs_state_table *table = &thread->shared->nfs4_state_table;
-        void                   *state_void;
-        uint8_t                 state_type;
-        nfsstat4                status;
+        struct nfs_state_table         *table = &thread->shared->nfs4_state_table;
+        struct chimera_vfs_open_handle *state_handle;
+        void                           *state_void;
+        uint8_t                         state_type;
+        nfsstat4                        status;
 
-        status = nfs_state_table_acquire(table, &args->stateid,
-                                         NFS4_SLOT_TYPE_OPEN,
+        /* Look the stateid up by any type and let
+         * nfs_state_check_write_for_fh judge it: a client holding a
+         * byte-range lock on the file sends the lock stateid here, exactly
+         * as it would for a WRITE, and refusing it while TEST_STATEID
+         * reports it valid leaves the client resending the SETATTR forever. */
+        status = nfs_state_table_acquire(table, &args->stateid, 0,
                                          &state_void, &state_type);
         if (status != NFS4_OK) {
             res->status = status;
@@ -264,40 +270,34 @@ chimera_nfs4_setattr(
             return;
         }
 
-        struct nfs_open_state *open_state = state_void;
-
-        /* RFC 7530 §9.1.4.3: the stateid must name an open of the object that
-         * is the current filehandle, not some other open file. */
-        if (open_state->fh_len != req->fhlen ||
-            memcmp(open_state->fh, req->fh, req->fhlen) != 0) {
-            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+        /* RFC 7530 section 9.1.4.3: the stateid must name a write-capable
+         * open of the object that is the current filehandle -- directly, or
+         * as the open a lock stateid is anchored to -- not some other open
+         * file. */
+        status = nfs_state_check_write_for_fh(state_void, state_type,
+                                              req->fh, req->fhlen);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, state_void, state_type,
                                     thread->vfs_thread);
-            res->status = NFS4ERR_BAD_STATEID;
+            res->status = status;
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
-
-        bool has_write = (open_state->share_access &
-                          OPEN4_SHARE_ACCESS_WRITE) != 0;
 
         /* Apply through the open's own handle: the stateid authorizes the
          * size change the way a descriptor authorizes ftruncate(2), and the
          * OPEN-time handle carries that grant (and, on a passthrough
          * backend, the writable descriptor itself) where a fresh path-only
          * open would face a per-operation permission re-check. */
-        if (has_write && open_state->handle) {
-            chimera_vfs_dup_handle(thread->vfs_thread, open_state->handle);
-            req->handle = open_state->handle;
+        state_handle = nfs_state_io_handle(state_void, state_type,
+                                           OPEN4_SHARE_ACCESS_WRITE);
+        if (state_handle) {
+            chimera_vfs_dup_handle(thread->vfs_thread, state_handle);
+            req->handle = state_handle;
         }
 
-        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+        nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
-
-        if (!has_write) {
-            res->status = NFS4ERR_OPENMODE;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
-        }
     }
 
     /* A size change conflicts with any outstanding writable layout for the
