@@ -580,6 +580,47 @@ cairn_read_end(struct cairn_thread *thread)
 } /* cairn_read_end */
 
 /*
+ * A read-only op completes inside its snapshot view, and its completion may
+ * dispatch the next op inline (a path walk's next component, an access
+ * gate's GETATTR, the next op of a compound).  That op must not see the
+ * outer view: a reader would overwrite it, so the outer snapshot is never
+ * released, and a writer would read through it instead of meta_txn.
+ * cairn_dispatch parks the outer view for the length of each dispatch.
+ */
+struct cairn_read_view {
+    const rocksdb_readoptions_t *meta_opts;
+    const rocksdb_snapshot_t    *meta_snap;
+    const rocksdb_readoptions_t *data_opts;
+    const rocksdb_snapshot_t    *data_snap;
+};
+
+static inline void
+cairn_read_view_park(
+    struct cairn_thread    *thread,
+    struct cairn_read_view *saved)
+{
+    saved->meta_opts       = thread->read_meta_opts;
+    saved->meta_snap       = thread->read_meta_snap;
+    saved->data_opts       = thread->read_data_opts;
+    saved->data_snap       = thread->read_data_snap;
+    thread->read_meta_opts = NULL;
+    thread->read_meta_snap = NULL;
+    thread->read_data_opts = NULL;
+    thread->read_data_snap = NULL;
+} /* cairn_read_view_park */
+
+static inline void
+cairn_read_view_unpark(
+    struct cairn_thread          *thread,
+    const struct cairn_read_view *saved)
+{
+    thread->read_meta_opts = saved->meta_opts;
+    thread->read_meta_snap = saved->meta_snap;
+    thread->read_data_opts = saved->data_opts;
+    thread->read_data_snap = saved->data_snap;
+} /* cairn_read_view_unpark */
+
+/*
  * Metadata point read.  Reader ops (read_meta_opts set) read the committed
  * base DB at their pinned snapshot; writer ops read through meta_txn for
  * read-your-writes and optimistic conflict tracking.
@@ -6127,9 +6168,10 @@ cairn_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct cairn_thread *thread = private_data;
-    struct cairn_shared *shared = thread->shared;
-    struct cairn_fs     *fs     = NULL;
+    struct cairn_thread   *thread = private_data;
+    struct cairn_shared   *shared = thread->shared;
+    struct cairn_fs       *fs     = NULL;
+    struct cairn_read_view outer_view;
 
     /* Ops that name a filesystem (or the pool) rather than an object in one:
      * mount/mkfs/rmfs resolve by name, umount by mount_private, and the KV
@@ -6174,6 +6216,8 @@ cairn_dispatch(
      * commit (scheduled by cairn_queue_request / the write helpers) drains
      * and completes them.
      */
+    cairn_read_view_park(thread, &outer_view);
+
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
             cairn_read_begin(thread, 0);
@@ -6310,6 +6354,8 @@ cairn_dispatch(
     if (!thread->in_commit && thread->request_count >= CAIRN_BATCH_MAX_OPS) {
         cairn_thread_commit(thread->evpl, thread);
     }
+
+    cairn_read_view_unpark(thread, &outer_view);
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
