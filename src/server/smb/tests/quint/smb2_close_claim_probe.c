@@ -4,6 +4,7 @@
  */
 
 #include "server/smb/smb_internal.h"
+#include "vfs/vfs_clock.h"
 
 /* Run the waiting CREATE's cache admission synchronously from the claim
  * completion. This makes the close/admit interleaving deterministic, without
@@ -134,8 +135,13 @@ run_case(int coalesced)
 int
 main(void)
 {
-    int failed = run_case(0);
+    int failed;
 
+    /* This probe bypasses VFS startup, but lease-break deadlines still need
+     * the process clock, including Windows' performance-counter frequency. */
+    chimera_vfs_clock_init();
+    failed  = run_case(0);
     failed |= run_case(1);
+    chimera_vfs_clock_shutdown();
     return failed;
 } /* main */
