@@ -53,6 +53,15 @@ set_tests_properties(chimera/server/smb/mbt/rename_disconnect_probe_memfs PROPER
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 60)
 
+# Closing a lease holder must remove its cache before waking a pending CREATE.
+add_executable(smb2_close_claim_probe smb2_close_claim_probe.c)
+target_include_directories(smb2_close_claim_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_close_claim_probe chimera_server chimera_smb chimera_vfs)
+add_test(NAME chimera/server/smb/mbt/close_claim_probe
+    COMMAND $<TARGET_FILE:smb2_close_claim_probe>)
+set_tests_properties(chimera/server/smb/mbt/close_claim_probe PROPERTIES
+    LABELS "functional;probe;smb_mbt" TIMEOUT 30)
+
 # Same object-store caching key across distinct protocol lease records.
 add_executable(smb2_lease_identity_probe smb2_lease_identity_probe.c)
 target_include_directories(smb2_lease_identity_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)

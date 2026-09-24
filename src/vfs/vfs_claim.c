@@ -1740,17 +1740,49 @@ chimera_vfs_claim_release_ranged(
     chimera_vfs_claim_release(state, file, claim);
 } /* chimera_vfs_claim_release_ranged */
 
+/* Drop a grant reference while file->lock is held. The caller frees a last
+ * reference after unlocking, and decides when it is safe to pump waiters. */
+static bool
+chimera_vfs_claim_grant_release_locked(struct chimera_vfs_claim_grant *grant)
+{
+    struct chimera_vfs_file_state   *file = grant->file;
+    struct chimera_vfs_claim_grant **pp;
+
+    chimera_vfs_abort_if(grant->refcount == 0, "double release of claim grant");
+    if (--grant->refcount) {
+        return false;
+    }
+    for (pp = &file->grants; *pp; pp = &(*pp)->grant_next) {
+        if (*pp == grant) {
+            *pp = grant->grant_next;
+            break;
+        }
+    }
+    if (grant->claim.file == file) {
+        chimera_vfs_claim_unlink_locked(file, &grant->claim);
+    }
+    return true;
+} /* chimera_vfs_claim_grant_release_locked */
+
 SYMBOL_EXPORT void
-chimera_vfs_claim_release(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_file_state *file,
-    struct chimera_vfs_claim      *claim)
+chimera_vfs_claim_release_open(
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim       *claim,
+    struct chimera_vfs_claim_grant *grant)
 {
     uint64_t token;
+    bool     last = false;
+
+    chimera_vfs_abort_if(grant && grant->file != file,
+                         "open claim and cache grant belong to different files");
 
     evpl_mutex_lock(&file->lock);
     if (claim->file == file) {
         chimera_vfs_claim_unlink_locked(file, claim);
+    }
+    if (grant) {
+        last = chimera_vfs_claim_grant_release_locked(grant);
     }
     token                = claim->backend_token;
     claim->backend_token = 0;
@@ -1762,9 +1794,21 @@ chimera_vfs_claim_release(
     }
     evpl_mutex_unlock(&file->lock);
 
+    if (last) {
+        free(grant);
+    }
     chimera_vfs_claim_pump_pending(state, file);
     chimera_vfs_claim_pump_io(state, file);
     chimera_vfs_claim_backend_reeval(state, file);
+} /* chimera_vfs_claim_release_open */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_release(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
+{
+    chimera_vfs_claim_release_open(state, file, claim, NULL);
 } /* chimera_vfs_claim_release */
 
 SYMBOL_EXPORT void
@@ -2250,29 +2294,11 @@ chimera_vfs_claim_grant_release(
     struct chimera_vfs_claim_grant *grant,
     bool                            pump)
 {
-    struct chimera_vfs_file_state   *file = grant->file;
-    struct chimera_vfs_claim_grant **pp;
-    bool                             last;
+    struct chimera_vfs_file_state *file = grant->file;
+    bool                           last;
 
     evpl_mutex_lock(&file->lock);
-
-    chimera_vfs_abort_if(grant->refcount == 0,
-                         "double release of claim grant");
-    grant->refcount--;
-    last = (grant->refcount == 0);
-
-    if (last) {
-        for (pp = &file->grants; *pp; pp = &(*pp)->grant_next) {
-            if (*pp == grant) {
-                *pp = grant->grant_next;
-                break;
-            }
-        }
-        if (grant->claim.file == file) {
-            chimera_vfs_claim_unlink_locked(file, &grant->claim);
-        }
-    }
-
+    last = chimera_vfs_claim_grant_release_locked(grant);
     evpl_mutex_unlock(&file->lock);
 
     if (last) {
