@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
+#include "nfs_write_payload.h"
 #include "nfs4_open_state.h"
 #include "nfs4_pnfs.h"
 #include "vfs/sdk/vfs_error.h"
@@ -144,9 +145,12 @@ chimera_nfs4_write(
     /* Op 2: WRITE */
     argarray[2].argop = OP_WRITE;
 
-    /* Use the stateid from the open state, or anonymous stateid if not available */
+    /* Session I/O uses the latest version of this state identity. Another
+     * local handle can coalesce an OPEN and advance its version while this
+     * handle still retains the original OPEN reply (RFC 8881 section 8.2.2). */
     if (open_state) {
-        argarray[2].opwrite.stateid = open_state->stateid;
+        argarray[2].opwrite.stateid       = open_state->stateid;
+        argarray[2].opwrite.stateid.seqid = 0;
     } else {
         /* Anonymous stateid */
         memset(&argarray[2].opwrite.stateid, 0, sizeof(argarray[2].opwrite.stateid));
@@ -163,6 +167,14 @@ chimera_nfs4_write(
                                request->thread->vfs->machine_name,
                                request->thread->vfs->machine_name_len);
 
+    int                payload_niov = request->write.niov;
+    struct evpl_iovec *payload      = chimera_nfs_write_payload_clone(request->write.iov, payload_niov);
+    if (!payload) {
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+    argarray[2].opwrite.data.iov = payload;
     chimera_nfs4_compound_call(
         thread,
         shared,
@@ -174,4 +186,5 @@ chimera_nfs4_write(
         chimera_nfs4_write_callback,
         request,
         chimera_nfs4_dispatch, private_data);
+    chimera_nfs_write_payload_discard(thread->evpl, payload, payload_niov);
 } /* chimera_nfs4_write */

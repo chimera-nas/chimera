@@ -86,6 +86,103 @@ nfs_layout_table_register(
     pthread_mutex_unlock(&shard->lock);
 } /* nfs_layout_table_register */
 
+static bool
+layout_admission_begin(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    bool                     barrier)
+{
+    if (!fh || !fh_len || fh_len > NFS4_FHSIZE) {
+        return false;
+    }
+    struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
+    struct nfs_layout_entry *entry;
+
+    pthread_mutex_lock(&shard->lock);
+    HASH_FIND(hh, shard->by_fh, fh, fh_len, entry);
+    if (entry && (barrier ? entry->grants != 0 : (entry->barriers || entry->waiters))) {
+        pthread_mutex_unlock(&shard->lock);
+        return false;
+    }
+    if (!entry) {
+        entry = calloc(1, sizeof(*entry));
+        chimera_nfs_abort_if(!entry, "layout admission alloc OOM");
+        memcpy(entry->fh, fh, fh_len);
+        entry->fh_len = fh_len;
+        HASH_ADD_KEYPTR(hh, shard->by_fh, entry->fh, entry->fh_len, entry);
+    }
+    if (barrier) {
+        entry->barriers++;
+    } else {
+        entry->grants++;
+    }
+    pthread_mutex_unlock(&shard->lock);
+    return true;
+} /* layout_admission_begin */
+
+static void
+layout_admission_end(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    bool                     barrier)
+{
+    struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
+    struct nfs_layout_entry *entry;
+
+    pthread_mutex_lock(&shard->lock);
+    HASH_FIND(hh, shard->by_fh, fh, fh_len, entry);
+    chimera_nfs_abort_if(!entry || !(barrier ? entry->barriers : entry->grants),
+                         "layout admission release without hold");
+    if (barrier) {
+        entry->barriers--;
+    } else {
+        entry->grants--;
+    }
+    if (!entry->holders && !entry->waiters && !entry->barriers && !entry->grants) {
+        HASH_DEL(shard->by_fh, entry);
+        free(entry);
+    }
+    pthread_mutex_unlock(&shard->lock);
+} /* layout_admission_end */
+
+bool
+nfs_layout_table_barrier_acquire(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    return layout_admission_begin(table, fh, fh_len, true);
+} /* nfs_layout_table_barrier_acquire */
+
+void
+nfs_layout_table_barrier_release(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    layout_admission_end(table, fh, fh_len, true);
+} /* nfs_layout_table_barrier_release */
+
+bool
+nfs_layout_table_grant_begin(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    return layout_admission_begin(table, fh, fh_len, false);
+} /* nfs_layout_table_grant_begin */
+
+void
+nfs_layout_table_grant_end(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    layout_admission_end(table, fh, fh_len, false);
+} /* nfs_layout_table_grant_end */
+
 void
 nfs_layout_table_deregister(
     struct nfs_layout_table *table,
@@ -110,12 +207,15 @@ nfs_layout_table_deregister(
         }
         ls->global_next = NULL;
 
-        /* Last holder gone: the recall is complete -- detach the deferred
-         * operations and drop the entry. */
+        /* Last holder gone: resume waiters, retaining any request barrier so
+         * a new LAYOUTGET cannot slip in before the conflicting op finishes. */
         if (!e->holders) {
-            waiters = e->waiters;
-            HASH_DEL(shard->by_fh, e);
-            free(e);
+            waiters    = e->waiters;
+            e->waiters = NULL;
+            if (!e->barriers && !e->grants) {
+                HASH_DEL(shard->by_fh, e);
+                free(e);
+            }
         }
     }
 
@@ -138,13 +238,14 @@ nfs_layout_table_recall_prepare(
     const uint8_t                   *fh,
     uint16_t                         fh_len,
     struct nfs_layout_recall_waiter *waiter,
-    struct nfs_layout_state        **out_holders,
-    int                              max_holders)
+    struct nfs_layout_state       ***out_holders)
 {
     struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
     struct nfs_layout_entry *e;
     struct nfs_layout_state *ls;
     int                      n = 0;
+
+    *out_holders = NULL;
 
     pthread_mutex_lock(&shard->lock);
 
@@ -154,14 +255,23 @@ nfs_layout_table_recall_prepare(
         return 0;
     }
 
+    /* Snapshot every holder; a fixed-size prefix would leave unnotified
+     * holders keeping the waiter asleep indefinitely. */
+    for (ls = e->holders; ls; ls = ls->global_next) {
+        n++;
+    }
+    *out_holders = calloc(n, sizeof(**out_holders));
+    chimera_nfs_abort_if(!*out_holders, "layout recall snapshot alloc OOM");
+    n = 0;
+
     /* Defer the caller behind this file's recall, and snapshot the current
      * holders (pinned) so the caller can recall each outside the lock. */
     waiter->next = e->waiters;
     e->waiters   = waiter;
 
-    for (ls = e->holders; ls && n < max_holders; ls = ls->global_next) {
+    for (ls = e->holders; ls; ls = ls->global_next) {
         nfs_layout_state_get(ls);
-        out_holders[n++] = ls;
+        (*out_holders)[n++] = ls;
     }
 
     pthread_mutex_unlock(&shard->lock);
@@ -180,12 +290,28 @@ nfs_layout_table_recall_active(
 
     pthread_mutex_lock(&shard->lock);
 
-    /* The entry carries waiters only between recall_prepare and the last
-     * holder's deregistration, which frees the entry -- so a non-empty waiter
-     * list is exactly "a recall is outstanding on this file". */
+    /* Waiters cover outstanding returns; a counted barrier covers the resumed
+     * conflicting operation until its request has accepted or aborted. */
     HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
-    active = (e && e->waiters);
+    active = (e && (e->waiters || e->barriers));
 
     pthread_mutex_unlock(&shard->lock);
     return active;
 } /* nfs_layout_table_recall_active */
+
+bool
+nfs_layout_table_has_holders(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
+    struct nfs_layout_entry *entry;
+    bool                     held;
+
+    pthread_mutex_lock(&shard->lock);
+    HASH_FIND(hh, shard->by_fh, fh, fh_len, entry);
+    held = entry && entry->holders;
+    pthread_mutex_unlock(&shard->lock);
+    return held;
+} /* nfs_layout_table_has_holders */

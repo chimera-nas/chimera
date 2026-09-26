@@ -346,15 +346,12 @@ main(
           "deviation delete-object-missing-404 no longer reproduces: got %d "
           "(fixed? retire it in s3_mbt_replay.c)", r->status);
 
-    /* DEVIATION delete-bucket-nonempty-500: AWS answers DELETE on a
-     * non-empty bucket with 409 BucketNotEmpty; chimera maps its internal
-     * BUCKET_NOT_EMPTY through the default 500 InternalError. */
+    /* Non-empty buckets report the S3 BucketNotEmpty conflict. */
     r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0");
-    CHECK(r->status == 500,
-          "deviation delete-bucket-nonempty-500 no longer reproduces: got %d "
-          "(fixed? retire it in s3_mbt_replay.c)", r->status);
-    CHECK(body_has(r, "<Code>InternalError</Code>"),
-          "non-empty DeleteBucket: body lacks InternalError");
+    CHECK(r->status == 409,
+          "non-empty DeleteBucket: expected 409, got %d", r->status);
+    CHECK(body_has(r, "<Code>BucketNotEmpty</Code>"),
+          "non-empty DeleteBucket: body lacks BucketNotEmpty");
 
     /* drain the bucket, then it deletes cleanly */
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/a");

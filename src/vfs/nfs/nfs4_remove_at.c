@@ -59,6 +59,8 @@ chimera_nfs4_remove_callback(
         return;
     }
 
+    chimera_nfs4_unmarshall_cinfo(&remove_res->opremove.resok4.cinfo,
+                                  &request->remove_at.r_dir_pre_attr, &request->remove_at.r_dir_post_attr);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_remove_callback */

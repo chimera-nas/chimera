@@ -21,6 +21,8 @@
 struct nfs4_getattr_park {
     struct nfs_request      *req;
     struct nfs_delegation   *deleg;
+    struct nfs_client       *holder_client;
+    uint64_t                 querying_client_id;
     struct chimera_vfs_attrs attr;
 };
 
@@ -42,7 +44,8 @@ chimera_nfs4_getattr_fill(
     struct GETATTR4res             *res,
     const struct chimera_vfs_attrs *attr,
     const uint8_t                  *fh,
-    int                             fhlen)
+    int                             fhlen,
+    bool                            change_projected)
 {
     struct chimera_vfs_attrs marshall_attr;
     int                      rc;
@@ -80,6 +83,15 @@ chimera_nfs4_getattr_fill(
     }
 
     marshall_attr = *attr;
+    if (!change_projected) {
+        struct nfs4_change_observation *observation;
+        nfsstat4                        status = nfs4_change_project(req->thread->shared->nfs4_state_table.change_table,
+                                                                     fh, fhlen, &marshall_attr, &req->
+                                                                     change_observations, &observation);
+        if (status != NFS4_OK) {
+            return status;
+        }
+    }
     chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
                                        args->num_attr_request,
                                        args->attr_request,
@@ -131,7 +143,7 @@ chimera_nfs4_getattr_finish(
     struct GETATTR4res  *res  = &req->res_compound.resarray[req->index].opgetattr;
 
     res->status = chimera_nfs4_getattr_fill(req, args, res, attr,
-                                            req->fh, req->fhlen);
+                                            req->fh, req->fhlen, false);
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
@@ -140,44 +152,15 @@ chimera_nfs4_getattr_finish(
     chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_getattr_finish */
 
-/* Encode an NFSv4 fattr4_change value back into park->attr in whichever
- * representation this file's backend uses, so the marshaller emits exactly
- * `change` while keeping change_attr_type stable per object: a native-counter
- * backend (CAP_CHANGE) carries it in va_change; a ctime-derived backend has no
- * CHANGE bit, so the value is split into a ctime that re-encodes to it. */
+/* Legacy execution uses the same private combine journal as compounds. Stage
+ * the response before publishing the sticky dirty flag and synthesized change,
+ * so a marshalling failure does not consume an attribute version. */
 static void
-chimera_nfs4_getattr_set_change(
+chimera_nfs4_getattr_complete(
+    enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
-    uint64_t                  change)
-{
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) {
-        attr->va_change = change;
-    } else {
-        attr->va_ctime.tv_sec  = change / 1000000000ULL;
-        attr->va_ctime.tv_nsec = change % 1000000000ULL;
-        attr->va_set_mask     |= CHIMERA_VFS_ATTR_CTIME;
-    }
-} /* chimera_nfs4_getattr_set_change */
+    void                     *private_data);
 
-/* Resume (on the requester's thread) after the write-delegation holder has
- * answered CB_GETATTR.  Implements the RFC 7530/8881 §10.4.3 server-side
- * change-attribute combine algorithm.
- *
- * The server caches the file's change attribute at delegation grant time (sc).
- * The holder reports its current change value (cc) via CB_GETATTR:
- *   cc == sc  -> the holder has NOT modified the file: return the server's own
- *                LOCAL change / time_metadata / time_modify (already in
- *                park->attr) -- do NOT substitute the holder's values.
- *   cc != sc  -> the holder HAS modified the file: synthesise time_metadata
- *                (ctime) and time_modify (mtime) from the current time, compute
- *                a new server change value nsc >= sc + 1, return nsc, replace
- *                the cached sc with nsc, and ensure each returned nsc STRICTLY
- *                exceeds the previously returned one (monotonicity) so a peer
- *                re-reading after the holder re-dirties always sees a change.
- * On query failure, fall back to the server's own LOCAL attrs unchanged.
- *
- * combine_lock serialises the per-delegation sc/last bookkeeping against
- * concurrent peer GETATTRs on other requester threads. */
 static void
 chimera_nfs4_getattr_cb_resume(
     void    *priv,
@@ -187,70 +170,62 @@ chimera_nfs4_getattr_cb_resume(
     bool     got_size,
     uint64_t size)
 {
-    struct nfs4_getattr_park *park  = priv;
-    struct nfs_delegation    *deleg = park->deleg;
+    struct nfs4_getattr_park             *park        = priv;
+    struct nfs_request                   *req         = park->req;
+    struct chimera_server_nfs_thread     *thread      = req->thread;
+    struct nfs_delegation_combine_journal journal     = { 0 };
+    struct GETATTR4args                  *args        = &req->args_compound->argarray[req->index].opgetattr;
+    struct GETATTR4res                   *res         = &req->res_compound.resarray[req->index].opgetattr;
+    nfsstat4                              result      = NFS4_OK;
+    struct nfs4_change_observation       *observation = NULL;
 
-    if (status == 0 && got_change && deleg) {
-        uint64_t cc = change;          /* holder's current change value */
-        bool     modified;
-        uint64_t nsc = 0;
+    int                                   match = nfs4_write_delegation_matches(thread, req->fh, req->fhlen,
+                                                                                park->querying_client_id, park->deleg);
 
-        pthread_mutex_lock(&deleg->combine_lock);
-
-        if (!deleg->combine_valid) {
-            /* sc was not captured at grant (CLAIM_FH / probe-deferred resume):
-             * adopt the holder's first reported value as the baseline sc.  The
-             * file is treated as unmodified at this instant; a later cc change
-             * is then detected normally. */
-            deleg->combine_sc    = cc;
-            deleg->combine_last  = cc;
-            deleg->combine_valid = true;
-        }
-
-        modified = (cc != deleg->combine_sc);
-
-        if (modified) {
-            /* nsc must exceed BOTH the cached sc and the last value we ever
-             * returned, by at least one -- so repeated GETATTRs after the holder
-             * re-dirties strictly advance even when cc itself does not change
-             * between queries (the holder's d=c+1 stays constant). */
-            uint64_t floor = deleg->combine_sc;
-            if (deleg->combine_last > floor) {
-                floor = deleg->combine_last;
-            }
-            /* If the holder reports a value already past our floor, honour it
-             * (still strictly advancing); otherwise bump by one. */
-            nsc                 = (cc > floor) ? cc : floor + 1;
-            deleg->combine_sc   = nsc;
-            deleg->combine_last = nsc;
-        }
-
-        pthread_mutex_unlock(&deleg->combine_lock);
-
-        if (modified) {
-            struct timespec now;
-
-            /* §10.4.3: on modification, construct time_metadata/time_modify
-             * from the current time so peers that revalidate on mtime/ctime
-             * observe the file as changed. */
-            clock_gettime(CLOCK_REALTIME, &now);
-            park->attr.va_ctime     = now;
-            park->attr.va_mtime     = now;
-            park->attr.va_set_mask |= CHIMERA_VFS_ATTR_CTIME |
-                CHIMERA_VFS_ATTR_MTIME;
-
-            chimera_nfs4_getattr_set_change(&park->attr, nsc);
-
-            if (got_size) {
-                park->attr.va_size      = size;
-                park->attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
-            }
-        }
-        /* cc == sc (unmodified): leave park->attr as the server's local view. */
+    if (!match) {
+        /* This legacy path fetched attrs before the callback. A returning
+         * holder may have flushed newer data while we waited, so refetch. */
+        nfs_client_finish_compound(park->holder_client, &thread->shared->nfs4_state_table,
+                                   thread->vfs_thread);
+        free(park);
+        chimera_vfs_getattr(thread->vfs_thread, &req->cred, req->handle,
+                            chimera_nfs4_attr2mask(args->attr_request, args->num_attr_request) |
+                            CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_SIZE,
+                            chimera_nfs4_getattr_complete, req);
+        return;
     }
-
-    chimera_nfs4_getattr_finish(park->req, &park->attr);
+    if (match < 0 || (match > 0 && (status || !got_change || !got_size))) {
+        result = NFS4ERR_DELAY;
+    } else if (match > 0) {
+        result = nfs4_change_project(thread->shared->nfs4_state_table.change_table,
+                                     req->fh, req->fhlen, &park->attr, &req->change_observations, &observation);
+        if (result == NFS4_OK) {
+            result = nfs_delegation_combine_reserve(park->deleg, park, &journal);
+        }
+        if (result == NFS4_OK) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            result = nfs_delegation_combine_attrs(&journal, change, got_size,
+                                                  size, &now, &park->attr);
+        }
+    }
+    if (result == NFS4_OK) {
+        result = chimera_nfs4_getattr_fill(req, args, res, &park->attr, req->fh, req->fhlen, true);
+        if (result == NFS4_OK) {
+            nfs4_change_observe(observation, &park->attr);
+        }
+    }
+    nfs_delegation_combine_finish(&journal, result == NFS4_OK,
+                                  &thread->shared->nfs4_state_table, thread->vfs_thread);
+    nfs_client_finish_compound(park->holder_client, &thread->shared->nfs4_state_table,
+                               thread->vfs_thread);
+    if (req->handle) {
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+        req->handle = NULL;
+    }
     free(park);
+    res->status = result;
+    chimera_nfs4_compound_complete(req, result);
 } /* chimera_nfs4_getattr_cb_resume */
 
 static void
@@ -263,8 +238,13 @@ chimera_nfs4_getattr_complete(
     struct GETATTR4res    *res = &req->res_compound.resarray[req->index].opgetattr;
     struct nfs_client     *client;
     struct nfs_delegation *wdeleg;
+    struct nfs_client     *holder_client;
 
     if (error_code != CHIMERA_VFS_OK) {
+        if (req->handle) {
+            chimera_vfs_release(req->thread->vfs_thread, req->handle);
+            req->handle = NULL;
+        }
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
@@ -281,14 +261,16 @@ chimera_nfs4_getattr_complete(
 
     if (client &&
         chimera_server_config_get_nfs4_delegations(req->thread->shared->config) &&
-        (wdeleg = nfs4_find_conflicting_write_deleg(req->thread, req->fh,
-                                                    req->fhlen,
-                                                    client->client_id)) != NULL) {
+        (wdeleg = nfs4_find_conflicting_write_deleg_pinned(req->thread, req->fh,
+                                                           req->fhlen,
+                                                           client->client_id, &holder_client)) != NULL) {
         struct nfs4_getattr_park *park = calloc(1, sizeof(*park));
 
-        park->req   = req;
-        park->deleg = wdeleg;
-        park->attr  = *attr;
+        park->req                = req;
+        park->deleg              = wdeleg;
+        park->holder_client      = holder_client;
+        park->querying_client_id = client->client_id;
+        park->attr               = *attr;
         nfs4_cb_getattr(req->thread, wdeleg, park,
                         chimera_nfs4_getattr_cb_resume);
         return; /* parked; resume finishes the GETATTR */
@@ -310,7 +292,8 @@ chimera_nfs4_getattr_open_callback(
         req->handle = handle;
 
         uint64_t attr_mask = chimera_nfs4_attr2mask(args->attr_request,
-                                                    args->num_attr_request);
+                                                    args->num_attr_request) |
+            CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_SIZE;
 
         chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
                             handle,

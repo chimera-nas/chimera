@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
+#include "nfs_write_payload.h"
 #include "nfs3_open_state.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
@@ -104,6 +105,15 @@ chimera_nfs3_write(
                                    request->thread->vfs->machine_name_len);
     }
 
+    int                payload_niov = request->write.niov;
+    struct evpl_iovec *payload      = chimera_nfs_write_payload_clone(request->write.iov, payload_niov);
+    if (!payload) {
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+    args.data.iov = payload;
     shared->nfs_v3.send_call_NFSPROC3_WRITE(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                             &args, 1, 0, NULL, 0, 0, chimera_nfs3_write_callback, request);
+    chimera_nfs_write_payload_discard(thread->evpl, payload, payload_niov);
 } /* chimera_nfs3_write */

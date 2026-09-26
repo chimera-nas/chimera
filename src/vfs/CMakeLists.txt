@@ -16,7 +16,7 @@ add_compile_definitions(_LGPL_SOURCE)
 add_library(chimera_vfs SHARED vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c
             vfs_sid.c
-            vfs_compound.c vfs_proc_mount.c vfs_proc_umount.c
+            vfs_compound.c vfs_lock.c vfs_proc_mount.c vfs_proc_umount.c
             vfs_proc_mkfs.c vfs_proc_rmfs.c
             vfs_proc_mkdir_at.c vfs_proc_mknod_at.c vfs_proc_close.c vfs_proc_open_fh.c
             vfs_proc_readdir.c vfs_proc_getattr.c vfs_proc_lookup_at.c
@@ -37,6 +37,9 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_proc_read_plus.c vfs_proc_write_same.c
             vfs_proc_getparent.c vfs_notify.c vfs_dump.c
             vfs_claim.c vfs_claim_break.c vfs_claim_io.c vfs_claim_backend.c
+            vfs_claim_journal.c
+            vfs_claim_journal_attempt.c
+            vfs_claim_access.c
             vfs_proc_claim_acquire.c vfs_proc_claim_release.c
             vfs_proc_get_xattr.c vfs_proc_set_xattr.c
             vfs_proc_list_xattrs.c vfs_proc_remove_xattr.c

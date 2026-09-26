@@ -64,6 +64,26 @@ target_link_libraries(ctl_proto_probe
     chimera_server chimera_nfs_common chimera_metrics ${JANSSON_LIBRARIES})
 mbt_add_krb5(ctl_proto_probe)
 
+# Finish injection uses ELF symbol interposition, as in the NFS3 compound probe.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(rest_fsop_compound_test rest_fsop_compound_test.c)
+    target_include_directories(rest_fsop_compound_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/server/nfs/tests/quint
+        ${CMAKE_BINARY_DIR}/src/nfs_common
+        ${JANSSON_INCLUDE_DIRS})
+    target_link_libraries(rest_fsop_compound_test
+        chimera_server chimera_nfs_common chimera_metrics chimera_vfs
+        ${JANSSON_LIBRARIES} ${CMAKE_DL_LIBS})
+    mbt_add_krb5(rest_fsop_compound_test)
+    set_target_properties(rest_fsop_compound_test PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/rest/ctl/fsop_compound
+        COMMAND $<TARGET_FILE:rest_fsop_compound_test>)
+    set_tests_properties(chimera/server/rest/ctl/fsop_compound PROPERTIES
+        LABELS "quint;ctl_mbt;memfs"
+        TIMEOUT 120)
+endif()
+
 add_test(NAME chimera/server/rest/ctl/proto_probe
     COMMAND $<TARGET_FILE:ctl_proto_probe>)
 set_tests_properties(chimera/server/rest/ctl/proto_probe PROPERTIES

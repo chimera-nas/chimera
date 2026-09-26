@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "smb_doc_compound.h"
 #include "smb_procs.h"
 #include "smb_string.h"
 #include "smb_ea.h"
@@ -12,13 +13,14 @@
 #include "vfs/vfs_release.h"
 
 static void
-chimera_smb_query_info_getattr_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+smb_query_info_marshal(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr)
 {
-    struct chimera_smb_request *request = private_data;
-
+    struct chimera_vfs_attrs snapshot;
+    attr = chimera_smb_data_fork_attrs(attr,
+        request->query_info.open_file &&
+        (request->query_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM), &snapshot);
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
             /* Marshal attributes based on the requested info class */
@@ -62,6 +64,20 @@ chimera_smb_query_info_getattr_callback(
                     break;
             } /* switch */
     } /* switch */
+
+} /* smb_query_info_marshal */
+
+static void
+chimera_smb_query_info_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (!error_code) {
+        smb_query_info_marshal(request, attr);
+    }
 
     chimera_smb_open_file_release(request, request->query_info.open_file);
 
@@ -594,11 +610,199 @@ chimera_smb_query_full_ea_info(struct chimera_smb_request *request)
         request);
 } /* chimera_smb_query_full_ea_info */
 
+static unsigned int
+smb_query_info_plan(
+    struct chimera_smb_request *request,
+    uint64_t                   *getattr_mask)
+{
+    unsigned int status = SMB2_STATUS_SUCCESS;
+
+    *getattr_mask = 0;
+    /* min_length is the info level's fixed minimum size: a request whose
+     * OutputBufferLength is smaller than this must fail INFO_LENGTH_MISMATCH
+     * (MS-SMB2 3.3.5.20.1 / smb2.getinfo.q*_buffercheck).  For fixed-size
+     * levels it equals output_length; variable-size levels override it below. */
+    request->query_info.min_length = 0;
+
+    switch (request->query_info.info_type) {
+        case SMB2_INFO_FILE:
+            /* The attribute-bearing FILE info classes require the handle to
+             * hold FILE_READ_ATTRIBUTES (MS-FSA 2.1.5.11): a handle opened with
+             * only FILE_READ_DATA cannot query FileBasicInformation and friends
+             * -> STATUS_ACCESS_DENIED (smb2.streams.attributes1).  Classes that
+             * carry no file attributes (standard sizes, internal id, EA size,
+             * position, mode, alignment, access, name) are not gated. */
+            switch (request->query_info.info_class) {
+                case SMB2_FILE_BASIC_INFO:
+                case SMB2_FILE_NETWORK_OPEN_INFO:
+                case SMB2_FILE_ATTRIBUTE_TAG_INFO:
+                case SMB2_FILE_ALL_INFO:
+                    /* FileCompressionInformation is intentionally NOT gated:
+                     * MS-SMB2 3.3.5.20.1's READ_ATTRIBUTES list does not include
+                     * it (the always-NONE compression state is readable). */
+                    if (!(request->query_info.open_file->granted_access &
+                          SMB2_FILE_READ_ATTRIBUTES)) {
+                        status = SMB2_STATUS_ACCESS_DENIED;
+                    }
+                    break;
+                default:
+                    break;
+            } /* switch */
+
+            if (status != SMB2_STATUS_SUCCESS) {
+                break;
+            }
+
+            /* Calculate the output buffer length based on the info class */
+            switch (request->query_info.info_class) {
+                case SMB2_FILE_BASIC_INFO:
+                    request->query_info.output_length = SMB2_FILE_BASIC_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT;
+                    break;
+                case SMB2_FILE_STANDARD_INFO:
+                    request->query_info.output_length = SMB2_FILE_STANDARD_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT;
+                    break;
+                case SMB2_FILE_INTERNAL_INFO:
+                    request->query_info.output_length = SMB2_FILE_INTERNAL_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT;
+                    break;
+                case SMB2_FILE_EA_INFO:
+                    request->query_info.output_length = SMB2_FILE_EA_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT |
+                        CHIMERA_VFS_ATTR_EA_SIZE;
+                    break;
+                case SMB2_FILE_ACCESS_INFO:
+                    /* GrantedAccess of this handle; no backend attrs needed. */
+                    request->query_info.output_length = SMB2_FILE_ACCESS_INFO_SIZE;
+                    break;
+                case SMB2_FILE_POSITION_INFO:
+                    /* CurrentByteOffset is per-handle state; no backend attrs. */
+                    request->query_info.output_length = SMB2_FILE_POSITION_INFO_SIZE;
+                    break;
+                case SMB2_FILE_MODE_INFO:
+                    /* FileModeInformation (MS-FSCC 2.4.26): a single Mode DWORD
+                    * of open-mode flags; per-handle state, no backend attrs. */
+                    request->query_info.output_length = SMB2_FILE_MODE_INFO_SIZE;
+                    break;
+                case SMB2_FILE_ALIGNMENT_INFO:
+                    /* FileAlignmentInformation (MS-FSCC 2.4.3): a single
+                     * AlignmentRequirement DWORD; no backend attrs. */
+                    request->query_info.output_length = SMB2_FILE_ALIGNMENT_INFO_SIZE;
+                    break;
+                case SMB2_FILE_COMPRESSION_INFO:
+                    request->query_info.output_length = SMB2_FILE_COMPRESSION_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT;
+                    break;
+                case SMB2_FILE_NETWORK_OPEN_INFO:
+                    request->query_info.output_length = SMB2_FILE_NETWORK_OPEN_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT;
+                    break;
+                case SMB2_FILE_ATTRIBUTE_TAG_INFO:
+                    request->query_info.output_length = SMB2_FILE_ATTRIBUTE_TAG_INFO_SIZE;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STAT;
+                    break;
+                case SMB2_FILE_ALL_INFO:
+                    /* FileAllInformation (MS-FSCC 2.4.2): the fixed 100 bytes
+                     * (FileNameLength field included) followed by the
+                     * share-relative path as UTF-16LE (full_path_len*2).  The
+                     * share root has an empty path; Windows reports its name as
+                     * "\" (2 bytes) so the reply clears the Linux cifs client's
+                     * 101-byte FILE_ALL_INFO minimum (see chimera_smb_append_all_info). */
+                    request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE +
+                        (request->query_info.open_file->full_path_len
+                         ? request->query_info.open_file->full_path_len * 2 : 2);
+                    /* The fixed portion ends after the FileNameLength field; a
+                     * shorter buffer is INFO_LENGTH_MISMATCH (smbtorture uses
+                     * fixed=104 here). */
+                    request->query_info.min_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + 4;
+                    *getattr_mask                  = CHIMERA_VFS_ATTR_MASK_STAT |
+                        CHIMERA_VFS_ATTR_EA_SIZE;
+                    break;
+                case SMB2_FILE_NORMALIZED_NAME_INFO:
+                    /* MS-FSCC 2.4.30 FILE_NAME_INFORMATION layout (FileNameLength
+                     * + FileName in UTF-16LE).  The normalized name is the open's
+                     * share-relative path, which we already hold (as UTF-8) — no
+                     * backend attrs. */
+                    request->query_info.output_length = 4 + request->query_info.open_file->full_path_len * 2;
+                    request->query_info.min_length    = 4;
+                    break;
+                default:
+                    /* A FILE info class we do not handle: keep NOT_IMPLEMENTED.
+                     * Samba's smb2.getinfo.qfile_buffercheck enumerates every
+                     * file level and treats NOT_IMPLEMENTED as "level
+                     * unsupported, skip" while asserting OK otherwise -- so a
+                     * valid-but-unsupported level must NOT be reported as
+                     * INVALID_INFO_CLASS.  Distinguishing a genuinely invalid
+                     * class value from a valid-but-unsupported one needs a
+                     * file-info-class validity table (out of scope here). */
+                    status = SMB2_STATUS_NOT_IMPLEMENTED;
+                    break;
+            } /* switch */
+            break;
+        case SMB2_INFO_FILESYSTEM:
+            switch (request->query_info.info_class) {
+                case SMB2_FILE_FS_VOLUME_INFO:
+                    /* 18-byte fixed header + 6-byte VolumeLabel ("fs\0" in
+                     * UTF-16LE).  smbtorture.qfs_buffercheck hardcodes fixed=24
+                     * for this level, so the total must be >= 24. */
+                    request->query_info.output_length = 24;
+                    break;
+                case SMB2_FILE_FS_SIZE_INFO:
+                    request->query_info.output_length = 24;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STATFS;
+                    break;
+                case SMB2_FILE_FS_DEVICE_INFO:
+                    request->query_info.output_length = 8;
+                    break;
+                case SMB2_FILE_FS_ATTRIBUTE_INFO:
+                    request->query_info.output_length = 16;
+                    break;
+                case SMB2_FILE_FS_CONTROL_INFO:
+                    /* FileFsControlInformation (MS-FSCC 2.5.2): quota control.
+                     * We do not enforce quotas; report "no quota tracking"
+                     * (all-zero thresholds, no control flags) like a volume with
+                     * quotas disabled. */
+                    request->query_info.output_length = SMB2_FILE_FS_CONTROL_INFO_SIZE;
+                    break;
+                case SMB2_FILE_FS_FULL_SIZE_INFO:
+                    request->query_info.output_length = 32;
+                    *getattr_mask                     = CHIMERA_VFS_ATTR_MASK_STATFS;
+                    break;
+                case SMB2_FILE_FS_OBJECTID_INFO:
+                    /* FileFsObjectIdInformation (MS-FSCC 2.5.6): a volume object
+                    * id.  We have no persistent volume GUID; report all-zero. */
+                    request->query_info.output_length = SMB2_FILE_FS_OBJECTID_INFO_SIZE;
+                    break;
+                case SMB2_FILE_FS_SECTOR_SIZE_INFO:
+                    /* FileFsSectorSizeInformation (MS-FSCC 2.5.7). */
+                    request->query_info.output_length = SMB2_FILE_FS_SECTOR_SIZE_INFO_SIZE;
+                    break;
+                default:
+                    /* Unhandled FS info class = invalid class for QUERY_INFO. */
+                    status = SMB2_STATUS_INVALID_INFO_CLASS;
+                    break;
+            } /* switch */
+            break;
+        default:
+            status = SMB2_STATUS_NOT_IMPLEMENTED;
+            break;
+    } /* switch */
+
+    /* Buffer-length validation (MS-SMB2 3.3.5.20).  Only for levels we accept;
+     * NOT_IMPLEMENTED levels keep their status. */
+    if (status == SMB2_STATUS_SUCCESS) {
+        status = chimera_smb_query_info_check_length(request);
+    }
+
+    return status;
+} /* smb_query_info_plan */
+
 void
 chimera_smb_query_info(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread       = request->compound->thread;
-    uint32_t                          getattr_mask = 0;
+    uint64_t                          getattr_mask = 0;
     uint32_t                          status       = SMB2_STATUS_SUCCESS;
 
 
@@ -716,195 +920,21 @@ chimera_smb_query_info(struct chimera_smb_request *request)
         return;
     }
 
-    /* min_length is the info level's fixed minimum size: a request whose
-     * OutputBufferLength is smaller than this must fail INFO_LENGTH_MISMATCH
-     * (MS-SMB2 3.3.5.20.1 / smb2.getinfo.q*_buffercheck).  For fixed-size
-     * levels it equals output_length; variable-size levels override it below. */
-    request->query_info.min_length = 0;
-
-    switch (request->query_info.info_type) {
-        case SMB2_INFO_FILE:
-            /* The attribute-bearing FILE info classes require the handle to
-             * hold FILE_READ_ATTRIBUTES (MS-FSA 2.1.5.11): a handle opened with
-             * only FILE_READ_DATA cannot query FileBasicInformation and friends
-             * -> STATUS_ACCESS_DENIED (smb2.streams.attributes1).  Classes that
-             * carry no file attributes (standard sizes, internal id, EA size,
-             * position, mode, alignment, access, name) are not gated. */
-            switch (request->query_info.info_class) {
-                case SMB2_FILE_BASIC_INFO:
-                case SMB2_FILE_NETWORK_OPEN_INFO:
-                case SMB2_FILE_ATTRIBUTE_TAG_INFO:
-                case SMB2_FILE_ALL_INFO:
-                    /* FileCompressionInformation is intentionally NOT gated:
-                     * MS-SMB2 3.3.5.20.1's READ_ATTRIBUTES list does not include
-                     * it (the always-NONE compression state is readable). */
-                    if (!(request->query_info.open_file->granted_access &
-                          SMB2_FILE_READ_ATTRIBUTES)) {
-                        status = SMB2_STATUS_ACCESS_DENIED;
-                    }
-                    break;
-                default:
-                    break;
-            } /* switch */
-
-            if (status != SMB2_STATUS_SUCCESS) {
-                break;
-            }
-
-            /* Calculate the output buffer length based on the info class */
-            switch (request->query_info.info_class) {
-                case SMB2_FILE_BASIC_INFO:
-                    request->query_info.output_length = SMB2_FILE_BASIC_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
-                    break;
-                case SMB2_FILE_STANDARD_INFO:
-                    request->query_info.output_length = SMB2_FILE_STANDARD_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
-                    break;
-                case SMB2_FILE_INTERNAL_INFO:
-                    request->query_info.output_length = SMB2_FILE_INTERNAL_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
-                    break;
-                case SMB2_FILE_EA_INFO:
-                    request->query_info.output_length = SMB2_FILE_EA_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT |
-                        CHIMERA_VFS_ATTR_EA_SIZE;
-                    break;
-                case SMB2_FILE_ACCESS_INFO:
-                    /* GrantedAccess of this handle; no backend attrs needed. */
-                    request->query_info.output_length = SMB2_FILE_ACCESS_INFO_SIZE;
-                    break;
-                case SMB2_FILE_POSITION_INFO:
-                    /* CurrentByteOffset is per-handle state; no backend attrs. */
-                    request->query_info.output_length = SMB2_FILE_POSITION_INFO_SIZE;
-                    break;
-                case SMB2_FILE_MODE_INFO:
-                    /* FileModeInformation (MS-FSCC 2.4.26): a single Mode DWORD
-                    * of open-mode flags; per-handle state, no backend attrs. */
-                    request->query_info.output_length = SMB2_FILE_MODE_INFO_SIZE;
-                    break;
-                case SMB2_FILE_ALIGNMENT_INFO:
-                    /* FileAlignmentInformation (MS-FSCC 2.4.3): a single
-                     * AlignmentRequirement DWORD; no backend attrs. */
-                    request->query_info.output_length = SMB2_FILE_ALIGNMENT_INFO_SIZE;
-                    break;
-                case SMB2_FILE_COMPRESSION_INFO:
-                    request->query_info.output_length = SMB2_FILE_COMPRESSION_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
-                    break;
-                case SMB2_FILE_NETWORK_OPEN_INFO:
-                    request->query_info.output_length = SMB2_FILE_NETWORK_OPEN_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
-                    break;
-                case SMB2_FILE_ATTRIBUTE_TAG_INFO:
-                    request->query_info.output_length = SMB2_FILE_ATTRIBUTE_TAG_INFO_SIZE;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
-                    break;
-                case SMB2_FILE_ALL_INFO:
-                    /* FileAllInformation (MS-FSCC 2.4.2): the fixed 100 bytes
-                     * (FileNameLength field included) followed by the
-                     * share-relative path as UTF-16LE (full_path_len*2).  The
-                     * share root has an empty path; Windows reports its name as
-                     * "\" (2 bytes) so the reply clears the Linux cifs client's
-                     * 101-byte FILE_ALL_INFO minimum (see chimera_smb_append_all_info). */
-                    request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE +
-                        (request->query_info.open_file->full_path_len
-                         ? request->query_info.open_file->full_path_len * 2 : 2);
-                    /* The fixed portion ends after the FileNameLength field; a
-                     * shorter buffer is INFO_LENGTH_MISMATCH (smbtorture uses
-                     * fixed=104 here). */
-                    request->query_info.min_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + 4;
-                    getattr_mask                   = CHIMERA_VFS_ATTR_MASK_STAT |
-                        CHIMERA_VFS_ATTR_EA_SIZE;
-                    break;
-                case SMB2_FILE_NORMALIZED_NAME_INFO:
-                    /* MS-FSCC 2.4.30 FILE_NAME_INFORMATION layout (FileNameLength
-                     * + FileName in UTF-16LE).  The normalized name is the open's
-                     * share-relative path, which we already hold (as UTF-8) — no
-                     * backend attrs. */
-                    request->query_info.output_length = 4 + request->query_info.open_file->full_path_len * 2;
-                    request->query_info.min_length    = 4;
-                    break;
-                case SMB2_FILE_FULL_EA_INFO:
-                    /* Output length depends on the enumerated EA set, so this
-                     * class drives its own async list+get flow. */
-                    chimera_smb_query_full_ea_info(request);
-                    return;
-                case SMB2_FILE_STREAM_INFO:
-                    /* Output length depends on the enumerated stream set, so
-                     * this class drives its own async list_streams flow. */
-                    chimera_smb_query_stream_info(request);
-                    return;
-                default:
-                    /* A FILE info class we do not handle: keep NOT_IMPLEMENTED.
-                     * Samba's smb2.getinfo.qfile_buffercheck enumerates every
-                     * file level and treats NOT_IMPLEMENTED as "level
-                     * unsupported, skip" while asserting OK otherwise -- so a
-                     * valid-but-unsupported level must NOT be reported as
-                     * INVALID_INFO_CLASS.  Distinguishing a genuinely invalid
-                     * class value from a valid-but-unsupported one needs a
-                     * file-info-class validity table (out of scope here). */
-                    status = SMB2_STATUS_NOT_IMPLEMENTED;
-                    break;
-            } /* switch */
-            break;
-        case SMB2_INFO_FILESYSTEM:
-            switch (request->query_info.info_class) {
-                case SMB2_FILE_FS_VOLUME_INFO:
-                    /* 18-byte fixed header + 6-byte VolumeLabel ("fs\0" in
-                     * UTF-16LE).  smbtorture.qfs_buffercheck hardcodes fixed=24
-                     * for this level, so the total must be >= 24. */
-                    request->query_info.output_length = 24;
-                    break;
-                case SMB2_FILE_FS_SIZE_INFO:
-                    request->query_info.output_length = 24;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STATFS;
-                    break;
-                case SMB2_FILE_FS_DEVICE_INFO:
-                    request->query_info.output_length = 8;
-                    break;
-                case SMB2_FILE_FS_ATTRIBUTE_INFO:
-                    request->query_info.output_length = 16;
-                    break;
-                case SMB2_FILE_FS_CONTROL_INFO:
-                    /* FileFsControlInformation (MS-FSCC 2.5.2): quota control.
-                     * We do not enforce quotas; report "no quota tracking"
-                     * (all-zero thresholds, no control flags) like a volume with
-                     * quotas disabled. */
-                    request->query_info.output_length = SMB2_FILE_FS_CONTROL_INFO_SIZE;
-                    break;
-                case SMB2_FILE_FS_FULL_SIZE_INFO:
-                    request->query_info.output_length = 32;
-                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STATFS;
-                    break;
-                case SMB2_FILE_FS_OBJECTID_INFO:
-                    /* FileFsObjectIdInformation (MS-FSCC 2.5.6): a volume object
-                    * id.  We have no persistent volume GUID; report all-zero. */
-                    request->query_info.output_length = SMB2_FILE_FS_OBJECTID_INFO_SIZE;
-                    break;
-                case SMB2_FILE_FS_SECTOR_SIZE_INFO:
-                    /* FileFsSectorSizeInformation (MS-FSCC 2.5.7). */
-                    request->query_info.output_length = SMB2_FILE_FS_SECTOR_SIZE_INFO_SIZE;
-                    break;
-                default:
-                    /* Unhandled FS info class = invalid class for QUERY_INFO. */
-                    status = SMB2_STATUS_INVALID_INFO_CLASS;
-                    break;
-            } /* switch */
-            break;
-        case SMB2_INFO_SECURITY:
-            chimera_smb_query_security(request);
-            return;
-        default:
-            status = SMB2_STATUS_NOT_IMPLEMENTED;
-            break;
-    } /* switch */
-
-    /* Buffer-length validation (MS-SMB2 3.3.5.20).  Only for levels we accept;
-     * NOT_IMPLEMENTED levels keep their status. */
-    if (status == SMB2_STATUS_SUCCESS) {
-        status = chimera_smb_query_info_check_length(request);
+    if (request->query_info.info_type == SMB2_INFO_SECURITY) {
+        chimera_smb_query_security(request);
+        return;
     }
+    if (request->query_info.info_type == SMB2_INFO_FILE) {
+        if (request->query_info.info_class == SMB2_FILE_FULL_EA_INFO) {
+            chimera_smb_query_full_ea_info(request);
+            return;
+        }
+        if (request->query_info.info_class == SMB2_FILE_STREAM_INFO) {
+            chimera_smb_query_stream_info(request);
+            return;
+        }
+    }
+    status = smb_query_info_plan(request, &getattr_mask);
 
     if (status != SMB2_STATUS_SUCCESS) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
@@ -1186,3 +1216,346 @@ chimera_smb_parse_query_info(
 
     return 0;
 } /* chimera_smb_parse_query_info */
+
+/* Reply helpers historically read the public open long after execution. Keep
+ * only their scalar/string inputs, with no borrowed state pointers, through the
+ * wire reply so a later command or disconnect cannot rewrite an earlier query. */
+struct smb_query_compound {
+    struct chimera_smb_open_file snapshot;
+    uint64_t                     attr_mask;
+    int                          delete_pending;
+    int                          ea_list;
+    int                          ea_published;
+    uint32_t                     ea_cursor, ea_length, ea_last, ea_cap;
+    uint8_t                     *ea_output;
+};
+
+static int
+smb_query_info_compound_eligible(struct chimera_smb_request *request)
+{
+    return request->query_info.info_type != SMB2_INFO_SECURITY;
+} /* smb_query_info_compound_eligible */
+
+static void
+smb_query_ea_compound_next(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    struct smb_query_compound            *ctx     = command->private_data;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+    const struct chimera_vfs_compound_op *list    = chimera_vfs_compound_op(compound, ctx->ea_list);
+
+    if (op->type == CHIMERA_VFS_COMPOUND_OP_GETXATTR && *status == CHIMERA_VFS_ENODATA) {
+        *status = CHIMERA_VFS_OK;
+    } else if (*status == CHIMERA_VFS_OK && op->type == CHIMERA_VFS_COMPOUND_OP_GETXATTR) {
+        uint32_t name_len = op->name_len - CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
+        uint32_t needed   = (8 + name_len + 1 + op->buffer_len + 3) & ~3u;
+        if (needed > ctx->ea_cap - ctx->ea_length) {
+            command->status = SMB2_STATUS_BUFFER_OVERFLOW;
+            *status         = CHIMERA_VFS_ERANGE;
+            return;
+        }
+        ctx->ea_last    = ctx->ea_length;
+        ctx->ea_length += chimera_smb_ea_full_emit_one(ctx->ea_output + ctx->ea_length,
+                                                       op->name + CHIMERA_VFS_XATTR_USER_PREFIX_LEN, name_len,
+                                                       op->buffer, op->buffer_len, 0);
+    }
+    if (*status != CHIMERA_VFS_OK) {
+        command->status = op->type == CHIMERA_VFS_COMPOUND_OP_LISTXATTRS &&
+            *status == CHIMERA_VFS_ERANGE ? SMB2_STATUS_BUFFER_OVERFLOW : chimera_smb_ea_status(*status);
+        return;
+    }
+    const char *names = list->buffer;
+    while (ctx->ea_cursor < list->buffer_len) {
+        const char *name   = names + ctx->ea_cursor;
+        uint32_t    length = strnlen(name, list->buffer_len - ctx->ea_cursor);
+        if (length == list->buffer_len - ctx->ea_cursor) {
+            *status = CHIMERA_VFS_EIO;
+            return;
+        }
+        ctx->ea_cursor += length + 1;
+        if (!chimera_vfs_xattr_is_user(name, length)) {
+            continue;
+        }
+        uint32_t overhead  = 8 + length - CHIMERA_VFS_XATTR_USER_PREFIX_LEN + 1;
+        uint32_t available = (ctx->ea_cap - ctx->ea_length) & ~3u;
+        if (overhead > available) {
+            command->status = SMB2_STATUS_BUFFER_OVERFLOW;
+            *status         = CHIMERA_VFS_ERANGE;
+            return;
+        }
+        uint32_t max = available - overhead;
+        if (max > 65535) {
+            max = 65535;
+        }
+        int      get = chimera_vfs_compound_add_getxattr(compound, name, length, max);
+        if (get >= 0) {
+            if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+                chimera_vfs_compound_op_set_handle(compound, get, command->handle);
+            }
+            chimera_vfs_compound_set_op_callbacks(compound, get, NULL, smb_query_ea_compound_next, command);
+        }
+        return;
+    }
+    if (ctx->ea_length) {
+        memset(ctx->ea_output + ctx->ea_last, 0, 4);
+    }
+    command->request->query_info.output_length = ctx->ea_length;
+} /* smb_query_ea_compound_next */
+
+static void
+smb_query_info_result_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command    *command = private_data;
+    struct smb_query_compound *ctx     = command->private_data;
+
+    (void) status;
+    if (!ctx->attr_mask) {
+        chimera_vfs_compound_op_skip(compound, index);
+    } else {
+        chimera_vfs_compound_op_args(compound, index)->attr_mask = ctx->attr_mask;
+    }
+} /* smb_query_info_result_prepare */
+
+static int
+smb_query_info_compound_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct smb_query_compound *ctx = calloc(1, sizeof(*ctx));
+
+    command->private_data = ctx;
+    if (command->request->query_info.info_type == SMB2_INFO_FILE &&
+        (command->request->query_info.info_class == SMB2_FILE_FULL_EA_INFO ||
+         command->request->query_info.info_class == SMB2_FILE_STREAM_INFO)) {
+        if (ctx && command->request->query_info.info_class == SMB2_FILE_FULL_EA_INFO) {
+            ctx->ea_cap = command->request->query_info.max_response_size;
+            if (ctx->ea_cap > CHIMERA_SMB_EA_QUERY_CAP_MAX) {
+                ctx->ea_cap = CHIMERA_SMB_EA_QUERY_CAP_MAX;
+            }
+            ctx->ea_output = calloc(1, ctx->ea_cap ? ctx->ea_cap : 1);
+        }
+        /* The preceding CREATE may not have an open yet during construction.
+         * Resolve the base-file branch after this command's checkpoint. */
+        return chimera_vfs_compound_add_checkpoint(compound);
+    }
+    int op = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MASK_STAT);
+    chimera_vfs_compound_op_set_handle(compound, op, command->handle);
+    chimera_vfs_compound_set_op_prepare(compound, op, smb_query_info_result_prepare, command);
+    return op;
+} /* smb_query_info_compound_build */
+
+static void
+smb_query_info_compound_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command       *command = private_data;
+    struct smb_query_compound    *ctx     = command->private_data;
+    struct chimera_smb_request   *request = command->request;
+    struct chimera_smb_open_file *open    = command->open;
+
+    (void) compound; (void) index; (void) status;
+    if (!ctx) {
+        command->status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+        return;
+    }
+    memset(&ctx->snapshot, 0, sizeof(ctx->snapshot));
+    ctx->snapshot.flags          = command->state->flags;
+    ctx->snapshot.position       = command->state->position;
+    ctx->snapshot.granted_access = open->granted_access;
+    struct chimera_smb_namespace_path path;
+    smb_doc_command_path(command, &path);
+    ctx->snapshot.full_path_len = path.full_path_len;
+    memcpy(ctx->snapshot.full_path, path.full_path, path.full_path_len + 1);
+    ctx->delete_pending = smb_doc_query_pending(command,
+                                                chimera_vfs_state_is_delete_pending(open->share_file_state));
+    request->query_info.open_file             = &ctx->snapshot;
+    request->query_info.r_attrs.smb_attr_mask = 0;
+    if (request->query_info.info_type == SMB2_INFO_FILE &&
+        request->query_info.info_class == SMB2_FILE_FULL_EA_INFO) {
+        ctx->ea_cursor                    = ctx->ea_length = ctx->ea_last = 0;
+        request->query_info.ea_out        = NULL;
+        request->query_info.ea_out_len    = 0;
+        request->query_info.output_length = 0;
+        if (!ctx->ea_output) {
+            command->status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+        } else if (!(command->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_XATTR)) {
+            command->status = SMB2_STATUS_EAS_NOT_SUPPORTED;
+        }
+        return;
+    }
+    if (request->query_info.info_type == SMB2_INFO_FILE &&
+        request->query_info.info_class == SMB2_FILE_STREAM_INFO) {
+        request->query_info.stream_record_len = request->query_info.stream_record_count = 0;
+        request->query_info.output_length     = 0;
+        return;
+    }
+    command->status = smb_query_info_plan(request, &ctx->attr_mask);
+} /* smb_query_info_compound_prepare */
+
+static void
+smb_query_stream_compound_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (op->type == CHIMERA_VFS_COMPOUND_OP_GETATTR) {
+        if (!S_ISDIR(op->attr.va_mode)) {
+            struct chimera_vfs_stream_entry entry = { 0 };
+            entry.size  = op->attr.va_size;
+            entry.alloc = op->attr.va_space_used;
+            memcpy(request->query_info.stream_records, &entry, sizeof(entry));
+            request->query_info.stream_record_len   = sizeof(entry);
+            request->query_info.stream_record_count = 1;
+        }
+    } else {
+        if (op->buffer_len > sizeof(request->query_info.stream_records)) {
+            *status = CHIMERA_VFS_EIO; return;
+        }
+        memcpy(request->query_info.stream_records, op->buffer, op->buffer_len);
+        request->query_info.stream_record_len   = op->buffer_len;
+        request->query_info.stream_record_count = op->buffer_count;
+    }
+    request->query_info.output_length = chimera_smb_emit_stream_info(
+        &request->compound->thread->iconv_ctx, request->query_info.stream_records,
+        request->query_info.stream_record_len, request->query_info.stream_record_count, NULL);
+    if (request->query_info.max_response_size < SMB2_FILE_STREAM_INFO_FIXED_SIZE) {
+        command->status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
+    } else if (request->query_info.max_response_size < request->query_info.output_length) {
+        command->status                   = SMB2_STATUS_BUFFER_OVERFLOW;
+        request->query_info.output_length = request->query_info.max_response_size;
+    }
+} /* smb_query_stream_compound_complete */
+
+static void
+smb_query_info_compound_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    struct smb_query_compound            *ctx     = command->private_data;
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+
+    if (request->query_info.info_type == SMB2_INFO_FILE &&
+        request->query_info.info_class == SMB2_FILE_FULL_EA_INFO) {
+        if (*status != CHIMERA_VFS_OK) {
+            return;
+        }
+        if (command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
+            chimera_vfs_compound_add_putfh(compound, command->open->base_fh, command->open->base_fh_len);
+            chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_PATH, 0);
+        }
+        ctx->ea_list = chimera_vfs_compound_add_listxattrs(compound, 0, sizeof(request->query_info.stream_records));
+        if (ctx->ea_list >= 0) {
+            if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+                chimera_vfs_compound_op_set_handle(compound, ctx->ea_list, command->handle);
+            }
+            chimera_vfs_compound_set_op_callbacks(compound, ctx->ea_list, NULL, smb_query_ea_compound_next, command);
+        }
+        return;
+    }
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (request->query_info.info_type == SMB2_INFO_FILE &&
+        request->query_info.info_class == SMB2_FILE_STREAM_INFO) {
+        int next;
+        if (!request->compound->thread->shared->config.named_streams ||
+            !(command->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
+            next = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MASK_STAT);
+            chimera_vfs_compound_op_set_handle(compound, next, command->handle);
+        } else {
+            if (command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
+                chimera_vfs_compound_add_putfh(compound, command->open->base_fh, command->open->base_fh_len);
+                chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_PATH, 0);
+            }
+            next = chimera_vfs_compound_add_list_streams(compound, 0, sizeof(request->query_info.stream_records), false)
+            ;
+            if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+                chimera_vfs_compound_op_set_handle(compound, next, command->handle);
+            }
+        }
+        if (next >= 0) {
+            chimera_vfs_compound_set_op_callbacks(compound, next, NULL, smb_query_stream_compound_complete, command);
+        }
+        return;
+    }
+    if (ctx->attr_mask) {
+        smb_query_info_marshal(request, &op->attr);
+    }
+    request->query_info.r_attrs.smb_disposition = ctx->delete_pending;
+    request->query_info.r_attrs.smb_attr_mask  |= SMB_ATTR_DISPOSITION;
+} /* smb_query_info_compound_complete */
+
+static void
+smb_query_info_compound_release(struct smb_vfs_command *command)
+{
+    struct smb_query_compound *ctx = command->private_data;
+
+    if (ctx) {
+        free(ctx->ea_output);
+        /* Wire emission normally frees this result. A disconnect can discard
+         * an accepted reply without invoking that emitter. */
+        if (ctx->ea_published) {
+            free(command->request->query_info.ea_out);
+            command->request->query_info.ea_out = NULL;
+        }
+    }
+    free(ctx);
+    command->private_data = NULL;
+} /* smb_query_info_compound_release */
+
+static void
+smb_query_info_compound_publish(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct smb_query_compound *ctx = command->private_data;
+
+    (void) compound;
+    if (command->status == SMB2_STATUS_SUCCESS &&
+        command->request->query_info.info_type == SMB2_INFO_FILE &&
+        command->request->query_info.info_class == SMB2_FILE_FULL_EA_INFO) {
+        command->request->query_info.ea_out     = ctx->ea_output;
+        command->request->query_info.ea_out_len = ctx->ea_length;
+        ctx->ea_output                          = NULL;
+        ctx->ea_published                       = 1;
+    }
+} /* smb_query_info_compound_publish */
+
+static struct chimera_smb_file_id
+smb_query_info_compound_file_id(struct chimera_smb_request *request)
+{
+    return request->query_info.file_id;
+} /* smb_query_info_compound_file_id */
+
+const struct smb_vfs_command_ops chimera_smb_query_info_compound_ops = {
+    .file_id       = smb_query_info_compound_file_id,
+    .eligible      = smb_query_info_compound_eligible,
+    .build         = smb_query_info_compound_build,
+    .prepare       = smb_query_info_compound_prepare,
+    .complete      = smb_query_info_compound_complete,
+    .publish       = smb_query_info_compound_publish,
+    .reply_release = smb_query_info_compound_release,
+};

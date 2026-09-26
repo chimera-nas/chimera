@@ -25,80 +25,6 @@ chimera_attrs_to_statvfs(
     st->f_namemax = 255;
 } /* chimera_attrs_to_statvfs */
 
-static void chimera_statfs_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data);
-
-static void
-chimera_statfs_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request  *request        = private_data;
-    struct chimera_client_thread   *thread         = request->thread;
-    struct chimera_vfs_open_handle *handle         = request->statfs.handle;
-    chimera_statfs_callback_t       callback       = request->statfs.callback;
-    void                           *callback_arg   = request->statfs.private_data;
-    int                             heap_allocated = request->heap_allocated;
-    struct chimera_statvfs          st;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        if (heap_allocated) {
-            chimera_client_request_free(thread, request);
-        }
-        chimera_vfs_release(thread->vfs_thread, handle);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
-    }
-
-    chimera_attrs_to_statvfs(attr, &st);
-
-    if (heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
-
-    chimera_vfs_release(thread->vfs_thread, handle);
-
-    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
-
-} /* chimera_statfs_getattr_complete */
-
-static void
-chimera_statfs_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    (void) attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_statfs_callback_t     callback     = request->statfs.callback;
-        void                         *callback_arg = request->statfs.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
-    }
-
-    request->statfs.handle = oh;
-
-    chimera_vfs_getattr(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        CHIMERA_VFS_ATTR_MASK_STATFS,
-        chimera_statfs_getattr_complete,
-        request);
-
-} /* chimera_statfs_open_complete */
-
 /*
  * statfs is filesystem-wide: resolve the path through chimera_vfs_open (which
  * picks the path-op vs FH-relative strategy internally, so it works on
@@ -127,9 +53,7 @@ chimera_statfs_sequence_complete(
         chimera_attrs_to_statvfs((struct chimera_vfs_attrs *) &op->attr, &st);
     }
 
-    /* Written out rather than routed through chimera_statfs_getattr_complete,
-    * which releases the handle the per-op path opened: the sequence owns that
-    * one and frees it below, and chimera_vfs_release does not take a NULL. */
+    /* The compound owns and releases the handle used for this request. */
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }
@@ -165,6 +89,6 @@ chimera_dispatch_statfs(
                                            (uint32_t) open_idx);
     }
 
-    chimera_vfs_compound_submit(compound, chimera_statfs_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(compound, chimera_statfs_sequence_complete,
+                                     request);
 } /* chimera_dispatch_statfs */

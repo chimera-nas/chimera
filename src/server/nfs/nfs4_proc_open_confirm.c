@@ -62,6 +62,9 @@ chimera_nfs4_open_confirm(
 
     seqid_class = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
                                             args->seqid);
+    if (seqid_class == NFS4_SEQID_REPLAY && owner->replay.op != OP_OPEN_CONFIRM) {
+        seqid_class = NFS4_SEQID_BAD;
+    }
 
     if (seqid_class == NFS4_SEQID_REPLAY) {
         /* RFC 7530 §9.1.7: return cached reply.  For OPEN_CONFIRM the
@@ -80,6 +83,16 @@ chimera_nfs4_open_confirm(
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
         res->status = NFS4ERR_BAD_SEQID;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if (open_state->fh_len != req->fhlen ||
+        memcmp(open_state->fh, req->fh, req->fhlen)) {
+        pthread_mutex_unlock(&owner->lock);
+        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_BAD_STATEID;
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
@@ -103,6 +116,13 @@ chimera_nfs4_open_confirm(
     status = nfs4_stateid_check_seqid(open_state->seqid,
                                       args->open_stateid.seqid);
     if (status != NFS4_OK) {
+        /* OLD_STATEID consumes the newly classified owner sequence, unlike
+         * future/BAD_STATEID. Cache it before releasing the owner snapshot so
+         * retransmission follows the same path as an accepted compound. */
+        if (nfs4_seqid_should_advance(status)) {
+            owner->seqid = args->seqid;
+            nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN_CONFIRM, status, NULL);
+        }
         pthread_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);

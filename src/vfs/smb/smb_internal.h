@@ -278,6 +278,7 @@ struct smb_create_result {
 * CLOSE chain (ops that open a path transiently: lookup/mkdir/remove/rename). */
 struct chimera_smb_op_state {
     struct chimera_smb_client_file_id file_id;
+    enum chimera_vfs_error            remove_status;
     /* Attr-enrich chain (getattr / lookup): the FileId above is queried for
      * FileAllInformation then the modefromsid security descriptor, merged into
      * `enrich_attr`, after which `enrich_done` runs (complete, or close+complete

@@ -214,7 +214,8 @@ chimera_nfs4_getattr_fill(
     struct GETATTR4res             *res,
     const struct chimera_vfs_attrs *attr,
     const uint8_t                  *fh,
-    int                             fhlen);
+    int                             fhlen,
+    bool                            change_projected);
 
 uint32_t
 chimera_nfs4_access_requested(
@@ -226,10 +227,11 @@ chimera_nfs4_access_requested(
 
 void
 chimera_nfs4_access_fill(
-    struct nfs_request *req,
-    struct ACCESS4res  *res,
-    uint32_t            requested,
-    uint32_t            granted);
+    struct nfs_request             *req,
+    struct ACCESS4res              *res,
+    uint32_t                        requested,
+    uint32_t                        granted,
+    const struct chimera_vfs_attrs *attr);
 
 nfsstat4
 chimera_nfs4_getfh_fill(
@@ -1103,6 +1105,9 @@ chimera_nfs4_compound_complete(
     nfsstat4            status)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
+
+    nfs4_change_finish(thread->shared->nfs4_state_table.change_table,
+                       &req->change_observations, true);
 
     if (status != NFS4_OK) {
         req->res_compound.status = status;

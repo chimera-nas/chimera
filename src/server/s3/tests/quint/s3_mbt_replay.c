@@ -407,22 +407,18 @@ dev_copy_is_self(json_t *op)
 static const struct deviation known_deviations[] = {
     /* AWS DeleteObject returns 204 No Content; chimera returns 200 for an
      * existing key... */
-    { "delete-object-200",          "ODeleteObject",            204,               200,               NULL
+    { "delete-object-200",         "ODeleteObject",           204,              200,               NULL
     },
     /* ...and 404 NoSuchKey for a missing one (AWS is idempotent). */
-    { "delete-object-missing-404",  "ODeleteObject",            204,               404,               NULL
-    },
-    /* AWS answers DELETE on a non-empty bucket with 409 BucketNotEmpty;
-     * chimera maps BUCKET_NOT_EMPTY through its default 500 InternalError. */
-    { "delete-bucket-nonempty-500", "ODeleteBucket",            409,               500,               NULL
+    { "delete-object-missing-404", "ODeleteObject",           204,              404,               NULL
     },
     /* AWS rejects a copy of an object onto itself (no metadata directive)
      * with 400 InvalidRequest; chimera performs it and returns 200. */
-    { "copy-self-200",              "OCopyObject",              400,               200,               dev_copy_is_self
+    { "copy-self-200",             "OCopyObject",             400,              200,               dev_copy_is_self
     },
     /* AWS returns 206 for every satisfiable Range, including one resolving
     * to the whole object; chimera collapses whole-object ranges to 200. */
-    { "range-full-200",             "OGetObject",               206,               200,               dev_range_is_full
+    { "range-full-200",            "OGetObject",              206,              200,               dev_range_is_full
     },
 };
 

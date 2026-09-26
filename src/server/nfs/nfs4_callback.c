@@ -903,6 +903,7 @@ struct nfs4_cb_getattr {
     uint8_t                           phase;   /* request (0) / response (1) */
     struct chimera_server_nfs_thread *requester_thread;
     struct nfs_delegation            *deleg;
+    struct nfs_client                *holder_client; /* own pin until RESPONSE cleanup */
     void                             *priv;
     nfs4_cb_getattr_resume_t          resume;
     int                               status;
@@ -937,6 +938,7 @@ nfs4_cb_getattr_deliver(struct nfs4_cb_getattr *w)
     r->phase            = NFS4_CB_GETATTR_RESPONSE;
     r->requester_thread = x;
     r->deleg            = w->deleg;
+    r->holder_client    = w->holder_client;
     r->priv             = w->priv;
     r->resume           = w->resume;
     r->status           = w->status;
@@ -1177,6 +1179,74 @@ nfs4_find_conflicting_write_deleg(
     return deleg;
 } /* nfs4_find_conflicting_write_deleg */
 
+struct nfs_delegation *
+nfs4_find_conflicting_write_deleg_pinned(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint64_t                          querying_client_id,
+    struct nfs_client               **holder_client)
+{
+    struct nfs_delegation *deleg = nfs4_find_conflicting_write_deleg(thread, fh, fh_len, querying_client_id);
+
+    *holder_client = NULL;
+    if (!deleg) {
+        return NULL;
+    }
+    /* The delegation reference keeps its immutable claim owner bytes alive.
+     * Do not dereference deleg->client until the table lookup pins it: client
+     * teardown can have detached the delegation while that reference survives. */
+    nfsstat4 status = nfs4_client_reserve_compound(&thread->shared->nfs4_shared_clients,
+                                                   deleg->claim.owner.client_key, holder_client);
+    if (status != NFS4_OK || deleg->client != *holder_client ||
+        atomic_load_explicit(&deleg->destroyed, memory_order_acquire) ||
+        atomic_load_explicit(&deleg->revoked, memory_order_acquire)) {
+        nfs_state_table_release(&thread->shared->nfs4_state_table, deleg, NFS4_SLOT_TYPE_DELEG,
+                                thread->vfs_thread);
+        if (*holder_client) {
+            nfs_client_finish_compound(*holder_client, &thread->shared->nfs4_state_table, thread->vfs_thread);
+            *holder_client = NULL;
+        }
+        return NULL;
+    }
+    return deleg;
+} /* nfs4_find_conflicting_write_deleg_pinned */
+
+int
+nfs4_write_delegation_matches(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint64_t                          querying_client_id,
+    const struct nfs_delegation      *expected)
+{
+    struct chimera_vfs_state      *vfs_state = thread->vfs->vfs_state;
+    uint64_t                       hash      = XXH3_64bits(fh, fh_len) & INT64_MAX;
+    struct chimera_vfs_file_state *file      = chimera_vfs_state_get(vfs_state, fh, fh_len, hash, false);
+    int                            result    = 0;
+
+    if (!file) {
+        return 0;
+    }
+    pthread_mutex_lock(&file->lock);
+    for (struct chimera_vfs_claim *claim = file->claims[CHIMERA_CLAIM_CLASS_CACHE];
+         claim; claim = claim->next) {
+        if (claim->owner.proto != CHIMERA_CLAIM_PROTO_NFSV4 || !(claim->used & CHIMERA_CLAIM_CW) ||
+            claim->owner.client_key == querying_client_id) {
+            continue;
+        }
+        const struct nfs_delegation *deleg = claim->cb_private;
+        if (!deleg || atomic_load_explicit(&deleg->destroyed, memory_order_acquire)) {
+            continue;
+        }
+        result = deleg == expected ? 1 : -1;
+        break;
+    }
+    pthread_mutex_unlock(&file->lock);
+    chimera_vfs_state_put(vfs_state, file);
+    return result;
+} /* nfs4_write_delegation_matches */
+
 void
 nfs4_cb_getattr(
     struct chimera_server_nfs_thread *requester_thread,
@@ -1184,16 +1254,23 @@ nfs4_cb_getattr(
     void                             *priv,
     nfs4_cb_getattr_resume_t          resume)
 {
-    struct nfs4_cb_client            *chan = deleg->client->cb_path.cb_client;
+    /* Both callers own a holder-client pin. Keep a separate pin until our
+     * delegation borrow is released, because resume may dispose the caller. */
+    struct nfs_client                *holder_client = deleg->client;
+    struct nfs4_cb_client            *chan          = deleg->client->cb_path.cb_client;
     struct chimera_server_nfs_thread *holder;
     struct nfs4_cb_getattr           *w;
 
+    nfs_client_duplicate_compound_pin(holder_client);
     if (!chan) {
         /* No callback channel -> can't query; fall back to server attrs. */
         resume(priv, -1, false, 0, false, 0);
         nfs_state_table_release(&requester_thread->shared->nfs4_state_table,
                                 deleg, NFS4_SLOT_TYPE_DELEG,
                                 requester_thread->vfs_thread);
+        nfs_client_finish_compound(holder_client,
+                                   &requester_thread->shared->nfs4_state_table,
+                                   requester_thread->vfs_thread);
         return;
     }
 
@@ -1203,6 +1280,7 @@ nfs4_cb_getattr(
     w->phase            = NFS4_CB_GETATTR_REQUEST;
     w->requester_thread = requester_thread;
     w->deleg            = deleg;
+    w->holder_client    = holder_client;
     w->priv             = priv;
     w->resume           = resume;
 
@@ -1224,21 +1302,18 @@ nfs4_cb_doorbell_drain(
         (struct chimera_server_nfs_thread *) ((char *) doorbell -
                                               offsetof(struct chimera_server_nfs_thread, cb_doorbell));
     struct nfs_delegation            *queue;
-    struct nfs_layout_state          *lrq;
     struct nfs4_cb_getattr           *gq;
     struct nfs4_cb_client            *tq;
 
     (void) evpl;
 
     pthread_mutex_lock(&thread->cb_recall_lock);
-    queue                         = thread->cb_recall_queue;
-    thread->cb_recall_queue       = NULL;
-    lrq                           = thread->cb_layoutrecall_queue;
-    thread->cb_layoutrecall_queue = NULL;
-    gq                            = thread->cb_getattr_queue;
-    thread->cb_getattr_queue      = NULL;
-    tq                            = thread->cb_teardown_queue;
-    thread->cb_teardown_queue     = NULL;
+    queue                     = thread->cb_recall_queue;
+    thread->cb_recall_queue   = NULL;
+    gq                        = thread->cb_getattr_queue;
+    thread->cb_getattr_queue  = NULL;
+    tq                        = thread->cb_teardown_queue;
+    thread->cb_teardown_queue = NULL;
     pthread_mutex_unlock(&thread->cb_recall_lock);
 
     while (queue) {
@@ -1248,16 +1323,7 @@ nfs4_cb_doorbell_drain(
         nfs4_cb_recall_send(thread, deleg);
     }
 
-    /* Layout recalls bounced here from another thread: we now own the holder's
-     * backchannel conn, so nfs4_cb_recall_holder sends inline.  Drop the ref the
-     * producer took to pin the layout across the bounce. */
-    while (lrq) {
-        struct nfs_layout_state *h = lrq;
-        lrq             = h->recall_qnext;
-        h->recall_qnext = NULL;
-        nfs4_cb_recall_holder(thread, h);
-        nfs_layout_state_put(h);
-    }
+    nfs4_cb_drain_layoutrecall_queue(thread);
 
     /* Deferred-op resumes bounced to this (their home) thread by a recall that
      * completed on another thread.  Re-drives the op where its iovecs live. */
@@ -1279,6 +1345,9 @@ nfs4_cb_doorbell_drain(
             nfs_state_table_release(&thread->shared->nfs4_state_table,
                                     w->deleg, NFS4_SLOT_TYPE_DELEG,
                                     thread->vfs_thread);
+            nfs_client_finish_compound(w->holder_client,
+                                       &thread->shared->nfs4_state_table,
+                                       thread->vfs_thread);
             free(w);
         }
     }

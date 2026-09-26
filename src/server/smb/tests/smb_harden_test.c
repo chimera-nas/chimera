@@ -415,6 +415,102 @@ test_ntlm_field_valid_decodes(void)
     free(result);
 } /* test_ntlm_field_valid_decodes */
 
+/* A parsed EA belongs to the request even if dispatch never reaches SET_INFO
+ * (for example, a bad session or a denied handle). Exercise pool reuse too. */
+static void
+test_set_ea_rejected_request_cleanup(void)
+{
+    uint8_t                           buf[104] = { 0 };
+    struct evpl_iovec                 iov;
+    struct evpl_iovec_cursor          cur;
+    struct chimera_server_smb_thread *thread  = calloc(1, sizeof(*thread));
+    struct chimera_smb_request       *request = chimera_smb_request_alloc(thread);
+
+    buf[66] = SMB2_INFO_FILE;
+    buf[67] = SMB2_FILE_FULL_EA_INFO;
+    put_le32(buf, 68, 8);
+    put_le16(buf, 72, 96);
+    request->request_struct_size = SMB2_SET_INFO_REQUEST_SIZE;
+    cursor_over(&cur, &iov, buf, sizeof(buf));
+    evpl_iovec_cursor_skip(&cur, 66);
+    CHECK(chimera_smb_parse_set_info(&cur, request) == 0 &&
+          (request->flags & CHIMERA_SMB_REQUEST_FLAG_SET_EA_OWNED),
+          "SET_INFO EA parse records payload ownership");
+    chimera_smb_request_free(thread, request);
+    CHECK(request->set_info.ea_buf == NULL &&
+          !(request->flags & CHIMERA_SMB_REQUEST_FLAG_SET_EA_OWNED),
+          "rejected SET_INFO frees EA without invoking handler");
+    request = chimera_smb_request_alloc(thread);
+    chimera_smb_request_free(thread, request);
+    free(request);
+    free(thread);
+} /* test_set_ea_rejected_request_cleanup */
+
+static void
+test_disposition_handle_lifetime(void)
+{
+    struct chimera_vfs_thread      *thread    = calloc(1, sizeof(*thread));
+    struct chimera_vfs             *vfs       = calloc(1, sizeof(*vfs));
+    struct chimera_vfs_file_state   file      = { 0 };
+    struct chimera_smb_open_file    open_file = { 0 };
+    struct vfs_open_cache_shard     shard     = { .cache_id = CHIMERA_VFS_OPEN_ID_FILE };
+    struct vfs_open_cache           cache     = { .shards = &shard };
+    struct chimera_vfs_open_handle  cached    = { .cache_id = CHIMERA_VFS_OPEN_ID_FILE,
+                                                  .opencnt  = 1 };
+    struct chimera_vfs_open_handle *original, *pin, *recycled;
+
+    thread->vfs              = vfs;
+    vfs->vfs_open_file_cache = &cache;
+    pthread_mutex_init(&file.lock, NULL);
+    pthread_mutex_init(&shard.lock, NULL);
+    open_file.share_file_state = &file;
+
+    original         = chimera_vfs_synth_handle_alloc(thread);
+    original->fh_len = 3;
+    memcpy(original->fh, "old", 3);
+    open_file.handle = original;
+    pin              = chimera_smb_disposition_pin_handle(thread, &open_file);
+    CHECK(pin && pin != original, "disposition owns synthetic validation snapshot");
+
+    /* Model CLOSE between GETATTR and READDIR, including immediate handle
+     * recycling by another request. Validation must retain the old identity. */
+    pthread_mutex_lock(&file.lock);
+    open_file.doc_close_started = 1;
+    open_file.handle            = NULL;
+    pthread_mutex_unlock(&file.lock);
+    chimera_vfs_release(thread, original);
+    recycled = chimera_vfs_synth_handle_alloc(thread);
+    memcpy(recycled->fh, "new", 3);
+    CHECK(recycled == original && pin && !memcmp(pin->fh, "old", 3),
+          "validation survives close and original synthetic slot reuse");
+    CHECK(chimera_smb_disposition_pin_handle(thread, &open_file) == NULL,
+          "retired open refuses validation pin");
+    chimera_vfs_release(thread, pin);
+    chimera_vfs_release(thread, recycled);
+
+    open_file.doc_close_started = 0;
+    open_file.handle            = &cached;
+    pin                         = chimera_smb_disposition_pin_handle(thread, &open_file);
+    CHECK(pin == &cached && cached.opencnt == 2, "cached validation acquires independent reference");
+    open_file.doc_close_started = 1;
+    open_file.handle            = NULL;
+    chimera_vfs_release(thread, &cached);
+    CHECK(cached.opencnt == 1 && !shard.pending_close,
+          "concurrent close leaves validation handle live");
+    chimera_vfs_release(thread, pin);
+    CHECK(cached.opencnt == 0, "validation completion releases its final reference once");
+
+    while (thread->free_synth_handles) {
+        original = thread->free_synth_handles;
+        LL_DELETE(thread->free_synth_handles, original);
+        free(original);
+    }
+    pthread_mutex_destroy(&shard.lock);
+    pthread_mutex_destroy(&file.lock);
+    free(vfs);
+    free(thread);
+} /* test_disposition_handle_lifetime */
+
 int
 main(
     int   argc,
@@ -438,6 +534,8 @@ main(
     fprintf(stderr, "=== SMB parse hardening: smb_cursor_seek_to ===\n");
     test_seek_to();
     test_compound_subwindow_then_skip();
+    test_set_ea_rejected_request_cleanup();
+    test_disposition_handle_lifetime();
 
     fprintf(stderr, "=== SMB parse hardening: CREATE-context bounds ===\n");
     test_create_ctx_datalen_uint32_overflow();

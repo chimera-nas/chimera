@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <evpl/evpl.h>
 #include "vfs/vfs_notify.h"
 #include "smb_common/smb_encrypt.h"
 #include "smb_secure_send.h"
@@ -14,6 +16,7 @@ struct chimera_smb_request;
 struct chimera_smb_conn;
 struct chimera_smb_open_file;
 struct chimera_smb_tree;
+struct chimera_smb_session;
 struct chimera_server_smb_thread;
 
 /*
@@ -36,7 +39,11 @@ struct chimera_smb_notify_request {
     struct chimera_smb_conn           *conn;
     struct chimera_server_smb_thread  *thread;
     struct chimera_smb_open_file      *open_file;
+    struct chimera_smb_notify_state   *state;       /* owned reference, independent of attachment */
+    struct evpl_timer                 admission_timer;
+    int                               admitting;   /* owning thread only, no watch yet */
     struct chimera_smb_tree           *tree;        /* for open_file refcount release */
+    struct chimera_smb_session        *session;     /* async security snapshot lifetime */
     uint64_t                           message_id;
     uint64_t                           async_id;
     uint64_t                           session_id;
@@ -92,6 +99,10 @@ struct chimera_smb_notify_request {
  */
 struct chimera_smb_notify_state {
     pthread_mutex_t                  lock;
+    atomic_uint                      refs;
+    struct chimera_vfs_notify       *vfs_notify;
+    int                              closing;       /* state->lock */
+    int                              cleanup_deleted; /* deletion preceding cleanup cutoff */
     struct chimera_vfs_notify_watch *watch;
     /* Outstanding CHANGE_NOTIFY requests on this open, oldest first.
      *
@@ -111,12 +122,23 @@ struct chimera_smb_notify_state {
      * overflow and deleted flags -- is shared by all of them. */
     struct chimera_smb_notify_request *q_head;
     struct chimera_smb_notify_request *q_tail;
-    /* Transient single-threaded linkage used only by tree/session teardown
+    /* Transient single-threaded linkage used by tree/session teardown
      * (chimera_smb_tree_free) to collect detached states and tear them down
      * after the open_files bucket lock is released — chimera_smb_notify_close
      * re-takes that lock via the parked request's open_file release. */
     struct chimera_smb_notify_state   *gc_next;
 };
+
+/* Attachment is protected by the open's bucket. Admission also holds the DOC
+ * registry, excluding native CLOSE until its late-watch recheck. A successful
+ * admission returns a state reference owned by the caller. PENDING means no
+ * watch was touched and the caller must defer on its own SMB worker. */
+uint32_t chimera_smb_notify_admit(struct chimera_server_smb_thread *thread,
+    struct chimera_smb_session *session, struct chimera_smb_open_file *open, uint32_t mask, int watch_tree,
+    struct chimera_smb_notify_state **state);
+void chimera_smb_notify_state_put(struct chimera_smb_notify_state *state);
+struct chimera_smb_notify_state *chimera_smb_notify_detach(struct chimera_smb_open_file *open);
+void chimera_smb_notify_admission_start(struct chimera_smb_notify_request *nr);
 
 /*
  * VFS notify callback — called when events arrive on a watched directory.
@@ -161,7 +183,7 @@ chimera_smb_notify_send_response(
 
 /*
  * Cancel a parked CHANGE_NOTIFY request and send STATUS_CANCELLED to
- * the client.  Use this on explicit SMB2_CLOSE.
+ * the client. Use this for SMB2_CANCEL; CLOSE queues NOTIFY_CLEANUP.
  */
 void
 chimera_smb_notify_cancel(
@@ -187,19 +209,6 @@ void
 chimera_smb_notify_complete_cleanup(
     struct chimera_smb_notify_request *nr,
     struct chimera_smb_notify_state   *state);
-
-/*
- * Marshal a NOTIFY_CLEANUP completion of the open's parked CHANGE_NOTIFY to
- * the request's owning SMB thread.  Used when a session is closed out from
- * under its still-live connection (a PreviousSessionId reconnect, MS-SMB2
- * 3.3.5.5.3): the parked request must be completed with STATUS_NOTIFY_CLEANUP,
- * but the response has to be built/sent on the connection's own thread.
- * Returns 1 if a parked request was queued for cleanup, 0 otherwise.  Safe to
- * call from another thread.
- */
-int
-chimera_smb_notify_queue_cleanup(
-    struct chimera_smb_open_file *open_file);
 
 /*
  * Append a request to the watch's outstanding queue.  Requires state->lock.

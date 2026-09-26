@@ -107,8 +107,12 @@ chimera_nfs4_seek(
 
     /* Op 2: SEEK */
     argarray[2].argop = OP_SEEK;
+    /* Session I/O uses the latest version of this state identity. Another
+     * local handle can coalesce an OPEN and advance its version while this
+     * handle still retains the original OPEN reply (RFC 8881 section 8.2.2). */
     if (open_state) {
-        argarray[2].opseek.sa_stateid = open_state->stateid;
+        argarray[2].opseek.sa_stateid       = open_state->stateid;
+        argarray[2].opseek.sa_stateid.seqid = 0;
     } else {
         memset(&argarray[2].opseek.sa_stateid, 0,
                sizeof(argarray[2].opseek.sa_stateid));

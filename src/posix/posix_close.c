@@ -26,13 +26,15 @@ chimera_posix_close(int fd)
      * process holds on that file, including ones taken through other
      * descriptions.  Must run before the description is dropped, so the
      * carve still has a handle to name the file with. */
-    chimera_posix_locks_release_file(posix, entry->ofd, handle);
+    int error = chimera_posix_locks_release_file(posix, handle);
 
     chimera_posix_close_on_worker(worker, handle);
 
-    chimera_posix_fd_release(entry, CHIMERA_POSIX_FD_CLOSING);
-
     chimera_posix_fd_free(posix, fd);
 
+    if (error) {
+        errno = error;
+        return -1;
+    }
     return 0;
 } /* chimera_posix_close */

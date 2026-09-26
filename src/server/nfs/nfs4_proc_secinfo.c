@@ -43,10 +43,11 @@ chimera_nfs4_secinfo_complete(
     res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                export ? export->sec_allowed : 0,
                                                req->thread->shared->gss_enabled);
-    /* RFC 7530 §16.31.3 / RFC 8881 §18.29.3: SECINFO consumes the current
-     * filehandle on success, so a following op relying on it fails with
-     * NFS4ERR_NOFILEHANDLE. */
-    req->fhlen  = 0;
+    /* NFSv4.0 retains the current FH; v4.1+ consumes it (RFC 7530
+     * 16.31.4 versus RFC 8881 18.29.3). */
+    if (req->minorversion >= 1) {
+        req->fhlen = 0;
+    }
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_secinfo_complete */
@@ -106,8 +107,9 @@ chimera_nfs4_secinfo_resume(
         res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                    sibling.sec_allowed,
                                                    thread->shared->gss_enabled);
-        /* Consume the current filehandle on success (see above). */
-        req->fhlen  = 0;
+        if (req->minorversion >= 1) {
+            req->fhlen = 0;
+        }
         res->status = NFS4_OK;
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
@@ -169,8 +171,9 @@ chimera_nfs4_secinfo(
         res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                    export ? export->sec_allowed : 0,
                                                    req->thread->shared->gss_enabled);
-        /* Consume the current filehandle on success (see above). */
-        req->fhlen  = 0;
+        if (req->minorversion >= 1) {
+            req->fhlen = 0;
+        }
         res->status = NFS4_OK;
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;

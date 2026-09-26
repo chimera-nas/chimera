@@ -177,11 +177,22 @@ utf16le(
 #define SMB2W_NTLMSSP_KEY_EXCH           0x40000000u
 #define SMB2W_NTLMSSP_128                0x20000000u
 
+static inline _Noreturn void
+smb2w_fatal_exit(int status)
+{
+    /* An embedded server may still own running event threads. A failed
+     * harness cannot safely run libevpl's global atexit cleanup underneath
+     * them. Preserve diagnostics and the failing status without that teardown. */
+    fflush(stdout);
+    fflush(stderr);
+    _Exit(status);
+} /* smb2w_fatal_exit */
+
 static inline void
 smb2w_die(const char *what)
 {
     fprintf(stderr, "smb2 wire: %s failed\n", what);
-    exit(6);
+    smb2w_fatal_exit(6);
 } /* smb2w_die */
 
 /* MD4 (the NT hash) lives in OpenSSL 3's legacy provider; the server loads it

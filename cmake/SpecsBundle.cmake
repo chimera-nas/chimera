@@ -195,6 +195,10 @@ endif()
 # corpus under ${CMAKE_BINARY_DIR}/ext/specs/traces and its coverage gates join
 # chimera's ctest set.  quint (REQUIRED there) is already confirmed present.
 add_subdirectory(${_specs_src} ${CMAKE_BINARY_DIR}/ext/specs)
-set(SPECS_BUNDLE_DIR ${CMAKE_BINARY_DIR}/ext/specs/traces)
+if(SPECS_TRACES_DIR)
+    set(SPECS_BUNDLE_DIR ${SPECS_TRACES_DIR})
+else()
+    set(SPECS_BUNDLE_DIR ${CMAKE_BINARY_DIR}/ext/specs/traces)
+endif()
 set(SPECS_BUNDLE_AVAILABLE ON)
 message(STATUS "specs: building trace corpus locally from ext/specs")

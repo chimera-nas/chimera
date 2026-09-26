@@ -45,6 +45,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_acl.h"
 #include "s3_status.h"
 
@@ -171,7 +172,7 @@ chimera_s3_get_acl_finish(
     bp += sprintf(bp, "</AccessControlPolicy>\n");
 
     evpl_iovec_set_length(&iov, bp - start);
-    evpl_http_request_add_datav(request->http_request, &iov, 1);
+    chimera_s3_response_add_datav(evpl, request, &iov, 1);
 
     request->is_list          = 1;
     request->file_length      = bp - start;
@@ -186,28 +187,30 @@ chimera_s3_get_acl_finish(
 } /* chimera_s3_get_acl_finish */
 
 static void
-chimera_s3_get_acl_lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_s3_get_acl_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
+    CHIMERA_S3_HOLD_REQUEST(private_data);
+    struct chimera_s3_request            *request = private_data;
+    enum chimera_vfs_error                status  = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(
+        compound, chimera_vfs_compound_num_ops(compound) - 1);
 
-    if (error_code) {
-        request->status = (error_code == CHIMERA_VFS_EACCES ||
-                           error_code == CHIMERA_VFS_EPERM) ?
-            CHIMERA_S3_STATUS_ACCESS_DENIED : CHIMERA_S3_STATUS_NO_SUCH_KEY;
+    if (status != CHIMERA_VFS_OK) {
+        request->status = chimera_s3_compound_error(compound, request,
+                                                    status == CHIMERA_VFS_ENOENT ? CHIMERA_S3_STATUS_NO_SUCH_KEY :
+                                                    CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        chimera_vfs_compound_free(compound);
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(evpl, request);
+            s3_server_respond(request->thread->evpl, request);
         }
         return;
     }
-
-    chimera_s3_get_acl_finish(request, attr);
-} /* chimera_s3_get_acl_lookup_cb */
+    chimera_s3_get_acl_finish(request, &op->attr);
+    chimera_vfs_compound_free(compound);
+} /* chimera_s3_get_acl_complete */
 
 void
 chimera_s3_get_acl(
@@ -215,23 +218,15 @@ chimera_s3_get_acl(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    /* For a bucket ACL the path is empty and the bucket dir fh is the target;
-     * for an object ACL we resolve the key relative to the bucket. */
-    if (request->path_len == 0) {
-        chimera_vfs_lookup(thread->vfs, &request->cred,
-                           request->bucket_fh, request->bucket_fhlen,
-                           ".", 1,
-                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                           CHIMERA_VFS_LOOKUP_FOLLOW,
-                           chimera_s3_get_acl_lookup_cb, request);
-    } else {
-        chimera_vfs_lookup(thread->vfs, &request->cred,
-                           request->bucket_fh, request->bucket_fhlen,
-                           request->path, request->path_len,
-                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                           CHIMERA_VFS_LOOKUP_FOLLOW,
-                           chimera_s3_get_acl_lookup_cb, request);
-    }
+    struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
+
+    chimera_vfs_compound_add_lookup_path(compound,
+                                         request->path_len ? request->path : ".",
+                                         request->path_len ? request->path_len : 1,
+                                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                                         CHIMERA_VFS_LOOKUP_FOLLOW);
+    chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_get_acl_complete, request);
 } /* chimera_s3_get_acl */
 
 /* ------------------------------------------------------------ PutXxxAcl --- */
@@ -256,92 +251,23 @@ chimera_s3_put_acl_finish(
 } /* chimera_s3_put_acl_finish */
 
 static void
-chimera_s3_put_acl_setattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_s3_put_acl_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    enum chimera_s3_status           status  = CHIMERA_S3_STATUS_OK;
+    CHIMERA_S3_HOLD_REQUEST(private_data);
+    struct chimera_s3_request *request = private_data;
+    enum chimera_vfs_error     error   = chimera_vfs_compound_status(compound);
+    enum chimera_s3_status     status  = CHIMERA_S3_STATUS_OK;
 
-    chimera_vfs_release(thread->vfs, request->file_handle);
-    request->file_handle = NULL;
-
-    if (error_code) {
-        status = (error_code == CHIMERA_VFS_EACCES ||
-                  error_code == CHIMERA_VFS_EPERM) ?
-            CHIMERA_S3_STATUS_ACCESS_DENIED : CHIMERA_S3_STATUS_INTERNAL_ERROR;
+    if (error != CHIMERA_VFS_OK) {
+        status = chimera_s3_compound_error(compound, request,
+                                           error == CHIMERA_VFS_ENOENT ? CHIMERA_S3_STATUS_NO_SUCH_KEY :
+                                           CHIMERA_S3_STATUS_INTERNAL_ERROR);
     }
-
+    chimera_vfs_compound_free(compound);
     chimera_s3_put_acl_finish(request, status);
-} /* chimera_s3_put_acl_setattr_cb */
-
-static void
-chimera_s3_put_acl_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    int                              is_dir;
-    uint32_t                         mode;
-
-    if (error_code) {
-        chimera_s3_put_acl_finish(request,
-                                  (error_code == CHIMERA_VFS_EACCES ||
-                                   error_code == CHIMERA_VFS_EPERM) ?
-                                  CHIMERA_S3_STATUS_ACCESS_DENIED :
-                                  CHIMERA_S3_STATUS_NO_SUCH_KEY);
-        return;
-    }
-
-    request->file_handle = oh;
-
-    is_dir = (request->path_len == 0);
-    mode   = chimera_s3_canned_acl_to_mode(request->canned_acl, is_dir);
-
-    memset(&request->set_attr, 0, sizeof(request->set_attr));
-    request->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-    request->set_attr.va_mode     = mode | (is_dir ? S_IFDIR : 0);
-
-    chimera_vfs_setattr(thread->vfs, &request->cred,
-                        request->file_handle,
-                        &request->set_attr,
-                        0, 0,
-                        chimera_s3_put_acl_setattr_cb, request);
-} /* chimera_s3_put_acl_open_cb */
-
-static void
-chimera_s3_put_acl_lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    int                              is_dir  = (request->path_len == 0);
-
-    if (error_code || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        chimera_s3_put_acl_finish(request,
-                                  (error_code == CHIMERA_VFS_EACCES ||
-                                   error_code == CHIMERA_VFS_EPERM) ?
-                                  CHIMERA_S3_STATUS_ACCESS_DENIED :
-                                  CHIMERA_S3_STATUS_NO_SUCH_KEY);
-        return;
-    }
-
-    chimera_vfs_open_fh(thread->vfs, &request->cred,
-                        attr->va_fh, attr->va_fh_len,
-                        is_dir ? (CHIMERA_VFS_OPEN_PATH |
-                                  CHIMERA_VFS_OPEN_INFERRED |
-                                  CHIMERA_VFS_OPEN_DIRECTORY) :
-                        (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED),
-                        chimera_s3_put_acl_open_cb, request);
-} /* chimera_s3_put_acl_lookup_cb */
+} /* chimera_s3_put_acl_complete */
 
 void
 chimera_s3_put_acl(
@@ -354,7 +280,10 @@ chimera_s3_put_acl(
      * no canned value is present we treat it as a no-op success rather than
      * failing the request (the object/bucket keeps its current mode). */
     if (request->canned_acl == CHIMERA_S3_CANNED_NONE) {
-        chimera_s3_put_acl_finish(request, CHIMERA_S3_STATUS_OK);
+        struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
+
+        chimera_s3_request_get(request);
+        chimera_frontend_compound_submit(compound, chimera_s3_put_acl_complete, request);
         return;
     }
 
@@ -364,19 +293,21 @@ chimera_s3_put_acl(
         return;
     }
 
-    if (request->path_len == 0) {
-        chimera_vfs_lookup(thread->vfs, &request->cred,
-                           request->bucket_fh, request->bucket_fhlen,
-                           ".", 1,
-                           CHIMERA_VFS_ATTR_FH,
-                           CHIMERA_VFS_LOOKUP_FOLLOW,
-                           chimera_s3_put_acl_lookup_cb, request);
-    } else {
-        chimera_vfs_lookup(thread->vfs, &request->cred,
-                           request->bucket_fh, request->bucket_fhlen,
-                           request->path, request->path_len,
-                           CHIMERA_VFS_ATTR_FH,
-                           CHIMERA_VFS_LOOKUP_FOLLOW,
-                           chimera_s3_put_acl_lookup_cb, request);
-    }
+    struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
+    struct chimera_vfs_attrs     attr     = { 0 };
+    int                          is_dir   = request->path_len == 0;
+
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    attr.va_mode     = chimera_s3_canned_acl_to_mode(request->canned_acl, is_dir) |
+        (is_dir ? S_IFDIR : 0);
+    chimera_vfs_compound_add_lookup_path(compound,
+                                         request->path_len ? request->path : ".",
+                                         request->path_len ? request->path_len : 1,
+                                         CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+                                          (is_dir ? CHIMERA_VFS_OPEN_DIRECTORY : 0), 0);
+    chimera_vfs_compound_add_setattr(compound, NULL, &attr, 0);
+    chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_put_acl_complete, request);
 } /* chimera_s3_put_acl */

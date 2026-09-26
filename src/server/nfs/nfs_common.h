@@ -93,6 +93,7 @@ struct nfs_nfs4_readdir_cursor {
     uint64_t       count;
     struct entry4 *entries;
     struct entry4 *last;
+    nfsstat4       change_status;
 };
 
 struct nfs_request;
@@ -106,6 +107,7 @@ typedef void (*nfs4_root_junction_resume_t)(
     int                               at_root_export);
 
 struct nfs_request {
+    struct nfs4_change_observation   *change_observations;
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
     struct otel_span                  otel;        /* compound (aggregate) span */
@@ -174,6 +176,10 @@ struct nfs_request {
      * owner seqid + caches the reply iff this is non-NULL and the status
      * is in nfs4_seqid_should_advance(). */
     struct nfs_open_owner            *open_4_0_owner;
+    /* Accepted compound publication may wait for the delegation probe. */
+    void                              (*compound_probe_resume)(
+        struct nfs_request *req);
+    void                             *compound_probe_private;
     /* An OPEN/UNCHECKED of an existing file asked for size 0.  The truncate
      * is held back until the share reservation is granted (see
      * chimera_nfs4_open_complete) so a denied OPEN cannot destroy the
@@ -479,9 +485,8 @@ struct chimera_server_nfs_thread {
     struct evpl_doorbell              cb_doorbell;
     pthread_mutex_t                   cb_recall_lock;
     struct nfs_delegation            *cb_recall_queue; /* via deleg->recall_qnext */
-    /* Cross-thread pNFS CB_LAYOUTRECALL marshalling (same rationale as
-     * cb_recall_queue, but for layout holders).  Via layout->recall_qnext. */
-    struct nfs_layout_state          *cb_layoutrecall_queue;
+    /* Independent recall contexts hold layout and client pins across a bounce. */
+    struct nfs4_cb_layout_recall_ctx *cb_layoutrecall_queue;
     /* Deferred-op resumes bounced back to their home thread: a layout recall
      * completes (LAYOUTRETURN) on the backchannel owner thread, but the deferred
      * op's request/iovecs are owned by the thread that received it.  See
@@ -553,6 +558,8 @@ nfs_request_free(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
+    nfs4_change_finish(thread->shared->nfs4_state_table.change_table,
+                       &req->change_observations, false);
     /* End the request span and drop the trace parent so a later VFS op cannot
      * attach to this (now recycled) request's span. */
     otel_span_end(&req->otel);

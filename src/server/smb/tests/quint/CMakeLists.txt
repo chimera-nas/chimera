@@ -92,6 +92,167 @@ add_executable(smb2_wire_probe smb2_wire_probe.c)
 target_include_directories(smb2_wire_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(smb2_wire_probe chimera_server chimera_metrics crypto)
 
+# Actual NextCommand-chained requests plus held/rejected VFS finish. The
+# executable interposes compound submission to verify coalescing and staging.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(smb2_compound_probe smb2_compound_probe.c)
+    target_include_directories(smb2_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    foreach(COMPOUND_WIRE_PROFILE IN ITEMS signed30 signed311 encrypted311)
+        add_test(NAME chimera/server/smb/mbt/compound_probe_memfs_${COMPOUND_WIRE_PROFILE}
+            COMMAND $<TARGET_FILE:smb2_compound_probe> ${COMPOUND_WIRE_PROFILE})
+        set_tests_properties(chimera/server/smb/mbt/compound_probe_memfs_${COMPOUND_WIRE_PROFILE} PROPERTIES
+            ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_compound_probe_memfs_${COMPOUND_WIRE_PROFILE}"
+            LABELS "quint;smb_mbt;memfs"
+            TIMEOUT 180)
+    endforeach()
+    add_executable(smb2_metadata_compound_probe smb2_metadata_compound_probe.c)
+    target_include_directories(smb2_metadata_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_metadata_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_metadata_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/metadata_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_metadata_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/metadata_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_metadata_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_ioctl_compound_probe smb2_ioctl_compound_probe.c smb2_resiliency_inspect.c
+        smb2_reparse_inspect.c)
+    target_include_directories(smb2_ioctl_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_ioctl_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_ioctl_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/ioctl_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_ioctl_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/ioctl_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_ioctl_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_compound_lifecycle_probe smb2_compound_lifecycle_probe.c)
+    target_include_directories(smb2_compound_lifecycle_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_compound_lifecycle_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_compound_lifecycle_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/compound_lifecycle_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_compound_lifecycle_probe>)
+    set_tests_properties(chimera/server/smb/mbt/compound_lifecycle_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_compound_lifecycle_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_directory_stream_probe smb2_directory_stream_probe.c)
+    target_include_directories(smb2_directory_stream_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_directory_stream_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_directory_stream_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/directory_stream_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_directory_stream_probe>)
+    set_tests_properties(chimera/server/smb/mbt/directory_stream_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_directory_stream_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_create_cache_compound_probe
+        smb2_create_cache_compound_probe.c smb2_create_cache_inspect.c)
+    target_include_directories(smb2_create_cache_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_create_cache_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_create_cache_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/create_cache_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_create_cache_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/create_cache_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_create_cache_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_cache_close_compound_probe
+        smb2_cache_close_compound_probe.c smb2_cache_close_inspect.c)
+    target_include_directories(smb2_cache_close_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_cache_close_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_cache_close_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/cache_close_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_cache_close_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/cache_close_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_cache_close_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_notify_close_compound_probe
+        smb2_notify_close_compound_probe.c smb2_notify_close_inspect.c)
+    target_include_directories(smb2_notify_close_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_notify_close_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_notify_close_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/notify_close_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_notify_close_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/notify_close_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_notify_close_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_persistent_cleanup_probe
+        smb2_persistent_cleanup_probe.c smb2_persistent_cleanup_inspect.c)
+    target_include_directories(smb2_persistent_cleanup_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_persistent_cleanup_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_persistent_cleanup_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/persistent_cleanup_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_persistent_cleanup_probe>)
+    set_tests_properties(chimera/server/smb/mbt/persistent_cleanup_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_persistent_cleanup_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_doc_compound_probe smb2_doc_compound_probe.c)
+    target_include_directories(smb2_doc_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_doc_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_doc_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/doc_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_doc_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/doc_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_doc_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_rename_compound_probe smb2_rename_compound_probe.c)
+    target_include_directories(smb2_rename_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_rename_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_rename_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/rename_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_rename_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/rename_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_rename_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_lock_compound_probe smb2_lock_compound_probe.c smb2_lock_inspect.c)
+    target_include_directories(smb2_lock_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_lock_compound_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_lock_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/lock_compound_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_lock_compound_probe>)
+    set_tests_properties(chimera/server/smb/mbt/lock_compound_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_lock_compound_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+    add_executable(smb2_access_retire_probe smb2_access_retire_probe.c smb2_access_retire_inspect.c)
+    target_include_directories(smb2_access_retire_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_access_retire_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_access_retire_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/access_retire_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_access_retire_probe>)
+    set_tests_properties(chimera/server/smb/mbt/access_retire_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_access_retire_probe_memfs"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 180)
+endif()
+
 add_test(NAME chimera/server/smb/mbt/wire_probe_memfs
     COMMAND $<TARGET_FILE:smb2_wire_probe>)
 set_tests_properties(chimera/server/smb/mbt/wire_probe_memfs PROPERTIES
@@ -140,7 +301,8 @@ set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
 # storage that NFSv4 named attributes also project onto.
 add_executable(smb2_stream_probe smb2_stream_probe.c)
 target_include_directories(smb2_stream_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_stream_probe chimera_server chimera_metrics crypto)
+target_link_libraries(smb2_stream_probe chimera_server chimera_metrics chimera_vfs evpl crypto dl)
+set_target_properties(smb2_stream_probe PROPERTIES ENABLE_EXPORTS ON)
 
 add_test(NAME chimera/server/smb/mbt/stream_probe_memfs
     COMMAND $<TARGET_FILE:smb2_stream_probe>)
@@ -194,13 +356,13 @@ add_test(NAME chimera/server/smb/mbt/batch_memfs
     COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2)
 # The whole generated corpus in one ctest, not a single case.  ext/specs
 # generates every instance and flavor unconditionally -- nothing is withheld on
-# account of what chimera does with it -- so this runs ~70 traces at depth
+# account of what chimera does with it -- so this runs the corpus at depth
 # 300-500, each standing up and tearing down its own filesystem, against an
 # ASAN build on a loaded container.
 #
-# The batches chimera cannot drive yet are declined BY NAME in
-# smb2_mbt_deviations.h (smb2_mbt_trace_limits), each with the chimera bug that
-# would retire the entry, and reported as SKIP lines.  SKIP_RETURN_CODE turns a
+# Any future unsupported batches must be recorded BY NAME in
+# smb2_mbt_deviations.h (smb2_mbt_trace_limits); that registry is currently empty.
+# SKIP_RETURN_CODE turns a
 # run where nothing was drivable into a ctest SKIP rather than a false pass.
 set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs"
@@ -224,3 +386,16 @@ set_tests_properties(chimera/server/smb/mbt/batch_memfs_signed PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 1800
     SKIP_RETURN_CODE 77)
+
+# Retain the additional wire profiles exercised by strict corpus validation.
+# Each uses the same model expectations and the ordinary deviation registry.
+foreach(WIRE_PROFILE IN ITEMS encrypted311 ntlmv2 signed30)
+    add_test(NAME chimera/server/smb/mbt/batch_memfs_${WIRE_PROFILE}
+        COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2
+                --wire ${WIRE_PROFILE})
+    set_tests_properties(chimera/server/smb/mbt/batch_memfs_${WIRE_PROFILE} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs_${WIRE_PROFILE}"
+        LABELS "quint;smb_mbt;memfs"
+        TIMEOUT 1800
+        SKIP_RETURN_CODE 77)
+endforeach()

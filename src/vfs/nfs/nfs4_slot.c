@@ -39,6 +39,7 @@
  */
 
 #include <stdlib.h>
+#include "evpl/evpl.h"
 
 #include "nfs_internal.h"
 
@@ -69,6 +70,13 @@ struct chimera_nfs4_compound_ctx {
         int,
         void *);
     void                                    *real_private;
+    struct chimera_nfs_thread               *thread;
+    struct chimera_nfs_shared               *shared;
+    struct chimera_vfs_request              *request;
+    chimera_nfs4_retry_fn                    retry_fn;
+    void                                    *retry_ctx;
+    struct evpl_timer                        delay_timer;
+    int                                      delayed;
     struct chimera_nfs4_compound_ctx        *prev, *next;  /* inflight dll        */
     struct chimera_nfs4_compound_ctx        *fl_next;      /* freelist            */
 };
@@ -398,9 +406,13 @@ chimera_nfs4_slot_table_reset(
      * NOT to the shared pool: the id is still leased to this thread and would be
      * double-issued if another thread borrowed it. */
     while (st->inflight) {
-        ctx                                  = st->inflight;
-        st->inflight                         = ctx->next;
-        ctx->prev                            = ctx->next = NULL;
+        ctx          = st->inflight;
+        st->inflight = ctx->next;
+        ctx->prev    = ctx->next = NULL;
+        if (ctx->delayed) {
+            evpl_remove_timer(evpl, &ctx->delay_timer);
+            ctx->delayed = 0;
+        }
         st->local_free[st->local_free_top++] = ctx->slot_id;
         ctx->real_cb(evpl, NULL, NULL, 1 /* error */, ctx->real_private);
         chimera_nfs4_ctx_free(st, ctx);
@@ -435,9 +447,14 @@ chimera_nfs4_slot_table_destroy(struct chimera_nfs_client_server_thread *server_
          * their ids return to local_free, then the whole lease goes back to the
          * shared pool so a torn-down thread does not leak slots. */
         while (st->inflight) {
-            ctx                                  = st->inflight;
-            st->inflight                         = ctx->next;
+            ctx          = st->inflight;
+            st->inflight = ctx->next;
+            if (ctx->delayed) {
+                evpl_remove_timer(ctx->thread->evpl, &ctx->delay_timer);
+                ctx->delayed = 0;
+            }
             st->local_free[st->local_free_top++] = ctx->slot_id;
+            chimera_nfs4_ctx_free(st, ctx);
         }
 
         pthread_mutex_lock(&session->lock);
@@ -526,6 +543,75 @@ chimera_nfs4_session_put(struct chimera_nfs4_client_session *session)
  * the server's pointer here raced an unmount into a NULL dereference and a
  * remount into advancing a seqid / returning an id on the wrong pool.
  */
+/* Reconstructing a delayed request is safe only before any successful
+ * operation with externally visible effects. In particular, never repeat
+ * OPEN/CREATE/WRITE merely because a later GETATTR returned DELAY. */
+static int
+chimera_nfs4_delay_can_retry(const struct COMPOUND4res *res)
+{
+    if (!res || res->status != NFS4ERR_DELAY || res->num_resarray < 1) {
+        return 0;
+    }
+    for (uint32_t i = 0; i + 1 < res->num_resarray; i++) {
+        switch (res->resarray[i].resop) {
+            case OP_SEQUENCE:
+            case OP_PUTFH:
+            case OP_PUTROOTFH:
+            case OP_SAVEFH:
+            case OP_RESTOREFH:
+            case OP_LOOKUP:
+            case OP_LOOKUPP:
+            case OP_GETFH:
+            case OP_GETATTR:
+            case OP_ACCESS:
+                break;
+            default:
+                return 0;
+        } /* switch */
+    }
+    return 1;
+} /* chimera_nfs4_delay_can_retry */
+
+static void
+chimera_nfs4_drain_parked(struct chimera_nfs4_slot_table *st)
+{
+    struct chimera_nfs4_parked *p;
+
+    while (st->local_free_top > 0 && st->wait_head) {
+        p = chimera_nfs4_park_pop(st);
+        chimera_nfs4_retry_fn       rf = p->retry_fn;
+        struct chimera_nfs_thread  *t  = p->thread;
+        struct chimera_nfs_shared  *sh = p->shared;
+        struct chimera_vfs_request *rq = p->request;
+        void                       *rc = p->retry_ctx;
+        p->next             = st->parked_freelist;
+        st->parked_freelist = p;
+        rf(t, sh, rq, rc);
+    }
+} /* chimera_nfs4_drain_parked */
+
+static void
+chimera_nfs4_delay_retry(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_nfs4_compound_ctx *ctx =
+        container_of(timer, struct chimera_nfs4_compound_ctx, delay_timer);
+    struct chimera_nfs4_slot_table   *st        = &ctx->server_thread->slots;
+    struct chimera_nfs_thread        *thread    = ctx->thread;
+    struct chimera_nfs_shared        *shared    = ctx->shared;
+    struct chimera_vfs_request       *request   = ctx->request;
+    chimera_nfs4_retry_fn             retry_fn  = ctx->retry_fn;
+    void                             *retry_ctx = ctx->retry_ctx;
+
+    ctx->delayed = 0;
+    chimera_nfs4_inflight_remove(st, ctx);
+    st->local_free[st->local_free_top++] = ctx->slot_id;
+    chimera_nfs4_ctx_free(st, ctx);
+    retry_fn(thread, shared, request, retry_ctx);
+    chimera_nfs4_drain_parked(st);
+} /* chimera_nfs4_delay_retry */
+
 static void
 chimera_nfs4_compound_call_cb(
     struct evpl                 *evpl,
@@ -538,7 +624,6 @@ chimera_nfs4_compound_call_cb(
     struct chimera_nfs_client_server_thread *server_thread = ctx->server_thread;
     struct chimera_nfs4_slot_table          *st            = &server_thread->slots;
     struct chimera_nfs4_client_session      *session       = st->session;
-    struct chimera_nfs4_parked              *p;
 
     void                                     (*real_cb)(
         struct evpl *,
@@ -547,8 +632,6 @@ chimera_nfs4_compound_call_cb(
         int,
         void *);
     void                                    *real_private;
-
-    chimera_nfs4_inflight_remove(st, ctx);
 
     /* Advance the slot's seqid only when the server accepted the SEQUENCE
      * (RFC 8881 §2.10.6.1).  On a transport error or a SEQUENCE error, leave it
@@ -567,6 +650,18 @@ chimera_nfs4_compound_call_cb(
             atomic_store_explicit(&session->target_usable, target, memory_order_relaxed);
         }
     }
+
+    if (status == 0 && ctx->retry_fn && chimera_nfs4_delay_can_retry(res)) {
+        /* Retain this slot and context while parked, so connection reset
+         * cancels the timer and error-completes the request exactly once.
+         * The next send uses the advanced SEQUENCE, not a cached DELAY reply. */
+        ctx->delayed = 1;
+        evpl_add_oneshot_timer(evpl, &ctx->delay_timer,
+                               chimera_nfs4_delay_retry, 10000);
+        return;
+    }
+
+    chimera_nfs4_inflight_remove(st, ctx);
 
     /* The freed id returns to this thread's local stack (lock-free). */
     st->local_free[st->local_free_top++] = ctx->slot_id;
@@ -602,17 +697,7 @@ chimera_nfs4_compound_call_cb(
     /* Then wake parked requests for any slots still free.  Each replay
      * re-dispatches the op, which re-enters chimera_nfs4_compound_call and
      * acquires a slot (re-entrant same-thread send is safe). */
-    while (st->local_free_top > 0 && st->wait_head) {
-        p = chimera_nfs4_park_pop(st);
-        chimera_nfs4_retry_fn       rf = p->retry_fn;
-        struct chimera_nfs_thread  *t  = p->thread;
-        struct chimera_nfs_shared  *sh = p->shared;
-        struct chimera_vfs_request *rq = p->request;
-        void                       *rc = p->retry_ctx;
-        p->next             = st->parked_freelist;
-        st->parked_freelist = p;
-        rf(t, sh, rq, rc);
-    }
+    chimera_nfs4_drain_parked(st);
 } /* chimera_nfs4_compound_call_cb */
 
 void
@@ -702,6 +787,12 @@ chimera_nfs4_compound_call(
     ctx->seqid         = session->slot_seqid[id];
     ctx->real_cb       = cb;
     ctx->real_private  = cb_private;
+    ctx->thread        = thread;
+    ctx->shared        = shared;
+    ctx->request       = request;
+    ctx->retry_fn      = retry_fn;
+    ctx->retry_ctx     = retry_ctx;
+    ctx->delayed       = 0;
     chimera_nfs4_inflight_add(st, ctx);
 
     shared->nfs_v4.send_call_NFSPROC4_COMPOUND(

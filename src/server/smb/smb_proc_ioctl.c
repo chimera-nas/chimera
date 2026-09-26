@@ -4,6 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_durable_compound.h"
 #include "smb_string.h"
 #include "smb_common/smb2.h"
 #include "common/misc.h"
@@ -1075,3 +1076,234 @@ chimera_smb_parse_ioctl(
 
     return 0;
 } /* chimera_smb_parse_ioctl */
+extern const struct smb_vfs_command_ops chimera_smb_sparse_compound_ops;
+extern const struct smb_vfs_command_ops chimera_smb_get_reparse_compound_ops;
+extern const struct smb_vfs_command_ops chimera_smb_offload_read_compound_ops;
+extern const struct smb_vfs_command_ops chimera_smb_copychunk_compound_ops;
+extern const struct smb_vfs_command_ops chimera_smb_copyoffload_compound_ops;
+
+static int
+smb_ioctl_simple_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    (void) command;
+    return chimera_vfs_compound_add_checkpoint(compound);
+} /* smb_ioctl_simple_build */
+
+static void
+smb_ioctl_simple_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command     *command = private_data;
+    struct chimera_smb_request *request = command->request;
+
+    (void) compound; (void) index; (void) status;
+    switch (request->ioctl.ctl_code) {
+        case SMB2_FSCTL_FILE_LEVEL_TRIM:
+            if (request->ioctl.tr_key || request->ioctl.max_output_response < 4) {
+                command->status = SMB2_STATUS_INVALID_PARAMETER;
+            }
+            break;
+        case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
+            if (request->ioctl.max_output_response < 12) {
+                command->status = SMB2_STATUS_INVALID_PARAMETER;
+            }
+            break;
+        case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+            if (command->state->channel_sequence_valid &&
+                (uint16_t) (request->channel_sequence - command->state->channel_sequence) >= 0x8000) {
+                command->status = SMB2_STATUS_FILE_NOT_AVAILABLE;
+                return;
+            }
+            command->state->channel_sequence       = request->channel_sequence;
+            command->state->channel_sequence_valid = command->state->sequence_dirty = 1;
+            if (request->ioctl.max_output_response < 64) {
+                command->status = SMB2_STATUS_BUFFER_TOO_SMALL;
+                return;
+            }
+            memset(request->ioctl.oid_buffer, 0, 64);
+            memcpy(request->ioctl.oid_buffer, &command->handle->fh_hash, 8);
+            memcpy(request->ioctl.oid_buffer + 8, &command->handle->fh_hash, 8);
+            request->ioctl.oid_buffer[8] ^= 0xa5;
+            memcpy(request->ioctl.oid_buffer + 16, request->compound->thread->shared->guid, 16);
+            memcpy(request->ioctl.oid_buffer + 32, request->ioctl.oid_buffer, 16);
+            break;
+        case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
+            if (request->ioctl.max_output_response < 16) {
+                command->status = SMB2_STATUS_INVALID_PARAMETER;
+                return;
+            }
+            request->ioctl.ii_algo  = command->state->integrity_algo;
+            request->ioctl.ii_flags = command->state->integrity_flags;
+            break;
+        case SMB2_FSCTL_SET_INTEGRITY_INFORMATION:
+            if (command->state->channel_sequence_valid &&
+                (uint16_t) (request->channel_sequence - command->state->channel_sequence) >= 0x8000) {
+                command->status = SMB2_STATUS_FILE_NOT_AVAILABLE;
+                return;
+            }
+            command->state->channel_sequence       = request->channel_sequence;
+            command->state->channel_sequence_valid = command->state->sequence_dirty = 1;
+            command->state->integrity_algo         = request->ioctl.ii_algo;
+            command->state->integrity_flags        = request->ioctl.ii_flags;
+            command->state->integrity_dirty        = 1;
+            break;
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+            /* A related FileId sentinel must not become the issued key. */
+            request->ioctl.file_id = command->open->file_id;
+            break;
+    } /* switch */
+} /* smb_ioctl_simple_prepare */
+
+static struct chimera_smb_file_id
+smb_ioctl_simple_file_id(struct chimera_smb_request *request)
+{
+    return request->ioctl.file_id;
+} /* smb_ioctl_simple_file_id */
+
+static int
+smb_ioctl_simple_eligible(struct chimera_smb_request *request)
+{
+    (void) request;
+    return 1;
+} /* smb_ioctl_simple_eligible */
+
+struct smb_resiliency_attempt {
+    struct chimera_smb_durable_entry *prepared;
+    uint64_t                          timeout_ms;
+};
+
+static int
+smb_resiliency_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct smb_resiliency_attempt *attempt = calloc(1, sizeof(*attempt));
+
+    command->private_data = attempt;
+    if (!attempt) {
+        command->input_status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+        return -1;
+    }
+    attempt->prepared = chimera_smb_durable_registration_prepare(command->request, command->open);
+    if (!attempt->prepared) {
+        command->input_status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+        return -1;
+    }
+    attempt->timeout_ms = command->request->ioctl.rr_timeout_ms;
+    if (!attempt->timeout_ms) {
+        attempt->timeout_ms = CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS;
+    } else if (attempt->timeout_ms < CHIMERA_SMB_RESILIENCY_MIN_TIMEOUT_MS) {
+        attempt->timeout_ms = CHIMERA_SMB_RESILIENCY_MIN_TIMEOUT_MS;
+    }
+    return chimera_vfs_compound_add_checkpoint(compound);
+} /* smb_resiliency_build */
+
+static void
+smb_resiliency_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    (void) compound; (void) index; (void) status;
+    if (command->request->ioctl.rr_timeout_ms > CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS) {
+        command->status = SMB2_STATUS_INVALID_PARAMETER;
+    }
+} /* smb_resiliency_prepare */
+
+static void
+smb_resiliency_publish(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct smb_resiliency_attempt    *attempt = command->private_data;
+    struct chimera_smb_open_file     *open    = command->open;
+
+    (void) compound;
+    if (!attempt || command->status != SMB2_STATUS_SUCCESS || !command->publish_live ||
+        command->state->closed || (command->state->producer && !command->state->published)) {
+        return;
+    }
+    struct chimera_smb_tree          *tree   = open->tree;
+    struct chimera_server_smb_shared *shared = command->request->compound->thread->shared;
+    unsigned int                      bucket = open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    pthread_mutex_lock(&shared->trees_lock);
+    pthread_mutex_lock(&tree->open_files_lock[bucket]);
+    if (!tree->compound_tearing_down &&
+        !(open->flags & (CHIMERA_SMB_OPEN_FILE_CLOSED | CHIMERA_SMB_OPEN_FILE_PARKED))) {
+        if (!open->durable_flags && !open->resilient) {
+            chimera_smb_durable_registration_publish(shared, &attempt->prepared);
+        }
+        open->resilient            = true;
+        open->resilient_timeout_ms = attempt->timeout_ms;
+    }
+    pthread_mutex_unlock(&tree->open_files_lock[bucket]);
+    pthread_mutex_unlock(&shared->trees_lock);
+} /* smb_resiliency_publish */
+
+static void
+smb_resiliency_release(struct smb_vfs_command *command)
+{
+    struct smb_resiliency_attempt *attempt = command->private_data;
+
+    if (attempt) {
+        chimera_smb_durable_registration_discard(&attempt->prepared);
+        free(attempt);
+        command->private_data = NULL;
+    }
+} /* smb_resiliency_release */
+
+static const struct smb_vfs_command_ops smb_resiliency_compound_ops = {
+    .file_id  = smb_ioctl_simple_file_id,
+    .eligible = smb_ioctl_simple_eligible,
+    .build    = smb_resiliency_build,
+    .prepare  = smb_resiliency_prepare,
+    .publish  = smb_resiliency_publish,
+    .release  = smb_resiliency_release,
+};
+
+static const struct smb_vfs_command_ops smb_ioctl_simple_compound_ops = {
+    .file_id  = smb_ioctl_simple_file_id,
+    .eligible = smb_ioctl_simple_eligible,
+    .build    = smb_ioctl_simple_build,
+    .prepare  = smb_ioctl_simple_prepare,
+};
+
+const struct smb_vfs_command_ops *
+chimera_smb_ioctl_compound_ops_for(struct chimera_smb_request *request)
+{
+    switch (request->ioctl.ctl_code) {
+        case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
+            return &smb_resiliency_compound_ops;
+        case SMB2_FSCTL_SET_SPARSE:
+        case SMB2_FSCTL_SET_ZERO_DATA:
+        case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
+            return &chimera_smb_sparse_compound_ops;
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+            return &chimera_smb_copychunk_compound_ops;
+        case SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE:
+        case SMB2_FSCTL_OFFLOAD_WRITE:
+            return &chimera_smb_copyoffload_compound_ops;
+        case SMB2_FSCTL_OFFLOAD_READ:
+            return &chimera_smb_offload_read_compound_ops;
+        case SMB2_FSCTL_GET_REPARSE_POINT:
+            return &chimera_smb_get_reparse_compound_ops;
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+        case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+        case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
+        case SMB2_FSCTL_SET_INTEGRITY_INFORMATION:
+        case SMB2_FSCTL_FILE_LEVEL_TRIM:
+        case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
+            return &smb_ioctl_simple_compound_ops;
+        default:
+            return NULL;
+    } /* switch */
+} /* chimera_smb_ioctl_compound_ops_for */

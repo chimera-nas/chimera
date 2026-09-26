@@ -139,6 +139,7 @@ struct chimera_io_uring_range {
     uint64_t                            offset;
     uint64_t                            length;
     uint8_t                             projected;
+    uint8_t                             owner_anchor;
     struct chimera_io_uring_range      *next;
 };
 
@@ -2836,6 +2837,11 @@ chimera_io_uring_range_file_get(
     }
 
     file = calloc(1, sizeof(*file));
+    if (!file) {
+        close(fd);
+        errno = ENOMEM;
+        return NULL;
+    }
 
     memcpy(file->fh, fh, fh_len);
     file->fh_len  = fh_len;
@@ -2975,6 +2981,116 @@ chimera_io_uring_range_report_conflict(
         : 0;
 } /* chimera_io_uring_range_report_conflict */
 
+
+/* Typed POSIX locking uses one owner descriptor anchor. The kernel owns the
+ * interval map, including atomic SEEK_END normalization and same-owner mode
+ * replacement; the anchor is only lifetime bookkeeping, never a range token. */
+static int
+chimera_io_uring_geometry_flock(
+    int           whence,
+    uint64_t      offset,
+    uint64_t      length,
+    short         type,
+    struct flock *fl)
+{
+    memset(fl, 0, sizeof(*fl));
+    fl->l_type   = type;
+    fl->l_whence = whence;
+    if (whence == SEEK_END) {
+        fl->l_start = (int64_t) offset;
+        fl->l_len   = (int64_t) length;
+        return 0;
+    }
+    if (whence != SEEK_SET || !length || offset > INT64_MAX ||
+        (length != UINT64_MAX && length - 1 > INT64_MAX - offset)) {
+        return EINVAL;
+    }
+    fl->l_start = offset;
+    fl->l_len   = length == UINT64_MAX || length > INT64_MAX ? 0 : length;
+    return 0;
+} /* chimera_io_uring_geometry_flock */
+
+static void
+chimera_io_uring_claim_replace(
+    struct chimera_vfs_request     *request,
+    struct chimera_io_uring_thread *thread)
+{
+    struct chimera_io_uring_shared     *shared = thread->shared;
+    struct chimera_io_uring_range_file *file;
+    struct chimera_io_uring_range      *anchor = NULL, *fresh = NULL;
+    struct flock                        fl;
+    bool                                test = !!(request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST);
+    int                                 err  = chimera_io_uring_geometry_flock(request->claim_acquire.whence,
+                                                                               request->claim_acquire.offset, request->
+                                                                               claim_acquire.length,
+                                                                               request->claim_acquire.exclusive ?
+                                                                               F_WRLCK : F_RDLCK, &fl);
+
+    if (err) {
+        request->status = chimera_linux_errno_to_status(err);
+        request->complete(request);
+        return;
+    }
+    pthread_mutex_lock(&shared->range_lock);
+    file = chimera_io_uring_range_file_get(thread, request->fh, request->fh_len,
+                                           request->fh_hash, &request->claim_acquire.owner);
+    if (!file) {
+        err = errno;
+        goto out;
+    }
+    for (anchor = shared->ranges; anchor; anchor = anchor->next) {
+        if (anchor->file == file && anchor->owner_anchor) {
+            break;
+        }
+    }
+    if (!test && !anchor) {
+        fresh = calloc(1, sizeof(*fresh));
+        if (!fresh) {
+            err = ENOMEM;
+            goto put;
+        }
+    }
+    /* Never use SETLKW here: VFS retries a nonblocking backend admission,
+     * leaving unlock and mandatory close able to make progress. */
+    if (fcntl(file->fd, test ? CHIMERA_IO_URING_LOCK_GET : CHIMERA_IO_URING_LOCK_SET, &fl) < 0) {
+        err = errno;
+        if (err == EAGAIN || err == EACCES) {
+            if (chimera_io_uring_geometry_flock(request->claim_acquire.whence,
+                                                request->claim_acquire.offset, request->claim_acquire.length,
+                                                request->claim_acquire.exclusive ? F_WRLCK : F_RDLCK, &fl) == 0 &&
+                fcntl(file->fd, CHIMERA_IO_URING_LOCK_GET, &fl) == 0) {
+                chimera_io_uring_range_report_conflict(request, &fl);
+            }
+            err = 0; /* r_granted remains zero */
+        }
+        goto put;
+    }
+    if (test) {
+        chimera_io_uring_range_report_conflict(request, &fl);
+        request->claim_acquire.r_granted = fl.l_type == F_UNLCK;
+        goto put;
+    }
+    if (fresh) {
+        anchor               = fresh;
+        fresh                = NULL;
+        anchor->file         = file;
+        anchor->projected    = 1;
+        anchor->owner_anchor = 1;
+        anchor->token        = ++shared->range_next_token;
+        LL_PREPEND(shared->ranges, anchor);
+        file->refcnt++; /* standing anchor; drop temporary pin below */
+    }
+    request->claim_acquire.r_token   = anchor->token;
+    request->claim_acquire.r_granted = 1;
+ put:
+    free(fresh);
+    chimera_io_uring_range_file_put(shared, file);
+ out:
+    pthread_mutex_unlock(&shared->range_lock);
+    request->status = err ? chimera_linux_errno_to_status(err) : CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_io_uring_claim_replace */
+
 static void
 chimera_io_uring_claim_acquire(
     struct chimera_vfs_request *request,
@@ -2995,6 +3111,11 @@ chimera_io_uring_claim_acquire(
          * CHIMERA_VFS_CAP_CLAIM_AGGREGATE. */
         request->status = CHIMERA_VFS_ENOTSUP;
         request->complete(request);
+        return;
+    }
+
+    if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_REPLACE) {
+        chimera_io_uring_claim_replace(request, thread);
         return;
     }
 
@@ -3107,13 +3228,9 @@ chimera_io_uring_claim_acquire(
     request->complete(request);
 } /* chimera_io_uring_claim_acquire */
 
-/* Release by GEOMETRY (claim_release.token == 0): the caller never learned the
- * absolute bytes it holds -- a SEEK_END lock is resolved down here and the
- * resolution is never reported back -- so it names the range to drop in exactly
- * the spelling it named the lock, and this side resolves EOF again.  Every
- * record of this owner's that overlaps the resolved range goes, each unlocked
- * over its own bytes so the kernel is left holding precisely what the registry
- * still describes.  Matching nothing is success. */
+/* Token-zero release means exactly this geometry. Typed owners retain their
+ * descriptor anchor until whole-owner cleanup. Legacy token records are carved
+ * with all split storage allocated before the kernel unlock. */
 static void
 chimera_io_uring_claim_release_ranged(
     struct chimera_vfs_request     *request,
@@ -3121,128 +3238,143 @@ chimera_io_uring_claim_release_ranged(
 {
     struct chimera_io_uring_shared     *shared = thread->shared;
     struct chimera_io_uring_range_file *file;
-    struct chimera_io_uring_range      *range, *tmp, *matched = NULL;
-    struct flock                        fl     = { 0 };
-    uint64_t                            offset = request->claim_release.offset;
-    uint64_t                            length = request->claim_release.length;
-    int                                 err    = 0;
-
-    pthread_mutex_lock(&shared->range_lock);
-
-    file = chimera_io_uring_range_file_find(shared,
-                                            request->fh,
-                                            request->fh_len,
-                                            request->fh_hash,
-                                            &request->claim_release.owner);
-
-    if (file) {
-        /* Pin it across the syscalls below, which run unlocked. */
-        file->refcnt++;
-    }
-
-    pthread_mutex_unlock(&shared->range_lock);
-
-    if (!file) {
-        /* This owner locks nothing on this file, so there is nothing of ours
-         * to drop and no size worth resolving against. */
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
-    }
-
-    if (request->claim_release.whence == SEEK_END) {
-        /* offset and length are bit-casts of the caller's signed l_start and
-         * l_len and keep POSIX's conventions: l_len 0 is to-EOF and a negative
-         * l_len runs backwards from l_start.  The descriptor is the one the
-         * locks were taken through, so its size is the one the kernel would
-         * resolve an F_UNLCK against. */
-        struct stat st;
-        int64_t     start = (int64_t) offset;
-        int64_t     len   = (int64_t) length;
-
-        if (fstat(file->fd, &st) < 0) {
-            err = errno;
-        } else {
-            start += (int64_t) st.st_size;
-
-            if (len < 0) {
-                start += len;
-                len    = -len;
-            }
-
-            if (start < 0) {
-                err = EINVAL;
-            } else {
-                offset = (uint64_t) start;
-                length = (len == 0) ? UINT64_MAX : (uint64_t) len;
-            }
-        }
-    }
+    struct chimera_io_uring_range      *range, *tmp, *pieces = NULL;
+    struct flock                        fl;
+    uint64_t                            offset   = request->claim_release.offset;
+    uint64_t                            length   = request->claim_release.length;
+    bool                                anchored = false;
+    bool                                whole    = request->claim_release.whence == SEEK_SET && offset == 0 && length ==
+        UINT64_MAX;
+    int                                 err = chimera_io_uring_geometry_flock(request->claim_release.whence,
+                                                                              offset, length, F_UNLCK, &fl);
 
     if (err) {
-        pthread_mutex_lock(&shared->range_lock);
-        chimera_io_uring_range_file_put(shared, file);
-        pthread_mutex_unlock(&shared->range_lock);
-
         request->status = chimera_linux_errno_to_status(err);
         request->complete(request);
         return;
     }
-
     pthread_mutex_lock(&shared->range_lock);
-
+    file = chimera_io_uring_range_file_find(shared, request->fh, request->fh_len,
+                                            request->fh_hash, &request->claim_release.owner);
+    if (!file) {
+        if (request->claim_release.whence == SEEK_END) {
+            /* Even an owner with no locks must reject invalid EOF-relative
+            * geometry. A temporary descriptor lets the kernel validate the
+            * original signed range atomically against its current size. */
+            file = chimera_io_uring_range_file_get(thread, request->fh, request->fh_len,
+                                                   request->fh_hash, &request->claim_release.owner);
+            if (!file) {
+                err = errno;
+            } else {
+                if (fcntl(file->fd, CHIMERA_IO_URING_LOCK_SET, &fl) < 0) {
+                    err = errno;
+                }
+                chimera_io_uring_range_file_put(shared, file);
+            }
+        }
+        goto out;
+    }
+    file->refcnt++;
+    for (range = shared->ranges; range; range = range->next) {
+        if (range->file == file && range->owner_anchor) {
+            anchored = true;
+            break;
+        }
+    }
+    if (!anchored && request->claim_release.whence == SEEK_END) {
+        /* Legacy token metadata needs absolute geometry. Typed owners above
+        * never use this approximation: their raw SEEK_END goes to fcntl. */
+        struct stat st;
+        if (fstat(file->fd, &st) < 0) {
+            err = errno;
+            goto put;
+        }
+        __int128    start = (__int128) st.st_size + (int64_t) offset;
+        __int128    size  = (int64_t) length;
+        if (size < 0) {
+            start += size;
+            size   = -size;
+        }
+        if (start < 0 || start > INT64_MAX || (size && start + size - 1 > INT64_MAX)) {
+            err = EINVAL;
+            goto put;
+        }
+        offset = start;
+        length = size ? (uint64_t) size : UINT64_MAX;
+        err    = chimera_io_uring_geometry_flock(SEEK_SET, offset, length, F_UNLCK, &fl);
+        if (err) {
+            goto put;
+        }
+    }
+    if (!anchored) {
+        __uint128_t end = length == UINT64_MAX ? ((__uint128_t) 1 << 64) : (__uint128_t) offset + length;
+        for (range = shared->ranges; range; range = range->next) {
+            if (range->file != file || !chimera_vfs_claim_range_overlap_i(range->offset,
+                                                                          range->length ? range->length : UINT64_MAX,
+                                                                          offset, length)) {
+                continue;
+            }
+            __uint128_t stop = range->length ? (__uint128_t) range->offset + range->length : ((__uint128_t) 1 << 64);
+            for (unsigned side = 0; side < 2; side++) {
+                uint64_t start_piece;
+                uint64_t length_piece;
+                if (side == 0 && range->offset < offset) {
+                    start_piece  = range->offset;
+                    length_piece = offset - range->offset;
+                } else if (side == 1 && stop > end) {
+                    start_piece  = end;
+                    length_piece = stop == ((__uint128_t) 1 << 64) ? 0 : stop - end;
+                } else {
+                    continue;
+                }
+                struct chimera_io_uring_range *piece = malloc(sizeof(*piece));
+                if (!piece) {
+                    err = ENOMEM;
+                    goto put;
+                }
+                *piece        = *range;
+                piece->offset = start_piece;
+                piece->length = length_piece;
+                LL_PREPEND(pieces, piece);
+            }
+        }
+    }
+    if (fcntl(file->fd, CHIMERA_IO_URING_LOCK_SET, &fl) < 0) {
+        err = errno;
+        goto put;
+    }
     LL_FOREACH_SAFE(shared->ranges, range, tmp)
     {
-        /* One descriptor per (file handle, owner), so having been taken through
-         * this one is the fh and chimera_claim_owner_equal() test already. */
-        if (range->file != file) {
+        if (range->file != file || (anchored && !whole)) {
             continue;
         }
-
-        /* The record keeps fcntl's spelling, where a length of 0 is to-EOF;
-         * the overlap test speaks the claim wire's, where UINT64_MAX is. */
-        if (!chimera_vfs_claim_range_overlap_i(range->offset,
-                                               range->length ? range->length : UINT64_MAX,
-                                               offset, length)) {
+        if (!whole && !chimera_vfs_claim_range_overlap_i(range->offset,
+                                                         range->length ? range->length : UINT64_MAX, offset, length)) {
             continue;
         }
-
         LL_DELETE(shared->ranges, range);
-        LL_PREPEND(matched, range);
-    }
-
-    pthread_mutex_unlock(&shared->range_lock);
-
-    /* Outside the registry lock, as every other lock syscall on this module is.
-     * F_UNLCK does not block, but the descriptor put below wants the lock and
-     * there is no reason to hold it across a syscall at all. */
-    LL_FOREACH(matched, range)
-    {
-        fl.l_type   = F_UNLCK;
-        fl.l_whence = SEEK_SET;
-        fl.l_start  = (off_t) range->offset;
-        fl.l_len    = (off_t) range->length;
-        fl.l_pid    = 0;
-
-        fcntl(file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
-    }
-
-    pthread_mutex_lock(&shared->range_lock);
-
-    while (matched) {
-        range = matched;
-        LL_DELETE(matched, range);
-        chimera_io_uring_range_file_put(shared, range->file);
+        chimera_io_uring_range_file_put(shared, file);
         free(range);
     }
-
+    while (pieces) {
+        range = pieces;
+        LL_DELETE(pieces, range);
+        file->refcnt++;
+        LL_PREPEND(shared->ranges, range);
+    }
+ put:
+    while (pieces) {
+        range = pieces;
+        LL_DELETE(pieces, range);
+        free(range);
+    }
     chimera_io_uring_range_file_put(shared, file);
-
+ out:
     pthread_mutex_unlock(&shared->range_lock);
-
-    request->status = CHIMERA_VFS_OK;
+    request->status = err ? chimera_linux_errno_to_status(err) : CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_io_uring_claim_release_ranged */
+
 
 static void
 chimera_io_uring_claim_release(
@@ -3251,50 +3383,45 @@ chimera_io_uring_claim_release(
 {
     struct chimera_io_uring_thread *thread = private_data;
     struct chimera_io_uring_shared *shared = thread->shared;
-    struct chimera_io_uring_range  *range;
-    struct flock                    fl = { 0 };
+    struct chimera_io_uring_range  *range, *tmp;
+    int                             err = 0;
 
     --thread->inflight;
-
-    /* claim_release.retained is an AGGREGATE downgrade mask; a RANGE record is
-     * binding and all-or-nothing, so the release simply drops it. */
 
     if (request->claim_release.token == 0 &&
         request->claim_release.klass == CHIMERA_VFS_CLAIM_KLASS_RANGE) {
         chimera_io_uring_claim_release_ranged(request, thread);
         return;
     }
-
     pthread_mutex_lock(&shared->range_lock);
-
-    for (range = shared->ranges; range; range = range->next) {
-        if (range->token == request->claim_release.token) {
-            LL_DELETE(shared->ranges, range);
-            break;
+    /* A geometric carve can leave multiple fragments carrying the original
+     * token. Releasing that token still releases all of its surviving bytes. */
+    LL_FOREACH_SAFE(shared->ranges, range, tmp)
+    {
+        if (range->token != request->claim_release.token) {
+            continue;
         }
+        if (range->projected) {
+            struct flock fl = {
+                .l_type  = F_UNLCK,       .l_whence             = SEEK_SET,
+                .l_start = range->offset, .l_len                = range->length,
+            };
+            if (fcntl(range->file->fd, CHIMERA_IO_URING_LOCK_SET, &fl) < 0) {
+                err = errno;
+                break;
+            }
+        }
+        LL_DELETE(shared->ranges, range);
+        if (range->file) {
+            chimera_io_uring_range_file_put(shared, range->file);
+        }
+        free(range);
     }
-
     pthread_mutex_unlock(&shared->range_lock);
-
-    if (range && range->projected) {
-        fl.l_type   = F_UNLCK;
-        fl.l_whence = SEEK_SET;
-        fl.l_start  = (off_t) range->offset;
-        fl.l_len    = (off_t) range->length;
-        fl.l_pid    = 0;
-
-        fcntl(range->file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
-
-        pthread_mutex_lock(&shared->range_lock);
-        chimera_io_uring_range_file_put(shared, range->file);
-        pthread_mutex_unlock(&shared->range_lock);
-    }
-
-    free(range);
-
-    request->status = CHIMERA_VFS_OK;
+    request->status = err ? chimera_linux_errno_to_status(err) : CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_io_uring_claim_release */
+
 
 static void
 chimera_io_uring_get_xattr(

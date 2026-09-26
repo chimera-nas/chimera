@@ -51,14 +51,35 @@ chimera_nfs4_access_requested(
  */
 void
 chimera_nfs4_access_fill(
-    struct nfs_request *req,
-    struct ACCESS4res  *res,
-    uint32_t            requested,
-    uint32_t            granted)
+    struct nfs_request             *req,
+    struct ACCESS4res              *res,
+    uint32_t                        requested,
+    uint32_t                        granted,
+    const struct chimera_vfs_attrs *attr)
 {
     res->status           = NFS4_OK;
     res->resok4.supported = requested;
     res->resok4.access    = chimera_nfs4_access_from_granted(requested, granted);
+
+    /* RFC 8881 18.1.4: even privileged callers may receive EXECUTE only
+     * when a mode execute bit or an ALLOW ACE marks the object executable.
+     * This ACCESS reporting rule does not change the shared DAC engine. */
+    if (res->resok4.access & ACCESS4_EXECUTE) {
+        bool                      executable = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && (attr->va_mode & 0111);
+        const struct chimera_acl *acl        = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
+        if (!executable && acl) {
+            for (uint32_t i = 0; i < acl->num_aces; i++) {
+                if (acl->aces[i].type == CHIMERA_ACE_ALLOWED &&
+                    (acl->aces[i].access_mask & CHIMERA_ACE_EXECUTE)) {
+                    executable = true;
+                    break;
+                }
+            }
+        }
+        if (!executable) {
+            res->resok4.access &= ~ACCESS4_EXECUTE;
+        }
+    }
 
     /* A read-only export never grants write-class access, regardless of what
      * the ACL/mode would allow.  `supported` stays unmasked: the bits were
@@ -80,9 +101,8 @@ chimera_nfs4_access_complete(
     struct ACCESS4res  *res  = &req->res_compound.resarray[req->index].opaccess;
     uint32_t            requested, granted;
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
@@ -96,7 +116,8 @@ chimera_nfs4_access_complete(
     granted = chimera_vfs_access_check(attr, &req->cred,
                                        chimera_nfs4_access4_to_mask(requested));
 
-    chimera_nfs4_access_fill(req, res, requested, granted);
+    chimera_nfs4_access_fill(req, res, requested, granted, attr);
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_access_complete */

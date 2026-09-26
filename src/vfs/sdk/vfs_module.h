@@ -28,7 +28,8 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION            2
+/* Version 5 adds the VFS-owned creation outcome to handle-state descriptors. */
+#define CHIMERA_VFS_SDK_VERSION            5
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -155,7 +156,7 @@ chimera_vfs_open_handle_retained(
 
 /* Opaque key/value record the caller asks the backend to persist atomically
  * as part of an open/create.  The VFS layer never interprets the bytes; for
- * the SMB server the key is "smbdh\0"+CreateGuid and the value is a serialized
+ * the SMB server the key includes the persistent FileId and the value is a serialized
  * persistent-handle record.  Stored in the backend's KV namespace, so it can
  * later be enumerated with chimera_vfs_search_keys and removed with
  * chimera_vfs_delete_key (clear-on-close / reap need not be atomic). */
@@ -164,6 +165,9 @@ struct chimera_vfs_handle_state {
     uint32_t    key_len;
     const void *value;
     uint32_t    value_len;
+    /* VFS-owned output for OPEN_AT: the filesystem created the entry even if
+     * subsequent record persistence fails. Not proof of record storage. */
+    uint8_t     r_created;
 };
 
 /* If set, module supports extended attributes via
@@ -178,10 +182,9 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_XATTR_CREATE              1 /* must not already exist */
 #define CHIMERA_VFS_XATTR_REPLACE             2 /* must already exist */
 
-/* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute, so the NFS
- * server can store per-file pNFS layout state on it and hand out pNFS layouts.
- * This is the "orchestrated" model: the module is a passive vessel and the NFS
- * server produces the layout (creating data-server backing files itself). */
+/* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute. This
+ * storage capability alone does not imply coherent pNFS data routing and must
+ * not be used to advertise or grant an independently writable DS backing. */
 #define CHIMERA_VFS_CAP_LAYOUT                (1U << 14)
 
 /* Module SOURCES the layout itself: it already knows where a file's data
@@ -313,6 +316,20 @@ struct chimera_vfs_handle_state {
 * Application Data Block -- writing a repeated pattern across a run of blocks --
 * via chimera_vfs_write_same.  Modules that leave this unset surface ENOTSUP. */
 #define CHIMERA_VFS_CAP_WRITE_SAME            (1U << 28)
+/* REMOVE_AT atomically compares child_fh before unlinking and reports
+ * r_unmatched without removing a replacement name. No lookup/remove fallback. */
+#define CHIMERA_VFS_CAP_REMOVE_MATCH_FH        (1ULL << 30)
+/* Atomic destination-absence check and rename, never a lookup/rename fallback. */
+#define CHIMERA_VFS_CAP_RENAME_NOREPLACE       (1ULL << 31)
+/* Atomic expected source FH comparison and rename; mismatch returns ESTALE. */
+#define CHIMERA_VFS_CAP_RENAME_MATCH_FH        (1ULL << 32)
+/* REMOVE_STREAM compares the complete expected stream FH atomically with
+ * unlinking its name. A mismatched name binding returns ESTALE unchanged. */
+#define CHIMERA_VFS_CAP_REMOVE_STREAM_MATCH_FH (1ULL << 33)
+/* Atomic occupied destination FH comparison; mismatch/absence returns ESTALE. */
+#define CHIMERA_VFS_CAP_RENAME_MATCH_DEST_FH   (1ULL << 34)
+/* Successful RENAME always reports MOVED or same-inode NOOP atomically. */
+#define CHIMERA_VFS_CAP_RENAME_OUTCOME         (1ULL << 35)
 
 struct chimera_vfs_module {
     /* Required

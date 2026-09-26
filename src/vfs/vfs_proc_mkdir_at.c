@@ -21,13 +21,15 @@ chimera_vfs_mkdir_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_mkdir_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                request->mkdir_at.handle->fh,
-                                request->mkdir_at.handle->fh_len,
-                                CHIMERA_VFS_NOTIFY_DIR_ADDED,
-                                request->mkdir_at.name,
-                                request->mkdir_at.name_len,
-                                NULL, 0);
+        if (!(request->mkdir_at.flags & CHIMERA_VFS_MKDIR_NO_NOTIFY)) {
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->mkdir_at.handle->fh,
+                                    request->mkdir_at.handle->fh_len,
+                                    CHIMERA_VFS_NOTIFY_DIR_ADDED,
+                                    request->mkdir_at.name,
+                                    request->mkdir_at.name_len,
+                                    NULL, 0);
+        }
 
         chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       request->mkdir_at.handle->fh_hash,
@@ -77,6 +79,7 @@ chimera_vfs_mkdir_at_dispatch(
     const char                     *name,
     int                             namelen,
     struct chimera_vfs_attrs       *attr,
+    uint32_t                        flags,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
@@ -154,6 +157,7 @@ chimera_vfs_mkdir_at_dispatch(
     request->mkdir_at.handle                      = handle;
     request->mkdir_at.name                        = name;
     request->mkdir_at.name_len                    = namelen;
+    request->mkdir_at.flags                       = flags;
     request->mkdir_at.name_hash                   = name_hash;
     request->mkdir_at.set_attr                    = attr;
     request->mkdir_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
@@ -181,6 +185,7 @@ struct chimera_vfs_mkdir_at_gate {
     const char                     *name;
     int                             namelen;
     struct chimera_vfs_attrs       *attr;
+    uint32_t                        flags;
     uint64_t                        attr_mask;
     uint64_t                        pre_attr_mask;
     uint64_t                        post_attr_mask;
@@ -205,7 +210,7 @@ chimera_vfs_mkdir_at_gate_complete(
     }
 
     chimera_vfs_mkdir_at_dispatch(gate->thread, gate->cred, gate->handle,
-                                  gate->name, gate->namelen, gate->attr,
+                                  gate->name, gate->namelen, gate->attr, gate->flags,
                                   gate->attr_mask, gate->pre_attr_mask,
                                   gate->post_attr_mask, gate->callback,
                                   gate->private_data);
@@ -213,13 +218,14 @@ chimera_vfs_mkdir_at_gate_complete(
 } /* chimera_vfs_mkdir_at_gate_complete */
 
 SYMBOL_EXPORT void
-chimera_vfs_mkdir_at(
+chimera_vfs_mkdir_at_flags(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
     struct chimera_vfs_attrs       *attr,
+    uint32_t                        flags,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
@@ -241,6 +247,7 @@ chimera_vfs_mkdir_at(
         gate->name           = name;
         gate->namelen        = namelen;
         gate->attr           = attr;
+        gate->flags          = flags;
         gate->attr_mask      = attr_mask;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
@@ -256,7 +263,25 @@ chimera_vfs_mkdir_at(
         return;
     }
 
-    chimera_vfs_mkdir_at_dispatch(thread, cred, handle, name, namelen, attr,
+    chimera_vfs_mkdir_at_dispatch(thread, cred, handle, name, namelen, attr, flags,
                                   attr_mask, pre_attr_mask, post_attr_mask,
                                   callback, private_data);
-} /* chimera_vfs_mkdir_at */
+} /* chimera_vfs_mkdir_at_flags */
+
+SYMBOL_EXPORT void
+chimera_vfs_mkdir_at(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    const char                    *name,
+    int                            namelen,
+    struct chimera_vfs_attrs       *attr,
+    uint64_t                       attr_mask,
+    uint64_t                       pre_attr_mask,
+    uint64_t                       post_attr_mask,
+    chimera_vfs_mkdir_at_callback_t callback,
+    void                          *private_data)
+{
+    chimera_vfs_mkdir_at_flags(thread, cred, handle, name, namelen, attr, 0,
+        attr_mask, pre_attr_mask, post_attr_mask, callback, private_data);
+}

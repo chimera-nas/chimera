@@ -14,6 +14,17 @@ target_link_libraries(fuse_sim_probe chimera_server chimera_vfs chimera_common c
 
 add_test(NAME chimera/fuse/sim/probe COMMAND fuse_sim_probe)
 
+add_executable(fuse_lock_compound_test fuse_lock_compound_test.c)
+target_link_libraries(fuse_lock_compound_test
+    chimera_server chimera_vfs chimera_common chimera_metrics dl)
+target_link_options(fuse_lock_compound_test PRIVATE -Wl,--export-dynamic)
+add_test(NAME chimera/fuse/sim/compound_locks COMMAND fuse_lock_compound_test)
+set_tests_properties(chimera/fuse/sim/compound_locks PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_compound_locks"
+    TIMEOUT 90
+    LABELS "fuse")
+
+
 set_tests_properties(chimera/fuse/sim/probe PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_sim_probe"
     TIMEOUT 60

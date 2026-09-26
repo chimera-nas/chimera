@@ -90,10 +90,12 @@ chimera_nfs4_open_acquire_share(
     state->share_claim.revoked_cb  = nfs_client_lease_revoked_cb;
     state->share_claim.cb_private  = state->owner->client;
 
+    struct chimera_vfs_claim_conflict conflict;
     result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
-                                           &state->share_claim, NULL);
-    if (result == CHIMERA_CLAIM_BREAKING) {
-        /* The conflict is a breakable holder -- an NFSv4 delegation being
+                                           &state->share_claim, &conflict);
+    if (result == CHIMERA_CLAIM_BREAKING || conflict.admission_fenced) {
+        /* An insertion fence is transient coordination, not a share denial.
+         * Otherwise the conflict is a breakable holder -- an NFSv4 delegation being
          * recalled (try_acquire already kicked the break).  Tell the client to
          * retry; by the next attempt the delegation's DELEGRETURN should have
          * released the claim and the SHARE will be granted (RFC 7530 §10.2
@@ -289,6 +291,23 @@ chimera_nfs4_open_grant_delegation(
         return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
 
+    struct chimera_vfs_attrs projected_attr;
+    if (deleg_type == OPEN_DELEGATE_WRITE) {
+        if (!nfs4_change_register(thread->shared->nfs4_state_table.change_table, req->fh, req->fhlen)) {
+            return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
+        }
+        if (file_attr) {
+            struct nfs4_change_observation *observation;
+            projected_attr = *file_attr;
+            if (nfs4_change_project(thread->shared->nfs4_state_table.change_table,
+                                    req->fh, req->fhlen, &projected_attr, &req->change_observations,
+                                    &observation) != NFS4_OK) {
+                return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
+            }
+            file_attr = &projected_attr;
+        }
+    }
+
     deleg = nfs_delegation_create(client, deleg_type,
                                   req->fh, req->fhlen, fh_hash,
                                   req->export_id,
@@ -321,18 +340,6 @@ chimera_nfs4_open_grant_delegation(
     }
     deleg->file_state = file_state;
 
-    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
-                                           &deleg->claim, NULL);
-    if (result != CHIMERA_CLAIM_GRANTED) {
-        /* Contention (another open / claim): just decline to delegate. */
-        chimera_vfs_state_put(vfs_state, file_state);
-        deleg->file_state = NULL;
-        nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
-                               thread->vfs_thread);
-        return chimera_nfs4_open_deleg_none(req, res, WND4_CONTENTION);
-    }
-    deleg->lease_held = true;
-
     /* RFC 7530/8881 §10.4.3: cache the file's change attribute at grant (sc).
      * Only meaningful for a write delegation (the holder can modify locally);
      * captured when the OPEN path supplied the change-derivation attrs.  If they
@@ -348,6 +355,18 @@ chimera_nfs4_open_grant_delegation(
         deleg->combine_valid = true;
         pthread_mutex_unlock(&deleg->combine_lock);
     }
+
+    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
+                                           &deleg->claim, NULL);
+    if (result != CHIMERA_CLAIM_GRANTED) {
+        /* Contention (another open / claim): just decline to delegate. */
+        chimera_vfs_state_put(vfs_state, file_state);
+        deleg->file_state = NULL;
+        nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
+                               thread->vfs_thread);
+        return chimera_nfs4_open_deleg_none(req, res, WND4_CONTENTION);
+    }
+    deleg->lease_held = true;
 
     res->resok4.delegation.delegation_type = deleg_type;
 
@@ -479,6 +498,17 @@ chimera_nfs4_open_install_state(
         nfs_open_owner_put(req->open_4_0_owner);
         nfs_open_owner_get(owner);
         req->open_4_0_owner = owner;
+    }
+
+    /* Another request has reserved this owner's first OPEN or pending CLOSEs
+     * for a compound. Do not install/coalesce behind its acceptance boundary. */
+    pthread_mutex_lock(&client->lock);
+    bool compound_pending = owner->compound_pending != NULL || owner->compound_close_count != 0 ||
+        owner->compound_reservation != NULL;
+    pthread_mutex_unlock(&client->lock);
+    if (compound_pending) {
+        status = NFS4ERR_DELAY;
+        goto err_release_handle;
     }
 
     /* RFC 7530 §9.10: check share-mode conflict against opens by *other*
@@ -651,14 +681,12 @@ chimera_nfs4_open_finish(
 
         pthread_mutex_lock(&owner->lock);
         owner->seqid = args->seqid;
-        nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
-                           status == NFS4_OK ? &res->resok4.stateid : NULL);
-        /* RFC 7530 §9.1.7 wants the stored last response replayed verbatim.
-         * rflags carries OPEN4_RESULT_CONFIRM (§16.18.5), which a client may
-         * act on, so keep it alongside the stateid. */
-        if (status == NFS4_OK) {
-            owner->replay.rflags = res->resok4.rflags;
-        }
+        res->status  = status;
+        /* The output FH is part of OPEN's effect on its compound cursor.
+         * Own it alongside the complete reply, including delegation permission
+         * bytes, before request buffers are returned. */
+        chimera_nfs_abort_if(!nfs4_replay_record_open(&owner->replay, args->seqid, res, req->fh, req->fhlen),
+                             "OPEN reply exceeds owned replay snapshot bounds");
         pthread_mutex_unlock(&owner->lock);
     }
 
@@ -807,6 +835,10 @@ chimera_nfs4_open_complete(
 void
 chimera_nfs4_open_resume_after_probe(struct nfs_request *req)
 {
+    if (req->compound_probe_resume) {
+        req->compound_probe_resume(req);
+        return;
+    }
     struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
     bool             deferred;
 
@@ -1792,32 +1824,44 @@ chimera_nfs4_open_4_0_entry(
             &created);
 
         pthread_mutex_lock(&owner->lock);
-        int                    cls = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
-                                                               args->seqid);
+        /* A compound owns both state and the owner-seqid snapshot until its
+         * finish is accepted. Reject a new legacy borrower before it can run
+         * VFS work or publish a consuming error into that reserved replay. */
+        if (owner->compound_reservation) {
+            pthread_mutex_unlock(&owner->lock);
+            nfs_open_owner_put(owner);
+            res->status = NFS4ERR_DELAY;
+            *status     = NFS4ERR_DELAY;
+            return true;
+        }
+        int cls = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
+                                            args->seqid);
+
+        if (cls == NFS4_SEQID_REPLAY && owner->replay.op != OP_OPEN) {
+            cls = NFS4_SEQID_BAD;
+        }
 
         if (cls == NFS4_SEQID_REPLAY) {
-            /* Return the cached reply.  Simplified replay (status, stateid
-             * and rflags); cinfo/attrset/delegation are reconstructed as
-             * zero/none.  Linux clients tolerate that since they re-fetch
-             * attrs via GETATTR after OPEN.
-             *
-             * rflags is replayed rather than zeroed: RFC 7530 §9.1.7 requires
-             * the stored last response, and dropping OPEN4_RESULT_CONFIRM
-             * (§16.18.5) tells a retransmitting client the opposite of what
-             * the original reply said about its OPEN_CONFIRM obligation.
-             *
-             * A retransmit on the SAME connection is normally answered
-             * byte-exact by the v4.0 reply cache before the compound is
-             * even decoded (nfs4_v40_drc.c), so this branch is reached
-             * only when the retransmit arrives on a new connection. */
-            res->status                            = owner->replay.status;
-            res->resok4.stateid                    = owner->replay.stateid;
-            res->resok4.cinfo.atomic               = 0;
-            res->resok4.cinfo.before               = 0;
-            res->resok4.cinfo.after                = 0;
-            res->resok4.rflags                     = owner->replay.rflags;
-            res->resok4.num_attrset                = 0;
-            res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+            uint32_t *attrset = NULL;
+            uint8_t  *who     = NULL;
+            uint32_t  fh_len;
+            if (owner->replay.status == NFS4_OK && owner->replay.open_valid &&
+                owner->replay.open.num_attrset) {
+                attrset = xdr_dbuf_alloc_space(3 * sizeof(uint32_t), req->encoding->dbuf);
+                chimera_nfs_abort_if(!attrset, "OPEN replay attrset allocation failed");
+            }
+            if (owner->replay.status == NFS4_OK && owner->replay.open_valid &&
+                owner->replay.open.delegation_who_len) {
+                who = xdr_dbuf_alloc_space(owner->replay.open.delegation_who_len, req->encoding->dbuf);
+                chimera_nfs_abort_if(!who, "OPEN replay delegation allocation failed");
+            }
+            if (nfs4_replay_fill_open(&owner->replay, res, attrset, req->fh, &fh_len, who)) {
+                if (res->status == NFS4_OK) {
+                    req->fhlen = fh_len;
+                }
+            } else {
+                res->status = NFS4ERR_BAD_SEQID;
+            }
             pthread_mutex_unlock(&owner->lock);
             /* Early return before the borrow ref transfers to the request;
              * release it here. */

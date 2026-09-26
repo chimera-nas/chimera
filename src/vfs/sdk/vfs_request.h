@@ -125,6 +125,9 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OPEN_READ_ONLY              (1U << 4)
 #define CHIMERA_VFS_OPEN_EXCLUSIVE              (1U << 5)
 #define CHIMERA_VFS_OPEN_NOFOLLOW               (1U << 6)
+/* Strict identity check for REMOVE_STREAM; requires the matching capability. */
+#define CHIMERA_VFS_REMOVE_STREAM_MATCH_FH      (1U << 0)
+
 /* Replace an existing file's contents on open: truncate to zero and apply
  * set_attr (used for the SMB OVERWRITE / OVERWRITE_IF / SUPERSEDE
  * dispositions).  Backends that do not honor it simply open the file. */
@@ -197,6 +200,27 @@ struct chimera_vfs_mount_options {
  * synchronous recall.  Callers with their own recall scheme (e.g. NFSv4, which
  * breaks the delegation and returns NFS4ERR_DELAY) leave it clear. */
 #define CHIMERA_VFS_REMOVE_RECALL               (1U << 2)
+/* Frontend publishes namespace/delete notifications after compound acceptance. */
+#define CHIMERA_VFS_REMOVE_NO_NOTIFY            (1U << 3)
+
+/* Frontend publishes creation only after compound acceptance. */
+#define CHIMERA_VFS_MKDIR_NO_NOTIFY             (1U << 0)
+#define CHIMERA_VFS_SYMLINK_NO_NOTIFY           (1U << 0)
+#define CHIMERA_VFS_MKNOD_NO_NOTIFY             (1U << 0)
+
+/* RENAME flags also accept REMOVE_RECALL for historical callers. */
+#define CHIMERA_VFS_RENAME_SRC_IS_DIR           (1U << 0)
+#define CHIMERA_VFS_RENAME_NOREPLACE            (1U << 3)
+#define CHIMERA_VFS_RENAME_NO_NOTIFY            (1U << 4)
+#define CHIMERA_VFS_RENAME_MATCH_SOURCE_FH      (1U << 5)
+/* target_fh is an immutable expected occupied destination, checked atomically. */
+#define CHIMERA_VFS_RENAME_MATCH_DEST_FH        (1U << 6)
+
+enum chimera_vfs_rename_outcome {
+    CHIMERA_VFS_RENAME_OUTCOME_UNKNOWN,
+    CHIMERA_VFS_RENAME_OUTCOME_MOVED,
+    CHIMERA_VFS_RENAME_OUTCOME_NOOP,
+};
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE         0x01
@@ -220,6 +244,9 @@ struct chimera_vfs_mount_options {
 /* RANGE claim flags (claim_acquire.flags) */
 #define CHIMERA_VFS_CLAIM_WAIT                  (1U << 0) /* block until grantable (F_SETLKW) */
 #define CHIMERA_VFS_CLAIM_TEST                  (1U << 1) /* probe only, do not acquire (F_GETLK) */
+/* Typed POSIX replacement: atomically replace same-owner overlap, preserving
+ * coverage outside the requested interval. Legacy token grants omit this. */
+#define CHIMERA_VFS_CLAIM_REPLACE               (1U << 2)
 
 /* Readdir flags */
 #define CHIMERA_VFS_READDIR_EMIT_DOT            (1U << 0) /* Emit "." and ".." entries */
@@ -568,6 +595,7 @@ struct chimera_vfs_request {
      * is the per-file state whose implicit lease this request has pinned
      * (NULL on the fast path where nothing was pinned). */
     struct chimera_claim_actor         io_owner;
+    struct chimera_vfs_io_view         io_view;
     uint8_t                            io_owner_valid;
     /* Set when a lease-holding writer must wait out sync_break read caches:
      * the request is parked on the file's io-wait queue until every such
@@ -883,6 +911,10 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_open_handle *handle;
             struct chimera_vfs_attrs       *set_attr;
+            /* An admitted file overwrite also removes alternate streams.
+             * Ordinary size changes preserve them; a named-stream handle
+             * replaces only its own data fork. */
+            bool                            overwrite;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } setattr;
@@ -917,6 +949,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             uint32_t                        name_len;
+            uint32_t                        flags;
             uint64_t                        name_hash;
             struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
@@ -928,6 +961,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             uint32_t                        name_len;
+            uint32_t                        flags;
             uint64_t                        name_hash;
             struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
@@ -1063,6 +1097,7 @@ struct chimera_vfs_request {
              * The op still completes OK, but the post-removal bookkeeping
              * (negative name-cache entry, FILE_REMOVED notify) must be skipped. */
             uint8_t                         r_unmatched;
+            uint8_t                        *unmatched_out; /* optional typed result, request lifetime */
             /* SMB3 directory-lease self-exemption (see link_at): spare the dir
              * lease named by the deleting open's ParentLeaseKey from the
              * FILE_REMOVED break on the parent.  NULL caller = break all. */
@@ -1077,6 +1112,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             int                             namelen;
+            uint32_t                        flags;
             uint64_t                        name_hash;
             const char                     *target;
             int                             targetlen;
@@ -1104,7 +1140,11 @@ struct chimera_vfs_request {
             uint64_t                 new_name_hash;
             const char              *new_name;
             int                      new_namelen;
-            unsigned int             flags;  /* CHIMERA_VFS_REMOVE_* (RECALL) */
+            unsigned int             flags;  /* CHIMERA_VFS_RENAME_* plus REMOVE_RECALL */
+            enum chimera_vfs_rename_outcome r_outcome;
+            enum chimera_vfs_rename_outcome *outcome_result; /* frontend output, VFS-only */
+            uint8_t                  match_source_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                 match_source_fh_len;
             const uint8_t           *target_fh; /* Optional: target FH if known (for silly rename) */
             int                      target_fh_len; /* 0 if target_fh not provided */
             /* Backing store for a target FH the VFS resolved itself (RECALL). */
@@ -1129,6 +1169,7 @@ struct chimera_vfs_request {
             const char              *name;
             int                      namelen;
             unsigned int             replace;
+            unsigned int             flags;
             uint64_t                 name_hash;
             /* SMB3 directory-lease self-exemption: when this link/rename is
              * issued through a handle that supplied a ParentLeaseKey, that
@@ -1430,6 +1471,9 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;       /* base file handle */
             const char                     *name;
             uint32_t                        namelen;
+            uint32_t                        flags;
+            uint8_t                         expected_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                        expected_fh_len;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } remove_stream;

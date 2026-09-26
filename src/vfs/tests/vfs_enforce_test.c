@@ -18,6 +18,7 @@
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -248,6 +249,73 @@ create_as(
     }
     return ctx->status;
 } /* create_as */
+
+static void
+create_compound_cb(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = chimera_vfs_compound_status(compound);
+    ctx->done   = 1;
+} /* create_compound_cb */
+
+/* The same INFERRED create used by NFS3, through either VFS entry point. */
+static enum chimera_vfs_error
+create_inferred_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name,
+    unsigned int                    exclusive,
+    int                             use_compound)
+{
+    struct chimera_vfs_attrs attr = { 0 };
+    unsigned int flags = CHIMERA_VFS_OPEN_CREATE |
+        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_CREATE_REGULAR |
+        exclusive;
+
+    /* A rejected UNCHECKED create must not truncate the existing file. */
+    attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+    attr.va_size     = 0;
+    if (use_compound) {
+        struct chimera_vfs_compound *compound =
+            chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+
+        assert(compound);
+        assert(chimera_vfs_compound_add_putfh(compound, dir->fh,
+                                              dir->fh_len) >= 0);
+        assert(chimera_vfs_compound_add_open(compound, name, strlen(name),
+                                             flags, 0, &attr, 0) >= 0);
+        chimera_vfs_compound_submit(compound, create_compound_cb, ctx);
+        wait_done(ctx);
+        chimera_vfs_compound_free(compound);
+    } else {
+        chimera_vfs_open_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+                            flags, &attr, CHIMERA_VFS_ATTR_FH,
+                            0, 0, openat_cb, ctx);
+        wait_done(ctx);
+        if (ctx->status == CHIMERA_VFS_OK) {
+            chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+        }
+    }
+    return ctx->status;
+} /* create_inferred_as */
+
+static void
+size_unchanged_cb(
+    enum chimera_vfs_error    status,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    assert(status == CHIMERA_VFS_OK);
+    assert(attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+    assert(attr->va_size == 4096);
+    ctx->done = 1;
+} /* size_unchanged_cb */
 
 /* Look `name` up in directory handle `dir` as `cred`; return status. */
 static enum chimera_vfs_error
@@ -497,12 +565,47 @@ main(
         assert(mkdir_as(&ctx, &owner, dir_handle, "sub") == CHIMERA_VFS_OK);
         TEST_PASS("mkdir: non-owner denied, owner allowed (0700 dir)");
 
-        /* Seed a file (as owner) for the lookup/remove checks below.  NOTE:
-         * regular-file creation via open_at is intentionally not VFS-gated
-         * (SMB applies its own create-access check; NFS file-create parent
-         * enforcement is a documented follow-up), so we do not assert a
-         * non-owner create is denied here. */
+        /* Seed a file (as owner) for the lookup/remove checks below. */
         assert(create_as(&ctx, &owner, dir_handle, "kid") == CHIMERA_VFS_OK);
+
+        /* Give everybody WRITE, but retain SEARCH only for the owner.
+         * Both inferred entry points must deny before inspecting the target,
+         * including existing regular files/directories and EXCLUSIVE. */
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0722) == CHIMERA_VFS_OK);
+        assert(lookup_as(&ctx, &owner, dir_handle, "kid") == CHIMERA_VFS_OK);
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, ctx.fh, ctx.fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        {
+            struct chimera_vfs_open_handle *kid     = ctx.handle;
+            const char                     *names[] = { "kid", "sub", "missing" };
+
+            memset(&sattr, 0, sizeof(sattr));
+            sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+            sattr.va_size     = 4096;
+            chimera_vfs_setattr(ctx.vfs_thread, &owner, kid, &sattr,
+                                0, 0, setattr_cb, &ctx);
+            wait_done(&ctx);
+            assert(ctx.status == CHIMERA_VFS_OK);
+            for (int compound = 0; compound < 2; compound++) {
+                for (unsigned int exclusive = 0; exclusive < 2; exclusive++) {
+                    for (unsigned int i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+                        assert(create_inferred_as(&ctx, &other, dir_handle,
+                                                  names[i], exclusive ?
+                                                  CHIMERA_VFS_OPEN_EXCLUSIVE : 0,
+                                                  compound) == CHIMERA_VFS_EACCES);
+                    }
+                }
+            }
+            chimera_vfs_getattr(ctx.vfs_thread, &owner, kid, CHIMERA_VFS_ATTR_SIZE,
+                                size_unchanged_cb, &ctx);
+            wait_done(&ctx);
+            chimera_vfs_release(ctx.vfs_thread, kid);
+            assert(lookup_as(&ctx, &owner, dir_handle, "missing") == CHIMERA_VFS_ENOENT);
+        }
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0700) == CHIMERA_VFS_OK);
+        TEST_PASS("inferred CREATE: parent SEARCH precedes existing type and mutation");
 
         /* lookup needs EXECUTE (search) on the directory. */
         assert(lookup_as(&ctx, &other, dir_handle, "kid") == CHIMERA_VFS_EACCES);

@@ -111,11 +111,15 @@ chimera_nfs4_allocate(
     argarray[1].opputfh.object.data = fh;
     argarray[1].opputfh.object.len  = fhlen;
 
+    /* Session I/O uses the latest version of this state identity. Another
+     * local handle can coalesce an OPEN and advance its version while this
+     * handle still retains the original OPEN reply (RFC 8881 section 8.2.2). */
     /* Op 2: ALLOCATE or DEALLOCATE -- both carry { stateid, offset, length }. */
     if (is_dealloc) {
         argarray[2].argop = OP_DEALLOCATE;
         if (open_state) {
-            argarray[2].opdeallocate.da_stateid = open_state->stateid;
+            argarray[2].opdeallocate.da_stateid       = open_state->stateid;
+            argarray[2].opdeallocate.da_stateid.seqid = 0;
         } else {
             memset(&argarray[2].opdeallocate.da_stateid, 0,
                    sizeof(argarray[2].opdeallocate.da_stateid));
@@ -125,7 +129,8 @@ chimera_nfs4_allocate(
     } else {
         argarray[2].argop = OP_ALLOCATE;
         if (open_state) {
-            argarray[2].opallocate.aa_stateid = open_state->stateid;
+            argarray[2].opallocate.aa_stateid       = open_state->stateid;
+            argarray[2].opallocate.aa_stateid.seqid = 0;
         } else {
             memset(&argarray[2].opallocate.aa_stateid, 0,
                    sizeof(argarray[2].opallocate.aa_stateid));

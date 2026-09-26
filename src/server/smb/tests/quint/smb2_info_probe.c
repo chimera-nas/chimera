@@ -421,6 +421,102 @@ probe_agreement(struct smb2_conn *c)
 /* ---- SET_INFO round trips ----------------------------------------------- */
 
 static void
+probe_set_info_access(struct smb2_conn *c)
+{
+    struct smb2_create_out owner, limited, lookup;
+    const uint32_t         access[] = { FILE_READ_ACCESS, FILE_READ_ATTRIBUTES | 0x2u,
+                                        FILE_READ_ATTRIBUTES | 0x40000u }; /* WRITE_DAC */
+    uint8_t                before[64], after[512], input[128];
+    uint32_t               len, st;
+
+    printf("# --- SET_INFO granted-access checks ---\n");
+    st = smb2_create(c, "setinfo-access.bin", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &owner);
+    CHECK(st == ST_SUCCESS, "setup access-check file -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    memset(input, 0, 20);
+    input[0] = 1;
+    p16(input, 2, 0x8010); /* SELF_RELATIVE | SACL_PRESENT, NULL SACL */
+    st = smb2_set_info_addl(c, SMB2_INFO_SECURITY_T, 0, owner.file_id,
+                            0x8u, input, 20);
+    CHECK(st == ST_ACCESS_DENIED, "full control without ACCESS_SYSTEM_SECURITY cannot set SACL");
+    const uint32_t privileged[] = { 0x01000000u | FILE_READ_ATTRIBUTES,
+                                    0x01000000u | 0x02000000u }; /* MAXIMUM_ALLOWED */
+    for (size_t i = 0; i < sizeof(privileged) / sizeof(privileged[0]); i++) {
+        st = smb2_create(c, "setinfo-access.bin", FILE_OPEN, privileged[i],
+                         FILE_SHARE_RWD, NULL, &lookup);
+        CHECK(st == 0xC0000061u,
+              "guest cannot obtain ACCESS_SYSTEM_SECURITY, including with MAXIMUM_ALLOWED -> 0x%08x", st);
+        if (st == ST_SUCCESS) {
+            smb2_close(c, lookup.file_id);
+        }
+    }
+    for (size_t i = 0; i < sizeof(access) / sizeof(access[0]); i++) {
+        st = smb2_create(c, "setinfo-access.bin", FILE_OPEN, access[i],
+                         FILE_SHARE_RWD, NULL, &limited);
+        CHECK(st == ST_SUCCESS, "setup restricted open %zu -> 0x%08x", i, st);
+        if (st != ST_SUCCESS) {
+            continue;
+        }
+        memset(input, 0, 20);
+        input[0] = 1;
+        p16(input, 2, 0x8010);
+        st = smb2_set_info_addl(c, SMB2_INFO_SECURITY_T, 0, limited.file_id,
+                                0x8u, input, 20);
+        CHECK(st == ST_ACCESS_DENIED, "restricted/WRITE_DAC open cannot set SACL");
+        if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, owner.file_id,
+                     before, sizeof(before), "BasicInformation before denial")) {
+            memset(input, 0, 40);
+            p64(input, 16, 133000000000000000ull);
+            p32(input, 32, 0x2u); /* HIDDEN */
+            st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
+                               limited.file_id, input, 40);
+            CHECK(st == ST_ACCESS_DENIED, "BASIC without WRITE_ATTRIBUTES -> 0x%08x", st);
+            if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, owner.file_id,
+                         after, sizeof(after), "BasicInformation after denial")) {
+                CHECK(g64(before, 16) == g64(after, 16) && g32(before, 32) == g32(after, 32),
+                      "denied BASIC preserved modification time and attributes");
+            }
+        }
+        st = smb2_set_disposition(c, limited.file_id, 1);
+        CHECK(st == ST_ACCESS_DENIED, "DISPOSITION without DELETE -> 0x%08x", st);
+        p32(input, 0, 1);
+        st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40, limited.file_id, input, 4);
+        CHECK(st == ST_ACCESS_DENIED, "DISPOSITION_EX without DELETE -> 0x%08x", st);
+        if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, owner.file_id,
+                     after, sizeof(after), "StandardInformation after denial")) {
+            CHECK(after[20] == 0, "denied disposition did not set delete-pending");
+        }
+        st = smb2_rename(c, limited.file_id, "setinfo-access-moved.bin", 0);
+        CHECK(st == ST_ACCESS_DENIED, "RENAME without DELETE -> 0x%08x", st);
+        int n = ea_put(input, 0, "USER.DENIED", "value", 1);
+        st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
+                           limited.file_id, input, (uint32_t) n);
+        CHECK(st == ST_ACCESS_DENIED, "EA without WRITE_EA -> 0x%08x", st);
+        len = 0;
+        st  = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
+                              owner.file_id, 0, after, sizeof(after), &len);
+        CHECK(st == ST_SUCCESS && len == 0, "denied EA left attribute list empty");
+        smb2_close(c, limited.file_id);
+    }
+    smb2_close(c, owner.file_id);
+    st = smb2_create(c, "setinfo-access.bin", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_SUCCESS, "denied rename/disposition preserved original name");
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+    st = smb2_create(c, "setinfo-access-moved.bin", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "denied rename did not create destination");
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+} /* probe_set_info_access */
+
+static void
 probe_set_info(struct smb2_conn *c)
 {
     struct smb2_create_out co;
@@ -1170,6 +1266,384 @@ probe_refusals(struct smb2_conn *c)
     smb2_close(c, co.file_id);
 } /* probe_refusals */
 
+static void
+probe_namespace_boundaries(struct smb2_conn *c)
+{
+    struct smb2_create_out dir, file, peer, other;
+    uint32_t               st, count = 0;
+
+    printf("# --- directory I/O, same-link rename, and delete timing ---\n");
+    st = smb2_create_opts(c, "boundary-dir", FILE_CREATE, FILE_ALL_ACCESS,
+                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    CHECK(st == ST_SUCCESS, "setup writable directory");
+    if (st == ST_SUCCESS) {
+        st = smb2_write(c, dir.file_id, 0, "x", 1, &count);
+        CHECK(st == 0xC0000010u, "directory WRITE is INVALID_DEVICE_REQUEST -> 0x%08x", st);
+        st = smb2_rename(c, dir.file_id, "boundary-dir", 0);
+        CHECK(st == ST_SUCCESS, "same-link directory rename succeeds -> 0x%08x", st);
+        smb2_close(c, dir.file_id);
+    }
+    st = smb2_create(c, "boundary-self", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &file);
+    CHECK(st == ST_SUCCESS, "setup same-link file");
+    if (st == ST_SUCCESS) {
+        st = smb2_rename(c, file.file_id, "boundary-self", 0);
+        CHECK(st == ST_SUCCESS, "same-link file rename without replace succeeds -> 0x%08x", st);
+        st = smb2_write(c, file.file_id, 0, "retained", 8, &count);
+        CHECK(st == ST_SUCCESS && count == 8, "same-link rename preserves usable handle");
+        smb2_close(c, file.file_id);
+    }
+
+    for (int create_doc = 0; create_doc < 2; create_doc++) {
+        const char *name = create_doc ? "boundary-create-doc" : "boundary-set-doc";
+        st = smb2_create_opts(c, name, FILE_CREATE, FILE_ALL_ACCESS,
+                              FILE_SHARE_RWD, create_doc ? FILE_DELETE_ON_CLOSE : 0,
+                              NULL, &file);
+        CHECK(st == ST_SUCCESS, "setup deletion case %d", create_doc);
+        if (st != ST_SUCCESS) {
+            continue;
+        }
+        st = smb2_create(c, name, FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &peer);
+        CHECK(st == ST_SUCCESS, "peer open before delete marking (%d) -> 0x%08x", create_doc, st);
+        if (st != ST_SUCCESS) {
+            smb2_close(c, file.file_id);
+            continue;
+        }
+        if (!create_doc) {
+            st = smb2_set_disposition(c, file.file_id, 1);
+            CHECK(st == ST_SUCCESS, "mark existing link deleted");
+        }
+        uint8_t pending_info[24];
+        if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, file.file_id,
+                     pending_info, sizeof(pending_info), "delete intent query")) {
+            CHECK(pending_info[20] == !create_doc,
+                  "CREATE mode alone is not pending; SET disposition is (%d)", create_doc);
+        }
+        st = smb2_create(c, name, FILE_OPEN, FILE_READ_ACCESS, 0, NULL, &other);
+        CHECK(st == (create_doc ? ST_SHARING_VIOLATION : ST_DELETE_PENDING),
+              "CREATE-DOC waits for close, SET disposition precedes share conflicts (%d) -> 0x%08x", create_doc, st);
+        if (st == ST_SUCCESS) {
+            smb2_close(c, other.file_id);
+        }
+        smb2_close(c, file.file_id);
+        if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, peer.file_id,
+                     pending_info, sizeof(pending_info), "surviving peer deletion state")) {
+            CHECK(pending_info[20] == 1, "surviving peer reports shared delete-pending (%d)", create_doc);
+        }
+        st = smb2_create(c, name, FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &other);
+        CHECK(st == ST_DELETE_PENDING, "name remains delete-pending until peer closes (%d) -> 0x%08x", create_doc, st);
+        if (st == ST_SUCCESS) {
+            smb2_close(c, other.file_id);
+        }
+        smb2_close(c, peer.file_id);
+        st = smb2_create(c, name, FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &other);
+        CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "last peer close removes pending name (%d) -> 0x%08x", create_doc, st);
+        if (st == ST_SUCCESS) {
+            smb2_close(c, other.file_id);
+        }
+    }
+} /* probe_namespace_boundaries */
+
+static void
+probe_delete_survivor(struct smb2_conn *c)
+{
+    struct smb2_create_out file, peer, lookup, stream;
+    uint32_t               st;
+
+    printf("# --- deferred deletion cancellation and named streams ---\n");
+    st = smb2_create(c, "cancel-deferred", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &file);
+    CHECK(st == ST_SUCCESS, "setup deferred cancellation file");
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_create(c, "cancel-deferred", FILE_OPEN, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &peer);
+    CHECK(st == ST_SUCCESS, "open cancellation survivor");
+    if (st != ST_SUCCESS) {
+        smb2_close(c, file.file_id);
+        return;
+    }
+    CHECK(smb2_set_disposition(c, file.file_id, 1) == ST_SUCCESS, "arm deferred delete");
+    CHECK(smb2_close(c, file.file_id) == ST_SUCCESS, "close delete setter before survivor");
+    st = smb2_rename(c, peer.file_id, "cancel-deferred-moved", 0);
+    CHECK(st == ST_ACCESS_DENIED, "rename of marked source is denied -> 0x%08x", st);
+    CHECK(smb2_set_disposition(c, peer.file_id, 0) == ST_SUCCESS, "survivor cancels deletion");
+    smb2_close(c, peer.file_id);
+    st = smb2_create(c, "cancel-deferred", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_SUCCESS, "cancelled pending record preserves name after last close -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+
+    st = smb2_create(c, "stream-deferred", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &file);
+    CHECK(st == ST_SUCCESS, "setup base for stream last-close");
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_create(c, "stream-deferred:fork", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &stream);
+    CHECK(st == ST_SUCCESS, "open named-stream final holder");
+    if (st != ST_SUCCESS) {
+        smb2_close(c, file.file_id);
+        return;
+    }
+    CHECK(smb2_set_disposition(c, stream.file_id, 1) == ST_SUCCESS, "arm own-stream delete");
+    CHECK(smb2_set_disposition(c, file.file_id, 1) == ST_SUCCESS, "arm base delete");
+    CHECK(smb2_close(c, file.file_id) == ST_SUCCESS, "base close defers while stream holds file");
+    st = smb2_create(c, "stream-deferred", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_DELETE_PENDING, "base remains pending with named stream open -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+    CHECK(smb2_close(c, stream.file_id) == ST_SUCCESS, "final stream close handles both deletion intents");
+    st = smb2_create(c, "stream-deferred", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "final named-stream close removes pending base -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+} /* probe_delete_survivor */
+
+static void
+probe_disposition_validation(struct smb2_conn *c)
+{
+    struct smb2_create_out file, dir, child, lookup;
+    uint8_t                input[40] = { 0 }, info[64];
+    uint32_t               st;
+
+    printf("# --- disposition validation before delete-pending publication ---\n");
+    st = smb2_create(c, "disposition-readonly.bin", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &file);
+    CHECK(st == ST_SUCCESS, "setup readonly disposition file");
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    p32(input, 32, 1); /* FILE_ATTRIBUTE_READONLY */
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
+                       file.file_id, input, sizeof(input));
+    CHECK(st == ST_SUCCESS, "set readonly attribute");
+    st = smb2_set_disposition(c, file.file_id, 1);
+    CHECK(st == 0xC0000121u, "readonly delete rejected with CANNOT_DELETE -> 0x%08x", st);
+    if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, file.file_id,
+                 info, sizeof(info), "readonly disposition nonmutation")) {
+        CHECK(info[20] == 0, "readonly rejection leaves delete-pending clear");
+    }
+    const uint32_t unsupported[] = { 0x5u, 0x9u };
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+        p32(input, 0, unsupported[i]);
+        st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40, file.file_id, input, 4);
+        CHECK(st == ST_NOT_SUPPORTED, "unsupported disposition semantics rejected -> 0x%08x", st);
+    }
+    p32(input, 0, 0x3u); /* DELETE | POSIX_SEMANTICS still needs readonly admission. */
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40, file.file_id, input, 4);
+    CHECK(st == 0xC0000121u, "POSIX delete preserves readonly admission -> 0x%08x", st);
+    p32(input, 0, 0x80000001u);
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40, file.file_id, input, 4);
+    CHECK(st == ST_INVALID_PARAMETER, "unknown disposition flags rejected -> 0x%08x", st);
+    p32(input, 0, 0x11u); /* DELETE | IGNORE_READONLY_ATTRIBUTE */
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40, file.file_id, input, 4);
+    CHECK(st == ST_SUCCESS, "explicit IGNORE_READONLY permits pending deletion -> 0x%08x", st);
+    st = smb2_set_disposition(c, file.file_id, 0);
+    CHECK(st == ST_SUCCESS, "clear pending deletion while still readonly");
+    smb2_close(c, file.file_id);
+    st = smb2_create(c, "disposition-readonly.bin", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_SUCCESS, "rejected/cancelled disposition preserved readonly file");
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+    st = smb2_create(c, "disposition-plain.bin", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &file);
+    CHECK(st == ST_SUCCESS, "setup ordinary disposition file");
+    if (st == ST_SUCCESS) {
+        st = smb2_set_disposition(c, file.file_id, 1);
+        CHECK(st == ST_SUCCESS, "ordinary file accepts delete-pending -> 0x%08x", st);
+        smb2_close(c, file.file_id);
+        st = smb2_create(c, "disposition-plain.bin", FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &lookup);
+        CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "accepted disposition removes file on close");
+        if (st == ST_SUCCESS) {
+            smb2_close(c, lookup.file_id);
+        }
+    }
+
+    st = smb2_create_opts(c, "disposition-dir", FILE_CREATE, FILE_ALL_ACCESS,
+                          FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
+    CHECK(st == ST_SUCCESS, "setup disposition directory");
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_create(c, "disposition-dir\\child", FILE_CREATE, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &child);
+    CHECK(st == ST_SUCCESS, "setup live directory entry");
+    if (st == ST_SUCCESS) {
+        smb2_close(c, child.file_id);
+    }
+    st = smb2_set_disposition(c, dir.file_id, 1);
+    CHECK(st == 0xC0000101u, "nonempty directory delete rejected -> 0x%08x", st);
+    if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, dir.file_id,
+                 info, sizeof(info), "directory disposition nonmutation")) {
+        CHECK(info[20] == 0, "nonempty-directory rejection leaves delete-pending clear");
+    }
+    smb2_close(c, dir.file_id);
+    st = smb2_create(c, "disposition-dir\\child", FILE_OPEN, FILE_READ_ACCESS,
+                     FILE_SHARE_RWD, NULL, &lookup);
+    CHECK(st == ST_SUCCESS, "rejected directory disposition preserved child");
+    if (st == ST_SUCCESS) {
+        smb2_close(c, lookup.file_id);
+    }
+} /* probe_disposition_validation */
+
+/* Queue CLOSE on separate server connections before waiting for either reply.
+ * Alternate CREATE and SET_INFO delete intent and use RO/RW handles so neither
+ * cache-handle identity nor sequential close order can stand in for file state. */
+static void
+probe_concurrent_delete_close(struct smb2_conn *c)
+{
+    struct smb2_conn      *peer_conn = smb2_conn_open(c->env);
+    struct smb2_create_out owner, peer, lookup;
+    uint32_t               st, owner_status, peer_status;
+    char                   name[64];
+
+    smb2_handshake(peer_conn);
+    printf("# --- concurrent last-close deletion ---\n");
+    for (int round = 0; round < 24; round++) {
+        int create_doc = round & 1;
+        snprintf(name, sizeof(name), "concurrent-doc-%d", round);
+        st = smb2_create_opts(c, name, FILE_CREATE, FILE_ALL_ACCESS,
+                              FILE_SHARE_RWD, create_doc ? FILE_DELETE_ON_CLOSE : 0,
+                              NULL, &owner);
+        CHECK(st == ST_SUCCESS, "concurrent DOC owner setup %d", round);
+        if (st != ST_SUCCESS) {
+            continue;
+        }
+        st = smb2_create(peer_conn, name, FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &peer);
+        CHECK(st == ST_SUCCESS, "concurrent DOC peer setup %d", round);
+        if (st != ST_SUCCESS) {
+            smb2_close(c, owner.file_id);
+            continue;
+        }
+        if (!create_doc) {
+            st = smb2_set_disposition(c, owner.file_id, 1);
+            CHECK(st == ST_SUCCESS, "concurrent DOC disposition %d", round);
+        }
+        /* Alternate transport submission order without waiting for completion. */
+        for (int n = 0; n < 2; n++) {
+            int               send_owner = (n == 0) == ((round & 2) == 0);
+            struct smb2_conn *conn       = send_owner ? c : peer_conn;
+            const uint8_t    *fid        = send_owner ? owner.file_id : peer.file_id;
+            int               b          = smb2c_begin(conn, SMB2_CLOSE, 0);
+            uint8_t          *body       = conn->sbuf + b;
+            p16(body, 0, 24);
+            memcpy(body + 8, fid, 16);
+            smb2c_send(conn, 24);
+        }
+        owner_status = smb2c_wait(c);
+        peer_status  = smb2c_wait(peer_conn);
+        CHECK(owner_status == ST_SUCCESS && peer_status == ST_SUCCESS,
+              "both concurrent closes succeed %d -> 0x%08x/0x%08x",
+              round, owner_status, peer_status);
+        st = smb2_create(c, name, FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &lookup);
+        CHECK(st == ST_OBJECT_NAME_NOT_FOUND,
+              "concurrent last close removes name exactly once %d -> 0x%08x", round, st);
+        if (st == ST_SUCCESS) {
+            smb2_close(c, lookup.file_id);
+        }
+    }
+} /* probe_concurrent_delete_close */
+
+/* An explicit POSIX delete retires the name at the deleting close while old
+ * handles retain their object. Recreating that name must not make the final
+ * old close delete the replacement. Ordinary DOC is tested separately above. */
+static void
+probe_posix_delete(struct smb2_conn *c)
+{
+    const char            *names[] = { "posix-delete-base", "posix-delete-stream:held:$DATA" };
+    struct smb2_create_out owner, peer, replacement, lookup;
+    uint8_t                flags[4], bytes[8];
+    uint32_t               st, count, length;
+
+    printf("# --- explicit POSIX deletion with surviving handles ---\n");
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        st = smb2_create(c, names[i], FILE_CREATE, FILE_ALL_ACCESS,
+                         FILE_SHARE_RWD, NULL, &owner);
+        CHECK(st == ST_SUCCESS, "POSIX delete owner setup %zu", i);
+        if (st != ST_SUCCESS) {
+            continue;
+        }
+        st = smb2_write(c, owner.file_id, 0, "old", 3, &count);
+        CHECK(st == ST_SUCCESS && count == 3, "POSIX delete old data %zu", i);
+        st = smb2_create(c, names[i], FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &peer);
+        CHECK(st == ST_SUCCESS, "POSIX delete retained peer %zu", i);
+        if (st != ST_SUCCESS) {
+            smb2_close(c, owner.file_id);
+            continue;
+        }
+        if (i == 0) {
+            uint8_t link_input[128] = { 0 };
+            int     name_len        = utf16le("posix-delete-alias", link_input + 20);
+            p32(link_input, 16, name_len);
+            st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_LINK_INFO_T,
+                               owner.file_id, link_input, 20 + name_len);
+            CHECK(st == ST_SUCCESS, "create surviving hardlink before POSIX delete");
+        }
+        p32(flags, 0, 0x3u); /* DELETE | POSIX_SEMANTICS */
+        st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40, owner.file_id, flags, sizeof(flags));
+        CHECK(st == ST_SUCCESS, "explicit POSIX disposition admitted %zu -> 0x%08x", i, st);
+        st = smb2_close(c, owner.file_id);
+        CHECK(st == ST_SUCCESS, "POSIX deleting close succeeds %zu -> 0x%08x", i, st);
+        st = smb2_create(c, names[i], FILE_CREATE, FILE_ALL_ACCESS,
+                         FILE_SHARE_RWD, NULL, &replacement);
+        CHECK(st == ST_SUCCESS, "POSIX deletion permits exclusive recreation before peer closes %zu -> 0x%08x", i, st);
+        if (st == ST_SUCCESS) {
+            st = smb2_write(c, replacement.file_id, 0, "new", 3, &count);
+            CHECK(st == ST_SUCCESS && count == 3, "replacement data written %zu", i);
+            smb2_close(c, replacement.file_id);
+        }
+        st = smb2_read(c, peer.file_id, 0, sizeof(bytes), bytes, &length);
+        CHECK(st == ST_SUCCESS && length == 3 && memcmp(bytes, "old", 3) == 0,
+              "old peer retains old object after POSIX unlink %zu", i);
+        smb2_close(c, peer.file_id);
+        st = smb2_create(c, names[i], FILE_OPEN, FILE_READ_ACCESS,
+                         FILE_SHARE_RWD, NULL, &lookup);
+        CHECK(st == ST_SUCCESS, "old peer close preserves replacement name %zu", i);
+        if (st == ST_SUCCESS) {
+            st = smb2_read(c, lookup.file_id, 0, sizeof(bytes), bytes, &length);
+            CHECK(st == ST_SUCCESS && length == 3 && memcmp(bytes, "new", 3) == 0,
+                  "replacement bytes survive old peer close %zu", i);
+            smb2_close(c, lookup.file_id);
+        }
+        if (i == 0) {
+            st = smb2_create(c, "posix-delete-alias", FILE_OPEN, FILE_ALL_ACCESS,
+                             FILE_SHARE_RWD, NULL, &lookup);
+            CHECK(st == ST_SUCCESS, "POSIX deletion preserves separate hardlink");
+            if (st == ST_SUCCESS) {
+                st = smb2_set_info(c, SMB2_INFO_FILE_T, 0x40,
+                                   lookup.file_id, flags, sizeof(flags));
+                CHECK(st == ST_SUCCESS, "surviving hardlink accepts independent POSIX deletion");
+                smb2_close(c, lookup.file_id);
+                st = smb2_create(c, "posix-delete-alias", FILE_OPEN, FILE_READ_ACCESS,
+                                 FILE_SHARE_RWD, NULL, &lookup);
+                CHECK(st == ST_OBJECT_NAME_NOT_FOUND,
+                      "consumed deletion marker does not prevent deleting another hardlink");
+                if (st == ST_SUCCESS) {
+                    smb2_close(c, lookup.file_id);
+                }
+            }
+        }
+    }
+} /* probe_posix_delete */
+
 int
 main(
     int   argc,
@@ -1214,6 +1688,12 @@ main(
 
     probe_agreement(c);
     probe_set_info(c);
+    probe_set_info_access(c);
+    probe_disposition_validation(c);
+    probe_namespace_boundaries(c);
+    probe_concurrent_delete_close(c);
+    probe_delete_survivor(c);
+    probe_posix_delete(c);
     probe_ea(c);
     probe_streams(c);
     probe_link(c);

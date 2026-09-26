@@ -320,6 +320,7 @@ struct mbt_env_opts {
     int             metrics_port;
     /* REST bearer/basic authentication.  Only meaningful with rest_port. */
     int             rest_auth;
+    int             rest_debug_fsops;
     /* The other two protocol servers.  Off by default (the NFS suites want
      * nothing else listening); the control-plane suite turns them on because
      * shares and buckets cannot be created on a server whose SMB or S3
@@ -432,6 +433,7 @@ struct mbt_env {
     * reached by the MDS over the inproc transport through the nfs client
     * module (mounted at /ds<i>).  Empty unless opts.pnfs_num_ds > 0. */
     int                          num_ds;
+    unsigned int                 pnfs_trace_index;
     struct chimera_server       *ds_server[MBT_MAX_DS];
     struct prometheus_metrics   *ds_metrics[MBT_MAX_DS];
 
@@ -798,6 +800,30 @@ mbt_pnfs_ds_start(
     chimera_server_config_set_nfs_data_server(config, 1);
     chimera_server_config_set_nfs_server_scope(config, 43 + idx);
 
+    if (strcmp(module, "diskfs") == 0) {
+        char img[360], cfg[640];
+        int  fd;
+
+        snprintf(img, sizeof(img), "%s/device.img", dir);
+        fd = open(img, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0 || ftruncate(fd, 1024LL * 1024 * 1024) != 0) {
+            fprintf(stderr, "pnfs DS device %s: %s\n", img, strerror(errno));
+            exit(1);
+        }
+        close(fd);
+        snprintf(cfg, sizeof(cfg),
+                 "{\"initialize\":true,\"unsafe_async\":true,"
+                 "\"intent_log_size\":67108864,"
+                 "\"devices\":[{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}]}",
+                 CHIMERA_DISKFS_DEVICE_TYPE, img);
+        chimera_server_config_add_module(config, module, NULL, cfg);
+    } else if (strcmp(module, "cairn") == 0) {
+        char cfg[640];
+
+        snprintf(cfg, sizeof(cfg), "{\"initialize\":true,\"path\":\"%s\"}", dir);
+        chimera_server_config_add_module(config, module, NULL, cfg);
+    }
+
     env->ds_server[idx] = chimera_server_init(config, env->ds_metrics[idx]);
     chimera_server_start(env->ds_server[idx]);
 
@@ -870,7 +896,8 @@ mbt_env_open_opts(
      * during its own bring-up below, so they have to be serving by then. */
     env->num_ds = (opts && opts->pnfs_num_ds > MBT_MAX_DS)
         ? MBT_MAX_DS : (opts ? opts->pnfs_num_ds : 0);
-    ds_module = (opts && opts->pnfs_ds_module) ? opts->pnfs_ds_module : "memfs";
+    ds_module = (opts && opts->pnfs_ds_module) ? opts->pnfs_ds_module :
+        ((opts && opts->module) ? opts->module : "memfs");
 
     for (i = 0; i < env->num_ds; i++) {
         mbt_pnfs_ds_start(env, i, ds_module);
@@ -1008,6 +1035,8 @@ mbt_env_open_opts(
             chimera_server_config_set_rest_http_port(config, opts->rest_port);
             chimera_server_config_set_rest_auth_enabled(config,
                                                         opts->rest_auth);
+            chimera_server_config_set_rest_debug_fsops(config,
+                                                        opts->rest_debug_fsops);
         }
         if (opts->disable_caches) {
             chimera_server_config_set_attr_cache_enabled(config, 0);
@@ -1114,6 +1143,15 @@ mbt_env_open_opts(
     if (env->num_ds > 0 && chimera_server_pnfs_resolve(env->server) != 0) {
         fprintf(stderr, "pnfs: MDS failed to resolve a data-server backing root\n");
         exit(1);
+    }
+    for (i = 0; i < env->num_ds; i++) {
+        char path[32];
+
+        snprintf(path, sizeof(path), "/ds%d", i);
+        if (chimera_server_create_export(env->server, path, path, 0, NULL) != 0) {
+            fprintf(stderr, "pnfs: failed to export authoritative root %s\n", path);
+            exit(1);
+        }
     }
 
     /* Client half: its own evpl loop; the reply callbacks run inside
@@ -1250,6 +1288,16 @@ mbt_env_open_opts(
     env->data_buf = malloc(MBT_MAX_DATA);
 } /* mbt_env_open_opts */
 
+static inline struct mbt_result * mbt_mnt(
+    struct mbt_env *env,
+    const char     *path);
+static inline struct mbt_result * mbt_mkdir(
+    struct mbt_env      *env,
+    const struct mbt_fh *dir,
+    const char          *name,
+    uint32_t             name_len,
+    int                  mode);
+
 /* Per-trace filesystem: stand up a fresh, isolated root, mount it at "share",
  * and export it.  Runs on the already-started server -- the trade that lets one
  * process amortize server/client init across every trace of a batch.
@@ -1270,6 +1318,34 @@ mbt_env_fs_setup_as(
     char path[80];
 
     snprintf(path, sizeof(path), "/%s", mntname);
+
+    if (env->num_ds > 0) {
+        char               root[32], backing[128];
+        struct mbt_result *result;
+        struct mbt_fh      root_fh;
+
+        /* MDS and direct DS I/O must address the same file. Each trace gets
+         * a fresh subtree on alternating DS mounts, retaining both device
+         * encodings without inventing a second independent data copy. */
+        snprintf(root, sizeof(root), "/ds%u", env->pnfs_trace_index++ % env->num_ds);
+        result = mbt_mnt(env, root);
+        if (result->rpc_err || result->status || !result->obj_fh.has) {
+            fprintf(stderr, "pnfs: failed to mount backing root %s\n", root);
+            exit(1);
+        }
+        root_fh = result->obj_fh;
+        result  = mbt_mkdir(env, &root_fh, fsname, strlen(fsname), 0777);
+        if (result->rpc_err || result->status) {
+            fprintf(stderr, "pnfs: failed to create trace root %s: %u\n", fsname, result->status);
+            exit(1);
+        }
+        snprintf(backing, sizeof(backing), "%s/%s", root, fsname);
+        if (chimera_server_create_export(env->server, path, backing, 0, NULL) != 0) {
+            fprintf(stderr, "pnfs: failed to export trace root %s\n", backing);
+            exit(1);
+        }
+        return;
+    }
 
     /* Mount and export under the *filesystem's own* name rather than a shared
      * "share", and check every call.
@@ -1365,6 +1441,12 @@ mbt_env_fs_teardown_as(
     snprintf(path, sizeof(path), "/%s", mntname);
 
     chimera_server_remove_export(env->server, path);
+
+    if (env->num_ds > 0) {
+        /* Unique trace subtrees survive until the cluster shuts down. They
+         * cannot alias later traces, and the shared DS mount stays active. */
+        return;
+    }
 
     /* The unmount status was previously discarded, and that is what made a
      * batch run nondeterministic.  Every trace mounts its filesystem under the

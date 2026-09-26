@@ -198,6 +198,15 @@ void chimera_smb_query_directory(
 void chimera_smb_set_info(
     struct chimera_smb_request *request);
 
+/* Retire a legacy CREATE open whose later stage failed. Consumes the CREATE
+ * caller reference, removes any durable backend record through a compound, and
+ * completes the request only after cleanup reaches a terminal result. */
+void chimera_smb_create_failed_open(struct chimera_smb_request *request, uint32_t status);
+
+/* Delays a failed legacy CREATE reply until a stored, unpublished recovery
+ * record has been removed. Returns true when cleanup owns completion. */
+bool chimera_smb_create_cleanup_failed_record(struct chimera_smb_request *request, uint32_t status);
+
 /* Apply a client FILE_FULL_EA_INFORMATION buffer to an open object's xattrs,
  * one EA at a time (shared by SetInfo and CREATE ExtA).  The caller owns ea_buf
  * for the duration; `done` is invoked with the resulting NTSTATUS. */
@@ -311,26 +320,11 @@ void chimera_smb_lock_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
-/* Complete a parked blocking byte-range LOCK on its owning thread with `status`
- * (the stashed grant result, SMB2_STATUS_CANCELLED, or
- * SMB2_STATUS_RANGE_NOT_LOCKED).  Cancels the VFS ticket bookkeeping, installs or
- * tears down the entry, drops the open_file reference the park held, and replies. */
-void chimera_smb_lock_park_finish(
-    struct chimera_smb_request *request,
-    uint32_t                    status);
+/* Signal a waiting compound LOCK under the open's bucket lock. The owning
+ * worker completes it with RANGE_NOT_LOCKED and releases its request pin. */
+void chimera_smb_lock_abort_parked(struct chimera_smb_open_file *open_file);
 
-/* Abort a blocking LOCK parked on `open_file` (handle close, tree disconnect,
- * logoff, or connection teardown): cancel its VFS acquire and complete it with
- * SMB2_STATUS_RANGE_NOT_LOCKED.  No-op when no lock is parked.  Must run on the
- * open's owning thread.  Returns the aborted request (whose open_file reference
- * the caller's completion drops), or NULL. */
-struct chimera_smb_request *
-chimera_smb_lock_abort_parked(
-    struct chimera_server_smb_thread *thread,
-    struct chimera_smb_open_file     *open_file);
-
-/* Drain (release + free) every byte-range lock entry held by `open_file`.
- * Called at close before the underlying VFS handle is released. */
+/* Retire ACCESS, cache and canonical RANGE ownership before handle release. */
 void chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);

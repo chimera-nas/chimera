@@ -60,6 +60,9 @@ struct nlm_lock_entry {
      * acquire callback must tear the entry down instead of completing it.
      * Exactly one of the reaper and the callback frees the entry. */
     bool                               reaped;
+    /* Reserved before LOCK admission: normalized ranges need at most two
+     * boundary fragments, even if the acquire later blocks. */
+    struct nlm_lock_entry             *carve_spare[2];
     struct nlm_lock_entry             *next;
     struct nlm_lock_entry             *prev;
 };
@@ -69,11 +72,13 @@ struct nlm_lock_entry {
  * magic must be first to allow safe type checking via conn private_data.
  */
 struct nlm_client {
-    uint32_t               magic;           /* NLM_CLIENT_MAGIC */
-    uint32_t               conn_count;      /* # active conns with private_data set */
-    char                   hostname[LM_MAXSTRLEN + 1];
-    struct nlm_lock_entry *locks;           /* DL_LIST of active locks */
-    UT_hash_handle         hh;              /* keyed by hostname */
+    uint32_t                   magic;       /* NLM_CLIENT_MAGIC */
+    uint32_t                   conn_count;  /* # active conns with private_data set */
+    char                       hostname[LM_MAXSTRLEN + 1];
+    struct nlm_lock_entry     *locks;       /* DL_LIST of active locks */
+    struct chimera_vfs_claim **carve_previous; /* mutex-protected publication scratch */
+    size_t                     carve_capacity;
+    UT_hash_handle             hh;          /* keyed by hostname */
 };
 
 /*
@@ -170,6 +175,8 @@ nlm_lock_entry_alloc(void)
 static inline void
 nlm_lock_entry_free(struct nlm_lock_entry *entry)
 {
+    free(entry->carve_spare[0]);
+    free(entry->carve_spare[1]);
     free(entry);
 } /* nlm_lock_entry_free */
 

@@ -299,14 +299,16 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 
 static void
 chimera_vfs_setattr_dispatch(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    chimera_vfs_setattr_callback_t  callback,
-    void                           *private_data)
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    bool                              overwrite,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -317,9 +319,14 @@ chimera_vfs_setattr_dispatch(
         return;
     }
 
-    request->opcode         = CHIMERA_VFS_OP_SETATTR;
-    request->complete       = chimera_vfs_setattr_complete;
-    request->setattr.handle = handle;
+    request->opcode            = CHIMERA_VFS_OP_SETATTR;
+    request->complete          = chimera_vfs_setattr_complete;
+    request->setattr.handle    = handle;
+    request->setattr.overwrite = overwrite;
+    if (io_owner) {
+        request->io_owner       = *io_owner;
+        request->io_owner_valid = 1;
+    }
     /* Identify the mutating handle so the caching recall below skips a
      * claim anchored to this same handle (the holder is coherent with its own
      * setattr -- the trigger engine's HOLDER-circle op_handle exemption). */
@@ -348,6 +355,19 @@ chimera_vfs_setattr_dispatch(
      *     coherence. */
     int flush_only = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? 0 : 1;
 
+    /* A caller's legacy LEVEL_II grant has no write coherence: a size set
+     * breaks it even on the same handle. WRITE's trigger makes that
+     * distinction while preserving the caller's own lease or write cache.
+     * Run after authorization, before the blocking peer recall and mutation.
+     * CREATE overwrites already invalidate old grants before admitting their
+     * new caching grant; do not invalidate that fresh grant here. */
+    if (!flush_only && io_owner && !overwrite) {
+        chimera_vfs_claim_invalidate(thread->vfs->vfs_state,
+                                     request->fh, request->fh_len,
+                                     request->fh_hash, CHIMERA_TRIGGER_WRITE,
+                                     io_owner, 0);
+    }
+
     chimera_vfs_io_recall(request, request->fh, request->fh_len,
                           request->fh_hash, flush_only,
                           chimera_vfs_dispatch);
@@ -365,6 +385,9 @@ struct chimera_vfs_setattr_gate {
     struct chimera_vfs_attrs       *set_attr;
     uint64_t                        pre_attr_mask;
     uint64_t                        post_attr_mask;
+    bool                            overwrite;
+    bool                            has_io_owner;
+    struct chimera_claim_actor      io_owner;
     chimera_vfs_setattr_callback_t  callback;
     void                           *private_data;
 };
@@ -556,22 +579,25 @@ chimera_vfs_setattr_gate_complete(
 
     chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->handle,
                                  gate->set_attr, gate->pre_attr_mask,
-                                 gate->post_attr_mask, gate->callback,
+                                 gate->post_attr_mask, gate->overwrite,
+                                 gate->has_io_owner ? &gate->io_owner : NULL, gate->callback,
                                  gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_setattr_gate_complete */
 
 static void
 chimera_vfs_setattr_common(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    int                             fd_rights,
-    chimera_vfs_setattr_callback_t  callback,
-    void                           *private_data)
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    int                               fd_rights,
+    bool                              overwrite,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data)
 {
     struct chimera_vfs_setattr_gate *gate;
     uint32_t                         required;
@@ -612,8 +638,13 @@ chimera_vfs_setattr_common(
             gate->set_attr       = set_attr;
             gate->pre_attr_mask  = pre_attr_mask;
             gate->post_attr_mask = post_attr_mask;
-            gate->callback       = callback;
-            gate->private_data   = private_data;
+            gate->overwrite      = overwrite;
+            gate->has_io_owner   = io_owner != NULL;
+            if (io_owner) {
+                gate->io_owner = *io_owner;
+            }
+            gate->callback     = callback;
+            gate->private_data = private_data;
 
             chimera_vfs_getattr(thread, cred, handle,
                                 CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
@@ -625,7 +656,7 @@ chimera_vfs_setattr_common(
     }
 
     chimera_vfs_setattr_dispatch(thread, cred, handle, set_attr,
-                                 pre_attr_mask, post_attr_mask,
+                                 pre_attr_mask, post_attr_mask, overwrite, io_owner,
                                  callback, private_data);
 } /* chimera_vfs_setattr_common */
 
@@ -641,9 +672,26 @@ chimera_vfs_setattr(
     void                           *private_data)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 0,
+                               pre_attr_mask, post_attr_mask, 0, false, NULL,
                                callback, private_data);
 } /* chimera_vfs_setattr */
+
+SYMBOL_EXPORT void
+chimera_vfs_setattr_owned(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data)
+{
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               pre_attr_mask, post_attr_mask, 0, false, io_owner,
+                               callback, private_data);
+} /* chimera_vfs_setattr_owned */
 
 /* Descriptor-originated setattr (ftruncate/futimens family): mutations whose
  * whole requirement is WRITE_DATA are authorized by the descriptor's
@@ -661,6 +709,43 @@ chimera_vfs_fsetattr(
     void                           *private_data)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 1,
+                               pre_attr_mask, post_attr_mask, 1, false, NULL,
                                callback, private_data);
 } /* chimera_vfs_fsetattr */
+
+SYMBOL_EXPORT void
+chimera_vfs_fsetattr_owned(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data)
+{
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               pre_attr_mask, post_attr_mask, 1, false, io_owner,
+                               callback, private_data);
+}
+
+SYMBOL_EXPORT void
+chimera_vfs_overwrite(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data)
+{
+    if (!(set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) || set_attr->va_size != 0) {
+        callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, private_data);
+        return;
+    }
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               0, post_attr_mask, 0, true, io_owner,
+                               callback, private_data);
+} /* chimera_vfs_overwrite */

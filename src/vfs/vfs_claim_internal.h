@@ -171,12 +171,6 @@ chimera_vfs_claim_begin_break_ex(
     uint32_t                  deadline_ms,
     bool                      one_shot);
 
-/* Pin a cache claim's grant across an unlocked begin_break; caller holds
- * file->lock.  Returns NULL for grant-less claims. */
-struct chimera_vfs_claim_grant *
-chimera_vfs_claim_pin_grant(
-    struct chimera_vfs_claim *claim);
-
 bool
 chimera_vfs_claim_deadline_passed(
     const struct chimera_vfs_claim *claim);
@@ -205,6 +199,7 @@ chimera_vfs_claim_trigger_ns_full(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_open_handle *skip_handle,
+    const struct chimera_claim_actor     *skip_actor,
     bool                                  flush_only);
 
 bool
@@ -294,3 +289,8 @@ chimera_vfs_claim_elapsed_ms(
 {
     return now > then ? chimera_vfs_ticks_to_ns(now - then) / 1000000ULL : 0;
 } /* chimera_vfs_claim_elapsed_ms */
+
+/* Pure two-sided conflict predicate, including class policy and owner circles.
+ * Caller stabilizes both rows; private ACCESS views never recall a holder. */
+bool chimera_vfs_claim_conflicts(const struct chimera_vfs_claim *holder,
+                                const struct chimera_vfs_claim *probe);

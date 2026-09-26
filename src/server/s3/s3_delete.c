@@ -2,108 +2,40 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <stdio.h>
-#include <time.h>
-#include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
-#include "s3_internal.h"
+#include "s3_compound.h"
+
+/* A trailing-slash key denotes the adapter's empty leaf, not its parent
+ * directory. Missing markers are idempotent and never remove descendants. */
+static void
+chimera_s3_delete_marker_done(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    if (*status == CHIMERA_VFS_ENOENT || *status == CHIMERA_VFS_ENOTDIR) {
+        *status = CHIMERA_VFS_OK;
+    }
+} /* chimera_s3_delete_marker_done */
 
 static void
-chimera_s3_delete_remove_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_s3_delete_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     CHIMERA_S3_HOLD_REQUEST(private_data);
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
+    struct chimera_s3_request *request = private_data;
+    enum chimera_vfs_error     status  = chimera_vfs_compound_status(compound);
 
-    chimera_vfs_release(thread->vfs, request->dir_handle);
-
-    if (error_code) {
-        request->status = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
+    if (status != CHIMERA_VFS_OK) {
+        request->status = chimera_s3_compound_error(compound, request, CHIMERA_S3_STATUS_NO_SUCH_KEY);
     }
-
+    chimera_vfs_compound_free(compound);
     request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-        s3_server_respond(evpl, request);
+        s3_server_respond(request->thread->evpl, request);
     }
-
-} /* chimera_s3_delete_remove_callback */
-
-static void
-chimera_s3_delete_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    CHIMERA_S3_HOLD_REQUEST(private_data);
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-
-    if (error_code) {
-        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        chimera_vfs_release(thread->vfs, request->dir_handle);
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(thread->evpl, request);
-        }
-        return;
-    }
-
-    request->dir_handle = oh;
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_remove_at(thread->vfs, &request->cred,
-                          oh,
-                          request->name,
-                          request->name_len,
-                          NULL,
-                          0,
-                          0,
-                          0,
-                          0,
-                          NULL,
-                          chimera_s3_delete_remove_callback,
-                          request);
-
-} /* chimera_s3_put_create_callback */
-
-static void
-chimera_s3_get_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    CHIMERA_S3_HOLD_REQUEST(private_data);
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-
-    if (error_code) {
-        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_NO_SUCH_KEY);
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(thread->evpl, request);
-        }
-        return;
-    }
-
-    chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_open_fh(thread->vfs, &request->cred,
-                        attr->va_fh,
-                        attr->va_fh_len,
-                        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_s3_delete_open_callback,
-                        request);
-}  /* chimera_s3_get_lookup_callback */
+} /* chimera_s3_delete_complete */
 
 void
 chimera_s3_delete(
@@ -111,43 +43,18 @@ chimera_s3_delete(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    const char *slash;
-    const char *dirpath = request->path;
-    int         dirpathlen;
+    struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
 
-    slash = rindex(request->path, '/');
-
-    if (slash) {
-
-        dirpathlen = slash - request->path;
-
-        request->name = slash + 1;
-
-        while (*request->name == '/') {
-            request->name++;
-        }
-
+    if (request->path_len && request->path[request->path_len - 1] == '/') {
+        int index = chimera_vfs_compound_add_remove_at_path(compound,
+                                                            request->path, request->path_len - 1, "", 0,
+                                                            CHIMERA_VFS_REMOVE_ISNOTDIR);
+        chimera_vfs_compound_set_op_callbacks(compound, index, NULL,
+                                              chimera_s3_delete_marker_done, NULL);
     } else {
-        dirpath       = "/";
-        dirpathlen    = 1;
-        request->name = request->path;
+        chimera_vfs_compound_add_remove_path(compound, request->path,
+                                             request->path_len, 0);
     }
-
-    request->name_len = strlen(request->name);
-
-    request->set_attr.va_req_mask = 0;
-    request->set_attr.va_set_mask = 0;
-
-
     chimera_s3_request_get(request);
-
-    chimera_vfs_lookup(thread->vfs, &request->cred,
-                       request->bucket_fh,
-                       request->bucket_fhlen,
-                       dirpath,
-                       dirpathlen,
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_s3_get_lookup_callback,
-                       request);
-} /* chimera_s3_get */
+    chimera_frontend_compound_submit(compound, chimera_s3_delete_complete, request);
+} /* chimera_s3_delete */

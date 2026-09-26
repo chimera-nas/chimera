@@ -121,6 +121,7 @@ static int                              g_nskipped;
 /* Set when the model and chimera have parted ways and the rest of this trace
  * would report consequences rather than findings. */
 static int                              g_abort_trace;
+static size_t                           g_state_index;
 
 /* Settle every server thread so the break notifications a command owes have
  * been delivered -- and so that "no break was sent" is a fact rather than a
@@ -202,11 +203,12 @@ mism(
 {
     va_list ap;
 
-    printf("MISMATCH [%s] ", g_trace);
+    printf("MISMATCH [%s] state %zu: ", g_trace, g_state_index);
     va_start(ap, fmt);
     vprintf(fmt, ap);
     va_end(ap);
     printf("\n");
+    fflush(stdout);
     g_nmismatch++;
 } /* mism */
 
@@ -303,9 +305,8 @@ model_size_blocks(const char *name)
  * and only when it is observable (a file already empty cannot be emptied
  * again).  Returns 1 if the trace should be abandoned.
  *
- * The probe open is attribute-only and non-truncating, so it takes no part in
- * share arbitration in either direction and cannot change what the next
- * modeled command sees. */
+ * Query an already-modeled handle: an extra metadata-only CREATE can park
+ * behind the very break this refusal triggered, preventing the trace's ACK. */
 static int
 check_refused_create_side_effect(
     struct smb2_conn *c,
@@ -314,7 +315,8 @@ check_refused_create_side_effect(
     uint32_t          status)
 {
     const struct smb2_mbt_deviation *d;
-    struct smb2_create_out           out;
+    uint8_t                          info[64];
+    uint32_t                         info_len = 0;
     long long                        want, got;
 
     if (status != ST_SHARING_VIOLATION) {
@@ -330,20 +332,35 @@ check_refused_create_side_effect(
         return 0;
     }
 
-    smb2_create(c, name, FILE_OPEN, FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                NULL, &out);
-    if (out.status != ST_SUCCESS) {
+    json_t *opens   = json_object_get(json_object_get(g_post_sdb, "opens"), "#map");
+    int     queried = 0;
+    for (size_t i = 0; i < json_array_size(opens); i++) {
+        json_t     *entry     = json_array_get(opens, i);
+        json_t     *open      = json_array_get(entry, 1);
+        int64_t     fid       = jint(json_array_get(entry, 0));
+        int64_t     tree      = jfield(open, "tree");
+        const char *open_name = json_string_value(json_object_get(open, "name"));
+        if (!open_name || strcmp(open_name, name) || fid < 0 || fid >= MAX_FID ||
+            !g_fid_known[fid] || !g_conn_for_fid[fid] || tree < 0 || tree >= MAX_TREE) {
+            continue;
+        }
+        c = g_conn_for_fid[fid];
+        uint32_t    saved_tree = c->tree_id;
+        c->tree_id = g_wire_tree[tree];
+        uint32_t    status = smb2_query_info(c, SMB2_INFO_FILE_T,
+                                             SMB2_FILE_STANDARD_INFO_T,
+                                             g_wire_fid[fid], 0, info,
+                                             sizeof(info), &info_len);
+        c->tree_id = saved_tree;
+        if (status == ST_SUCCESS && info_len >= 24) {
+            queried = 1;
+            break;
+        }
+    }
+    if (!queried || g64(info, 8) % BS) {
         return 0;
     }
-    /* The CREATE reply carries EndOfFile, so the size costs no extra round
-     * trip beyond the probe open itself. */
-    smb2_close(c, out.file_id);
-
-    if (out.end_of_file % BS) {
-        return 0;
-    }
-    got = (long long) (out.end_of_file / BS);
+    got = (long long) (g64(info, 8) / BS);
     if (want == got) {
         return 0;
     }
@@ -1011,6 +1028,9 @@ check_no_stray_notifies(const char *what)
 
 /* ---- per-command replay + compare --------------------------------------- */
 
+static void wait_pending_create(
+    int64_t fid);
+
 /* Resolve a FidSel (FidRelated -> the current compound's CREATE fid; FidRef k
  * -> the learned wire FileId for model fid k). */
 static const uint8_t *
@@ -1026,6 +1046,7 @@ resolve_fid(
     if (k < 0 || k >= MAX_FID) {
         return NULL;
     }
+    wait_pending_create(k);
     return g_wire_fid[k];
 } /* resolve_fid */
 
@@ -1111,52 +1132,17 @@ check_caching(
 } /* check_caching */
 
 static void
-do_create(
-    struct smb2_conn *c,
-    json_t           *v,
-    json_t           *res)
+check_create_result(
+    struct smb2_conn      *c,
+    json_t                *v,
+    json_t                *res,
+    struct smb2_create_out out,
+    int                    got_parked)
 {
-    const char                    *name  = json_string_value(json_object_get(v, "name"));
-    uint32_t                       disp  = disp_wire(jtag(json_object_get(v, "disp")));
-    uint32_t                       acc   = access_wire(json_object_get(v, "access"));
-    uint32_t                       shr   = share_wire(json_object_get(v, "share"));
-    int                            doc   = jbool(v, "delOnClose");
-    int                            isdir = jbool(v, "isDir");
-    uint32_t                       opts  = isdir ? FILE_DIRECTORY_FILE
-                                        : FILE_NON_DIRECTORY_FILE;
-    struct smb2_create_out         out;
-    struct smb2_oplock_req         oreq;
-    const struct smb2_oplock_req  *reqp =
-        oplock_req_of(json_object_get(v, "oplock"), &oreq);
-    struct smb2_durable_req        dreq;
-    const struct smb2_durable_req *durp =
-        durable_req_of(json_object_get(v, "durable"), &dreq);
-    int                            interim0;
-
-    if (!c) {
-        /* dispatch_cmd rejects a connectionless command before it gets here;
-         * this is the belt to that braces, and keeps the deref below provably
-         * safe rather than safe-by-inspection. */
-        smb2c_no_conn(SMB2_CREATE);
-    }
-
-    interim0 = c->ninterim;
-
-    if (doc) {
-        opts |= FILE_DELETE_ON_CLOSE;
-    }
-
-    smb2_create_dur_opts(c, name, disp, acc, shr, opts, reqp, durp, &out);
-    if (getenv("SMB2_MBT_DEBUG")) {
-        fprintf(stderr, "DBG create '%s' disp=%u acc=%08x shr=%u opts=%08x "
-                "reqp=%p lvl=%u lease=%d -> st=%08x opl=%02x lease=%02x\n",
-                name, disp, acc, shr, opts, (void *) reqp,
-                reqp ? reqp->level : 0, reqp ? reqp->is_lease : 0,
-                out.status, out.oplock, out.lease_state);
-    }
-
-    json_t  *rv     = jval(res);
-    uint32_t exp_st = (uint32_t) jfield(rv, "st");
+    const char *name   = json_string_value(json_object_get(v, "name"));
+    uint32_t    disp   = disp_wire(jtag(json_object_get(v, "disp")));
+    json_t     *rv     = jval(res);
+    uint32_t    exp_st = (uint32_t) jfield(rv, "st");
 
     if (out.status != exp_st) {
         if (!dev_status("RCreate", exp_st, out.status, name)) {
@@ -1170,7 +1156,7 @@ do_create(
      * ack-required break (smb_async_interim.c).  The model predicts exactly
      * that condition, so assert it rather than tolerating either shape. */
     int exp_parked = jbool(rv, "parked");
-    int got_parked = (c->ninterim > interim0);
+
     if (exp_parked != got_parked) {
         mism("CREATE '%s' park: model %s an async interim, wire %s one", name,
              exp_parked ? "expected" : "expected no",
@@ -1243,6 +1229,194 @@ do_create(
             strcmp(jtag(caching), "CLease") == 0
             ? (int) jfield(jval(caching), "key") : -1;
     }
+} /* check_create_result */
+
+struct mbt_pending_create {
+    struct smb2_conn *conn;
+    uint64_t          mid;
+    json_t           *args;
+    json_t           *result;
+    size_t            state_index;
+    uint8_t          *reply;
+    int               parked;
+};
+static struct mbt_pending_create g_pending_create[MAX_FID];
+
+static int
+capture_create_reply(
+    struct smb2_conn *c,
+    const uint8_t    *reply,
+    int               len)
+{
+    for (int i = 0; i < MAX_FID; i++) {
+        struct mbt_pending_create *p = &g_pending_create[i];
+        if (p->conn == c && p->mid == g64(reply + 4, 24)) {
+            if (p->reply) {
+                mism("duplicate final CREATE reply");
+                return 1;
+            }
+            p->reply = malloc((size_t) len);
+            memcpy(p->reply, reply, (size_t) len);
+            return 1;
+        }
+    }
+    return 0;
+} /* capture_create_reply */
+
+static void
+finish_pending_creates(void)
+{
+    for (int i = 0; i < MAX_FID; i++) {
+        struct mbt_pending_create *p = &g_pending_create[i];
+        if (p->reply) {
+            struct smb2_create_out out;
+            uint8_t               *saved       = p->conn->rbuf;
+            size_t                 saved_index = g_state_index;
+            p->conn->rbuf = p->reply;
+            smb2c_parse_create(p->conn, &out);
+            p->conn->rbuf = saved;
+            g_state_index = p->state_index;
+            check_create_result(p->conn, p->args, p->result, out, p->parked);
+            g_state_index = saved_index;
+            free(p->reply);
+            memset(p, 0, sizeof(*p));
+        }
+    }
+} /* finish_pending_creates */
+
+/* An ACK response on one connection can arrive before the final CREATE reply
+ * on another. A real client cannot encode the new FileId until that final
+ * reply arrives; do not send a zero/stale mapping merely because the model
+ * has already assigned its symbolic handle. Preserve normal ACK dispatch so
+ * unrelated commands can unblock the parked CREATE first. */
+static void
+wait_pending_create(int64_t fid)
+{
+    for (int i = 0; i < MAX_FID; i++) {
+        struct mbt_pending_create *p = &g_pending_create[i];
+        if (!p->conn || jfield(jval(p->result), "fid") != fid) {
+            continue;
+        }
+        uint64_t                   deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+        while (!p->reply) {
+            evpl_continue(g_env.evpl);
+            if (p->conn->disconnected) {
+                smb2c_dead(p->conn);
+            }
+            if (smb2c_now_ms() >= deadline) {
+                smb2c_hang(p->conn, "final CREATE reply before FileId use");
+            }
+        }
+        finish_pending_creates();
+        return;
+    }
+} /* wait_pending_create */
+
+/* The model records the result of a parked CREATE when it is issued, then
+ * schedules the ACKs which let that result become observable. After its last
+ * modeled break is settled, drain the final reply before the next message.
+ * An ACK reply alone is not this barrier: independently sending another OPEN
+ * could race the first one's temporary SHARE rights and test a different
+ * interleaving than the sequential trace. Still leave genuinely blocked
+ * creates outstanding so later ACK/CLOSE commands can unblock them. */
+static void
+finish_unblocked_creates(void)
+{
+    for (int i = 0; i < MAX_FID; i++) {
+        struct mbt_pending_create *p = &g_pending_create[i];
+        if (!p->conn || !jbool(jval(p->result), "parked")) { continue; }
+        json_t *breaks = json_object_get(json_object_get(jval(p->result), "breaks"), "#set");
+        bool acknowledged = true, had_ack = false;
+        for (size_t n = 0; n < json_array_size(breaks); n++) {
+            json_t *event = json_array_get(breaks, n);
+            if (!jbool(event, "ackReq")) { continue; }
+            had_ack = true;
+            json_t *open = itf_map_get(json_object_get(g_post_sdb, "opens"), NULL,
+                                      jfield(event, "fid"));
+            if (open && jbool(open, "breaking")) { acknowledged = false; }
+            if (jbool(event, "isLease")) {
+                json_t *opens = json_object_get(json_object_get(g_post_sdb, "opens"), "#map");
+                for (size_t k = 0; k < json_array_size(opens); k++) {
+                    json_t *peer = json_array_get(json_array_get(opens, k), 1);
+                    json_t *cache = json_object_get(peer, "caching");
+                    if (jfield(peer, "file") == jfield(jval(p->result), "ino") &&
+                        jtag(cache) && !strcmp(jtag(cache), "CLease") &&
+                        jfield(jval(cache), "key") == jfield(event, "key") &&
+                        jbool(peer, "breaking")) { acknowledged = false; }
+                }
+            }
+        }
+        if (had_ack && acknowledged) { wait_pending_create(jfield(jval(p->result), "fid")); }
+    }
+}
+
+static void
+do_create(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res)
+{
+    const char                    *name  = json_string_value(json_object_get(v, "name"));
+    uint32_t                       disp  = disp_wire(jtag(json_object_get(v, "disp")));
+    uint32_t                       acc   = access_wire(json_object_get(v, "access"));
+    uint32_t                       shr   = share_wire(json_object_get(v, "share"));
+    int                            doc   = jbool(v, "delOnClose");
+    int                            isdir = jbool(v, "isDir");
+    uint32_t                       opts  = isdir ? FILE_DIRECTORY_FILE
+                                        : FILE_NON_DIRECTORY_FILE;
+    struct smb2_oplock_req         oreq;
+    const struct smb2_oplock_req  *reqp =
+        oplock_req_of(json_object_get(v, "oplock"), &oreq);
+    struct smb2_durable_req        dreq;
+    const struct smb2_durable_req *durp =
+        durable_req_of(json_object_get(v, "durable"), &dreq);
+    int                            interim0;
+
+    if (!c) {
+        /* dispatch_cmd rejects a connectionless command before it gets here;
+         * this is the belt to that braces, and keeps the deref below provably
+         * safe rather than safe-by-inspection. */
+        smb2c_no_conn(SMB2_CREATE);
+    }
+
+    interim0 = c->ninterim;
+
+    if (doc) {
+        opts |= FILE_DELETE_ON_CLOSE;
+    }
+
+    struct mbt_pending_create *pending = NULL;
+    for (int i = 0; i < MAX_FID; i++) {
+        if (!g_pending_create[i].conn) {
+            pending = &g_pending_create[i];
+            break;
+        }
+    }
+    if (!pending) {
+        slot_overflow("pending CREATE", MAX_FID, MAX_FID);
+    }
+    pending->conn        = c;
+    pending->mid         = c->msg_id;
+    pending->args        = v;
+    pending->result      = res;
+    pending->state_index = g_state_index;
+    c->capture_create    = capture_create_reply;
+    smb2_create_dur_post(c, name, disp, acc, shr, opts, reqp, durp);
+    uint64_t deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+    while (!pending->reply && c->ninterim == interim0) {
+        evpl_continue(g_env.evpl);
+        if (c->disconnected) {
+            smb2c_dead(c);
+        }
+        if (smb2c_now_ms() >= deadline) {
+            smb2c_hang(c, "CREATE reply or async interim");
+        }
+    }
+    pending->parked = c->ninterim > interim0;
+    if (!jbool(jval(res), "parked") && pending->parked && !pending->reply) {
+        mism("CREATE '%s' unexpectedly parked", name);
+    }
+    finish_pending_creates();
 } /* do_create */
 
 /* OPLOCK_BREAK (StructureSize 24) / LEASE_BREAK (StructureSize 36)
@@ -1986,6 +2160,11 @@ do_logoff(
          * connection itself stays in the history: a reconnect may still want
          * its ClientGuid. */
         bind_sess(sess, NULL);
+        /* Quiescence walks the transport history, not the session map. Do
+         * not send encrypted ECHO barriers with keys the server just retired.
+         * Keep the connection's ClientGuid for a later reconnect. */
+        c->session_id = 0;
+        c->tree_id    = 0;
         for (int i = 0; i < MAX_FID; i++) {
             if (g_conn_for_fid[i] == c) {
                 g_conn_for_fid[i] = NULL;
@@ -2238,8 +2417,10 @@ do_message(json_t *lmsg_value)
             check_notify_notes(notes, "message");
         }
     }
+    finish_unblocked_creates();
     check_no_stray_breaks("message");
     check_no_stray_notifies("message");
+    finish_pending_creates();
 } /* do_message */
 
 /* ---- trace driver ------------------------------------------------------- */
@@ -2315,7 +2496,9 @@ run_trace(
     const struct smb2_mbt_trace_limit *lim  =
         smb2_mbt_trace_limit_find(base ? base + 1 : path);
 
-    if (lim) {
+    /* Diagnostic runs can exercise known limits while fixing them.  They
+     * remain real failures; this never changes the expected model result. */
+    if (lim && !getenv("CHIMERA_MBT_INCLUDE_DECLINED")) {
         printf("SKIP %s [%s] %s\n", lim->id, base ? base + 1 : path,
                lim->summary);
         g_nskipped++;
@@ -2395,6 +2578,10 @@ run_trace(
         if (!lo || strcmp(jtag(lo), "LMsg") != 0) {
             continue;
         }
+        g_state_index = i;
+        if (getenv("SMB2_MBT_DEBUG")) {
+            fprintf(stderr, "DBG state %zu\n", i);
+        }
         g_post_sdb = json_object_get(st_i, sdbkey);
         do_message(jval(lo));
         if (g_abort_trace) {
@@ -2409,6 +2596,10 @@ run_trace(
     }
     g_post_sdb = NULL;
 
+    for (int i = 0; i < MAX_FID; i++) {
+        free(g_pending_create[i].reply);
+        memset(&g_pending_create[i], 0, sizeof(g_pending_create[i]));
+    }
     smb2_conn_reset(&g_env);
     smb2_env_fs_teardown(&g_env, fsname);
 

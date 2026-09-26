@@ -1084,13 +1084,17 @@ chimera_vfs_open_cache_clear_doc(
  * Otherwise performs a normal release and returns 0.
  */
 struct chimera_vfs_doc_info {
-    uint8_t                      parent_fh[CHIMERA_VFS_FH_SIZE];
-    char                         name[CHIMERA_VFS_NAME_MAX];
-    struct chimera_vfs_cred      cred;
-    uint16_t                     parent_fh_len;
-    uint16_t                     name_len;
+    uint8_t                        parent_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                        target_fh[CHIMERA_VFS_FH_SIZE];
+    uint16_t                       target_fh_len;
+    struct chimera_vfs_file_state *pending_state;
+    void                          *smb_stream_delete;
+    char                           name[CHIMERA_VFS_NAME_MAX];
+    struct chimera_vfs_cred        cred;
+    uint16_t                       parent_fh_len;
+    uint16_t                       name_len;
     /* Backend close state -- the caller closes after the unlink */
-    struct chimera_vfs_close_ref close_ref;
+    struct chimera_vfs_close_ref   close_ref;
 };
 
 static inline int
@@ -1122,9 +1126,13 @@ chimera_vfs_open_cache_release_doc(
         /* Last reference with DOC — extract deletion info and remove
          * from cache.  The caller is responsible for the actual unlink
          * and for closing the underlying VFS module handle. */
-        doc_out->parent_fh_len = handle->doc_parent_fh_len;
-        doc_out->name_len      = handle->doc_name_len;
-        doc_out->cred          = handle->doc_cred;
+        doc_out->parent_fh_len     = handle->doc_parent_fh_len;
+        doc_out->pending_state     = NULL;
+        doc_out->smb_stream_delete = NULL;
+        doc_out->target_fh_len     = handle->fh_len;
+        memcpy(doc_out->target_fh, handle->fh, handle->fh_len);
+        doc_out->name_len = handle->doc_name_len;
+        doc_out->cred     = handle->doc_cred;
         chimera_vfs_close_ref_capture(&doc_out->close_ref, handle);
         memcpy(doc_out->parent_fh, handle->doc_parent_fh,
                handle->doc_parent_fh_len);

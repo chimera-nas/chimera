@@ -199,23 +199,31 @@ chimera_posix_init(
     }
 
     pthread_mutex_init(&posix->fd_lock, NULL);
+    pthread_mutex_init(&posix->dup_lock, NULL);
     atomic_init(&posix->next_worker, 0);
     atomic_init(&posix->init_cursor, 0);
 
-    posix->pool = evpl_threadpool_create(
-        NULL,
-        posix->nworkers,
-        chimera_posix_worker_init,
-        chimera_posix_worker_shutdown,
-        posix);
+    posix->lock_domain = chimera_vfs_lock_domain_create(posix->client->vfs);
+    if (posix->lock_domain) {
+        posix->pool = evpl_threadpool_create(
+            NULL,
+            posix->nworkers,
+            chimera_posix_worker_init,
+            chimera_posix_worker_shutdown,
+            posix);
+    }
 
     if (!posix->pool) {
+        if (posix->lock_domain) {
+            chimera_vfs_lock_domain_destroy(posix->lock_domain);
+        }
         for (int i = 0; i < posix->max_fds; i++) {
             pthread_mutex_destroy(&posix->fds[i].lock);
             pthread_cond_destroy(&posix->fds[i].cond);
         }
         free(posix->fds);
         pthread_mutex_destroy(&posix->fd_lock);
+        pthread_mutex_destroy(&posix->dup_lock);
         free(posix->workers);
         chimera_destroy(posix->client);
         free(posix);
@@ -293,23 +301,31 @@ chimera_posix_init_json(
     }
 
     pthread_mutex_init(&posix->fd_lock, NULL);
+    pthread_mutex_init(&posix->dup_lock, NULL);
     atomic_init(&posix->next_worker, 0);
     atomic_init(&posix->init_cursor, 0);
 
-    posix->pool = evpl_threadpool_create(
-        NULL,
-        posix->nworkers,
-        chimera_posix_worker_init,
-        chimera_posix_worker_shutdown,
-        posix);
+    posix->lock_domain = chimera_vfs_lock_domain_create(posix->client->vfs);
+    if (posix->lock_domain) {
+        posix->pool = evpl_threadpool_create(
+            NULL,
+            posix->nworkers,
+            chimera_posix_worker_init,
+            chimera_posix_worker_shutdown,
+            posix);
+    }
 
     if (!posix->pool) {
+        if (posix->lock_domain) {
+            chimera_vfs_lock_domain_destroy(posix->lock_domain);
+        }
         for (int i = 0; i < posix->max_fds; i++) {
             pthread_mutex_destroy(&posix->fds[i].lock);
             pthread_cond_destroy(&posix->fds[i].cond);
         }
         free(posix->fds);
         pthread_mutex_destroy(&posix->fd_lock);
+        pthread_mutex_destroy(&posix->dup_lock);
         free(posix->workers);
         chimera_destroy(posix->client);
         free(posix);
@@ -329,6 +345,10 @@ chimera_posix_shutdown(void)
     if (!posix) {
         return;
     }
+
+    /* Cancel all semantic owners, including overridden identities, before
+     * waiting on leaked descriptors that can hold blocked SETLKW references. */
+    chimera_posix_locks_shutdown(posix);
 
     /* Close any descriptors the application leaked: their open handles
      * otherwise keep the VFS close-thread handshake in chimera_vfs_destroy
@@ -352,6 +372,7 @@ chimera_posix_shutdown(void)
     }
 
     pthread_mutex_destroy(&posix->fd_lock);
+    pthread_mutex_destroy(&posix->dup_lock);
 
     if (posix->fds) {
         for (int i = 0; i < posix->max_fds; i++) {
@@ -365,6 +386,7 @@ chimera_posix_shutdown(void)
         free(posix->workers);
     }
 
+    chimera_vfs_lock_domain_destroy(posix->lock_domain);
     if (posix->client) {
         chimera_destroy(posix->client);
     }

@@ -341,7 +341,7 @@ chimera_smb_lease_break_cb(
             if (member->share_lease_inserted) {
                 /* Runs under file->lock (the member walk): the locked-context
                 * park variant, which is exactly the old direct-flag store. */
-                chimera_vfs_claim_park_locked(&member->share_lease, true);
+                chimera_vfs_claim_park_locked(chimera_smb_share_claim(member), true);
             }
         }
     }

@@ -18,6 +18,15 @@
  * owning-thread doorbell resume — R63/R65) is preserved bit for bit.
  */
 
+static bool
+chimera_vfs_io_is_write(const struct chimera_vfs_request *request)
+{
+    return request->opcode == CHIMERA_VFS_OP_WRITE ||
+           request->opcode == CHIMERA_VFS_OP_COPY_RANGE ||
+           request->opcode == CHIMERA_VFS_OP_CLONE_RANGE ||
+           request->opcode == CHIMERA_VFS_OP_ALLOCATE;
+}
+
 static void
 chimera_vfs_implicit_break_cb(
     struct chimera_vfs_claim *claim,
@@ -412,6 +421,7 @@ chimera_vfs_io_try(
     if (request->io_recall_all) {
         if (chimera_vfs_claim_trigger_ns_full(state, file,
                                               request->io_handle,
+                                              request->io_owner_valid ? &request->io_owner : NULL,
                                               request->io_recall_flush_only)) {
             pthread_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
@@ -431,7 +441,7 @@ chimera_vfs_io_try(
         return;
     }
 
-    need = (request->opcode == CHIMERA_VFS_OP_WRITE)
+    need = chimera_vfs_io_is_write(request)
         ? CHIMERA_CLAIM_W : CHIMERA_CLAIM_R;
 
     pthread_mutex_lock(&file->lock);
@@ -456,14 +466,20 @@ chimera_vfs_io_try(
 
     chimera_vfs_implicit_owner(file, &iowner);
     memset(&probe, 0, sizeof(probe));
-    probe.construct  = CHIMERA_CONSTRUCT_IMPLICIT;
-    probe.klass      = CHIMERA_CLAIM_CLASS_ACCESS;
-    probe.used       = target;
-    probe.advertised = target;
-    probe.owner      = iowner;
-    probe.length     = UINT64_MAX;
-    probe.break_cb   = chimera_vfs_implicit_break_cb;
-    probe.cb_private = state;
+    probe.construct = CHIMERA_CONSTRUCT_IMPLICIT;
+    probe.klass     = CHIMERA_CLAIM_CLASS_ACCESS;
+    /* Judge this request's access, not previously cached bits. A scoped
+     * write may have admitted W past a still-pinned deny-W holder; ordinary
+     * later reads must neither inherit that exemption nor request W merely
+     * because the shared implicit claim has cached it. */
+    probe.used               = need;
+    probe.advertised         = need;
+    probe.owner              = iowner;
+    probe.length             = UINT64_MAX;
+    probe.break_cb           = chimera_vfs_implicit_break_cb;
+    probe.cb_private         = state;
+    probe.admit_excluded     = request->io_view.excluded;
+    probe.admit_num_excluded = request->io_view.num_excluded;
 
     {
         struct chimera_vfs_claim *conflict = NULL;
@@ -504,6 +520,11 @@ chimera_vfs_io_try(
 
         if (!was_active) {
             file->implicit_claim = probe;
+            /* A private admission decision must never lend its exemption or
+             * borrowed pointers to the shared cached claim. Every subsequent
+             * anonymous request performs its own admission check above. */
+            file->implicit_claim.admit_excluded     = NULL;
+            file->implicit_claim.admit_num_excluded = 0;
             chimera_vfs_claim_link_locked(file, &file->implicit_claim);
             file->implicit_active = 1;
             activated             = true;
@@ -587,7 +608,7 @@ chimera_vfs_io_claim_acquire(
      * victims, the writer PARKS until its break acks -- the invalidation
      * must be visible before the write returns, not merely begun. */
     if (actor) {
-        if (request->opcode == CHIMERA_VFS_OP_WRITE) {
+        if (chimera_vfs_io_is_write(request)) {
             chimera_vfs_claim_invalidate(state, request->fh, request->fh_len,
                                          request->fh_hash,
                                          CHIMERA_TRIGGER_WRITE, actor, 0);

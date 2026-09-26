@@ -32,21 +32,24 @@ chimera_vfs_link_at_complete(struct chimera_vfs_request *request)
          * directory cannot be hard-linked, so the added entry is always a file.
          * parent_lease_skip (set when an SMB op supplied a ParentLeaseKey)
          * spares the caller's own directory lease from that break. */
-        uint64_t skip_lo = 0, skip_hi = 0;
+        struct chimera_claim_actor parent_actor = {0};
+        const struct chimera_claim_actor *notify_actor = NULL;
 
-        if (request->link_at.parent_lease_skip_valid) {
-            memcpy(&skip_lo, request->link_at.parent_lease_skip, 8);
-            memcpy(&skip_hi, request->link_at.parent_lease_skip + 8, 8);
+        if (request->io_owner_valid && request->link_at.parent_lease_skip_valid) {
+            parent_actor = request->io_owner;
+            memcpy(parent_actor.owner.key, request->link_at.parent_lease_skip, 16);
+            notify_actor = &parent_actor;
         }
-        chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                      request->link_at.dir_fh,
-                                      request->link_at.dir_fhlen,
-                                      CHIMERA_VFS_NOTIFY_FILE_ADDED,
-                                      request->link_at.name,
-                                      request->link_at.namelen,
-                                      NULL, 0,
-                                      skip_lo, skip_hi,
-                                      request->link_at.parent_lease_skip_valid);
+        if (!(request->link_at.flags & CHIMERA_VFS_LINK_NO_NOTIFY)) {
+            chimera_vfs_notify_emit_actor(thread->vfs->vfs_notify,
+                                          request->link_at.dir_fh,
+                                          request->link_at.dir_fhlen,
+                                          CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                          request->link_at.name,
+                                          request->link_at.namelen,
+                                          NULL, 0,
+                                          notify_actor);
+        }
 
         chimera_vfs_name_cache_insert(thread, name_cache,
                                       request->link_at.dir_fh_hash,
@@ -101,11 +104,13 @@ chimera_vfs_link_at_dispatch(
     const char                     *name,
     int                             namelen,
     unsigned int                    replace,
+    unsigned int                    flags,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     const uint8_t                  *parent_lease_skip,
     struct chimera_vfs_open_handle *op_handle,
+    const struct chimera_claim_actor *actor,
     chimera_vfs_link_at_callback_t  callback,
     void                           *private_data)
 {
@@ -127,6 +132,7 @@ chimera_vfs_link_at_dispatch(
     request->link_at.namelen     = namelen;
     request->link_at.name_hash   = chimera_vfs_hash(name, namelen);
     request->link_at.replace     = replace;
+    request->link_at.flags       = flags;
     if (parent_lease_skip) {
         memcpy(request->link_at.parent_lease_skip, parent_lease_skip, 16);
         request->link_at.parent_lease_skip_valid = 1;
@@ -136,6 +142,10 @@ chimera_vfs_link_at_dispatch(
     /* Self-exempt the operating handle's own lease from the source-file recall
      * (the linker is coherent with its own change; NULL = recall all). */
     request->io_handle                           = op_handle;
+    if (actor) {
+        request->io_owner = *actor;
+        request->io_owner_valid = 1;
+    }
     request->link_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->link_at.r_attr.va_set_mask          = 0;
     request->link_at.r_replaced_attr.va_req_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
@@ -170,9 +180,12 @@ struct chimera_vfs_link_at_gate {
     const char                     *name;
     int                             namelen;
     unsigned int                    replace;
+    unsigned int                    flags;
     uint64_t                        attr_mask;
     uint64_t                        pre_attr_mask;
     uint64_t                        post_attr_mask;
+    struct chimera_claim_actor actor;
+    uint8_t have_actor;
     uint8_t                         parent_lease_skip[16];
     uint8_t                         parent_lease_skip_valid;
     struct chimera_vfs_open_handle *op_handle;
@@ -198,17 +211,17 @@ chimera_vfs_link_at_gate_complete(
 
     chimera_vfs_link_at_dispatch(gate->thread, gate->cred, gate->fh, gate->fhlen,
                                  gate->dir_fh, gate->dir_fhlen, gate->name,
-                                 gate->namelen, gate->replace, gate->attr_mask,
+                                 gate->namelen, gate->replace, gate->flags, gate->attr_mask,
                                  gate->pre_attr_mask, gate->post_attr_mask,
                                  gate->parent_lease_skip_valid ?
                                  gate->parent_lease_skip : NULL,
-                                 gate->op_handle,
+                                 gate->op_handle, gate->have_actor ? &gate->actor : NULL,
                                  gate->callback, gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_link_at_gate_complete */
 
 SYMBOL_EXPORT void
-chimera_vfs_link_at(
+chimera_vfs_link_at_flags_actor(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     const void                     *fh,
@@ -218,11 +231,13 @@ chimera_vfs_link_at(
     const char                     *name,
     int                             namelen,
     unsigned int                    replace,
+    unsigned int                    flags,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
     const uint8_t                  *parent_lease_skip,
     struct chimera_vfs_open_handle *op_handle,
+    const struct chimera_claim_actor *actor,
     chimera_vfs_link_at_callback_t  callback,
     void                           *private_data)
 {
@@ -263,6 +278,7 @@ chimera_vfs_link_at(
         gate->name           = name;
         gate->namelen        = namelen;
         gate->replace        = replace;
+        gate->flags          = flags;
         gate->attr_mask      = attr_mask;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
@@ -272,6 +288,8 @@ chimera_vfs_link_at(
         } else {
             gate->parent_lease_skip_valid = 0;
         }
+        gate->have_actor = actor != NULL;
+        if (actor) gate->actor = *actor;
         gate->op_handle    = op_handle;
         gate->callback     = callback;
         gate->private_data = private_data;
@@ -284,8 +302,59 @@ chimera_vfs_link_at(
     }
 
     chimera_vfs_link_at_dispatch(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
-                                 name, namelen, replace, attr_mask,
+                                 name, namelen, replace, flags, attr_mask,
                                  pre_attr_mask, post_attr_mask,
-                                 parent_lease_skip, op_handle, callback,
+                                 parent_lease_skip, op_handle, actor, callback,
                                  private_data);
+} /* chimera_vfs_link_at_flags */
+
+/* Preserve notification behavior for all existing callers. */
+SYMBOL_EXPORT void
+chimera_vfs_link_at(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    const void                     *fh,
+    int                             fhlen,
+    const void                     *dir_fh,
+    int                             dir_fhlen,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    replace,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    const uint8_t                  *parent_lease_skip,
+    struct chimera_vfs_open_handle *op_handle,
+    chimera_vfs_link_at_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_link_at_flags(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
+                              name, namelen, replace, 0, attr_mask, pre_attr_mask, post_attr_mask,
+                              parent_lease_skip, op_handle, callback, private_data);
 } /* chimera_vfs_link_at */
+
+/* Compatibility entrypoint for callers without a protocol actor. */
+SYMBOL_EXPORT void
+chimera_vfs_link_at_flags(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    const void                     *fh,
+    int                             fhlen,
+    const void                     *dir_fh,
+    int                             dir_fhlen,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    replace,
+    unsigned int                    flags,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    const uint8_t                  *parent_lease_skip,
+    struct chimera_vfs_open_handle *op_handle,
+    chimera_vfs_link_at_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_link_at_flags_actor(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
+        name, namelen, replace, flags, attr_mask, pre_attr_mask, post_attr_mask,
+        parent_lease_skip, op_handle, NULL, callback, private_data);
+}

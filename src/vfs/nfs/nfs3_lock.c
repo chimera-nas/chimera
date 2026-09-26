@@ -49,6 +49,7 @@ struct nfs3_lock_ctx {
      * the first failure any of their unlocks reported. */
     struct chimera_nfs3_range               *pending;
     enum chimera_vfs_error ranged_status;
+    int                                      geometry_only;
 };
 
 static void chimera_nfs3_do_lock(
@@ -109,9 +110,10 @@ static uint64_t
 chimera_nfs3_range_insert(
     struct chimera_nfs_shared        *shared,
     const struct chimera_vfs_request *request,
-    const uint8_t                    *oh)
+    const uint8_t                    *oh,
+    struct chimera_nfs3_range        *range)
 {
-    struct chimera_nfs3_range *range = calloc(1, sizeof(*range));
+    struct chimera_nfs3_range *existing;
 
     memcpy(range->fh, request->fh, request->fh_len);
     range->fh_len = (int) request->fh_len;
@@ -119,7 +121,23 @@ chimera_nfs3_range_insert(
     range->length = request->claim_acquire.length;
     memcpy(range->oh, oh, CHIMERA_NFS3_LOCK_OH_SIZE);
 
+    range->geometry_only = !!(request->claim_acquire.flags & CHIMERA_VFS_CLAIM_REPLACE);
     pthread_mutex_lock(&shared->nlm_range_lock);
+    if (range->geometry_only) {
+        DL_FOREACH(shared->nlm_ranges, existing)
+        {
+            if (existing->geometry_only && existing->fh_len == range->fh_len &&
+                !memcmp(existing->fh, range->fh, range->fh_len) &&
+                !memcmp(existing->oh, oh, CHIMERA_NFS3_LOCK_OH_SIZE)) {
+                uint64_t token = existing->token;
+                pthread_mutex_unlock(&shared->nlm_range_lock);
+                free(range);
+                return token;
+            }
+        }
+        range->offset = 0;
+        range->length = UINT64_MAX;
+    }
     range->token = ++shared->nlm_next_token;
     DL_APPEND(shared->nlm_ranges, range);
     pthread_mutex_unlock(&shared->nlm_range_lock);
@@ -156,7 +174,8 @@ chimera_nfs3_range_owner_holds(
     struct chimera_nfs_shared *shared,
     const uint8_t             *fh,
     int                        fh_len,
-    const uint8_t             *oh)
+    const uint8_t             *oh,
+    int                       *geometry_only)
 {
     struct chimera_nfs3_range *range;
     int                        held = 0;
@@ -169,7 +188,10 @@ chimera_nfs3_range_owner_holds(
             memcmp(range->fh, fh, fh_len) == 0 &&
             memcmp(range->oh, oh, CHIMERA_NFS3_LOCK_OH_SIZE) == 0) {
             held = 1;
-            break;
+            if (range->geometry_only) {
+                *geometry_only = 1;
+                break;
+            }
         }
     }
 
@@ -243,6 +265,14 @@ chimera_nfs3_lock_callback(
     struct nfs3_lock_ctx       *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
+        /* A lost reply does not prove LOCK was unapplied. Keep a typed owner
+        * anchor so close can still send the mandatory whole-owner UNLOCK. */
+        if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_REPLACE) {
+            (void) chimera_nfs3_range_insert(ctx->shared, request, ctx->oh, ctx->range);
+        } else {
+            free(ctx->range);
+        }
+        ctx->range      = NULL;
         request->status = CHIMERA_VFS_EFAULT;
         request->complete(request);
         return;
@@ -251,7 +281,8 @@ chimera_nfs3_lock_callback(
     switch (res->stat) {
         case NLM4_GRANTED:
             request->claim_acquire.r_token = chimera_nfs3_range_insert(
-                ctx->shared, request, ctx->oh);
+                ctx->shared, request, ctx->oh, ctx->range);
+            ctx->range                       = NULL;
             request->claim_acquire.r_granted = 1;
             request->status                  = CHIMERA_VFS_OK;
             break;
@@ -273,6 +304,8 @@ chimera_nfs3_lock_callback(
             break;
     } /* switch */
 
+    free(ctx->range);
+    ctx->range = NULL;
     request->complete(request);
 } /* chimera_nfs3_lock_callback */
 
@@ -387,6 +420,12 @@ chimera_nfs3_do_lock(
     } else {
         struct nlm4_lockargs args;
 
+        ctx->range = calloc(1, sizeof(*ctx->range));
+        if (!ctx->range) {
+            request->status = CHIMERA_VFS_ENOSPC;
+            request->complete(request);
+            return;
+        }
         memset(&args, 0, sizeof(args));
         args.block                 = (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_WAIT) ? 1 : 0;
         args.exclusive             = request->claim_acquire.exclusive;
@@ -446,10 +485,14 @@ chimera_nfs3_lock_getattr_callback(
     raw_offset = (int64_t) request->claim_acquire.offset;
     raw_length = (int64_t) request->claim_acquire.length;
 
-    base = (int64_t) file_size + raw_offset;
-
-    if (raw_length < 0) {
-        base += raw_length;
+    if (file_size > INT64_MAX ||
+        __builtin_add_overflow((int64_t) file_size, raw_offset, &base) ||
+        (raw_length < 0 && __builtin_add_overflow(base, raw_length, &base)) ||
+        raw_length == INT64_MIN ||
+        (raw_length > 0 && base > INT64_MAX - (raw_length - 1))) {
+        request->status = CHIMERA_VFS_EOVERFLOW;
+        request->complete(request);
+        return;
     }
 
     if (base < 0) {
@@ -627,6 +670,65 @@ chimera_nfs3_unlock_ranged_send(struct chimera_vfs_request *request)
                                                   request);
 } /* chimera_nfs3_unlock_ranged_send */
 
+/* Typed locks keep only an owner anchor: the upstream NLM server performs
+ * replacement and splitting. Never expand an unlock to the anchor's coverage. */
+static void
+chimera_nfs3_unlock_exact_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct nlm4_res             *res,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+    struct nfs3_lock_ctx       *ctx     = request->plugin_data;
+    struct chimera_nfs3_range  *range, *tmp;
+
+    request->status = (!status && res->stat == NLM4_GRANTED)
+        ? CHIMERA_VFS_OK : CHIMERA_VFS_EFAULT;
+    if (request->status == CHIMERA_VFS_OK &&
+        request->claim_release.offset == 0 &&
+        request->claim_release.length == UINT64_MAX) {
+        pthread_mutex_lock(&ctx->shared->nlm_range_lock);
+        DL_FOREACH_SAFE(ctx->shared->nlm_ranges, range, tmp)
+        {
+            if (range->geometry_only && range->fh_len == request->fh_len &&
+                !memcmp(range->fh, request->fh, request->fh_len) &&
+                !memcmp(range->oh, ctx->oh, sizeof(ctx->oh))) {
+                DL_DELETE(ctx->shared->nlm_ranges, range);
+                free(range);
+            }
+        }
+        pthread_mutex_unlock(&ctx->shared->nlm_range_lock);
+    }
+    request->complete(request);
+} /* chimera_nfs3_unlock_exact_callback */
+
+static void
+chimera_nfs3_unlock_exact_send(struct chimera_vfs_request *request)
+{
+    struct nfs3_lock_ctx  *ctx  = request->plugin_data;
+    struct nlm4_unlockargs args = { 0 };
+    struct evpl_rpc2_cred  rpc2_cred;
+    uint8_t               *fh;
+    int                    fhlen;
+
+    chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name, request->thread->vfs->machine_name_len);
+    args.alock.caller_name.str = (char *) request->thread->vfs->machine_name;
+    args.alock.caller_name.len = request->thread->vfs->machine_name_len;
+    args.alock.fh.data         = fh;
+    args.alock.fh.len          = fhlen;
+    args.alock.oh.data         = ctx->oh;
+    args.alock.oh.len          = sizeof(ctx->oh);
+    args.alock.l_offset        = request->claim_release.offset;
+    args.alock.l_len           = chimera_nfs3_lock_nlm_len(request->claim_release.length);
+    ctx->shared->nlm_v4.send_call_NLMPROC4_UNLOCK(&ctx->shared->nlm_v4.rpc2,
+                                                  ctx->nfs_thread->evpl, ctx->server_thread->nlm_conn, &rpc2_cred,
+                                                  &args, 0, 0, NULL, 0, 0, chimera_nfs3_unlock_exact_callback, request);
+} /* chimera_nfs3_unlock_exact_send */
+
 static void
 chimera_nfs3_unlock_ranged_getattr_callback(
     struct evpl                 *evpl,
@@ -659,10 +761,14 @@ chimera_nfs3_unlock_ranged_getattr_callback(
     raw_offset = (int64_t) request->claim_release.offset;
     raw_length = (int64_t) request->claim_release.length;
 
-    base = (int64_t) file_size + raw_offset;
-
-    if (raw_length < 0) {
-        base += raw_length;
+    if (file_size > INT64_MAX ||
+        __builtin_add_overflow((int64_t) file_size, raw_offset, &base) ||
+        (raw_length < 0 && __builtin_add_overflow(base, raw_length, &base)) ||
+        raw_length == INT64_MIN ||
+        (raw_length > 0 && base > INT64_MAX - (raw_length - 1))) {
+        request->status = CHIMERA_VFS_EOVERFLOW;
+        request->complete(request);
+        return;
     }
 
     if (base < 0) {
@@ -679,6 +785,14 @@ chimera_nfs3_unlock_ranged_getattr_callback(
         length = 0 - (uint64_t) raw_length;
     } else {
         length = UINT64_MAX;  /* to-EOF */
+    }
+
+    if (ctx->geometry_only) {
+        request->claim_release.offset = offset;
+        request->claim_release.length = length;
+        request->claim_release.whence = SEEK_SET;
+        chimera_nfs3_unlock_exact_send(request);
+        return;
     }
 
     ctx->pending = chimera_nfs3_range_take_overlapping(ctx->shared,
@@ -709,14 +823,25 @@ chimera_nfs3_claim_release_ranged(
     uint8_t                                  oh[CHIMERA_NFS3_LOCK_OH_SIZE];
     uint8_t                                 *fh;
     int                                      fhlen;
+    int                                      geometry_only = 0;
+
+    if (request->claim_release.whence != SEEK_END && request->claim_release.length == 0) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
 
     chimera_nfs3_lock_owner_handle(&request->claim_release.owner, oh);
 
     if (!chimera_nfs3_range_owner_holds(shared, request->fh,
-                                        (int) request->fh_len, oh)) {
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
+                                        (int) request->fh_len, oh, &geometry_only)) {
+        if (request->claim_release.whence != SEEK_END) {
+            request->status = CHIMERA_VFS_OK;
+            request->complete(request);
+            return;
+        }
+        /* Even an unheld unlock must validate its EOF-relative geometry. */
+        geometry_only = 1;
     }
 
     ctx                = request->plugin_data;
@@ -725,6 +850,7 @@ chimera_nfs3_claim_release_ranged(
     ctx->range         = NULL;
     ctx->pending       = NULL;
     ctx->ranged_status = CHIMERA_VFS_OK;
+    ctx->geometry_only = geometry_only;
 
     memcpy(ctx->oh, oh, sizeof(ctx->oh));
 
@@ -732,6 +858,13 @@ chimera_nfs3_claim_release_ranged(
     ctx->server_thread = server_thread;
 
     if (!server_thread || !server_thread->nlm_conn) {
+        if (ctx->geometry_only) {
+            /* Keep uncertain ownership available to a later cleanup attempt;
+             * a missing connection does not confirm an upstream unlock. */
+            request->status = CHIMERA_VFS_ESTALE;
+            request->complete(request);
+            return;
+        }
         /* The mount these locks belonged to is gone; the server drops its locks
          * when it monitors us down, so every record this owner has on the file
          * is dead whatever the geometry says, and freeing them is all that is
@@ -770,6 +903,11 @@ chimera_nfs3_claim_release_ranged(
                                                   &getattr_args, 0, 0, NULL, 0, 0,
                                                   chimera_nfs3_unlock_ranged_getattr_callback,
                                                   request);
+        return;
+    }
+
+    if (ctx->geometry_only) {
+        chimera_nfs3_unlock_exact_send(request);
         return;
     }
 

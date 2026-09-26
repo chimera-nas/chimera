@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <string.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -13,10 +14,22 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_claim_access.h"
+#include "vfs/vfs_open_cache.h"
 #include "smb_common/smb2.h"
+#include "smb_namespace.h"
 
 struct chimera_smb_share;
 struct chimera_smb_conn;
+struct chimera_server_smb_thread;
+struct chimera_smb_open_file;
+
+struct chimera_smb_teardown_doc_ctx {
+    struct chimera_vfs_thread *vfs_thread;
+    struct chimera_vfs_doc_info doc_info;
+    struct chimera_vfs_open_handle *parent_handle;
+    struct chimera_smb_open_file *retiring_open;
+};
 
 struct chimera_smb_file_id {
     uint64_t pid;
@@ -137,8 +150,10 @@ typedef int (*chimera_smb_pipe_transceive_t)(
     int                         input_niov,
     struct evpl_iovec          *output_iov);
 
+struct chimera_smb_namespace_participant;
 struct chimera_smb_notify_state;
-struct chimera_smb_lock_entry;
+
+struct chimera_vfs_claim_owner;
 
 struct chimera_smb_open_file {
     enum chimera_smb_open_file_type  type;
@@ -154,6 +169,9 @@ struct chimera_smb_open_file {
     struct UT_hash_handle            hh;
     struct chimera_smb_file_id       file_id;
     struct chimera_vfs_open_handle  *handle;
+    /* Bucket-protected exclusive identity migration; blocks new consumers. */
+    const void                     *identity_rebind;
+    struct chimera_smb_lease_key_entry *lease_key_binding;
     uint32_t                         desired_access;
     /* Access mask actually granted on this handle (FileAccessInformation).
      * Resolved from the object ACL at open: equals desired_access for a
@@ -165,9 +183,29 @@ struct chimera_smb_open_file {
     uint32_t                         share_access;
     uint32_t                         name_len;
     uint32_t                         flags;
+    uint8_t                          doc_close_started;
+    uint8_t                          doc_stream_close_started;
+    struct chimera_vfs_cred          stream_delete_cred;
+    uint8_t                          doc_from_create;
+    /* Explicit FileDispositionInformationEx POSIX delete: unlink on this
+     * handle's CLOSE even while other opens retain the inode. */
+    uint8_t                          doc_posix;
     uint64_t                         position;
     uint32_t                         parent_fh_len;
-    uint32_t                         refcnt;
+    _Atomic uint32_t                 refcnt;
+    /* Parked opens retain their original bucket-lock lifetime until rehome or
+     * destruction. Retirement embeds its timer before any irreversible cut. */
+    struct chimera_smb_tree         *durable_tree_pin;
+    struct chimera_smb_open_file     *retire_next;
+    struct evpl_timer                retire_timer;
+    struct chimera_smb_doc_fence      retire_doc_fence;
+    struct chimera_vfs_claim_access_fence retire_access_fence;
+    bool retire_doc_running;
+    bool retire_skip_doc;
+    struct chimera_smb_teardown_doc_ctx retire_doc_ctx;
+    struct chimera_server_smb_thread *retire_thread;
+    void (*retire_done)(struct chimera_server_smb_thread *, struct chimera_smb_open_file *, void *);
+    void                            *retire_private;
     /* MS-SMB2 §3.3.5.2.10 channel-sequence tracking.  channel_sequence holds
      * the highest ChannelSequence observed on this Open; a mutating op
      * (WRITE/SET_INFO/IOCTL) carrying a stale sequence -- behind by
@@ -216,14 +254,13 @@ struct chimera_smb_open_file {
     uint8_t                          app_version_present;
     struct chimera_smb_open_file    *next;
     struct chimera_smb_notify_state *notify_state;
-    /* Byte-range locks (SMB2_LOCK) held against this open.  Allocated
-     * and linked on each granted lock op; freed on UNLOCK or on close. */
-    struct chimera_smb_lock_entry   *lock_entries;
+    /* Canonical exact range owner for all SMB LOCK/UNLOCK and CLOSE. */
+    struct chimera_vfs_claim_owner *range_owner;
     /* A blocking byte-range LOCK (MS-SMB2 3.3.5.14) parked on this open waiting
      * for a conflicting range to release.  NULL when no lock is pending.  The
      * parked request holds an open_file reference, so the open is not freed while
      * a lock waits; close / tree-disconnect / logoff / connection teardown abort
-     * the parked lock (cancel the VFS ticket, complete RANGE_NOT_LOCKED) so the
+     * the parked lock (cancel the compound wait, complete RANGE_NOT_LOCKED) so the
      * reference is dropped and the open can be reclaimed. */
     struct chimera_smb_request      *parked_lock_req;
     /* MS-SMB2 3.3.5.14 LockSequence replay cache.  A LOCK/UNLOCK carries a
@@ -240,6 +277,7 @@ struct chimera_smb_open_file {
     uint32_t                         lock_seq_status[64];
     /* SHARE claim (whole-file access/deny reservation) held by this open
      * once CREATE succeeds.  Released at close. */
+    struct chimera_vfs_claim_access_owner *access_owner;
     struct chimera_vfs_claim         share_lease;
     struct chimera_vfs_file_state   *share_file_state;
     bool                             share_lease_inserted;
@@ -249,6 +287,8 @@ struct chimera_smb_open_file {
      * property: a stream opened without FILE_SHARE_DELETE must block the base
      * file's deletion, and a base delete with a stream open held must defer
      * (smb2.streams.delete).  Released at close in drain_locks. */
+    struct chimera_vfs_claim_access_owner *base_access_owner;
+    struct chimera_vfs_open_handle *base_handle; /* owned ACCESS actor anchor */
     struct chimera_vfs_claim         base_share_lease;
     struct chimera_vfs_file_state   *base_share_file_state;
     bool                             base_share_lease_inserted;
@@ -275,6 +315,9 @@ struct chimera_smb_open_file {
      * AppInstanceId force-close locate and unhash the conflicting open
      * directly from the lease back-reference. */
     struct chimera_smb_tree         *tree;
+    struct chimera_smb_namespace_participant *namespace_participant;
+    struct chimera_smb_namespace_participant *base_namespace_participant;
+    bool namespace_registered, base_namespace_registered;
     uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
     char                             name[SMB_FILENAME_MAX];
     /* Full path of this open relative to the share root, backslash-separated
@@ -299,6 +342,32 @@ struct chimera_smb_open_file {
     uint32_t                         integrity_flags;
 };
 
+/* The embedded claims are construction templates only once a canonical token
+ * exists. All admission, park, shrink and policy accesses use token storage. */
+static inline struct chimera_vfs_claim *
+chimera_smb_share_claim(struct chimera_smb_open_file *open)
+{
+    return open->access_owner ? chimera_vfs_claim_access_owner_claim(open->access_owner) : &open->share_lease;
+}
+
+/* Reconnect can move a nonlease durable open to a different client session.
+ * Its ACCESS/RANGE identity remains that of the original open. Lease-key bytes
+ * add cache coherence without replacing the per-FileId range owner. */
+static inline struct chimera_claim_owner
+chimera_smb_open_actor_owner(struct chimera_smb_open_file *open)
+{
+    struct chimera_claim_owner owner = chimera_smb_share_claim(open)->owner;
+    memset(owner.key, 0, sizeof(owner.key));
+    if (open->grant) { memcpy(owner.key, open->grant->claim.owner.key, sizeof(owner.key)); }
+    return owner;
+}
+
+static inline struct chimera_vfs_claim *
+chimera_smb_base_share_claim(struct chimera_smb_open_file *open)
+{
+    return open->base_access_owner ? chimera_vfs_claim_access_owner_claim(open->base_access_owner) : &open->base_share_lease;
+}
+
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256
 #define CHIMERA_SMB_OPEN_FILE_BUCKET_MASK (CHIMERA_SMB_OPEN_FILE_BUCKETS - 1)
 
@@ -308,6 +377,11 @@ enum chimera_smb_tree_type {
 };
 
 struct chimera_smb_tree {
+    /* Pool lifetime pins, protected by shared->trees_lock. These do not
+     * delay TREE_DISCONNECT's logical close of the tree's opens. */
+    _Atomic uint32_t              compound_pins;
+    bool                          compound_retired;
+    bool                          compound_tearing_down;
     enum chimera_smb_tree_type    type;
     uint32_t                      tree_id;
     uint32_t                      refcnt;
@@ -360,6 +434,9 @@ struct chimera_smb_tree {
 #define SMB2_MAX_CHANNELS                32
 
 struct chimera_smb_session {
+    /* Memory-only pins; do not keep channels, opens or claims logically live. */
+    uint32_t                    compound_pins;
+    bool                        compound_retired;
     uint64_t                    session_id;
     /* Stable per-CLIENT identity used as the owner key for cache claims,
      * SHARE reservations and byte-range locks (chimera_claim_owner.client_key).

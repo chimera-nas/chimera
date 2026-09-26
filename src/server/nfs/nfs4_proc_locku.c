@@ -12,6 +12,33 @@
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 
+/* Once an owner seqid is accepted as new, consumed errors are replies too.
+ * Keep the acquired state (and therefore its owner) alive until the cache is
+ * updated, then release it on every completion path. */
+static void
+chimera_nfs4_locku_finish(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct LOCKU4args                *args,
+    struct LOCKU4res                 *res,
+    struct nfs_lock_state            *lock_state)
+{
+    struct nfs_lock_owner *owner = lock_state->lock_owner;
+
+    if (req->minorversion == 0 && nfs4_seqid_should_advance(res->status)) {
+        pthread_mutex_lock(&owner->lock);
+        owner->seqid = args->seqid;
+        nfs4_replay_record(&owner->replay, args->seqid, OP_LOCKU,
+                           res->status,
+                           res->status == NFS4_OK ? &res->lock_stateid : NULL);
+        pthread_mutex_unlock(&owner->lock);
+    }
+    nfs_state_table_release(&thread->shared->nfs4_state_table, lock_state,
+                            NFS4_SLOT_TYPE_LOCK, thread->vfs_thread);
+    req->nfs_state_ref = NULL;
+    chimera_nfs4_compound_complete(req, res->status);
+} /* chimera_nfs4_locku_finish */
+
 void
 chimera_nfs4_locku(
     struct chimera_server_nfs_thread *thread,
@@ -65,6 +92,10 @@ chimera_nfs4_locku(
         int seqid_class = nfs4_owner_seqid_classify(lock_owner->seqid,
                                                     &lock_owner->replay,
                                                     args->seqid);
+        if (seqid_class == NFS4_SEQID_REPLAY &&
+            lock_owner->replay.op != OP_LOCKU) {
+            seqid_class = NFS4_SEQID_BAD;
+        }
         if (seqid_class == NFS4_SEQID_REPLAY) {
             res->status       = lock_owner->replay.status;
             res->lock_stateid = lock_owner->replay.stateid;
@@ -94,11 +125,8 @@ chimera_nfs4_locku(
         status = nfs4_stateid_check_seqid(lock_state->seqid,
                                           args->lock_stateid.seqid);
         if (status != NFS4_OK) {
-            nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                    thread->vfs_thread);
-            req->nfs_state_ref = NULL;
-            res->status        = status;
-            chimera_nfs4_compound_complete(req, res->status);
+            res->status = status;
+            chimera_nfs4_locku_finish(thread, req, args, res, lock_state);
             return;
         }
     }
@@ -106,11 +134,8 @@ chimera_nfs4_locku(
     /* RFC 7530 §16.12.4: same length rules as LOCK */
     if (args->length == 0 ||
         (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
-        nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                thread->vfs_thread);
-        req->nfs_state_ref = NULL;
-        res->status        = NFS4ERR_INVAL;
-        chimera_nfs4_compound_complete(req, res->status);
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_locku_finish(thread, req, args, res, lock_state);
         return;
     }
 
@@ -217,18 +242,5 @@ chimera_nfs4_locku(
     res->status = NFS4_OK;
     chimera_nfs4_set_current_stateid(req, &res->lock_stateid);
 
-    /* RFC 7530 §9.1.7: record cached reply for the lock_owner. */
-    if (is_v40 && lock_owner) {
-        pthread_mutex_lock(&lock_owner->lock);
-        lock_owner->seqid = args->seqid;
-        nfs4_replay_record(&lock_owner->replay, args->seqid, OP_LOCKU,
-                           NFS4_OK, &res->lock_stateid);
-        pthread_mutex_unlock(&lock_owner->lock);
-    }
-
-    nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                            thread->vfs_thread);
-    req->nfs_state_ref = NULL;
-
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_locku_finish(thread, req, args, res, lock_state);
 } /* chimera_nfs4_locku */

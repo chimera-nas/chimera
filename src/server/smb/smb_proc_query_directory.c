@@ -68,16 +68,28 @@ chimera_smb_query_directory_readdir_complete(
 
 } /* chimera_smb_query_directory_readdir_complete */
 
-int
-chimera_smb_query_directory_readdir_callback(
+struct smb_directory_page {
+    struct chimera_smb_request *request;
+    struct evpl_iovec *iov;
+    uint64_t cookie;
+    uint32_t flags;
+    uint32_t output_length;
+    uint32_t max_output_length;
+    uint32_t *last_file_offset;
+    int owned;
+    int stopped;
+};
+
+static int
+smb_query_directory_emit(
     uint64_t                        inum,
     uint64_t                        cookie,
     const char                     *name,
     int                             namelen,
     const struct chimera_vfs_attrs *attrs,
-    void                           *arg)
+    struct smb_directory_page      *page)
 {
-    struct chimera_smb_request       *request = arg;
+    struct chimera_smb_request       *request = page->request;
     struct chimera_server_smb_thread *thread  = request->compound->thread;
     uint16_t                         *namebuf;
     uint16_t                          namelen_padded;
@@ -119,7 +131,7 @@ chimera_smb_query_directory_readdir_callback(
 
     namelen_padded += (8 - (namelen_padded & 7)) & 7;
 
-    if (request->query_directory.flags & SMB2_INDEX_SPECIFIED) {
+    if (page->flags & SMB2_INDEX_SPECIFIED) {
         if (file_index != request->query_directory.file_index) {
             /* Not the target entry -- skip it but keep iterating.
              * Return 0 because any non-zero return value means "stop" to the VFS
@@ -129,7 +141,7 @@ chimera_smb_query_directory_readdir_callback(
         /* Found the matching entry.  Clear the flag so subsequent entries
          * are accepted normally, but skip this entry itself -- it was
          * already returned in the previous response. */
-        request->query_directory.flags &= ~SMB2_INDEX_SPECIFIED;
+        page->flags &= ~SMB2_INDEX_SPECIFIED;
         return 0;
     }
 
@@ -163,22 +175,22 @@ chimera_smb_query_directory_readdir_callback(
 
     expected_length += (8 - (expected_length & 7)) & 7;
 
-    if (request->query_directory.output_length + expected_length >
-        request->query_directory.max_output_length) {
+    if (page->output_length + expected_length >
+        page->max_output_length) {
         return -1;
     }
 
-    if (request->query_directory.output_length &&
-        (request->query_directory.flags & SMB2_RETURN_SINGLE_ENTRY)) {
+    if (page->output_length &&
+        (page->flags & SMB2_RETURN_SINGLE_ENTRY)) {
         return -1;
     }
 
-    request->query_directory.last_file_offset = evpl_iovec_data(&request->query_directory.iov) +
-        request->query_directory.output_length;
+    page->last_file_offset = evpl_iovec_data(&(*page->iov)) +
+        page->output_length;
 
-    evpl_iovec_cursor_init(&entry_cursor, &request->query_directory.iov, 1);
+    evpl_iovec_cursor_init(&entry_cursor, &(*page->iov), 1);
 
-    evpl_iovec_cursor_skip(&entry_cursor, request->query_directory.output_length);
+    evpl_iovec_cursor_skip(&entry_cursor, page->output_length);
 
     evpl_iovec_cursor_append_uint32(&entry_cursor, expected_length);
 
@@ -340,12 +352,37 @@ chimera_smb_query_directory_readdir_callback(
             break;
     } /* switch */
 
-    request->query_directory.output_length += expected_length;
+    page->output_length += expected_length;
 
-    request->query_directory.open_file->position = cookie;
+    page->cookie = cookie;
 
     return 0;
 } /* chimera_smb_query_directory_readdir_callback */
+
+/* Compatibility entry point for the unconverted named-pipe/control fallback.
+ * Both callers share one marshaller; only this legacy wrapper publishes early. */
+int
+chimera_smb_query_directory_readdir_callback(
+    uint64_t inum, uint64_t cookie, const char *name, int namelen,
+    const struct chimera_vfs_attrs *attrs, void *arg)
+{
+    struct chimera_smb_request *request = arg;
+    struct smb_directory_page page = {
+        .request = request,
+        .iov = &request->query_directory.iov,
+        .cookie = request->query_directory.open_file->position,
+        .flags = request->query_directory.flags,
+        .output_length = request->query_directory.output_length,
+        .max_output_length = request->query_directory.max_output_length,
+        .last_file_offset = request->query_directory.last_file_offset,
+    };
+    int rc = smb_query_directory_emit(inum, cookie, name, namelen, attrs, &page);
+    request->query_directory.flags = page.flags;
+    request->query_directory.output_length = page.output_length;
+    request->query_directory.last_file_offset = page.last_file_offset;
+    request->query_directory.open_file->position = page.cookie;
+    return rc;
+}
 
 void
 chimera_smb_query_directory(struct chimera_smb_request *request)
@@ -538,6 +575,7 @@ chimera_smb_query_directory_reply(
                                  &request->query_directory.iov,
                                  1,
                                  request->query_directory.output_length);
+        request->query_directory.output_length = 0;
     }
 } /* chimera_smb_query_directory_reply */
 
@@ -608,3 +646,220 @@ chimera_smb_parse_query_directory(
 
     return 0;
 } /* chimera_smb_parse_query_directory */
+static uint32_t
+smb_query_directory_header_length(unsigned int info_class)
+{
+    switch (info_class) {
+        case SMB2_FILE_DIRECTORY_INFORMATION: return 64;
+        case SMB2_FILE_FULL_DIRECTORY_INFORMATION: return 68;
+        case SMB2_FILE_BOTH_DIRECTORY_INFORMATION: return 94;
+        case SMB2_FILE_NAMES_INFORMATION: return 12;
+        case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION: return 102;
+        case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION: return 74;
+        default: return 0;
+    }
+}
+
+static int
+smb_query_directory_compound_eligible(struct chimera_smb_request *request)
+{
+    /* The legacy validation rejects unsupported classes before resolving the
+     * FileId. Keep those malformed requests at that validation boundary. */
+    return smb_query_directory_header_length(request->query_directory.info_class) != 0;
+}
+
+static struct chimera_smb_file_id
+smb_query_directory_compound_file_id(struct chimera_smb_request *request)
+{
+    return request->query_directory.file_id;
+}
+
+static void
+smb_query_directory_stream_reset(struct chimera_vfs_compound *compound, uint32_t index,
+                                  void *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+    struct smb_directory_page *page = command->private_data;
+    (void) compound;
+    (void) index;
+    page->cookie = command->state->position;
+    page->flags = command->request->query_directory.flags;
+    page->output_length = 0;
+    page->last_file_offset = NULL;
+    page->stopped = 0;
+}
+
+static int
+smb_query_directory_stream_append(struct chimera_vfs_compound *compound, uint32_t index,
+                                   uint64_t inum, uint64_t cookie, const char *name,
+                                   int namelen, const struct chimera_vfs_attrs *attrs,
+                                   void *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+    struct smb_directory_page *page = command->private_data;
+    struct chimera_smb_request *request = command->request;
+    int rc;
+    (void) compound;
+    (void) index;
+
+    if (!chimera_vfs_dirent_match(name, namelen, request->query_directory.pattern,
+                                  request->query_directory.pattern_length)) {
+        return 0;
+    }
+    rc = smb_query_directory_emit(inum, cookie, name, namelen, attrs, page);
+    if (rc) {
+        page->stopped = 1;
+    }
+    return rc;
+}
+
+static void
+smb_query_directory_readdir_prepare(struct chimera_vfs_compound *compound, uint32_t index,
+                                     enum chimera_vfs_error *status, void *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+    (void) status;
+    chimera_vfs_compound_op_args(compound, index)->cookie = command->state->position;
+}
+
+static int
+smb_query_directory_compound_build(struct chimera_vfs_compound *compound,
+                                    struct smb_vfs_command *command)
+{
+    struct chimera_smb_request *request = command->request;
+    struct smb_directory_page *page = calloc(1, sizeof(*page));
+    uint64_t mask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME;
+    int index;
+    command->private_data = page;
+    if (!page) {
+        /* The command checkpoint reports the allocation error on every attempt. */
+        return chimera_vfs_compound_add_checkpoint(compound);
+    }
+    page->request = request;
+    page->iov = &request->query_directory.iov;
+    page->max_output_length = request->query_directory.max_output_length;
+    if (page->max_output_length > CHIMERA_SMB_MAX_TRANSACT_SIZE) {
+        page->max_output_length = CHIMERA_SMB_MAX_TRANSACT_SIZE;
+    }
+    if (page->max_output_length >= smb_query_directory_header_length(request->query_directory.info_class)) {
+        evpl_iovec_alloc(request->compound->thread->evpl, page->max_output_length, 4096,
+                         1, 0, page->iov);
+        page->owned = 1;
+    }
+    switch (request->query_directory.info_class) {
+        case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:
+        case SMB2_FILE_FULL_DIRECTORY_INFORMATION:
+        case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION:
+        case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION:
+            mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+            break;
+    }
+    if (request->tree->share && request->tree->share->access_based_enum) {
+        mask |= CHIMERA_VFS_ATTR_ACL;
+    }
+    index = chimera_vfs_compound_add_readdir_stream(compound, 0, 0, mask,
+        smb_query_directory_stream_reset, smb_query_directory_stream_append, command);
+    chimera_vfs_compound_op_args(compound, index)->readdir_flags = CHIMERA_VFS_READDIR_EMIT_DOT;
+    chimera_vfs_compound_set_op_prepare(compound, index, smb_query_directory_readdir_prepare, command);
+    return index;
+}
+
+static void
+smb_query_directory_compound_prepare(struct chimera_vfs_compound *compound, uint32_t index,
+                                      enum chimera_vfs_error *status, void *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+    struct chimera_smb_request *request = command->request;
+    struct smb_directory_page *page = command->private_data;
+    (void) compound;
+    (void) index;
+    (void) status;
+
+    if (!page) {
+        command->status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+        return;
+    }
+    if (request->query_directory.flags & (SMB2_RESTART_SCANS | SMB2_REOPEN | SMB2_INDEX_SPECIFIED)) {
+        command->state->position = 0;
+        command->state->position_dirty = 1;
+    }
+    if (command->state->position == UINT64_MAX) {
+        command->status = SMB2_STATUS_NO_MORE_FILES;
+        return;
+    }
+    if (page->max_output_length < smb_query_directory_header_length(request->query_directory.info_class)) {
+        command->status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
+        return;
+    }
+}
+
+static void
+smb_query_directory_compound_complete(struct chimera_vfs_compound *compound, uint32_t index,
+                                       enum chimera_vfs_error *status, void *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+    struct smb_directory_page *page = command->private_data;
+    const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, index);
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (page->last_file_offset) {
+        *page->last_file_offset = 0;
+    }
+    command->state->position = op->eof && !page->stopped ? UINT64_MAX : page->cookie;
+    command->state->position_dirty = 1;
+    if (!page->output_length) {
+        command->status = SMB2_STATUS_NO_MORE_FILES;
+        *status = CHIMERA_VFS_EINVAL;
+    }
+}
+
+static void
+smb_query_directory_compound_publish(struct chimera_vfs_compound *compound,
+                                      struct smb_vfs_command *command)
+{
+    struct smb_directory_page *page = command->private_data;
+    struct chimera_smb_request *request = command->request;
+    (void) compound;
+    if (command->status == SMB2_STATUS_SUCCESS && command->publish_live) {
+        request->query_directory.output_length = page->output_length;
+        page->owned = 0;
+        command->reply_data_owned = 1;
+    }
+}
+
+static void
+smb_query_directory_compound_release(struct smb_vfs_command *command)
+{
+    struct smb_directory_page *page = command->private_data;
+    if (page) {
+        if (page->owned) {
+            evpl_iovec_release(command->request->compound->thread->evpl, page->iov);
+        }
+        free(page);
+        command->private_data = NULL;
+    }
+}
+
+static void
+smb_query_directory_compound_reply_release(struct smb_vfs_command *command)
+{
+    struct chimera_smb_request *request = command->request;
+    if (command->reply_data_owned && request->query_directory.output_length) {
+        evpl_iovec_release(request->compound->thread->evpl, &request->query_directory.iov);
+        request->query_directory.output_length = 0;
+    }
+    command->reply_data_owned = 0;
+}
+
+const struct smb_vfs_command_ops chimera_smb_query_directory_compound_ops = {
+    .eligible = smb_query_directory_compound_eligible,
+    .file_id = smb_query_directory_compound_file_id,
+    .map_error = chimera_smb_query_directory_status,
+    .build = smb_query_directory_compound_build,
+    .prepare = smb_query_directory_compound_prepare,
+    .complete = smb_query_directory_compound_complete,
+    .publish = smb_query_directory_compound_publish,
+    .release = smb_query_directory_compound_release,
+    .reply_release = smb_query_directory_compound_reply_release,
+};

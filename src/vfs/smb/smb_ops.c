@@ -2094,7 +2094,7 @@ chimera_smb_client_mkdir_at(
                     chimera_smb_mkdir_create_reply);
 } /* chimera_smb_client_mkdir_at */
 
-/* ---- remove_at (full path, delete-on-close) ---------------------------- */
+/* ---- remove_at (explicit POSIX disposition then close) ---------------- */
 
 static void
 chimera_smb_remove_close_reply(
@@ -2105,16 +2105,38 @@ chimera_smb_remove_close_reply(
     int                             body_len,
     void                           *arg)
 {
-    struct chimera_vfs_request *request = arg;
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
 
     (void) conn;
     (void) hdr;
     (void) body;
     (void) body_len;
 
-    request->status = chimera_smb_status_to_errno(status);
+    request->status = state->remove_status != CHIMERA_VFS_OK ?
+        state->remove_status : chimera_smb_status_to_errno(status);
     request->complete(request);
 } /* chimera_smb_remove_close_reply */
+
+static void
+chimera_smb_remove_disposition_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+
+    /* Always retire the temporary open, preserving a failed SET_INFO result.
+     * A peer without POSIX disposition must not report deferred unlink as
+     * POSIX success while another open keeps the name alive. */
+    state->remove_status = status == SMB2_STATUS_INVALID_INFO_CLASS ?
+        CHIMERA_VFS_ENOTSUP : chimera_smb_status_to_errno(status);
+    smb_send_close(conn, request, &state->file_id, chimera_smb_remove_close_reply);
+} /* chimera_smb_remove_disposition_reply */
 
 static void
 chimera_smb_remove_create_reply(
@@ -2128,6 +2150,9 @@ chimera_smb_remove_create_reply(
     struct chimera_vfs_request  *request = arg;
     struct chimera_smb_op_state *state   = request->plugin_data;
     struct smb_create_result     r;
+    struct evpl_iovec            iov;
+    struct evpl_iovec_cursor     cursor;
+    struct smb2_header          *request_hdr;
 
     (void) hdr;
     (void) body_len;
@@ -2141,8 +2166,20 @@ chimera_smb_remove_create_reply(
     smb_parse_create_reply(body, &r);
     state->file_id = r.file_id;
 
-    /* FILE_DELETE_ON_CLOSE was set on the open, so CLOSE removes the file. */
-    smb_send_close(conn, request, &state->file_id, chimera_smb_remove_close_reply);
+    state->remove_status = CHIMERA_VFS_OK;
+    chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &request_hdr);
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_DISPOSITION_INFO_EX);
+    evpl_iovec_cursor_append_uint32(&cursor, 4);
+    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 32);
+    evpl_iovec_cursor_append_uint16(&cursor, 0);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.vid);
+    evpl_iovec_cursor_append_uint32(&cursor, 3); /* DELETE | POSIX_SEMANTICS */
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_remove_disposition_reply, request);
 } /* chimera_smb_remove_create_reply */
 
 void
@@ -2162,7 +2199,7 @@ chimera_smb_client_remove_at(
     /* POSIX unlink/rmdir removes the named entry itself; a final-component
      * symlink must be deleted as the link, never followed (which would ELOOP or
      * hit the target).  FILE_OPEN_REPARSE_POINT opens the link node so
-     * DELETE_ON_CLOSE removes it.
+     * the explicit POSIX disposition removes it on the helper open's CLOSE.
      *
      * Project the caller's rmdir-vs-unlink assertion onto the CREATE options so
      * the peer enforces it (#959): without one, an SMB server deletes whatever
@@ -2171,7 +2208,7 @@ chimera_smb_client_remove_at(
      * 3.3.12, 3.3.13).  The peer answers STATUS_NOT_A_DIRECTORY /
      * STATUS_FILE_IS_A_DIRECTORY, which the status map turns into ENOTDIR /
      * EISDIR. */
-    uint32_t options = SMB2_FILE_DELETE_ON_CLOSE | SMB2_FILE_OPEN_REPARSE_POINT;
+    uint32_t options = SMB2_FILE_OPEN_REPARSE_POINT;
 
     if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
         options |= SMB2_FILE_DIRECTORY_FILE;

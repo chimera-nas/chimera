@@ -131,6 +131,37 @@ struct chimera_claim_actor {
     struct chimera_vfs_open_handle *op_handle;
 };
 
+struct chimera_vfs_claim;
+
+/* Per-I/O admission view. NULL owner means ordinary anonymous admission,
+ * including all nonexcluded share denies and caching claims. Excluded claims
+ * and the pointer array must remain pinned through asynchronous completion.
+ * They are never installed on the file's shared implicit claim. */
+struct chimera_vfs_io_view {
+    const struct chimera_claim_actor      *owner;
+    const struct chimera_vfs_claim *const *excluded;
+    uint32_t                               num_excluded;
+};
+
+static inline void
+chimera_vfs_io_view_copy(
+    struct chimera_vfs_io_view       *dst,
+    struct chimera_claim_actor       *owner_storage,
+    const struct chimera_vfs_io_view *src)
+{
+    if (src) {
+        *dst = *src;
+        if (src->owner) {
+            *owner_storage = *src->owner;
+            dst->owner     = owner_storage;
+        }
+    } else {
+        dst->owner        = NULL;
+        dst->excluded     = NULL;
+        dst->num_excluded = 0;
+    }
+} // chimera_vfs_io_view_copy
+
 static inline bool
 chimera_claim_owner_equal(
     const struct chimera_claim_owner *a,
@@ -150,14 +181,16 @@ chimera_claim_owner_has_key(const struct chimera_claim_owner *o)
     return memcmp(o->key, zero, 16) != 0;
 } /* chimera_claim_owner_has_key */
 
-/* same_key: same 16-byte nonzero key.  A zero key never matches anything,
+/* Keys are scoped by protocol and client identity (SMB LeaseTable.ClientGuid
+ * then LeaseKey), never shared between independent clients. A zero key never matches anything,
  * including itself -- keyless holders fall back to the HOLDER/OWNER circles. */
 static inline bool
 chimera_claim_owner_same_key(
     const struct chimera_claim_owner *a,
     const struct chimera_claim_owner *b)
 {
-    return chimera_claim_owner_has_key(a) &&
+    return a->proto == b->proto && a->client_key == b->client_key &&
+           chimera_claim_owner_has_key(a) &&
            memcmp(a->key, b->key, 16) == 0;
 } /* chimera_claim_owner_same_key */
 

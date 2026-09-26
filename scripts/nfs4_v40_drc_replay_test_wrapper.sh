@@ -64,6 +64,8 @@ cat > "$CONFIG_FILE" << EOF
     },
     "server": {
         "nfs_enabled": true,
+        "nfs4_delegations": ${V40_DELEGATIONS:-false},
+        "nfs4_grace_time": 0,
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false

@@ -34,10 +34,23 @@ chimera_nfs4_readdir_entry_fill(
     int                             namelen,
     const struct chimera_vfs_attrs *attrs)
 {
-    uint32_t       dbuf_cur;
-    uint32_t       dbuf_before = req->encoding->dbuf->used;
-    struct entry4 *entry;
-    int            rc;
+    uint32_t                 dbuf_cur;
+    uint32_t                 dbuf_before = req->encoding->dbuf->used;
+    struct entry4           *entry;
+    int                      rc;
+    struct chimera_vfs_attrs projected = *attrs;
+
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_FH) && args->num_attr_request &&
+        (args->attr_request[0] & (1U << FATTR4_CHANGE))) {
+        struct nfs4_change_observation *observation;
+        cursor->change_status = nfs4_change_project(req->thread->shared->nfs4_state_table.change_table,
+                                                    attrs->va_fh, attrs->va_fh_len, &projected, &req->
+                                                    change_observations, &observation);
+        if (cursor->change_status != NFS4_OK) {
+            return -1;
+        }
+        attrs = &projected;
+    }
 
     entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
     if (!entry) {
@@ -156,6 +169,10 @@ chimera_nfs4_readdir_complete(
     struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
     uint64_t                        cv;
 
+    if (status == NFS4_OK && cursor->change_status != NFS4_OK) {
+        status = cursor->change_status;
+    }
+
     /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are
      * not at end-of-directory, the buffer is too small. Returning an empty,
      * non-eof page would stall a paging client. */
@@ -202,7 +219,7 @@ chimera_nfs4_readdir_open_callback(
         return;
     }
     attrmask = chimera_nfs4_attr2mask(args->attr_request,
-                                      args->num_attr_request);
+                                      args->num_attr_request) | CHIMERA_VFS_ATTR_FH;
     uint64_t cookieverf;
     memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
     chimera_vfs_readdir(thread->vfs_thread, &req->cred,
@@ -452,9 +469,10 @@ chimera_nfs4_readdir(
      * + the dirlist4 "entry present" and "eof" booleans (4 each). Keeping
      * this tight ensures a small maxcount on a continuation still admits at
      * least one entry rather than returning an empty, non-eof page. */
-    cursor->count   = 16;
-    cursor->entries = NULL;
-    cursor->last    = NULL;
+    cursor->count         = 16;
+    cursor->entries       = NULL;
+    cursor->last          = NULL;
+    cursor->change_status = NFS4_OK;
 
     res->resok4.reply.entries = NULL;
 

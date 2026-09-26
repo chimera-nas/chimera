@@ -45,8 +45,14 @@ endif()
 
 add_executable(client_read_into read_into.c)
 target_link_libraries(client_read_into chimera_client evpl prometheus-c)
+add_library(client_compound_finish_reject SHARED compound_finish_reject.c)
+target_include_directories(client_compound_finish_reject PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(client_compound_finish_reject chimera_vfs ${CMAKE_DL_LIBS})
 if(CHIMERA_LIMITS_TESTING)
     add_test(NAME chimera/client/read_into COMMAND client_read_into)
+    add_test(NAME chimera/client/compound_finish_reject
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/compound_finish_reject.sh
+        $<TARGET_FILE:client_read_into> $<TARGET_FILE:client_compound_finish_reject>)
 endif()
 
 # List of test programs

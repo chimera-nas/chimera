@@ -14,6 +14,7 @@
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_compound.h"
+#include "common/compound_retry.h"
 #include "vfs/vfs_release.h"
 #include "common/logging.h"
 

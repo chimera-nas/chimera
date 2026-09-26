@@ -173,14 +173,15 @@ chimera_fuse_request_finish(struct chimera_fuse_request *req)
 {
     struct chimera_fuse_thread *thread = req->thread;
 
-    if (req->handle) {
-        chimera_vfs_release(thread->vfs_thread, req->handle);
-        req->handle = NULL;
-    }
-
     if (req->compound) {
         chimera_vfs_compound_free(req->compound);
         req->compound = NULL;
+    }
+
+    /* Lock compounds borrow this pin through their attempt cleanup. */
+    if (req->handle) {
+        chimera_vfs_release(thread->vfs_thread, req->handle);
+        req->handle = NULL;
     }
 
     chimera_fuse_request_free(thread, req);
@@ -374,41 +375,6 @@ chimera_fuse_channel_dead(struct chimera_fuse_channel *channel)
     chimera_fuse_info("fuse mount %s: connection closed by kernel",
                       channel->mount->mountpoint);
 } /* chimera_fuse_channel_dead */
-
-/* Marshal a request completed off-thread home for its reply. */
-void
-chimera_fuse_resume_post(struct chimera_fuse_request *req)
-{
-    struct chimera_fuse_thread *thread = req->thread;
-
-    pthread_mutex_lock(&thread->resume_lock);
-    req->next            = thread->resume_queue;
-    thread->resume_queue = req;
-    pthread_mutex_unlock(&thread->resume_lock);
-
-    evpl_ring_doorbell(&thread->resume_doorbell);
-} /* chimera_fuse_resume_post */
-
-void
-chimera_fuse_resume_doorbell(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
-{
-    struct chimera_fuse_thread  *thread = container_of(doorbell, struct chimera_fuse_thread, resume_doorbell);
-    struct chimera_fuse_request *queue, *req;
-
-    pthread_mutex_lock(&thread->resume_lock);
-    queue                = thread->resume_queue;
-    thread->resume_queue = NULL;
-    pthread_mutex_unlock(&thread->resume_lock);
-
-    while (queue) {
-        req   = queue;
-        queue = req->next;
-
-        chimera_fuse_lock_resume(req);
-    }
-} /* chimera_fuse_resume_doorbell */
 
 static void
 chimera_fuse_op_interrupt(

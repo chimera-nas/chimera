@@ -309,11 +309,9 @@ chimera_vfs_notify_emit(
     const char                *old_name,
     uint16_t                   old_name_len);
 
-/* Like chimera_vfs_notify_emit, but the caller (the SMB layer) supplies a
- * ParentLeaseKey naming an SMB3 directory lease to spare from the
- * directory-lease break this fires: the mutating client's cached directory view
- * is coherent with the change it just made (MS-SMB2 dirlease self-exemption).
- * `has_skip` == false is exactly chimera_vfs_notify_emit (break every lease). */
+/* Compatibility entrypoint. A bare ParentLeaseKey cannot identify its client,
+ * so this conservatively breaks every directory lease. Call emit_actor with
+ * protocol, client identity, and key to request a scoped self-exemption. */
 void
 chimera_vfs_notify_emit_lease(
     struct chimera_vfs_notify *notify,
@@ -327,6 +325,16 @@ chimera_vfs_notify_emit_lease(
     uint64_t                   skip_lo,
     uint64_t                   skip_hi,
     bool                       has_skip);
+
+/* Emit with a complete cache actor. ParentLeaseKey exemptions are scoped by
+ * protocol and client identity as well as key; NULL recalls all directory leases.
+ * The actor is borrowed only for the synchronous invalidation call. */
+struct chimera_claim_actor;
+void chimera_vfs_notify_emit_actor(
+    struct chimera_vfs_notify *notify, const uint8_t *dir_fh, uint16_t dir_fh_len,
+    uint32_t action, const char *name, uint16_t name_len,
+    const char *old_name, uint16_t old_name_len,
+    const struct chimera_claim_actor *actor);
 
 /* Deliver a CHANGE_NOTIFY event but do NOT break SMB3 directory leases.  For
  * the SMB create path when a create-capable disposition only opened an existing

@@ -46,6 +46,13 @@ chimera_nfs4_release_lockowner(
 
     if (lo) {
         pthread_mutex_lock(&lo->lock);
+        if (atomic_load_explicit(&lo->compound_pins, memory_order_acquire)) {
+            pthread_mutex_unlock(&lo->lock);
+            pthread_mutex_unlock(&client->lock);
+            res->status = NFS4ERR_DELAY;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
         for (ls = lo->states; ls; ls = ls->next_in_owner) {
             if (ls->range_leases != NULL) {
                 held = true;

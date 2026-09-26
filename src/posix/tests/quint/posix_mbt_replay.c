@@ -1398,18 +1398,6 @@ check_status(
             g_last_recon = "ND6";
             return 0;
         }
-        /* ND8: the nfs3 profile pins copyRange=false, which the model
-         * flattens to ENOTSUP for every copy_file_range -- but argument
-         * validation comes first in POSIX and Linux alike, so a same-file
-         * overlapping range draws EINVAL before any backend support check.
-         * Retires when the model orders its argument checks ahead of the
-         * capability answer. */
-        if (actual == 22 && expected == 95 &&
-            strcmp(g_cur_tag, "RCopyRange") == 0) {
-            record_dev("ND8");
-            g_last_recon = "ND8";
-            return 0;
-        }
         /* ND9: a path operation relative to a directory descriptor whose
          * directory has been removed.  POSIX resolves through the held-open
          * husk and reports ENOENT; an NFS client holds only the directory's

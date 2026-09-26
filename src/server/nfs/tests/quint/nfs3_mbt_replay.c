@@ -313,19 +313,6 @@ static const struct deviation known_deviations[] = {
      * read and return the OK the model asserts. */
     { "exclusive-create-retry-exist", "OCreate",  0, 17 },
 
-    /* CREATE over an existing name in a directory the caller cannot SEARCH
-     * (execute): the model requires search permission to resolve the name at
-     * all and asserts ACCES ahead of any existence/type result (POSIX path
-     * resolution).  The passthrough backends enforce this in the kernel and
-     * match ACCES directly.  The mkfs backends (memfs/diskfs/cairn) omit the
-     * search check on the existing-entry path -- chimera bug #1771 -- and leak
-     * the entry by returning its type-based reply instead: EISDIR over a
-     * directory, EXIST over another non-regular object, or OK (the existing
-     * regular file) for an UNCHECKED create.  Tracked for fix in #1771; when
-     * fixed, delete these three entries. */
-    { "create-search-perm-1771",      "OCreate", 13, 21 },
-    { "create-search-perm-1771",      "OCreate", 13, 17 },
-    { "create-search-perm-1771",      "OCreate", 13,  0 },
 };
 /* *INDENT-ON* */
 

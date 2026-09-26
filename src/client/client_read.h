@@ -7,34 +7,14 @@
 #include "client_internal.h"
 
 static void
-chimera_read_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    chimera_read_callback_t        callback      = request->read.callback;
-    void                          *callback_arg  = request->read.private_data;
-
-    // Store the actual count and eof for use by the callback
-    request->read.result_count = count;
-    request->read.result_eof   = eof;
-
-    chimera_client_request_free(client_thread, request);
-
-    callback(client_thread, error_code, iov, niov, callback_arg);
-} /* chimera_read_complete */
-
-static void
 chimera_read_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
+    struct chimera_client_request        *request       = private_data;
+    struct chimera_client_thread         *client_thread = request->thread;
+    chimera_read_callback_t               callback      = request->read.callback;
+    void                                 *callback_arg  = request->read.private_data;
     const struct chimera_vfs_compound_op *op;
     struct evpl_iovec                    *iov  = NULL;
     int                                   niov = 0;
@@ -58,7 +38,13 @@ chimera_read_sequence_complete(
      * does not own it (see the note on ->compound). */
     chimera_vfs_compound_free(compound);
 
-    chimera_read_complete(status, count, eof, iov, niov, NULL, private_data);
+    // Store the actual count and eof for use by the callback
+    request->read.result_count = count;
+    request->read.result_eof   = eof;
+
+    chimera_client_request_free(client_thread, request);
+
+    callback(client_thread, status, iov, niov, callback_arg);
 } /* chimera_read_sequence_complete */
 
 static inline void
@@ -87,6 +73,6 @@ chimera_dispatch_read(
                                   CHIMERA_CLIENT_IOV_MAX,
                                   NULL);
 
-    chimera_vfs_compound_submit(request->compound,
-                                chimera_read_sequence_complete, request);
+    chimera_frontend_compound_submit(request->compound,
+                                     chimera_read_sequence_complete, request);
 } /* chimera_dispatch_read */

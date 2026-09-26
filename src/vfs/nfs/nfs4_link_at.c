@@ -73,6 +73,8 @@ chimera_nfs4_link_callback(
         return;
     }
 
+    chimera_nfs4_unmarshall_cinfo(&link_res->oplink.resok4.cinfo,
+                                  &request->link_at.r_dir_pre_attr, &request->link_at.r_dir_post_attr);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_link_callback */

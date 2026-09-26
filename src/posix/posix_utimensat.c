@@ -159,13 +159,12 @@ chimera_posix_futimens(
  * diskfs and the NFS3/NFS4 clients).  AT_SYMLINK_NOFOLLOW drops the FOLLOW flag
  * so the times are applied to the symlink itself.
  *
- * Once the target file handle is known we open it (O_PATH) and apply the
- * setattr, mirroring the lookup -> open_fh -> setattr chain in
- * client_setattr.h.
+ * One compound validates the starting descriptor, resolves and opens the
+ * target (O_PATH), then applies setattr. A both-omitted call resolves the
+ * path without opening or changing the target.
  */
 struct chimera_posix_utimensat_ctx {
     struct chimera_posix_completion comp;
-    struct chimera_vfs_open_handle *file_handle;
     struct chimera_vfs_attrs        set_attr;
     uint32_t                        lookup_flags;   /* CHIMERA_VFS_LOOKUP_FOLLOW or 0 */
     /* Both timestamps omitted: validate the path resolution, change
@@ -184,137 +183,68 @@ struct chimera_posix_utimensat_ctx {
 };
 
 static void
-chimera_posix_utimensat_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_posix_utimensat_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_posix_utimensat_ctx *ctx = private_data;
+    struct chimera_posix_utimensat_ctx *ctx    = private_data;
+    enum chimera_vfs_error              status = chimera_vfs_compound_status(compound);
 
-    chimera_vfs_release(ctx->comp.request->thread->vfs_thread, ctx->file_handle);
-    chimera_posix_complete(&ctx->comp, error_code);
-} /* chimera_posix_utimensat_setattr_complete */
+    chimera_vfs_compound_free(compound);
+    chimera_posix_complete(&ctx->comp, status);
+} /* chimera_posix_utimensat_sequence_complete */
 
 static void
-chimera_posix_utimensat_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
+chimera_posix_utimensat_dircheck(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_posix_utimensat_ctx *ctx     = private_data;
-    struct chimera_client_request      *request = ctx->comp.request;
+    const struct chimera_vfs_attrs *attr = &chimera_vfs_compound_op(compound, index)->attr;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
-        return;
+    if (*status == CHIMERA_VFS_OK && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode)) {
+        *status = CHIMERA_VFS_ENOTDIR;
     }
-
-    ctx->file_handle = oh;
-
-    chimera_vfs_setattr(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        &ctx->set_attr,
-        0,  /* pre_attr_mask */
-        0,  /* post_attr_mask */
-        chimera_posix_utimensat_setattr_complete,
-        ctx);
-} /* chimera_posix_utimensat_open_complete */
-
-static void
-chimera_posix_utimensat_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_posix_utimensat_ctx *ctx     = private_data;
-    struct chimera_client_request      *request = ctx->comp.request;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
-        return;
-    }
-
-    if (ctx->validate_only) {
-        /* Resolution succeeded; a both-omitted call changes nothing. */
-        chimera_posix_complete(&ctx->comp, CHIMERA_VFS_OK);
-        return;
-    }
-
-    chimera_vfs_open_fh(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        attr->va_fh,
-        attr->va_fh_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
-        chimera_posix_utimensat_open_complete,
-        ctx);
-} /* chimera_posix_utimensat_lookup_complete */
-
-static void
-chimera_posix_utimensat_lookup(struct chimera_client_request *request)
-{
-    struct chimera_posix_utimensat_ctx *ctx = request->setattr.private_data;
-
-    chimera_vfs_lookup(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        ctx->start_fh,
-        ctx->start_fh_len,
-        ctx->path,
-        ctx->path_len,
-        CHIMERA_VFS_ATTR_FH,
-        ctx->lookup_flags,
-        chimera_posix_utimensat_lookup_complete,
-        ctx);
-} /* chimera_posix_utimensat_lookup */
-
-/* Resolving a relative path under a non-directory dirfd is ENOTDIR; a directory
- * (even one whose name was unlinked while the fd stayed open) proceeds to the
- * path resolution below, which yields the natural ENOENT for a removed dir. */
-static void
-chimera_posix_utimensat_dircheck_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_posix_utimensat_ctx *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISDIR(attr->va_mode)) {
-        chimera_posix_complete(&ctx->comp, CHIMERA_VFS_ENOTDIR);
-        return;
-    }
-
-    chimera_posix_utimensat_lookup(ctx->comp.request);
-} /* chimera_posix_utimensat_dircheck_complete */
+} /* chimera_posix_utimensat_dircheck */
 
 static void
 chimera_posix_utimensat_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    struct chimera_posix_utimensat_ctx *ctx = request->setattr.private_data;
+    struct chimera_posix_utimensat_ctx *ctx      = request->setattr.private_data;
+    struct chimera_vfs_compound        *compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, chimera_client_req_cred(request));
 
+    request->compound = compound;
     if (ctx->dir_handle) {
-        chimera_vfs_getattr(
-            thread->vfs_thread,
-            chimera_client_req_cred(request),
-            ctx->dir_handle,
-            CHIMERA_VFS_ATTR_MASK_STAT,
-            chimera_posix_utimensat_dircheck_complete,
-            ctx);
-        return;
+        chimera_vfs_compound_add_puthandle(compound, ctx->dir_handle, CHIMERA_VFS_OPEN_INFERRED);
+        int check = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+        if (check >= 0) {
+            chimera_vfs_compound_op_set_handle(compound, check, ctx->dir_handle);
+            chimera_vfs_compound_set_op_callbacks(compound, check, NULL,
+                                                  chimera_posix_utimensat_dircheck, ctx);
+        }
     }
-
-    chimera_posix_utimensat_lookup(request);
+    chimera_vfs_compound_add_putfh(compound, ctx->start_fh, ctx->start_fh_len);
+    if (ctx->validate_only) {
+        chimera_vfs_compound_add_lookup_path(compound, ctx->path, ctx->path_len,
+                                             CHIMERA_VFS_ATTR_FH, ctx->lookup_flags);
+    } else {
+        unsigned int flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
+        if (!(ctx->lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW)) {
+            flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
+        }
+        int          opened = chimera_vfs_compound_add_open_path(compound, ctx->path,
+                                                                 ctx->path_len, flags, NULL, 0);
+        int          attr = chimera_vfs_compound_add_setattr(compound, NULL, &ctx->set_attr, 0);
+        if (opened >= 0 && attr >= 0) {
+            chimera_vfs_compound_op_use_handle(compound, attr, opened);
+        }
+    }
+    chimera_frontend_compound_submit(compound, chimera_posix_utimensat_sequence_complete, ctx);
 } /* chimera_posix_utimensat_exec */
 
 SYMBOL_EXPORT int
@@ -333,7 +263,6 @@ chimera_posix_utimensat(
 
     chimera_posix_completion_init(&ctx.comp, &req);
 
-    ctx.file_handle   = NULL;
     ctx.validate_only = chimera_posix_utimes_noop(times);
 
     /* By default follow a final symlink and set times on its target; with

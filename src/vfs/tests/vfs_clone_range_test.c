@@ -23,7 +23,9 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_attrs.h"
+#include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
 #include "common/logging.h"
@@ -46,6 +48,7 @@ struct test_ctx {
     const uint8_t                  *expect;     /* read verification */
     uint32_t                        expect_len;
     int                             verify_ok;
+    uint64_t                        copied;
 };
 
 static void
@@ -197,6 +200,222 @@ clone_cb(
     ctx->done   = 1;
 } /* clone_cb */
 
+static void                        (*copy_dispatch_original)(
+    struct chimera_vfs_request *,
+    void *);
+static struct chimera_vfs_request *copy_delayed_read;
+static void                       *copy_delayed_private;
+static struct chimera_claim_actor  copy_src_actor, copy_dst_actor;
+static int                         copy_expect_owners, copy_delay_read, copy_write_fault;
+static unsigned                    copy_reads, copy_writes;
+static int                         copy_synthetic;
+static uintptr_t                   copy_stack_origin;
+
+/* Exercise the real read/write ownership gates and buffers, with a controllable
+ * asynchronous boundary and backend write completion. */
+static void
+copy_dispatch(
+    struct chimera_vfs_request *req,
+    void                       *private_data)
+{
+    if (req->opcode == CHIMERA_VFS_OP_READ || req->opcode == CHIMERA_VFS_OP_WRITE) {
+        if (copy_synthetic) {
+            /* ASan can place address-taken locals on its fake stack, whose
+             * allocation positions change even when callback depth is flat.
+             * Inspect the actual call frame rather than a local's address. */
+            uintptr_t stack_here = (uintptr_t) __builtin_frame_address(0);
+            if (!copy_stack_origin) {
+                copy_stack_origin = stack_here;
+            }
+            uintptr_t distance = stack_here > copy_stack_origin ?
+                stack_here - copy_stack_origin : copy_stack_origin - stack_here;
+            assert(distance < 32768);
+        }
+        assert(req->io_owner_valid == copy_expect_owners);
+        if (copy_expect_owners) {
+            const struct chimera_claim_actor *want = req->opcode == CHIMERA_VFS_OP_READ ?
+                &copy_src_actor : &copy_dst_actor;
+            assert(!memcmp(&req->io_owner, want, sizeof(*want)));
+        }
+        if (req->opcode == CHIMERA_VFS_OP_READ) {
+            copy_reads++;
+            if (copy_synthetic) {
+                assert(evpl_iovec_alloc(req->thread->evpl, req->read.length,
+                                        0, 1, 0, req->read.iov) == 1);
+                memset(req->read.iov[0].data, 0x51, req->read.length);
+                req->read.r_length           = req->read.length;
+                req->read.r_niov             = 1;
+                req->read.r_eof              = 0;
+                req->read.r_attr.va_set_mask = 0;
+                req->status                  = CHIMERA_VFS_OK;
+                req->complete(req);
+                return;
+            }
+            if (copy_delay_read) {
+                copy_delay_read      = 0;
+                copy_delayed_read    = req;
+                copy_delayed_private = private_data;
+                return;
+            }
+        } else {
+            copy_writes++;
+            if (copy_write_fault || copy_synthetic) {
+                struct chimera_acl *acl = NULL;
+                req->write.r_length = copy_write_fault == 1 ? 0 :
+                    req->write.length - (copy_write_fault == 2);
+                req->write.r_sync                  = CHIMERA_VFS_WRITE_FILESYNC;
+                req->write.r_pre_attr.va_set_mask  = 0;
+                req->write.r_post_attr.va_set_mask = 0;
+                if (copy_synthetic) {
+                    acl = calloc(1, chimera_acl_size(1));
+                    assert(acl);
+                    acl->num_aces                      = 1;
+                    acl->aces[0].access_mask           = CHIMERA_ACE_READ_DATA;
+                    req->write.r_post_attr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+                    req->write.r_post_attr.va_acl      = acl;
+                }
+                req->status = CHIMERA_VFS_OK;
+                req->complete(req);
+                free(acl);
+                return;
+            }
+        }
+    }
+    copy_dispatch_original(req, private_data);
+} /* copy_dispatch */
+
+static void
+copy_cb(
+    enum chimera_vfs_error    status,
+    uint64_t                  copied,
+    struct chimera_vfs_attrs *pre,
+    struct chimera_vfs_attrs *post,
+    void                     *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    if (copy_synthetic) {
+        assert(post && (post->va_set_mask & CHIMERA_VFS_ATTR_ACL));
+        assert(post->va_acl && post->va_acl->num_aces == 1);
+        assert(post->va_acl->aces[0].access_mask == CHIMERA_ACE_READ_DATA);
+    }
+    ctx->status = status;
+    ctx->copied = copied;
+    ctx->done   = 1;
+} /* copy_cb */
+
+static void
+write_data(
+    struct test_ctx *,
+    const struct chimera_vfs_cred *,
+    struct chimera_vfs_open_handle *,
+    uint64_t,
+    const uint8_t *,
+    uint32_t);
+static void
+read_verify(
+    struct test_ctx *,
+    const struct chimera_vfs_cred *,
+    struct chimera_vfs_open_handle *,
+    uint32_t,
+    const uint8_t *);
+
+static void
+test_copy_fallback(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *src,
+    struct chimera_vfs_open_handle *dst)
+{
+    struct chimera_vfs_module *module       = src->vfs_module;
+    uint64_t                   capabilities = module->capabilities;
+    struct chimera_vfs_module  other_module = *module;
+    struct chimera_claim_actor src_actor = { 0 }, dst_actor = { 0 };
+    const uint32_t             length  = 384 * 1024;
+    uint8_t                   *pattern = malloc(length);
+
+    assert(pattern);
+    for (uint32_t i = 0; i < length; i++) {
+        pattern[i] = (uint8_t) (i * 11 + 3);
+    }
+    write_data(ctx, cred, src, 0, pattern, length);
+
+    copy_dispatch_original     = module->dispatch;
+    module->dispatch           = copy_dispatch;
+    module->capabilities      &= ~CHIMERA_VFS_CAP_COPY_RANGE;
+    src_actor.owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    src_actor.owner.client_key = 123;
+    src_actor.owner.owner_lo   = 41;
+    dst_actor.owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    dst_actor.owner.client_key = 456;
+    dst_actor.owner.owner_lo   = 42;
+    copy_src_actor             = src_actor;
+    copy_dst_actor             = dst_actor;
+    copy_expect_owners         = 1;
+    copy_delay_read            = 1;
+    copy_reads                 = copy_writes = 0;
+    chimera_vfs_copy_range_owned(ctx->vfs_thread, cred, src, 0, dst, 0,
+                                 length, 0, 0, 0, &src_actor, &dst_actor,
+                                 copy_cb, ctx);
+    assert(!ctx->done && copy_delayed_read);
+    /* The fallback owns value copies while its caller is free to discard the
+     * actors it supplied. The destination actor has not been used yet. */
+    memset(&src_actor, 0, sizeof(src_actor));
+    memset(&dst_actor, 0, sizeof(dst_actor));
+    copy_dispatch_original(copy_delayed_read, copy_delayed_private);
+    copy_delayed_read = NULL;
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && ctx->copied == length);
+    assert(copy_reads == 2 && copy_writes == 2);
+    TEST_PASS("copy fallback retains both endpoint actors across asynchronous read");
+
+    copy_expect_owners = 0;
+    for (copy_write_fault = 1; copy_write_fault <= 2; copy_write_fault++) {
+        copy_reads = copy_writes = 0;
+        chimera_vfs_copy_range(ctx->vfs_thread, cred, src, 0, dst, 0,
+                               16, 0, 0, 0, copy_cb, ctx);
+        wait_done(ctx);
+        assert(ctx->status == CHIMERA_VFS_EIO && ctx->copied == 0);
+        assert(copy_reads == 1 && copy_writes == 1);
+    }
+    copy_write_fault = 0;
+    TEST_PASS("copy fallback rejects zero and short writes without looping or success");
+
+    /* Distinct module endpoints must use the generic fallback even when the
+     * destination advertises native COPY_RANGE. Their ordinary I/O still uses
+     * the real mounts, so this also exercises buffer ownership through VFS. */
+    dst->vfs_module = &other_module;
+    chimera_vfs_copy_range(ctx->vfs_thread, cred, src, 0, dst, 0,
+                           16, 0, 0, 0, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && ctx->copied == 16);
+    dst->vfs_module = module;
+    TEST_PASS("legacy copy wrapper supports cross-module fallback without actor attribution");
+
+    chimera_vfs_copy_range(ctx->vfs_thread, cred, src, length, dst, 0,
+                           16, 0, 0, 0, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && ctx->copied == 0);
+
+    /* Generate bounded buffers without storing a large file: hundreds of
+     * synchronous backend completions must not grow the callback stack. */
+    copy_synthetic    = 1;
+    copy_stack_origin = 0;
+    copy_reads        = copy_writes = 0;
+    chimera_vfs_copy_range(ctx->vfs_thread, cred, src, 0, dst, 0,
+                           64 * 1024 * 1024, 0, 0, CHIMERA_VFS_ATTR_ACL, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && ctx->copied == 64 * 1024 * 1024);
+    assert(copy_reads == 256 && copy_writes == 256);
+    copy_synthetic = 0;
+    TEST_PASS("copy fallback bounds callback stack and retains callback-scoped ACLs across 256 chunks");
+
+    module->capabilities = capabilities;
+    module->dispatch     = copy_dispatch_original;
+    read_verify(ctx, cred, dst, length, pattern);
+    free(pattern);
+} /* test_copy_fallback */
+
 /* Create `name` under `dir` and return the open handle (kept open).  The
  * create handle carries the inode in vfs_private, exactly as the SMB create
  * path delivers to clone_range/copy_range. */
@@ -286,6 +505,130 @@ read_verify(
 } /* read_verify */
 
 static void
+test_anonymous_admission_views(
+    struct test_ctx *ctx,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_open_handle *root)
+{
+    struct chimera_vfs_open_handle *src = create_file(ctx, cred, root, "view-src");
+    struct chimera_vfs_open_handle *dst = create_file(ctx, cred, root, "view-dst");
+    struct chimera_vfs_state *state = ctx->vfs->vfs_state;
+    struct chimera_vfs_file_state *src_file, *dst_file;
+    struct chimera_vfs_claim src_closing, src_blocker, dst_closing, dst_blocker;
+    struct chimera_claim_actor setup = { 0 };
+    struct chimera_claim_owner owner = { .proto = CHIMERA_CLAIM_PROTO_NFSV4,
+                                        .client_key = 501, .owner_lo = 1 };
+    const struct chimera_vfs_claim *src_excluded[] = { &src_closing };
+    const struct chimera_vfs_claim *dst_excluded[] = { &dst_closing };
+    struct chimera_vfs_io_view src_view = { .excluded = src_excluded, .num_excluded = 1 };
+    struct chimera_vfs_io_view dst_view = { .excluded = dst_excluded, .num_excluded = 1 };
+    struct chimera_vfs_io_view anonymous = { 0 };
+    struct evpl_iovec bytes, read_iov[READ_MAX_IOV];
+    const uint8_t expected[] = "admission view";
+
+    assert(src->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE);
+    assert(evpl_iovec_alloc(ctx->evpl, sizeof(expected), 0, 1, 0, &bytes) == 1);
+    memcpy(bytes.data, expected, sizeof(expected));
+    /* Seed the fixture before installing claims, without warming the shared
+     * anonymous cache whose admission is under test. */
+    setup.owner = owner;
+    chimera_vfs_write_owned(ctx->vfs_thread, cred, src, 0, sizeof(expected), 1,
+                            0, 0, &bytes, 1, &setup, write_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    src_file = chimera_vfs_state_get(state, src->fh, src->fh_len, src->fh_hash, true);
+    dst_file = chimera_vfs_state_get(state, dst->fh, dst->fh_len, dst->fh_hash, true);
+    chimera_vfs_claim_init_nfs4_open(&src_closing, CHIMERA_CLAIM_W, CHIMERA_CLAIM_R, &owner);
+    owner.owner_lo++;
+    chimera_vfs_claim_init_nfs4_open(&dst_closing, CHIMERA_CLAIM_R, CHIMERA_CLAIM_W, &owner);
+    owner.proto = CHIMERA_CLAIM_PROTO_SMB2;
+    owner.client_key++;
+    chimera_vfs_claim_init_smb_open(&src_blocker, CHIMERA_CLAIM_W, CHIMERA_CLAIM_R, &owner);
+    owner.owner_lo++;
+    chimera_vfs_claim_init_smb_open(&dst_blocker, CHIMERA_CLAIM_R, CHIMERA_CLAIM_W, &owner);
+    assert(chimera_vfs_claim_try_acquire(state, src_file, &src_closing, NULL) == CHIMERA_CLAIM_GRANTED);
+    assert(chimera_vfs_claim_try_acquire(state, src_file, &src_blocker, NULL) == CHIMERA_CLAIM_GRANTED);
+    assert(chimera_vfs_claim_try_acquire(state, dst_file, &dst_closing, NULL) == CHIMERA_CLAIM_GRANTED);
+    assert(chimera_vfs_claim_try_acquire(state, dst_file, &dst_blocker, NULL) == CHIMERA_CLAIM_GRANTED);
+
+    ctx->expect = expected;
+    ctx->expect_len = sizeof(expected);
+    chimera_vfs_read_view(ctx->vfs_thread, cred, src, 0, sizeof(expected), read_iov,
+                          READ_MAX_IOV, 0, &src_view, read_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES); /* nonexcluded SMB deny-R */
+    chimera_vfs_write_view(ctx->vfs_thread, cred, dst, 0, sizeof(expected), 1, 0, 0,
+                           &bytes, 1, &dst_view, write_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES); /* nonexcluded SMB deny-W */
+    TEST_PASS("anonymous views retain unrelated cross-protocol READ/WRITE denies");
+
+    chimera_vfs_copy_range_view(ctx->vfs_thread, cred, src, 0, dst, 0, sizeof(expected),
+                                0, 0, 0, &anonymous, &anonymous, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES && ctx->copied == 0);
+    TEST_PASS("native-capable anonymous COPY with no exclusions still enforces claims");
+
+    chimera_vfs_claim_release(state, src_file, &src_blocker);
+    chimera_vfs_read_view(ctx->vfs_thread, cred, src, 0, sizeof(expected), read_iov,
+                          READ_MAX_IOV, 0, &src_view, read_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && ctx->verify_ok);
+    chimera_vfs_read(ctx->vfs_thread, cred, src, 0, sizeof(expected), read_iov,
+                     READ_MAX_IOV, 0, read_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES); /* no exemption leaked into cache */
+
+    chimera_vfs_copy_range_view(ctx->vfs_thread, cred, src, 0, dst, 0, sizeof(expected),
+                                0, 0, 0, &src_view, &dst_view, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES && ctx->copied == 0);
+    chimera_vfs_claim_release(state, dst_file, &dst_blocker);
+    chimera_vfs_copy_range_view(ctx->vfs_thread, cred, src, 0, dst, 0, sizeof(expected),
+                                0, 0, 0, &anonymous, &dst_view, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES && ctx->copied == 0);
+    chimera_vfs_copy_range_view(ctx->vfs_thread, cred, src, 0, dst, 0, sizeof(expected),
+                                0, 0, 0, &src_view, &anonymous, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES && ctx->copied == 0);
+    chimera_vfs_copy_range_view(ctx->vfs_thread, cred, src, 0, dst, 0, sizeof(expected),
+                                0, 0, 0, &src_view, &dst_view, copy_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && ctx->copied == sizeof(expected));
+    TEST_PASS("native-capable COPY enforces independent anonymous source/destination views");
+
+    chimera_vfs_write(ctx->vfs_thread, cred, dst, 0, sizeof(expected), 1, 0, 0,
+                      &bytes, 1, write_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES);
+    /* A cached scoped W must not turn an ordinary R into a W request. */
+    read_verify(ctx, cred, dst, sizeof(expected), expected);
+    assert(src_file->implicit_claim.admit_excluded == NULL);
+    assert(src_file->implicit_claim.admit_num_excluded == 0);
+    assert(dst_file->implicit_claim.admit_excluded == NULL);
+    assert(dst_file->implicit_claim.admit_num_excluded == 0);
+    TEST_PASS("scoped cache permissions neither escape to later callers nor overdeny reads");
+
+    chimera_vfs_claim_release(state, src_file, &src_closing);
+    chimera_vfs_claim_release(state, dst_file, &dst_closing);
+    chimera_vfs_state_put(state, src_file);
+    chimera_vfs_state_put(state, dst_file);
+    evpl_iovec_release(ctx->evpl, &bytes);
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, root, "view-src", 8,
+                          src->fh, src->fh_len, 0, 0, 0, NULL, remove_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, root, "view-dst", 8,
+                          dst->fh, dst->fh_len, 0, 0, 0, NULL, remove_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    chimera_vfs_release(ctx->vfs_thread, src);
+    chimera_vfs_release(ctx->vfs_thread, dst);
+} /* test_anonymous_admission_views */
+
+static void
 clone(
     struct test_ctx                *ctx,
     const struct chimera_vfs_cred  *cred,
@@ -300,6 +643,89 @@ clone(
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
 } /* clone */
+
+static unsigned native_dispatches, native_breaks;
+static void (*native_original)(struct chimera_vfs_request *, void *);
+
+static void
+native_gate_dispatch(struct chimera_vfs_request *request, void *private_data)
+{
+    if (request->opcode == CHIMERA_VFS_OP_COPY_RANGE || request->opcode == CHIMERA_VFS_OP_CLONE_RANGE ||
+        request->opcode == CHIMERA_VFS_OP_ALLOCATE) {
+        native_dispatches++;
+        request->status = CHIMERA_VFS_OK;
+        if (request->opcode == CHIMERA_VFS_OP_COPY_RANGE) {
+            request->copy_range.r_length = request->copy_range.length;
+            request->copy_range.r_pre_attr.va_set_mask = 0;
+            request->copy_range.r_post_attr.va_set_mask = 0;
+        } else if (request->opcode == CHIMERA_VFS_OP_CLONE_RANGE) {
+            request->clone_range.r_pre_attr.va_set_mask = 0;
+            request->clone_range.r_post_attr.va_set_mask = 0;
+        } else {
+            request->allocate.r_pre_attr.va_set_mask = 0;
+            request->allocate.r_post_attr.va_set_mask = 0;
+        }
+        request->complete(request);
+        return;
+    }
+    native_original(request, private_data);
+}
+
+static void
+native_gate_break(struct chimera_vfs_claim *claim, uint8_t used, void *private_data)
+{
+    (void) claim; (void) private_data;
+    assert(used == 0);
+    native_breaks++;
+}
+
+static void
+test_owned_native_gate(struct test_ctx *ctx, const struct chimera_vfs_cred *cred,
+                       struct chimera_vfs_open_handle *root, struct chimera_vfs_open_handle *src)
+{
+    struct chimera_vfs_open_handle *dst = create_file(ctx, cred, root, "native-gate");
+    struct chimera_vfs_state *state = ctx->vfs->vfs_state;
+    struct chimera_vfs_file_state *file = chimera_vfs_state_get(state, dst->fh,
+        dst->fh_len, dst->fh_hash, true);
+    struct chimera_claim_owner victim = { .proto = CHIMERA_CLAIM_PROTO_FUSE, .client_key = 123 };
+    struct chimera_claim_actor actor = { .owner = { .proto = CHIMERA_CLAIM_PROTO_SMB2, .client_key = 456 } };
+    struct chimera_vfs_module *module = dst->vfs_module;
+    unsigned int capabilities = module->capabilities;
+    native_original = module->dispatch;
+    module->dispatch = native_gate_dispatch;
+    module->capabilities |= CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE;
+    for (int kind = 0; kind < 3; kind++) {
+        struct chimera_vfs_claim cache;
+        chimera_vfs_claim_init_fuse_grant(&cache, &victim);
+        cache.break_cb = native_gate_break;
+        assert(chimera_vfs_claim_try_acquire(state, file, &cache, NULL) == CHIMERA_CLAIM_GRANTED);
+        native_dispatches = native_breaks = 0;
+        if (kind == 2) {
+            chimera_vfs_allocate_owned(ctx->vfs_thread, cred, dst, 0,
+                4096, 0, 0, 0, &actor, clone_cb, ctx);
+        } else if (kind == 1) {
+            chimera_vfs_clone_range_owned(ctx->vfs_thread, cred, src, 0, dst, 0,
+                4096, 0, 0, &actor, &actor, clone_cb, ctx);
+        } else {
+            chimera_vfs_copy_range_owned(ctx->vfs_thread, cred, src, 0, dst, 0,
+                4096, 0, 0, 0, &actor, &actor, copy_cb, ctx);
+        }
+        assert(native_breaks == 1 && !native_dispatches && !ctx->done);
+        chimera_vfs_claim_ack(&cache, 0);
+        wait_done(ctx);
+        assert(ctx->status == CHIMERA_VFS_OK && native_dispatches == 1);
+        chimera_vfs_claim_release(state, file, &cache);
+    }
+    module->dispatch = native_original;
+    module->capabilities = capabilities;
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, root, "native-gate", 11,
+        dst->fh, dst->fh_len, 0, 0, 0, NULL, remove_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    chimera_vfs_release(ctx->vfs_thread, dst);
+    TEST_PASS("owned native COPY/CLONE/ALLOCATE await cache invalidation before backend dispatch");
+}
 
 int
 main(
@@ -408,6 +834,10 @@ main(
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_EINVAL);
     TEST_PASS("sub-cluster (non-4K-aligned) clone is rejected with EINVAL");
+
+    test_anonymous_admission_views(&ctx, &cred, root_handle);
+    test_owned_native_gate(&ctx, &cred, root_handle, src_h);
+    test_copy_fallback(&ctx, &cred, src_h, dst_h);
 
     chimera_vfs_release(ctx.vfs_thread, src_h);
     chimera_vfs_release(ctx.vfs_thread, dst_h);

@@ -84,6 +84,36 @@ test_get_parse(void)
     return 0;
 } /* test_get_parse */
 
+/* An overflowing relative offset must not jump backwards and repeatedly
+ * replay entries, nor may a caller-supplied offset wrap the fixed-header check. */
+static int
+test_offset_wrap(void)
+{
+    uint8_t buf[48] = { 0 };
+    uint32_t off = 16, next = UINT32_MAX - 15;
+    struct chimera_smb_ea_entry entry;
+    memcpy(buf + off, &next, sizeof(next));
+    buf[off + 5] = 1;
+    buf[off + 8] = 'X';
+    CHECK(chimera_smb_ea_full_parse_one(buf, sizeof(buf), &off, &entry) == -1);
+    CHECK(off == 16);
+    off = UINT32_MAX - 3;
+    CHECK(chimera_smb_ea_full_parse_one(buf, sizeof(buf), &off, &entry) == -1);
+
+    memset(buf, 0, sizeof(buf));
+    off = 16;
+    memcpy(buf + off, &next, sizeof(next));
+    buf[off + 4] = 1;
+    buf[off + 5] = 'X';
+    const char *name;
+    uint32_t name_len;
+    CHECK(chimera_smb_ea_get_parse_one(buf, sizeof(buf), &off, &name, &name_len) == -1);
+    CHECK(off == 16);
+    off = UINT32_MAX - 3;
+    CHECK(chimera_smb_ea_get_parse_one(buf, sizeof(buf), &off, &name, &name_len) == -1);
+    return 0;
+}
+
 static int
 test_name_eq(void)
 {
@@ -133,7 +163,7 @@ test_ea_size_formula(void)
 int
 main(void)
 {
-    if (test_full_roundtrip() || test_full_parse_bounds() || test_get_parse() ||
+    if (test_full_roundtrip() || test_full_parse_bounds() || test_get_parse() || test_offset_wrap() ||
         test_name_eq() || test_name_valid() || test_status_map() ||
         test_ea_size_formula()) {
         return 1;

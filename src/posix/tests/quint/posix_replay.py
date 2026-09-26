@@ -130,9 +130,10 @@ DISK_PROFILE = dict(PROFILE, cloneRange=False)
 # NFS loopback paths (client -> in-process server -> backend) probed
 # 2026-08-12; identical across the three backends behind each version, so
 # the profiles are version-keyed (posixNfs3/posixNfs4 instances match).
-NFS3_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
+# 2026-09-23: the VFS buffered COPY fallback now supports proxy handles.
+NFS3_PROFILE = dict(PROFILE, cloneRange=False,
                     seekHole=False, strictAtime=True)
-NFS4_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
+NFS4_PROFILE = dict(PROFILE, cloneRange=False,
                     seekHole=True, strictAtime=False)
 
 # The FUSE server, probed 2026-08-26 through the in-process harness

@@ -127,6 +127,7 @@ nlm_state_destroy(struct nlm_state *state)
             DL_DELETE(client->locks, entry);
             nlm_lock_entry_free(entry);
         }
+        free(client->carve_previous);
         free(client);
     }
 

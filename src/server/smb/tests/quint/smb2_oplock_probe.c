@@ -1094,10 +1094,9 @@ sec_o12(
      * worth reading twice, because each one corrected a guess made from the
      * server source:
      *
-     *   - an RqLs lease IS capped (to R) by its own client's plain open, while
-     *     a legacy oplock in the same position is not: the share-reservation
-     *     cap exempts a peer open only when that peer is itself LEASE-backed.
-     *     The legacy half of that asymmetry is DEVIATIONS-SMB.md S-3;
+     *   - a distinct plain open caps both a new write-caching lease and a
+     *     legacy exclusive/batch oplock, even on the requester's client.
+     *     An attribute-only peer also counts for the sole-opener rule;
      *   - an attribute-only REQUESTER is not refused outright behind a peer
      *     open.  The strict "oplock-transparent" cap only bites when even a
      *     read cache would have to break someone, so with a peer that holds no
@@ -1129,9 +1128,9 @@ sec_o12(
         { O12_P_NONE,   O12_R_BSTAT,
           O12_L_BATCH, 0 },
         { O12_P_SELF,   O12_R_BATCH,
-          O12_L_BATCH, 0 },
+          O12_L_II, 0 },
         { O12_P_SELF,   O12_R_EXCL,
-          O12_L_EXCL, 0 },
+          O12_L_II, 0 },
         { O12_P_SELF,   O12_R_II,
           O12_L_II, 0 },
         { O12_P_SELF,   O12_R_RWH,
@@ -1139,9 +1138,9 @@ sec_o12(
         { O12_P_SELF,   O12_R_RH,
           O12_L_LEASE, O12_S_R },
         { O12_P_SELF,   O12_R_BSTAT,
-          O12_L_BATCH, 0 },
+          O12_L_II, 0 },
         { O12_P_GUID,   O12_R_BATCH,
-          O12_L_BATCH, 0 },
+          O12_L_II, 0 },
         { O12_P_GUID,   O12_R_RWH,
           O12_L_LEASE, O12_S_R },
         { O12_P_OTHER,  O12_R_BATCH,
@@ -1157,17 +1156,17 @@ sec_o12(
         { O12_P_OTHER,  O12_R_BSTAT,
           O12_L_II, 0 },
         { O12_P_OATTR,  O12_R_BATCH,
-          O12_L_BATCH, 0 },
+          O12_L_II, 0 },
         { O12_P_OATTR,  O12_R_EXCL,
-          O12_L_EXCL, 0 },
+          O12_L_II, 0 },
         { O12_P_OATTR,  O12_R_II,
           O12_L_II, 0 },
         { O12_P_OATTR,  O12_R_RWH,
-          O12_L_LEASE, O12_S_RWH },
+          O12_L_LEASE, O12_S_RH },
         { O12_P_OATTR,  O12_R_RH,
           O12_L_LEASE, O12_S_RH },
         { O12_P_OATTR,  O12_R_BSTAT,
-          O12_L_BATCH, 0 },
+          O12_L_II, 0 },
         { O12_P_LEAS_O, O12_R_RWH,
           O12_L_LEASE, O12_S_RH },
         { O12_P_LEAS_O, O12_R_RH,
@@ -1339,23 +1338,9 @@ sec_o12(
                o.oplock == SMB2_OPLOCK_LEVEL_BATCH);
 
         if (rows[i].peer != O12_P_NONE) {
-            if (has_w) {
-                DEVIATION("S-3",
-                          "O12[%d] %s: a %s request was granted a WRITE cache "
-                          "(%s %s) while a peer Open is on the stream; "
-                          "MS-FSA 2.1.5.18.1 refuses an exclusive oplock when "
-                          "Open.File.OpenList holds more than one Open on the "
-                          "stream -- that clause has no OplockKey and no "
-                          "client-identity exemption. See DEVIATIONS-SMB.md.",
-                          i, o12_peer_name(rows[i].peer),
-                          o12_req_name(rows[i].req), oplock_name(o.oplock),
-                          o.oplock == SMB2_OPLOCK_LEVEL_LEASE
-                          ? lease_str(o.lease_state) : "");
-            } else {
-                EXPECT(1,
-                       "O12[%d] no write cache is granted behind a peer Open "
-                       "(MS-FSA 2.1.5.18.1)", i);
-            }
+            EXPECT(!has_w,
+                   "O12[%d] no write cache is granted behind a peer Open "
+                   "(MS-FSA 2.1.5.18.1)", i);
         }
 
         smb2_close(a, o.file_id);
@@ -1364,6 +1349,80 @@ sec_o12(
         }
     }
 } /* sec_o12 */
+
+/* MS-FSA 2.1.5.15.5 and the SET_INFORMATION oplock algorithm: legacy
+ * LEVEL_II always breaks on a size set, while a lease's own key is coherent. */
+static void
+sec_o13(
+    struct smb2_env  *env,
+    struct smb2_conn *a,
+    struct smb2_conn *b)
+{
+    struct smb2_create_out first, second;
+    struct smb2_oplock_req req = { .level = SMB2_OPLOCK_LEVEL_II };
+    struct smb2_break      br, breaks[8];
+    int                    count = 0;
+    uint32_t               status;
+
+    printf("\n== O13: size changes and transparent metadata lease requests ==\n");
+    smb2_create(a, "o13-size-ii", FILE_CREATE, FILE_ALL_ACCESS,
+                FILE_SHARE_RWD, &req, &first);
+    EXPECT(first.status == ST_SUCCESS && first.oplock == SMB2_OPLOCK_LEVEL_II,
+           "O13 own writable LEVEL_II handle established");
+    status = smb2_set_eof(a, first.file_id, 4096);
+    smb2_quiesce(env);
+    EXPECT(status == ST_SUCCESS, "O13 SET_EOF succeeds");
+    EXPECT(smb2_conn_pop_break(a, &br) && !br.is_lease &&
+           br.oplock_level == SMB2_OPLOCK_LEVEL_NONE,
+           "O13 SET_EOF invalidates its own LEVEL_II cache");
+    EXPECT(smb2_conn_nbreaks(a) == 0, "O13 size change sends one break");
+    smb2_close(a, first.file_id);
+
+    smb2_create(a, "o13-size-ii", FILE_OVERWRITE, FILE_ALL_ACCESS,
+                FILE_SHARE_RWD, &req, &first);
+    smb2_quiesce(env);
+    EXPECT(first.status == ST_SUCCESS && first.oplock == SMB2_OPLOCK_LEVEL_II &&
+           smb2_conn_nbreaks(a) == 0,
+           "O13 overwrite retains the new cache granted by that CREATE");
+    smb2_close(a, first.file_id);
+
+    memset(&req, 0, sizeof(req));
+    req.is_lease     = 1;
+    req.lease_key[0] = 0xD3;
+    req.lease_state  = SMB2_LEASE_READ;
+    req.lease_epoch  = 1;
+    smb2_create(a, "o13-size-key", FILE_CREATE, FILE_ALL_ACCESS,
+                FILE_SHARE_RWD, &req, &first);
+    smb2_create(a, "o13-size-key", FILE_OPEN, FILE_ALL_ACCESS,
+                FILE_SHARE_RWD, &req, &second);
+    EXPECT(first.status == ST_SUCCESS && second.status == ST_SUCCESS &&
+           first.lease_state == SMB2_LEASE_READ &&
+           second.lease_state == SMB2_LEASE_READ,
+           "O13 two handles share a read lease key");
+    status = smb2_set_eof(a, second.file_id, 4096);
+    smb2_quiesce(env);
+    EXPECT(status == ST_SUCCESS && smb2_conn_nbreaks(a) == 0,
+           "O13 sibling-handle SET_EOF preserves its own coherent lease");
+    smb2_close(a, second.file_id);
+    smb2_close(a, first.file_id);
+
+    req.lease_key[0] = 0xD4;
+    req.lease_state  = SMB2_LEASE_RWH;
+    smb2_create(a, "o13-stat-key", FILE_CREATE,
+                FILE_READ_ATTRIBUTES, FILE_SHARE_RWD,
+                &req, &first);
+    EXPECT(first.status == ST_SUCCESS && first.lease_state == SMB2_LEASE_RWH,
+           "O13 metadata-only holder established a write cache");
+    req.lease_key[0] = 0xD5;
+    req.lease_state  = SMB2_LEASE_RH;
+    conflicting_open(env, b, a, "o13-stat-key", FILE_OPEN,
+                     FILE_READ_ATTRIBUTES, FILE_SHARE_RWD,
+                     &req, &second, breaks, &count);
+    EXPECT(second.status == ST_SUCCESS && second.lease_state == 0 && count == 0,
+           "O13 metadata lease request caps to NONE without recalling peer");
+    smb2_close(b, second.file_id);
+    smb2_close(a, first.file_id);
+} /* sec_o13 */
 
 int
 main(
@@ -1399,6 +1458,7 @@ main(
     sec_o9(&env, a, b);
     sec_o11(&env, a);
     sec_o12(&env, a, b, g);
+    sec_o13(&env, a, b);
 
     smb2_env_stop(&env);
 

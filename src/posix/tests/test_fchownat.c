@@ -67,6 +67,14 @@ main(
         posix_test_fail(&env);
     }
 
+    int dirfd = chimera_posix_open("/test", O_RDONLY | O_DIRECTORY, 0);
+    if (dirfd < 0 || chimera_posix_fchownat(dirfd, "fchownat_test", 0, 0, 0) ||
+        chimera_posix_stat("/test/fchownat_test", &st) || st.st_uid != 0 || st.st_gid != 0) {
+        fprintf(stderr, "dirfd fchownat failed to apply requested owner/group\n");
+        posix_test_fail(&env);
+    }
+    chimera_posix_close(dirfd);
+
     fprintf(stderr, "fchownat test passed\n");
 
     rc = posix_test_umount();

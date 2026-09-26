@@ -601,6 +601,8 @@ chimera_nfs4_compound(
     req->current_stateid_valid       = false;
     req->saved_current_stateid_valid = false;
     req->open_4_0_owner              = NULL;
+    req->compound_probe_resume       = NULL;
+    req->compound_probe_private      = NULL;
     req->lock_4_0_open_owner         = NULL;
     req->lock_4_0_lock_owner         = NULL;
 

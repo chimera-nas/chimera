@@ -13,6 +13,7 @@
 #include "vfs/vfs_procs.h"
 #include "common/format.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_procs.h"
 #include "s3_etag.h"
 
@@ -631,7 +632,7 @@ chimera_s3_list_cmp(
 
 static void
 chimera_s3_list_find_complete(
-    enum chimera_vfs_error error_code,
+    enum chimera_s3_status error_code,
     void                  *private_data)
 {
     CHIMERA_S3_HOLD_REQUEST(private_data);
@@ -648,6 +649,21 @@ chimera_s3_list_find_complete(
     char                             enc[CHIMERA_S3_KEY_MAX * 6 + 8];
     const char                      *next = NULL;
     uint64_t                         total;
+
+    if (error_code != CHIMERA_S3_STATUS_OK) {
+        for (i = 0; i < n; i++) {
+            free(ents[i].key);
+        }
+        free(ents);
+        request->list.entries   = NULL;
+        request->list.n_entries = request->list.cap_entries = 0;
+        request->status         = error_code;
+        request->vfs_state      = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
 
     /* S3 returns keys in lexicographic order; the VFS walk does not. */
     if (n > 0) {
@@ -896,23 +912,43 @@ chimera_s3_list_find_complete(
     }
 } /* chimera_s3_list_find_complete */
 
+static void
+chimera_s3_list_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct chimera_s3_request *request = private_data;
+
+    for (int i = 0; i < request->list.n_entries; i++) {
+        free(request->list.entries[i].key);
+    }
+    request->list.n_entries = 0;
+} /* chimera_s3_list_reset */
+
+static void
+chimera_s3_list_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    enum chimera_s3_status status = chimera_s3_compound_error(compound, private_data,
+                                                              CHIMERA_S3_STATUS_INTERNAL_ERROR);
+
+    chimera_vfs_compound_free(compound);
+    chimera_s3_list_find_complete(status, private_data);
+} /* chimera_s3_list_complete */
+
 void
 chimera_s3_list(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    /* One reference for the whole find: the per-entry callback runs many
-     * times, the completion exactly once, so the completion is what drops
-     * it. */
-    chimera_s3_request_get(request);
+    struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
 
-    chimera_vfs_find(thread->vfs, &request->cred,
-                     request->bucket_fh,
-                     request->bucket_fhlen,
-                     CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                     chimera_s3_list_filter,
-                     chimera_s3_list_find_callback,
-                     chimera_s3_list_find_complete,
-                     request);
+    chimera_vfs_compound_add_find(compound, CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                                  chimera_s3_list_reset, chimera_s3_list_filter,
+                                  chimera_s3_list_find_callback, request);
+    chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_list_complete, request);
 } /* chimera_s3_list */

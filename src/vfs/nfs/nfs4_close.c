@@ -145,6 +145,10 @@ chimera_nfs4_close_transmit(
     argarray[2].argop                = OP_CLOSE;
     argarray[2].opclose.seqid        = 0;
     argarray[2].opclose.open_stateid = ctx->stateid;
+    /* An OPEN already on the wire may have coalesced this identity after the
+    * last local handle captured its version. Close the current session
+    * version; the identity is fixed and closing blocks new local holders. */
+    argarray[2].opclose.open_stateid.seqid = 0;
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

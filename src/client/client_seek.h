@@ -7,30 +7,15 @@
 #include "client_internal.h"
 
 static void
-chimera_seek_complete(
-    enum chimera_vfs_error error_code,
-    int                    eof,
-    uint64_t               offset,
-    void                  *private_data)
-{
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *client_thread  = request->thread;
-    chimera_seek_callback_t        callback       = request->seek.callback;
-    void                          *callback_arg   = request->seek.private_data;
-    int                            heap_allocated = request->heap_allocated;
-
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    }
-
-    callback(client_thread, error_code, eof, offset, callback_arg);
-} /* chimera_seek_complete */
-
-static void
 chimera_seek_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
+    struct chimera_client_request        *request        = private_data;
+    struct chimera_client_thread         *client_thread  = request->thread;
+    chimera_seek_callback_t               callback       = request->seek.callback;
+    void                                 *callback_arg   = request->seek.private_data;
+    int                                   heap_allocated = request->heap_allocated;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                status;
     uint64_t                              offset = 0;
@@ -47,7 +32,11 @@ chimera_seek_sequence_complete(
 
     chimera_vfs_compound_free(compound);
 
-    chimera_seek_complete(status, eof, offset, private_data);
+    if (heap_allocated) {
+        chimera_client_request_free(client_thread, request);
+    }
+
+    callback(client_thread, status, eof, offset, callback_arg);
 } /* chimera_seek_sequence_complete */
 
 static inline void
@@ -65,6 +54,6 @@ chimera_dispatch_seek(
     chimera_vfs_compound_add_seek(request->compound, NULL,
                                   request->seek.offset, request->seek.what);
 
-    chimera_vfs_compound_submit(request->compound,
-                                chimera_seek_sequence_complete, request);
+    chimera_frontend_compound_submit(request->compound,
+                                     chimera_seek_sequence_complete, request);
 } /* chimera_dispatch_seek */

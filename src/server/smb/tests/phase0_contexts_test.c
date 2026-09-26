@@ -975,6 +975,7 @@ static void
 test_durable_register_park_claim(void)
 {
     struct chimera_server_smb_shared *shared = calloc(1, sizeof(*shared));
+    struct chimera_smb_tree           tree = { 0 };
     struct chimera_smb_open_file      of;
     struct chimera_smb_open_file     *claimed;
     uint8_t                           guid[16];
@@ -987,8 +988,11 @@ test_durable_register_park_claim(void)
     int                               i;
 
     chimera_smb_durable_table_init(&shared->durable);
+    pthread_mutex_init(&shared->trees_lock, NULL);
 
     memset(&of, 0, sizeof(of));
+    of.tree = &tree;
+    of.refcnt = 1; /* tree/parked-registry ownership */
     for (i = 0; i < 16; i++) {
         guid[i]  = (uint8_t) (0x10 + i);
         cguid[i] = (uint8_t) (0x20 + i);
@@ -1106,7 +1110,19 @@ test_durable_register_park_claim(void)
         TEST_FAIL("durable: v1 (no-guid) reconnect reclaims the open");
     }
 
+    /* The registry-only fixture does not run the CREATE rehome helper. Release
+     * its independently retained original-tree pin as that helper would. */
+    assert(of.durable_tree_pin == &tree && tree.compound_pins == 1);
+    chimera_smb_tree_memory_unpin(shared, of.durable_tree_pin);
+    of.durable_tree_pin = NULL;
+    chimera_smb_durable_park(shared, &of); /* live registry entry retains it again */
+    chimera_smb_durable_forget(shared, of.file_id.pid);
+    chimera_smb_tree_memory_unpin(shared, of.durable_tree_pin);
+    of.durable_tree_pin = NULL;
+    chimera_smb_durable_park(shared, &of); /* absent entry must not acquire a pin */
+    assert(tree.compound_pins == 0 && !of.durable_tree_pin);
     chimera_smb_durable_table_destroy(&shared->durable);
+    pthread_mutex_destroy(&shared->trees_lock);
     free(shared);
 } /* test_durable_register_park_claim */
 

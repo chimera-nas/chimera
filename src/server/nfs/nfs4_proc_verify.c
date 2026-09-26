@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "nfs4_procs.h"
@@ -29,6 +30,10 @@
  * marshaller producing canonical output (it does — see
  * chimera_nfs4_marshall_attrs).
  */
+
+static nfsstat4 verify_validate_mask(
+    uint32_t        num,
+    const uint32_t *mask);
 
 static struct fattr4 *
 verify_args_fattr4(struct nfs_request *req)
@@ -100,14 +105,50 @@ chimera_nfs4_verify_status(
     struct chimera_vfs_attrs marshall_attr;
     nfsstat4                 status;
 
+    status = verify_validate_mask(args->num_attrmask, args->attrmask);
+    if (status != NFS4_OK) {
+        return status;
+    }
+
     /* Marshal current attrs into the same on-wire format the client sent
      * us, restricted to the bits in the request mask. */
-    uint32_t                 out_mask[3] = { 0, 0, 0 };
-    uint32_t                 num_out_mask;
-    uint8_t                  out_buf[4096];
-    uint32_t                 out_len = 0;
+    uint32_t out_mask[3] = { 0, 0, 0 };
+    uint32_t num_out_mask;
+    uint8_t  fixed_buf[4096];
+    uint8_t *out_buf = fixed_buf;
+    uint32_t out_cap = sizeof(fixed_buf);
+    uint32_t out_len = 0;
+
+    /* ACL attributes are variable sized. A fixed comparison buffer can cause
+    * the marshaller to omit a valid stored ACL and incorrectly report a
+    * mismatch. Match GETATTR's allocation policy, using the owned snapshot
+    * in a compound and the live callback-scoped ACL on the legacy path.
+    * This scratch buffer never consumes reply-arena space across retries. */
+    if (args->num_attrmask && (args->attrmask[0] & (1U << FATTR4_ACL))) {
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+            out_cap += chimera_nfs4_acl_wire_size(attr->va_acl);
+        } else {
+            out_cap += chimera_nfs4_acl_wire_size(NULL) +
+                8 * (4 * sizeof(uint32_t) + ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u));
+        }
+        out_buf = malloc(out_cap);
+        if (!out_buf) {
+            return NFS4ERR_RESOURCE;
+        }
+    }
 
     marshall_attr = *attr;
+    if (args->num_attrmask && (args->attrmask[0] & (1U << FATTR4_CHANGE))) {
+        struct nfs4_change_observation *observation;
+        status = nfs4_change_project(req->thread->shared->nfs4_state_table.change_table,
+                                     fh, fhlen, &marshall_attr, &req->change_observations, &observation);
+        if (status != NFS4_OK) {
+            if (out_buf != fixed_buf) {
+                free(out_buf);
+            }
+            return status;
+        }
+    }
     chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
                                        args->num_attrmask,
                                        args->attrmask,
@@ -122,7 +163,7 @@ chimera_nfs4_verify_status(
                                 3,
                                 out_buf,
                                 &out_len,
-                                sizeof(out_buf),
+                                out_cap,
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
@@ -142,6 +183,10 @@ chimera_nfs4_verify_status(
                 num_out_mask * sizeof(uint32_t)) == 0) &&
         (out_len == args->attr_vals.len) &&
         (memcmp(out_buf, args->attr_vals.data, out_len) == 0);
+
+    if (out_buf != fixed_buf) {
+        free(out_buf);
+    }
 
     if (is_nverify) {
         status = match ? NFS4ERR_SAME : NFS4_OK;

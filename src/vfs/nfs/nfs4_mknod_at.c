@@ -98,6 +98,8 @@ chimera_nfs4_mknod_callback(
         }
     }
 
+    chimera_nfs4_unmarshall_cinfo(&create_res->opcreate.resok4.cinfo,
+                                  &request->mknod_at.r_dir_pre_attr, &request->mknod_at.r_dir_post_attr);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_mknod_callback */
