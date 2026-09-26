@@ -14,10 +14,11 @@ ending at `18035808`. The refinement checkpoint is `21104a97`, published on
 existing draft PR #1692, `compound-boilerplate`.
 
 The integration worktree is `/tmp/chimera-compound-reconcile`, branch
-`compounds-reconciled`. The reconciliation checkpoint was pushed as `bc13021f`, then the PR history
-was rebased onto main `eb322605` (including the Windows port and subsequent
-SETATTR lock-stateid and Cairn metadata-conflict fixes). The original worktree
-is aligned with the published PR after final publication. The old PR tip also has a local backup branch,
+`compounds-reconciled`. The reconciliation checkpoint was pushed as `bc13021f`,
+then the PR history was rebased onto main `c971e5a5` (including the Windows port,
+SETATTR lock-stateid and Cairn metadata-conflict fixes, diskfs shutdown repair,
+and claim-waiter race fix). The original worktree uses `compound-boilerplate`
+and tracks the published PR branch. The old PR tip also has a local backup branch,
 `backup/compound-pr-before-reconcile-20260926`.
 
 ## Integration choices
@@ -58,7 +59,10 @@ with backup refs for the original PR, reconciliation checkpoint, and first main
 rebase. The first rebase targeted `92ca73e7`; after refreshing main, the two newer
 commits through `eb322605` were replayed too. A conflict-resolution fixup was
 folded into its predecessor so the published history does not retain intermediate
-conflict markers. The resulting tip before validation repairs is `f97f6512`.
+conflict markers. Validation repairs were published as `989821ec`. Two more
+main commits then landed, through `c971e5a5`; the final rebase includes both.
+The published intermediate tip is preserved at
+`backup/compound-before-final-main-20260926`.
 
 Main's libevpl and ndrzcc revisions are retained. The specs merge is `8dfc579`,
 combining the earlier reconciliation with main's platform harness and explicit
@@ -87,6 +91,14 @@ Integration repairs preserve:
   integers. One million randomized comparisons against the previous arithmetic
   pass; native boundary tests cover EOF, overflow, and signed SEEK_END geometry.
   Linux-only backend arithmetic remains platform-specific.
+- Main's claim-waiter fix rechecks blockers and queues under the same file
+  mutex, preventing a missed wakeup when a break settles before enqueue.
+  The integration also checks compound admission fences under that mutex:
+  existing waiters remain queued, while fresh requests return without parking.
+  A new regression covers both cases and completion after fence release;
+  main's immediate-acknowledgment regressions remain active.
+- Main's diskfs shutdown repair retains the commit wake sender until the push
+  thread stops; those production changes are unchanged from main.
 
 The explicit-open retry fixture now checks mode-compatible handles rather than
 assuming that the mode-keyed cache returns the same pointer for WRITE and RDWR.
@@ -101,15 +113,24 @@ with 42 reports; ClangRelease initially stopped on a fixture compilation warning
 then completed after repairs. These reports have not all been established as
 runtime bugs or resolved. No native Windows build has been performed.
 
-Final Debug and Release quick results each: **214 passed, 29 skipped, 30 failed**,
-273 total.
-Seventeen final focused arithmetic, locking and compound boundary/retry checks
+Full Debug and Release quick results at `989821ec` each:
+**214 passed, 29 skipped, 30 failed**, 273 total. These full runs precede the
+last two main commits; the final rebase is checked with focused regressions.
+After the final rebase, 14 focused tests pass in both Debug/ASan and Release,
+including claim admission and journals, compound retries, SMB compounds and
+the base SMB model, NFS lock replay, FUSE/POSIX locking, and diskfs model/smoke
+coverage. The Debug results combine 13 passing tests from the main run with a
+separate diskfs smoke run. Its additional `leases_memfs_plain` run reported
+oplock-grant and missing lease-break mismatches, then timed out at 600 seconds;
+the final rebase has not resolved the known SMB lease-model failures.
+Seventeen focused arithmetic, locking and compound boundary/retry checks
 pass. Earlier focused S3, SDK and NFS regressions pass, as do filehandle OPEN
 authorization, POSIX-over-NFSv4 models, all five pNFS models and the three SMB
 stream/reconnect probes. Linux/io_uring filehandle-dependent tests skip or abort
 because this container's backing filesystem cannot provide the fixture; these
-must be distinguished from behavioral mismatches. Both configurations have the same failing test names, although lease timing
-differs. This is not a clean CI sweep.
+must be distinguished from behavioral mismatches. Both full-suite configurations
+have the same failing test names, although lease timing differs. This is not a
+clean CI sweep.
 
 `make syntax` and `make check` were run. Optimized-build warnings in the journal,
 payload test, and diskfs harness were repaired. Final syntax, SDK include
@@ -121,13 +142,12 @@ and lease-identity/model mismatches, POSIX-over-SMB mismatches, and NFSv3 RMDIR
 through the remote NFSv4 proxy accepting a non-directory target. Those require
 follow-up work; branch reconciliation does not certify the conversion complete.
 
-The user approved publishing a separate specs PR after automatic approval review
-initially rejected that repository push. Commit `8dfc579` is now reachable on
+The user approved publishing a separate specs PR. Commit `8dfc579` is reachable on
 `chimera-nas/specs:compounds-reconciled`, with draft PR
-[specs #33](https://github.com/chimera-nas/specs/pull/33). Final publication of the
-root uses a force-with-lease against `bc13021f`; any newer remote work must be
-reconciled before updating that lease. The local working branch tracks the PR
-branch after publication, so ordinary future pushes target the same history.
+[specs #33](https://github.com/chimera-nas/specs/pull/33). Root publication uses
+force-with-lease; any newer remote work must be reconciled before updating the
+lease. The original working branch tracks the PR branch, so ordinary future
+pushes target the same history.
 
 The previously recorded LockSequence publication race remains a source-level
 finding: VFS journal publication and SMB replay-state publication do not form
