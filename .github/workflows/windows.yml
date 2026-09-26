@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2022","arch":"x64","config":"Debug","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Debug","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Release","generator":"Visual Studio 18 2026","vs":"[18.0,19.0)"}]' || '[{"runner":"windows-2022","arch":"x64","config":"Release","generator":"Visual Studio 17 2022","vs":"[17.0,18.0)"}]') }}
+        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2022","arch":"x64","config":"Debug","vs":"[17.0,18.0)"},{"runner":"windows-2022","arch":"x64","config":"Release","vs":"[17.0,18.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Debug","vs":"[18.0,19.0)"},{"runner":"windows-11-vs2026-arm","arch":"ARM64","config":"Release","vs":"[18.0,19.0)"}]' || '[{"runner":"windows-2022","arch":"x64","config":"Release","vs":"[17.0,18.0)"}]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -75,6 +75,57 @@ jobs:
           "VCPKG_VISUAL_STUDIO_PATH=$vs" >> $env:GITHUB_ENV
           & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Ninja drives cl.exe directly rather than through MSBuild, so the job
+      # needs what a Developer Command Prompt provides: the environment of the
+      # same Visual Studio the prebuilt dependencies were published with,
+      # targeting this runner's native architecture.
+      - name: Enter the MSVC developer environment
+        shell: pwsh
+        run: |
+          $arch = '${{ matrix.arch }}'.ToLower()
+          $vcvars = Join-Path $env:VCPKG_VISUAL_STUDIO_PATH 'VC/Auxiliary/Build/vcvarsall.bat'
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $after = cmd.exe /c "call `"$vcvars`" $arch >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvarsall $arch failed" }
+          foreach ($line in $after) {
+            if ($line -match '^([^=]+)=(.*)$' -and $before[$Matches[1]] -ne $Matches[2]) {
+              "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV
+            }
+          }
+      # Ninja schedules every compile and every model-corpus family as one
+      # graph, so the corpus generates alongside the C build instead of ahead
+      # of it, as on the other platforms.  ccache is the compiler cache the
+      # Linux and macOS jobs use; the Visual Studio generators ignore a
+      # compiler launcher, which is why this job no longer uses one.  Both are
+      # pinned upstream releases, checked like WinFlexBison below.
+      - name: Install ninja and ccache
+        shell: pwsh
+        run: |
+          $tools = "$env:RUNNER_TEMP/tools"
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          if ('${{ matrix.arch }}' -eq 'ARM64') {
+            $downloads = @(
+              @('https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-winarm64.zip', 'e52f0bdef9dfb1003229dbd6508a508c4073fd017247002adc66e5e806cb0391'),
+              @('https://github.com/ccache/ccache/releases/download/v4.14/ccache-4.14-windows-aarch64.zip', 'baa07085f68f75ea033d6f8d8fe6b53b7f353050bd191e299ff27e131cc3d787'))
+          } else {
+            $downloads = @(
+              @('https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip', '07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65'),
+              @('https://github.com/ccache/ccache/releases/download/v4.14/ccache-4.14-windows-x86_64.zip', '2568347a697e103ca1b073981c704ad76fb2507d066c38dba038dd73399d968f'))
+          }
+          foreach ($download in $downloads) {
+            $archive = Join-Path $env:RUNNER_TEMP (Split-Path $download[0] -Leaf)
+            Invoke-WebRequest $download[0] -OutFile $archive -MaximumRetryCount 5 -RetryIntervalSec 10
+            if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $download[1]) { throw "$archive checksum mismatch" }
+            Expand-Archive $archive $tools -Force
+          }
+          Move-Item "$tools/ccache-4.14-windows-*/ccache.exe" $tools
+          $tools >> $env:GITHUB_PATH
+          "CCACHE_DIR=$env:RUNNER_TEMP\ccache" >> $env:GITHUB_ENV
+          "CCACHE_MAXSIZE=2G" >> $env:GITHUB_ENV
+          "SPECS_CORPUS_CACHE_DIR=$env:RUNNER_TEMP\specs-corpus-cache" >> $env:GITHUB_ENV
+          & "$tools/ninja.exe" --version
+          & "$tools/ccache.exe" --version | Select-Object -First 1
       - name: Configure read-only package access
         shell: pwsh
         env:
@@ -112,21 +163,29 @@ jobs:
           Invoke-WebRequest https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip -OutFile $archive -MaximumRetryCount 5 -RetryIntervalSec 10
           if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135') { throw 'WinFlexBison checksum mismatch' }
           Expand-Archive $archive "$env:RUNNER_TEMP/winflexbison"
-      # Model traces depend on the generator, models and cell configuration,
-      # not on the C implementation being tested. Only an exact input match
-      # can reuse them; configure still validates every registered cell.
-      - uses: actions/cache/restore@v4
-        id: corpus-cache
+      # The same shared caches as the Linux and macOS jobs, one lane per arch
+      # and configuration: restored from the newest entry, saved only by
+      # build-test.yml's push to main.  See the notes at the top of that file.
+      - name: Restore the ccache directory
+        uses: actions/cache/restore@v4
         with:
-          path: build/specs-corpus
-          key: windows-specs-v1-${{ matrix.arch }}-${{ hashFiles('ext/specs/.quint-version', 'ext/specs/CMakeLists.txt', 'ext/specs/cmake/**', 'ext/specs/quint/**', 'ext/specs/tools/**', 'src/**/quint/configs/**', 'src/**/CMakeLists.txt', 'CMakeLists.txt', 'cmake/**', 'vcpkg.json', '.github/workflows/windows.yml') }}
+          path: ${{ runner.temp }}/ccache
+          key: ccache-v2-windows-${{ matrix.arch }}-${{ matrix.config }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v2-windows-${{ matrix.arch }}-${{ matrix.config }}-
+      - name: Restore the model corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-windows-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: |
+            specs-corpus-v1-windows-${{ matrix.arch }}-
       - name: Configure native Windows
         id: configure
         shell: pwsh
         run: |
           $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
-          $prebuiltCorpus = if ('${{ steps.corpus-cache.outputs.cache-hit }}' -eq 'true') { 'ON' } else { 'OFF' }
-          cmake -S . -B build -G "${{ matrix.generator }}" -A ${{ matrix.arch }} "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DSPECS_CORPUS_PREBUILT=$prebuiltCorpus" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }} -DCMAKE_C_COMPILER=cl "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # The installed libraries live in build/vcpkg_installed. Drop temporary
       # package extraction/probe trees before diskfs tests need scratch space.
@@ -137,29 +196,40 @@ jobs:
             if (Test-Path $path) { Remove-Item $path -Recurse -Force }
           }
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free
-      - name: Generate protocol model corpus
-        run: cmake --build build --target specs_corpus --config ${{ matrix.config }} --parallel 4
-      - uses: actions/cache/save@v4
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.corpus-cache.outputs.cache-hit != 'true'
-        with:
-          path: build/specs-corpus
-          key: ${{ steps.corpus-cache.outputs.cache-primary-key }}
       - name: Build
-        run: cmake --build build --config ${{ matrix.config }} --parallel 4
+        shell: pwsh
+        run: |
+          # Counters ride along in the restored cache; zero them so the stats
+          # below describe this run alone.
+          ccache -z | Out-Null
+          $runStart = Get-Date
+          cmake --build build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ccache --show-stats
+          # Trim to the configured ceiling before the save, so the entry the
+          # other workflows restore stays a predictable size.
+          ccache --trim-max-size $env:CCACHE_MAXSIZE
+          # Keep only the corpus cells this build used.
+          $entries = Join-Path $env:SPECS_CORPUS_CACHE_DIR 'v1'
+          if (Test-Path $entries) {
+            Get-ChildItem $entries -Directory | Where-Object LastWriteTime -lt $runStart | Remove-Item -Recurse -Force
+          }
+          exit 0
       - name: Test
         shell: pwsh
         env:
           TEST_TIER: ${{ inputs.test_tier }}
         run: |
           New-Item -ItemType Directory -Force ctest-results | Out-Null
+          # A single-config build selects the tier with -C, as on Unix.
           $selection = @()
-          if ($env:TEST_TIER -eq 'quick') {
-            $selection = @('--tests-from-file', "$pwd/build/quick-tests.txt")
-          } elseif ($env:TEST_TIER -ne 'extended') {
+          if ($env:TEST_TIER -eq 'extended') {
+            $selection = @('-C', 'extended')
+          } elseif ($env:TEST_TIER -ne 'quick') {
             throw "Unknown test tier: $env:TEST_TIER"
           }
           $timer = [System.Diagnostics.Stopwatch]::StartNew()
-          ctest --test-dir build -C ${{ matrix.config }} @selection --output-on-failure --no-tests=error --parallel 4 --timeout 300 --test-output-size-failed 65536 --output-junit "$pwd/ctest-results/results.xml"
+          ctest --test-dir build @selection --output-on-failure --no-tests=error --parallel 4 --timeout 300 --test-output-size-failed 65536 --output-junit "$pwd/ctest-results/results.xml"
           $testExit = $LASTEXITCODE
           $timer.Stop()
           [math]::Round($timer.Elapsed.TotalSeconds) | Set-Content ctest-results/duration_seconds
@@ -172,6 +242,20 @@ jobs:
           path: ctest-results/
           if-no-files-found: warn
           retention-days: 30
+      # Saved even when the job failed, as on the other platforms: the caches
+      # reflect a build that happened.
+      - name: Save the ccache directory
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-v2-windows-${{ matrix.arch }}-${{ matrix.config }}-${{ github.sha }}
+      - name: Save the model corpus cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-windows-${{ matrix.arch }}-${{ github.sha }}
       - name: Remove temporary package credentials
         if: always()
         shell: pwsh

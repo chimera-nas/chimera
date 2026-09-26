@@ -48,11 +48,34 @@ cmake -S . -B build -G $generator -A $arch `
 cmake --build build --config Debug --parallel 4
 ```
 
+CI builds with Ninja instead, from a Visual Studio developer environment for
+the target architecture (a Developer PowerShell, or `vcvarsall.bat arm64` /
+`x64`), which lets the
+model corpus generate in parallel with the C build and lets ccache cache the
+compiles. Either generator works locally; with Ninja the configuration is
+chosen at configure time:
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=cl `
+  "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" `
+  "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" `
+  "-DFLEX_EXECUTABLE=$parserTools/win_flex.exe" `
+  "-DBISON_EXECUTABLE=$parserTools/win_bison.exe" `
+  -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
+cmake --build build
+```
+
+When `ccache` is on `PATH`, Ninja builds use it and embed debug information
+in each object (`/Z7`), which ccache can cache; Visual Studio generators
+ignore it.
+
 The manifest installs the native dependencies through vcpkg. The parser
 generators are build tools, not a POSIX runtime dependency. Generated model
 traces use the pinned Quint release through Node.js, without requiring Unix
 symlinks or a shell. Model corpus generation can take substantially longer
-than compiling the C sources.
+than compiling the C sources; set `SPECS_CORPUS_CACHE_DIR` to a directory in
+the build environment to reuse traces whose models and configs have not
+changed, as CI does.
 
 CI uses prebuilt dependencies from the [Windows dependency publisher](/windows-dependencies):
 VS2022 on `windows-2022` for x64, and VS2026 on the explicit
@@ -64,7 +87,7 @@ rerun the Windows job. The restore step records its duration in the job summary.
 The local build commands above still permit source builds when no feed is configured.
 
 Executables and their dependent DLLs are placed in `build/bin/Debug` or
-`build/bin/Release`. Keep the DLLs beside the executable when running it.
+`build/bin/Release` (`build/bin` with Ninja). Keep the DLLs beside the executable when running it.
 Pass an explicit configuration file with `chimera.exe -c <file>`; the Linux
 example configuration includes backends that are unavailable on Windows.
 
@@ -76,7 +99,9 @@ x64/ARM64 Debug/Release. The scheduled `Extended` workflow runs the full
 matrix and suite. Both call the reusable Windows build/test workflow and
 publish the same JUnit/duration artifacts as the other platforms.
 
-For MSVC, CTest's `-C` selects the binary configuration, so the generated
+A Ninja build selects the tier as on Unix: plain `ctest` runs the quick tier
+and `ctest -C extended` runs everything. With a Visual Studio generator,
+CTest's `-C` selects the binary configuration, so the generated
 `quick-tests.txt` selects the quick tier separately (CTest 3.29 or newer):
 
 ```powershell
