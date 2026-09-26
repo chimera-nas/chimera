@@ -517,6 +517,10 @@ chimera_fuse_op_setlk(
     if (!atomic_compare_exchange_strong(&req->u.lock.phase, &expected, 2)) {
         /* Callback already ran inline on this thread. */
         chimera_fuse_lock_finish(req);
+    } else if (wait) {
+        /* Parked for as long as the conflicting holder keeps its lock --
+         * which may take a request of its own to release. */
+        chimera_fuse_uring_parked(req);
     }
 } /* chimera_fuse_op_setlk */
 

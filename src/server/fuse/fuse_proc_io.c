@@ -404,11 +404,11 @@ chimera_fuse_op_write(
         sync = 1;
     }
 
-    /* Page-aligned by construction (see CHIMERA_FUSE_REQ_OFF): the borrowed
+    /* Page-aligned by construction (see CHIMERA_FUSE_REQ_OFF, and
+     * CHIMERA_FUSE_URING_PAYLOAD_OFF for ring requests): the borrowed
      * segment below is what a backend DMAs from, and diskfs's zero-copy
      * device write rejects an unaligned source. */
-    data_off = CHIMERA_FUSE_REQ_OFF + sizeof(struct fuse_in_header) +
-        sizeof(*in);
+    data_off = req->hdr_off + sizeof(struct fuse_in_header) + sizeof(*in);
 
     /* Borrow the payload straight out of the request buffer; the buffer is
      * not recycled until the request completes. */

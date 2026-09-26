@@ -89,6 +89,27 @@ _Static_assert((CHIMERA_FUSE_REQ_OFF + sizeof(struct fuse_in_header) +
 /* Pooled requests kept per thread; each pins a CHIMERA_FUSE_BUFSZ buffer. */
 #define CHIMERA_FUSE_MAX_POOLED_REQS 64
 
+/*
+ * FUSE-over-io_uring (ABI 7.42+, Linux 6.14+, and only when the fuse module
+ * was loaded with enable_uring=1).  Built when CMake found liburing
+ * (CHIMERA_FUSE_URING) and the uAPI header is new enough to describe it.
+ */
+#if defined(CHIMERA_FUSE_URING) && defined(FUSE_OVER_IO_URING)
+#define CHIMERA_FUSE_HAVE_URING      1
+#else  /* if defined(CHIMERA_FUSE_URING) && defined(FUSE_OVER_IO_URING) */
+#define CHIMERA_FUSE_HAVE_URING      0
+#endif /* if defined(CHIMERA_FUSE_URING) && defined(FUSE_OVER_IO_URING) */
+
+/* Ring entries registered per kernel queue (the kernel keeps one queue per
+ * possible CPU): the requests one CPU's callers can have in flight before the
+ * rest wait in the kernel.  Each entry holds a CHIMERA_FUSE_BUFSZ buffer for
+ * the life of the mount, so a mount reserves ~CPUs x depth MiB -- resident
+ * only as large requests touch it, but kept once touched.  Overridden by
+ * CHIMERA_FUSE_URING_DEPTH (which CI sets low) and, per mount, by the
+ * uring_depth option. */
+#define CHIMERA_FUSE_URING_DEPTH     16
+#define CHIMERA_FUSE_URING_DEPTH_MAX 1024
+
 /* Clone one /dev/fuse channel per core thread (FUSE_DEV_IOC_CLONE), so each
  * thread reads and replies on its own kernel queue.  Set to 0 to fall back
  * to a single channel on thread slot 0 for debugging. */
@@ -96,6 +117,8 @@ _Static_assert((CHIMERA_FUSE_REQ_OFF + sizeof(struct fuse_in_header) +
 
 struct chimera_fuse_thread;
 struct chimera_fuse_shared;
+struct chimera_fuse_uring;
+struct chimera_fuse_uring_ent;
 struct chimera_fuse_request;
 struct chimera_fuse_mount;
 
@@ -105,7 +128,7 @@ struct chimera_fuse_mount;
  * locks conflict correctly with NLM, NFSv4, and SMB2 locks.  The range is
  * POSIX-inclusive [start, end]; end == CHIMERA_FUSE_LOCK_EOF means to-EOF.
  */
-#define CHIMERA_FUSE_LOCK_EOF        0x7fffffffffffffffULL
+#define CHIMERA_FUSE_LOCK_EOF 0x7fffffffffffffffULL
 
 struct chimera_fuse_lock {
     struct chimera_fuse_lock_file     *lf;
@@ -239,6 +262,15 @@ struct chimera_fuse_mount {
     int                             direct_io_mmap;
     uint32_t                        max_write;   /* negotiated */
     uint32_t                        proto_minor; /* negotiated */
+    /* uring_depth: ring entries per kernel queue; 0 never offers io_uring.
+     * uring: negotiated (FUSE_OVER_IO_URING) -- requests move to the ring
+     * once every queue has an entry registered, and until then (and for
+     * FORGET/INTERRUPT always) keep arriving on the channel fds. */
+    uint32_t                        uring_depth;
+    int                             uring;
+    int                             uring_nr_queues;
+    _Atomic int                     uring_active; /* first ring request logged */
+    _Atomic int                     uring_failed; /* first rejection logged */
     int                             mounted;
     int                             dead;
     /* Test transport (chimera_fuse_add_synthetic_mount): when >= 0, setup
@@ -284,6 +316,10 @@ struct chimera_fuse_mount {
 struct chimera_fuse_shared {
     struct chimera_vfs         *vfs;
     struct prometheus_metrics  *metrics;
+    /* Server config fuse_io_uring: offer FUSE_OVER_IO_URING at INIT. */
+    int                         io_uring;
+    /* Default uring_depth for mounts (CHIMERA_FUSE_URING_DEPTH). */
+    uint32_t                    uring_depth;
     evpl_mutex_t                lock;
     int                         num_mounts;
     struct chimera_fuse_mount   mounts[CHIMERA_FUSE_MAX_MOUNTS];
@@ -336,6 +372,9 @@ struct chimera_fuse_thread {
     evpl_mutex_t                 resume_lock;
     struct chimera_fuse_request *resume_queue;
     struct evpl_doorbell         resume_doorbell;
+    /* Per-thread io_uring carrying every uring mount's ring entries for the
+     * queues this thread serves; created on first attach (fuse_uring.c). */
+    struct chimera_fuse_uring   *uring;
 };
 
 struct chimera_fuse_request {
@@ -361,6 +400,14 @@ struct chimera_fuse_request {
     struct evpl_iovec               buf;
     int                             buf_allocated;
     uint32_t                        buf_len;
+    /* Where the fuse_in_header sits in buf: CHIMERA_FUSE_REQ_OFF for a
+     * request read from the channel fd; for a ring request it moves with the
+     * opcode's header size (see fuse_uring.c). */
+    uint32_t                        hdr_off;
+    /* The ring entry this request arrived in, which owns the request (and
+     * its buffer) for good; NULL for a request read from the channel fd. */
+    struct chimera_fuse_uring_ent  *ring_ent;
+    int                             ring_committed;
 
     /* Coverage captured at request ENTRY (before the backend op) by ops that
      * condition reply TTLs on it -- a CHIMERA_FUSE_COVER_* value.  See the
@@ -482,6 +529,52 @@ void
 chimera_fuse_request_free(
     struct chimera_fuse_thread  *thread,
     struct chimera_fuse_request *req);
+
+/* Validate framing and hand a received request to its opcode handler. */
+void
+chimera_fuse_dispatch(
+    struct chimera_fuse_request *req,
+    uint32_t                     len);
+
+/* fuse_uring.c.  Everything here runs on the owning thread.  Without
+ * CHIMERA_FUSE_HAVE_URING these are no-ops and no request has a ring_ent. */
+
+/* Register this thread's share of the mount's kernel queues on its ring. */
+void
+chimera_fuse_uring_attach(
+    struct chimera_fuse_thread  *thread,
+    struct chimera_fuse_channel *channel);
+
+/* Deliver a reply for a ring request (COMMIT_AND_FETCH). */
+int
+chimera_fuse_uring_commit(
+    struct chimera_fuse_request *req,
+    int                          error,
+    const void                  *payload,
+    size_t                       payload_len,
+    struct evpl_iovec           *data_iov,
+    int                          data_niov,
+    size_t                       data_len);
+
+/* A ring request is done with: its entry goes back to the kernel. */
+void
+chimera_fuse_uring_release(
+    struct chimera_fuse_request *req);
+
+/* A ring request is about to wait indefinitely (a blocking lock): give its
+ * queue a replacement entry so later requests are not stuck behind it. */
+void
+chimera_fuse_uring_parked(
+    struct chimera_fuse_request *req);
+
+void
+chimera_fuse_uring_thread_destroy(
+    struct chimera_fuse_thread *thread);
+
+/* The kernel's queue count: one per possible CPU. */
+int
+chimera_fuse_uring_nr_queues(
+    void);
 
 /* fuse_mount.c */
 int
@@ -925,12 +1018,12 @@ chimera_fuse_reply_space(struct chimera_fuse_request *req)
 } /* chimera_fuse_reply_space */
 
 /* The request header, which does NOT sit at the buffer base (see
- * CHIMERA_FUSE_REQ_OFF).  Callbacks re-derive their request body from here. */
+ * CHIMERA_FUSE_REQ_OFF and req->hdr_off).  Callbacks re-derive their request body from here. */
 static inline const struct fuse_in_header *
 chimera_fuse_request_hdr(struct chimera_fuse_request *req)
 {
     return (const struct fuse_in_header *)
-           ((uint8_t *) evpl_iovec_data(&req->buf) + CHIMERA_FUSE_REQ_OFF);
+           ((uint8_t *) evpl_iovec_data(&req->buf) + req->hdr_off);
 } /* chimera_fuse_request_hdr */
 
 static inline struct chimera_fuse_open_file *

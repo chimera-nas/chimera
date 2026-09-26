@@ -19,7 +19,9 @@ extern struct chimera_server_protocol fuse_protocol;
  * namespace (e.g. "/memfs_dir/subdir").  Must be called after init() and
  * before start(); the actual kernel mount happens in start().  `options` is a
  * comma-separated list: allow_other, no_default_permissions,
- * attr_timeout_ms=<n>, entry_timeout_ms=<n>.  Returns 0 on success.
+ * attr_timeout_ms=<n>, entry_timeout_ms=<n>, uring_depth=<n> (ring entries
+ * per kernel queue when the kernel offers FUSE-over-io_uring, default 16 or
+ * $CHIMERA_FUSE_URING_DEPTH; 0 keeps the mount on plain /dev/fuse reads).  Returns 0 on success.
  */
 int
 chimera_fuse_add_mount(

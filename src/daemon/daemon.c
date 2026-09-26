@@ -821,6 +821,11 @@ main(
         chimera_server_config_set_fuse_enabled(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "fuse_io_uring");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_fuse_io_uring(server_config, json_is_true(json_value));
+    }
+
     /* NFSv4.1 server identity (EXCHANGE_ID server scope).  Set a distinct value
      * on independent servers that do not share state -- e.g. a pNFS data server
      * co-deployed with its MDS -- so v4.1 clients do not coalesce them. */
