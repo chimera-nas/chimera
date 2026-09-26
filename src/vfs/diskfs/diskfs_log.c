@@ -866,15 +866,13 @@ diskfs_push_trim(struct diskfs_intent_log *il)
 
     if (advanced) {
         diskfs_il_push_metrics(il);
-        /* Freed log space -> resume the commit thread, but only while its
-         * doorbell is still live.  The commit thread is destroyed before the
-         * push thread (the push thread drains the records it handed off), which
-         * closes wake_doorbell's fd; ringing it after that aborts.  commit_alive
-         * is cleared before that teardown, and during shutdown the commit thread
-         * makes progress by self-pumping, so a skipped wake is harmless. */
-        if (chimera_atomic_load_n(&il->commit_alive, CHIMERA_MEMORY_ACQUIRE)) {
-            evpl_ring_doorbell(&il->wake_doorbell);
-        }
+        /* The commit receiver may retire while this thread drains home writes.
+         * The retained sender serializes retirement with signal submission;
+         * an atomic liveness flag alone cannot protect that lifetime. */
+        int rc = evpl_doorbell_signal(il->push_wake_sender);
+
+        chimera_diskfs_abort_if(rc && rc != ECANCELED,
+                                "intent-log trim wake failed: %d", rc);
     }
 } /* diskfs_push_trim */
 
@@ -2105,6 +2103,7 @@ diskfs_intent_log_thread_init(
 
     (void) i;
     evpl_add_doorbell(evpl, &il->wake_doorbell, diskfs_intent_log_wake_cb);
+    il->push_wake_sender = evpl_doorbell_sender(&il->wake_doorbell);
 
     /* Poll all channel SQs every loop iteration (cheap atomic loads) so commit
      * pickup never waits for the wake doorbell; the doorbell only rouses us when
