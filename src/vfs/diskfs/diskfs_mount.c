@@ -1433,7 +1433,6 @@ diskfs_init(
     shared->intent_log.ready        = 0;
     shared->intent_log.push_ready   = 0;
     shared->intent_log.shutdown     = 0;
-    shared->intent_log.commit_alive = 1;
     shared->intent_log.num_channels = 0;
     shared->intent_log.pending_head = NULL;
     shared->intent_log.rec_pool     = NULL;   /* Stage A: commit-hot-path recycle pools */
@@ -1723,11 +1722,8 @@ diskfs_teardown(
      * the push thread), then the push thread (it flushes every record home and
      * trims the log).  Only then are the shared rings and device-metric arrays
      * safe to free.  (il->shutdown was already published above.) */
-    /* Stop the push thread from ringing the commit thread's wake_doorbell:
-     * destroying the commit thread closes that fd, and the push thread (torn
-     * down afterwards, to drain what the commit thread handed off) would
-     * otherwise abort writing to it. */
-    chimera_atomic_store_n(&shared->intent_log.commit_alive, 0, CHIMERA_MEMORY_RELEASE);
+    /* The push thread retains a sender while draining. Receiver retirement
+     * revokes it safely even if a trim wake is already in flight. */
     evpl_thread_destroy(shared->intent_log.thread);
     /* Apply thread next: its shutdown drains the apply queue (applying every
      * remaining record's deltas and advancing applied_seq to the final
@@ -1736,6 +1732,7 @@ diskfs_teardown(
      * complete free map. */
     evpl_thread_destroy(shared->intent_log.apply_thread);
     evpl_thread_destroy(shared->intent_log.push_thread);
+    evpl_doorbell_sender_release(shared->intent_log.push_wake_sender);
 
     /* Stage A: drain the commit-thread record/ctx recycle pools (all IL threads
      * are stopped now, so the pools are quiescent). */

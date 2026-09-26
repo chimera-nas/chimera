@@ -1540,12 +1540,12 @@ struct diskfs_retire_slot {
 
 struct diskfs_intent_log {
     /* ---------- commit thread ---------- */
-    struct evpl_doorbell             wake_doorbell;   /* workers + push-trim ring this */
+    struct evpl_doorbell             wake_doorbell;   /* commit receiver */
+    struct evpl_doorbell_sender     *push_wake_sender; /* retained until the push thread stops */
     struct evpl                     *evpl;            /* commit thread evpl */
     struct evpl_thread              *thread;          /* commit thread */
     int                              ready;           /* atomic: commit thread up */
     int                              shutdown;        /* atomic */
-    int                              commit_alive;    /* atomic: 1 while the commit thread's wake_doorbell is live; the push thread must not ring it once 0 (cleared before the commit thread is destroyed, which closes that fd) */
     struct evpl_poll                *sq_poll;         /* polls the global submission ring every loop iteration */
     int                              awake;           /* atomic (seq_cst): 1 while the commit thread is in poll mode (not blocked).  A submitter skips ringing wake_doorbell when this is set; see diskfs_iq_try_submit / diskfs_il_poll_exit. */
     int                              reg_dirty;       /* atomic (seq_cst): a channel (un)registration is pending.  Set by workers after touching pending_head / unregister_requested; the commit thread's per-iteration poll services it without waiting for the wake doorbell (which is starved while we stay in continuous poll mode under load). */
