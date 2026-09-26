@@ -671,7 +671,7 @@ chimera_rest_auth_check_request(
 
 /* ========== Login handler ========== */
 
-CHIMERA_REST_EXPORT void
+void
 chimera_rest_handle_auth_login(
     struct evpl                 *evpl,
     struct chimera_rest_request *request,

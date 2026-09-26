@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include "rest_internal.h"
+#include "rest_services.h"
 
 extern const unsigned char swagger_index_html[];
 extern const unsigned int  swagger_index_html_len;

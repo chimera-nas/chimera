@@ -13,6 +13,7 @@
 #include "server/server.h"
 #include "server/smb/smb.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 
 struct share_list_ctx {

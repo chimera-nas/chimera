@@ -20,6 +20,7 @@
 #include "server/server.h"
 #include "server/nfs/nfs.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 
 struct export_list_ctx {

@@ -15,7 +15,9 @@
 #define CHIMERA_REST_PUBLIC       1U
 #define CHIMERA_REST_MAX_BODY     65536U
 
-#if defined(__GNUC__)
+#if defined(_WIN32)
+#define CHIMERA_REST_EXPORT       __declspec(dllexport)
+#elif defined(__GNUC__)
 #define CHIMERA_REST_EXPORT       __attribute__((visibility("default")))
 #else // if defined(__GNUC__)
 #define CHIMERA_REST_EXPORT

@@ -75,10 +75,11 @@ set_tests_properties(chimera/server/rest/ctl/proto_probe PROPERTIES
     TIMEOUT 120)
 
 # Real external modules, compiled against only the public REST SDK.
+find_package(Threads REQUIRED)
 foreach(variant v2 badabi)
     add_library(rest_example_${variant} MODULE ${CMAKE_SOURCE_DIR}/examples/rest_module/rest_example.c)
     set_property(TARGET rest_example_${variant} PROPERTY INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/src/server/rest/sdk)
-    target_link_libraries(rest_example_${variant} PRIVATE pthread)
+    target_link_libraries(rest_example_${variant} PRIVATE Threads::Threads)
 endforeach()
 target_compile_definitions(rest_example_v2 PRIVATE EXAMPLE_API_VERSION=2)
 target_compile_definitions(rest_example_badabi PRIVATE EXAMPLE_ABI_VERSION=999)
