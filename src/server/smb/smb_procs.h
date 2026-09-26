@@ -397,6 +397,12 @@ void chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
+/* The same without waking waiters, for final shutdown (no live connection
+ * is left to answer one). */
+void chimera_smb_open_file_drain_locks_nopump(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
+
 /* break_cb wired onto SMB cache claims at CREATE time.  Sends an
  * OPLOCK_BREAK Notification on the conn the open was created on, or
  * forcibly revokes if the conn is gone. */

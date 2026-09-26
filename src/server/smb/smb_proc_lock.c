@@ -136,10 +136,15 @@ struct chimera_smb_lock_entry {
     struct chimera_smb_lock_entry     *next;
 };
 
-SYMBOL_EXPORT void
-chimera_smb_open_file_drain_locks(
+/* pump=false is the shutdown variant (chimera_smb_durable_drain_all): every
+ * claim is still unlinked -- the open is freed right after, and the VFS
+ * close thread walks the claim lists during its own shutdown pass -- but
+ * no waiter is woken, since none has a connection left to answer. */
+static void
+chimera_smb_open_file_drain_claims(
     struct chimera_server_smb_thread *thread,
-    struct chimera_smb_open_file     *open_file)
+    struct chimera_smb_open_file     *open_file,
+    bool                              pump)
 {
     struct chimera_smb_lock_entry *entry, *tmp;
     struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
@@ -151,7 +156,16 @@ chimera_smb_open_file_drain_locks(
     if (open_file->grant) {
         chimera_smb_grant_remove_member(open_file->grant, open_file);
     }
-    if (open_file->share_lease_inserted) {
+    if (!pump) {
+        if (open_file->share_lease_inserted) {
+            chimera_vfs_claim_release_nopump(vfs_state, open_file->share_file_state,
+                                             &open_file->share_lease);
+            open_file->share_lease_inserted = false;
+        }
+        if (open_file->grant) {
+            chimera_vfs_claim_grant_release(vfs_state, open_file->grant, false /*pump*/);
+        }
+    } else if (open_file->share_lease_inserted) {
         chimera_vfs_claim_release_open(vfs_state, open_file->share_file_state,
                                        &open_file->share_lease, open_file->grant);
         open_file->share_lease_inserted = false;
@@ -168,8 +182,13 @@ chimera_smb_open_file_drain_locks(
     /* A named stream's file-level DELETE reservation on the base file's state
      * (smb2.streams.delete). */
     if (open_file->base_share_lease_inserted) {
-        chimera_vfs_claim_release(vfs_state, open_file->base_share_file_state,
-                                  &open_file->base_share_lease);
+        if (pump) {
+            chimera_vfs_claim_release(vfs_state, open_file->base_share_file_state,
+                                      &open_file->base_share_lease);
+        } else {
+            chimera_vfs_claim_release_nopump(vfs_state, open_file->base_share_file_state,
+                                             &open_file->base_share_lease);
+        }
         chimera_vfs_state_stream_holder_dec(open_file->base_share_file_state);
         open_file->base_share_lease_inserted = false;
     }
@@ -196,8 +215,13 @@ chimera_smb_open_file_drain_locks(
     while (entry) {
         tmp = entry->next;
         if (entry->lease_inserted) {
-            chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
-                                             entry->file_state, &entry->lease);
+            if (pump) {
+                chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
+                                                 entry->file_state, &entry->lease);
+            } else {
+                chimera_vfs_claim_release_nopump(vfs_state, entry->file_state,
+                                                 &entry->lease);
+            }
         }
         if (entry->file_state) {
             chimera_vfs_state_put(vfs_state, entry->file_state);
@@ -205,7 +229,23 @@ chimera_smb_open_file_drain_locks(
         free(entry);
         entry = tmp;
     }
+} /* chimera_smb_open_file_drain_claims */
+
+SYMBOL_EXPORT void
+chimera_smb_open_file_drain_locks(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file)
+{
+    chimera_smb_open_file_drain_claims(thread, open_file, true);
 } /* chimera_smb_open_file_drain_locks */
+
+SYMBOL_EXPORT void
+chimera_smb_open_file_drain_locks_nopump(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file)
+{
+    chimera_smb_open_file_drain_claims(thread, open_file, false);
+} /* chimera_smb_open_file_drain_locks_nopump */
 
 int
 chimera_smb_parse_lock(
