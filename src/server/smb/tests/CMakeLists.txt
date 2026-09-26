@@ -5,6 +5,7 @@
 # SMB2/3 model-based tests (Quint spec + build-time self-test).
 add_subdirectory(quint)
 
+find_package(Threads REQUIRED)
 add_executable(smb_namespace_test smb_namespace_test.c ../smb_namespace.c)
 target_include_directories(smb_namespace_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(smb_namespace_test evpl Threads::Threads)

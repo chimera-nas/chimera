@@ -170,7 +170,10 @@ chimera_server_mount(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 
@@ -199,7 +202,10 @@ chimera_server_mkfs(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 
@@ -227,7 +233,10 @@ chimera_server_rmfs(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 
@@ -464,14 +473,46 @@ struct chimera_seed_step {
 };
 
 static const struct chimera_seed_step chimera_seed_symlink_steps[] = {
-    { "SymlinkTest",      NULL,                   S_IFDIR | 0755                                              },
-    { "SymlinkTest/link", "target",               0                                                           },
-    { "badlink",          "nonexistent",          0                                                           },
+
+    {
+        "SymlinkTest",
+        NULL,
+        S_IFDIR | 0755
+    }
+    ,
+
+    {
+        "SymlinkTest/link",
+        "target",
+        0
+    }
+    ,
+
+    {
+        "badlink",
+        "nonexistent",
+        0
+    }
+    ,
+
+
 };
 
 static const struct chimera_seed_step chimera_seed_fsa_steps[] = {
-    { "ExistingFolder",   NULL,   S_IFDIR | 0755     },
-    { "ExistingFile.txt", NULL,   S_IFREG | 0644     },
+
+    {
+        "ExistingFolder",
+        NULL,
+        S_IFDIR | 0755
+    },
+
+    {
+        "ExistingFile.txt",
+        NULL,
+        S_IFREG | 0644
+    },
+
+
 };
 
 struct chimera_seed_ctx {
@@ -695,7 +736,10 @@ chimera_server_unmount(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 

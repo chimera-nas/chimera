@@ -474,9 +474,10 @@ dh_mkdir(
                                               NULL, 0, &sa,
                                               CHIMERA_VFS_ATTR_FH, 0, 0);
 
-    dh->status = compound_test_run(dh->evpl, cp);
+    enum chimera_vfs_error status = compound_test_run(dh->evpl, cp);
+    dh->status = status;
 
-    if (dh->status == CHIMERA_VFS_OK) {
+    if (status == CHIMERA_VFS_OK) {
         op = chimera_vfs_compound_op(cp, (uint32_t) i_mkdir);
         if (op->attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
             memcpy(dh->fh, op->attr.va_fh, op->attr.va_fh_len);
@@ -490,7 +491,7 @@ dh_mkdir(
 
     chimera_vfs_compound_free(cp);
 
-    return dh->status;
+    return status;
 } /* dh_mkdir */
 
 /* Create a regular file; if keep is non-NULL, keep the open handle there,
@@ -520,11 +521,12 @@ dh_create(
                                            CHIMERA_VFS_OPEN_CREATE, 0, &sa,
                                            CHIMERA_VFS_ATTR_FH, 0, 0);
 
-    dh->status = compound_test_run(dh->evpl, cp);
+    enum chimera_vfs_error status = compound_test_run(dh->evpl, cp);
+    dh->status = status;
 
-    if (dh->status != CHIMERA_VFS_OK) {
+    if (status != CHIMERA_VFS_OK) {
         chimera_vfs_compound_free(cp);
-        return dh->status;
+        return status;
     }
 
     op = chimera_vfs_compound_op(cp, (uint32_t) i_open);

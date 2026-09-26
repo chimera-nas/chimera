@@ -89,8 +89,13 @@ probe(
     off_t offset,
     off_t length)
 {
-    struct flock fl = { .l_type  = F_WRLCK, .l_whence     = SEEK_SET,
-                        .l_start = offset,  .l_len        = length };
+    struct flock fl = {
+        .l_type   = F_WRLCK,
+        .l_whence = SEEK_SET,
+
+        .l_start = offset,
+        .l_len   = length
+    };
 
     CHECK(fcntl(fd, CHIMERA_LINUX_LOCK_GET, &fl) == 0);
     return fl.l_type;
@@ -102,8 +107,12 @@ main(void)
 #ifndef F_OFD_SETLK
     return 77;
 #else  /* ifndef F_OFD_SETLK */
-    struct chimera_linux_shared      shared = { 0 };
-    struct chimera_linux_thread      thread = { .shared = &shared };
+    struct chimera_linux_shared      shared = {
+        0
+    };
+    struct chimera_linux_thread      thread = {
+        .shared = &shared
+    };
     struct chimera_linux_range_file *file   = calloc(1, sizeof(*file));
     char                             path[] = "/tmp/chimera-lock-geometry-XXXXXX";
     int                              fd     = mkstemp(path);
@@ -162,8 +171,18 @@ main(void)
 
     /* A legacy token survives a middle carve as two records. Releasing it
      * must remove both fragments without unlocking unrelated geometry. */
-    struct flock                fl = { .l_type  = F_WRLCK, .l_whence                 = SEEK_SET,
-                                       .l_start = 100,     .l_len                    = 100 };
+    struct flock                fl = {
+        .l_type  = F_WRLCK,
+        .l_whence
+            =
+                SEEK_SET,
+
+        .l_start = 100,
+        .l_len
+            =
+                100
+    }
+    ;
     CHECK(fcntl(fd, CHIMERA_LINUX_LOCK_SET, &fl) == 0);
     struct chimera_linux_range *legacy = calloc(1, sizeof(*legacy));
     CHECK(legacy != NULL);

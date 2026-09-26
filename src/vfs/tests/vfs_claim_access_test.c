@@ -446,16 +446,19 @@ check_prepared_read_lease(
     assert(grant->epoch == 43 && grant->is_v2 && grant->claim.used == CHIMERA_CLAIM_CR);
     assert(grant->members == &second && second.next == &first && grant->refcount == 2);
     evpl_mutex_unlock(&file->lock);
-    struct chimera_claim_actor actor = { .owner         = { .
-                                                            proto
-                                                                =
-                                                                    CHIMERA_CLAIM_PROTO_SMB2,
-                                                            .
-                                                            client_key
-                                                                = 927,
-                                                            .
-                                                            owner_lo
-                                                                = 927 } };
+    struct chimera_claim_actor actor = { .owner
+                                             = { .
+                                                 proto
+                                                     =
+                                                         CHIMERA_CLAIM_PROTO_SMB2,
+                                                 .
+                                                 client_key
+                                                     =
+                                                         927,
+                                                 .
+                                                 owner_lo
+                                                     =
+                                                         927 } };
     chimera_vfs_claim_invalidate(file->state, file->fh, file->fh_len, file->fh_hash,
                                  directory ? CHIMERA_TRIGGER_DIR_CONTENT : CHIMERA_TRIGGER_WRITE, &actor, 0);
     assert(calls == 1);

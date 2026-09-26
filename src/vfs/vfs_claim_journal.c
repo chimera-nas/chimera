@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -64,8 +65,8 @@ exact_overlap(
     bool                                        zero_point)
 {
     return (zero_point || (a->length && b->length)) &&
-           (__uint128_t) a->offset < (__uint128_t) b->offset + b->length &&
-           (__uint128_t) b->offset < (__uint128_t) a->offset + a->length;
+           chimera_range_compare(chimera_range_offset(a->offset), chimera_range_end(b->offset, b->length)) < 0 &&
+           chimera_range_compare(chimera_range_offset(b->offset), chimera_range_end(a->offset, a->length)) < 0;
 } /* exact_overlap */
 
 /* Record refs and owner list membership are guarded by owner->lock. Every
@@ -508,8 +509,9 @@ record_init(
     if (!range->length && !owner->zero_point) {
         return;
     }
-    record->num_claims = range->offset == 0 && range->length == UINT64_MAX ? 2 : 1;
-    for (unsigned i = 0; i < record->num_claims; i++) {
+    const unsigned num_claims = range->offset == 0 && range->length == UINT64_MAX ? 2 : 1;
+    record->num_claims = num_claims;
+    for (unsigned i = 0; i < num_claims; i++) {
         uint64_t offset = range->offset, length = range->length;
         if (record->num_claims == 2) {
             offset = i ? UINT64_MAX - 1 : 0;
@@ -636,7 +638,7 @@ chimera_vfs_claim_journal_acquire(
     }
     /* Validate the entire acquisition request before changing the overlay. */
     for (uint32_t i = 0; i < count; i++) {
-        if ((__uint128_t) ranges[i].offset + ranges[i].length > ((__uint128_t) 1 << 64)) {
+        if (chimera_range_compare(chimera_range_end(ranges[i].offset, ranges[i].length), chimera_range_eof()) > 0) {
             result->status = CHIMERA_VFS_EINVAL; result->failed = i; return;
         }
         for (uint32_t k = 0; k < i; k++) {
@@ -779,16 +781,17 @@ chimera_vfs_claim_journal_io_denied(
         }
         /* Claim geometry retains the legacy EOF sentinel. I/O geometry is
          * finite, and retains the existing interior-point zero-WRITE test. */
-        __uint128_t end = claim->length == UINT64_MAX ? ((__uint128_t) 1 << 64) :
-            (__uint128_t) claim->offset + claim->length;
-        bool        overlap = (__uint128_t) claim->offset < (__uint128_t) offset + length &&
-            (__uint128_t) offset < end;
+        struct chimera_range_endpoint end = claim->length == UINT64_MAX ? chimera_range_eof() :
+            chimera_range_end(claim->offset, claim->length);
+        bool                          overlap = chimera_range_compare(chimera_range_offset(claim->offset),
+                                                                      chimera_range_end(offset, length)) < 0 &&
+            chimera_range_compare(chimera_range_offset(offset), end) < 0;
         if (excluded || claim->break_state == CHIMERA_CLAIM_BREAK_REVOKED || !overlap) {
             continue;
         }
-        bool        self = actor && (chimera_claim_owner_equal(&claim->owner, &actor->owner) ||
-                                     chimera_claim_owner_same_key(&claim->owner, &actor->owner) ||
-                                     (actor->op_handle && actor->op_handle == claim->op_handle));
+        bool                          self = actor && (chimera_claim_owner_equal(&claim->owner, &actor->owner) ||
+                                                       chimera_claim_owner_same_key(&claim->owner, &actor->owner) ||
+                                                       (actor->op_handle && actor->op_handle == claim->op_handle));
         if ((claim->used & CHIMERA_CLAIM_LW) ? !self : write) {
             denied = true; break;
         }

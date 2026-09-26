@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+// SPDX-License-Identifier: LGPL-2.1-only
+
 #include <stdio.h>
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_procs.h"

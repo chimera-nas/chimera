@@ -429,7 +429,8 @@ chimera_vfs_read_gate_complete(
 
     /* A data READ cannot target a directory. Check type before DAC, as
      * nfsd's fh_verify(S_IFREG) does, even after an open directory is chmod'd. */
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISDIR(attr->va_mode)) {
+    if (!(gate->handle->flags & CHIMERA_VFS_OPEN_HANDLE_STREAM) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISDIR(attr->va_mode)) {
         gate->callback(CHIMERA_VFS_EISDIR, 0, 0, NULL, 0, NULL, gate->private_data);
         chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;

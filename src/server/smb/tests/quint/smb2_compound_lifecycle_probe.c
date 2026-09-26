@@ -390,8 +390,20 @@ data_open_chain(
     memcpy(wire + offset, create, create_len);
     p32(wire + offset, 20, create_len);
     offset += create_len; slot++;
-    const uint16_t     codes[] = { SMB2_WRITE, SMB2_QUERY_DIRECTORY, SMB2_QUERY_INFO, SMB2_READ, SMB2_CLOSE };
-    const unsigned int sizes[] = { 120, 104, 104, 112, 88 };
+    const uint16_t     codes[] = {
+        SMB2_WRITE,
+        SMB2_QUERY_DIRECTORY,
+        SMB2_QUERY_INFO,
+        SMB2_READ,
+        SMB2_CLOSE
+    };
+    const unsigned int sizes[] = {
+        120,
+        104,
+        104,
+        112,
+        88
+    };
     for (unsigned int i = 0; i < 5; i++, slot++) {
         uint8_t *header = wire + offset;
         related_header(header, codes[i], mid + slot, i == 4 ? 0 : sizes[i]);
@@ -461,7 +473,9 @@ live_cache_open(
 
     smb2_handshake(holder);
     const char            *name    = level == SMB2_OPLOCK_LEVEL_BATCH ? "recall-batch.txt" : "recall-exclusive.txt";
-    struct smb2_oplock_req caching = { .level = level };
+    struct smb2_oplock_req caching = {
+        .level = level
+    };
     struct smb2_create_out held_open, opened;
     assert(smb2_create(holder, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
                        &caching, &held_open) == ST_SUCCESS && held_open.oplock == level);
@@ -720,12 +734,14 @@ overwrite_failure_continuation(
     ;
     assert(smb2_write(conn, seed.file_id, 0, "keep!", 5, &bytes) == ST_SUCCESS && bytes == 5);
     assert(smb2_close(conn, seed.file_id) == ST_SUCCESS);
-    uint8_t                packet[2048] = { 0 };
-    int                    first_body   = smb2c_build_create_full(conn, name, disposition,
-                                                                  desired, failure_phase ? MBT_FILE_SHARE_READ :
-                                                                  MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE, NULL,
-                                                                  NULL, 0
-                                                                  );
+    uint8_t                packet[2048] = {
+        0
+    };
+    int                    first_body = smb2c_build_create_full(conn, name, disposition,
+                                                                desired, failure_phase ? MBT_FILE_SHARE_READ :
+                                                                MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                                NULL, 0
+                                                                );
     uint64_t               mid       = g64(conn->sbuf + 4, 24);
     unsigned int           first_len = (SMB2_HDR_SIZE + first_body + 7) & ~7u;
     memcpy(packet, conn->sbuf + 4, SMB2_HDR_SIZE + first_body);
@@ -786,7 +802,11 @@ overwrite_failure_continuation(
 static void
 overwrite_cases(struct smb2_conn *conn)
 {
-    const uint32_t dispositions[] = { MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF, MBT_FILE_SUPERSEDE };
+    const uint32_t dispositions[] = {
+        MBT_FILE_OVERWRITE,
+        MBT_FILE_OVERWRITE_IF,
+        MBT_FILE_SUPERSEDE
+    };
 
     for (unsigned int i = 0; i < sizeof(dispositions) / sizeof(dispositions[0]); i++) {
         char                   name[64]; snprintf(name, sizeof(name), "overwrite-%u.txt", dispositions[i]);
@@ -812,7 +832,9 @@ overwrite_cases(struct smb2_conn *conn)
                          MBT_FILE_READ_ATTRIBUTES, MBT_FILE_SHARE_READ | MBT_FILE_SHARE_DELETE);
         overwrite_denied(conn, name, dispositions[i], held.file_id, ST_SHARING_VIOLATION,
                          MBT_FILE_READ_ATTRIBUTES, MBT_FILE_SHARE_WRITE | MBT_FILE_SHARE_DELETE);
-        uint8_t basic[40] = { 0 }; p32(basic, 32, 1); /* READONLY */
+        uint8_t basic[40] = {
+            0
+        }; p32(basic, 32, 1); /* READONLY */
         assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
                              held.file_id, basic, sizeof(basic)) == ST_SUCCESS);
         overwrite_denied(conn, name, dispositions[i], held.file_id, ST_ACCESS_DENIED,
@@ -869,7 +891,12 @@ create_ea_cases(struct smb2_conn *conn)
     }
     uint32_t         large_len = ea_encode(large, "Large", value, sizeof(value), true);
     uint32_t         small_len = ea_encode(small, "Foo", "one", 3, true);
-    struct smb2_cctx ctx       = { (const uint8_t *) "ExtA", 4, small, small_len };
+    struct smb2_cctx ctx       = {
+        (const uint8_t *) "ExtA",
+        4,
+        small,
+        small_len
+    };
     data_open_access = 1;
     expected_ea      = small; expected_ea_len = small_len;
     create_query_close(conn, "create-ea.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
@@ -888,7 +915,15 @@ create_ea_cases(struct smb2_conn *conn)
     ctx.data = large; ctx.data_len = large_len; expected_ea = large; expected_ea_len = large_len;
     create_query_close(conn, "create-large-ea.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     /* A later duplicate replaces and releases an earlier overflow buffer. */
-    struct smb2_cctx duplicate[] = { ctx, { (const uint8_t *) "ExtA", 4, small, small_len } };
+    struct smb2_cctx duplicate[] = {
+        ctx,
+        {
+            (const uint8_t *) "ExtA",
+            4,
+            small,
+            small_len
+        }
+    };
     expected_ea = small; expected_ea_len = small_len;
     create_query_close(conn, "create-duplicate-ea.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, duplicate, 2, 0);
     uint32_t         pos = ea_encode(list, "absent", NULL, 0, false);
@@ -944,10 +979,17 @@ create_ea_cases(struct smb2_conn *conn)
 static void
 legacy_create_ea_cases(struct smb2_conn *conn)
 {
-    struct smb2_oplock_req caching = { .is_lease    = 1,
-                                       .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE |
-                                           SMB2_LEASE_HANDLE,
-                                       .lease_key   = { 0x92,0x31  } };
+    struct smb2_oplock_req caching = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE |
+            SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x92,
+            0x31
+        }
+    };
     uint8_t                list[256], expected[64], actual[256];
 
     for (unsigned int phase = 0; phase < 2; phase++) {
@@ -960,7 +1002,12 @@ legacy_create_ea_cases(struct smb2_conn *conn)
             length += ea_encode(list + length, "leGacy", "three", 5, false);
             length += ea_encode(list + length, "LEgACY", "four", 4, true);
         }
-        struct smb2_cctx       ctx      = { (const uint8_t *) "ExtA", 4, list, length };
+        struct smb2_cctx       ctx = {
+            (const uint8_t *) "ExtA",
+            4,
+            list,
+            length
+        };
         int                    body_len = smb2c_build_create_full(conn, "legacy-create-ea.txt",
                                                                   phase ? MBT_FILE_OPEN : MBT_FILE_CREATE,
                                                                   MBT_FILE_ALL_ACCESS,
@@ -990,7 +1037,12 @@ legacy_create_ea_cases(struct smb2_conn *conn)
      * remains, but its deny-all SHARE reservation must not leak in the tree. */
     uint32_t               length = ea_encode(list, "Prefix", "kept", 4, false);
     length += ea_encode(list + length, "bad:name", "x", 1, true);
-    struct smb2_cctx       ctx      = { (const uint8_t *) "ExtA", 4, list, length };
+    struct smb2_cctx       ctx = {
+        (const uint8_t *) "ExtA",
+        4,
+        list,
+        length
+    };
     int                    body_len = smb2c_build_create_full(conn, "legacy-error-ea.txt", MBT_FILE_CREATE,
                                                               MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE |
                                                               0x00010000u                                                       /* FILE_OPEN_REQUIRING_OPLOCK */
@@ -1025,7 +1077,12 @@ create_ea_budget_case(
                             i == ENTRIES - 1 ? "last" : "x", i == ENTRIES - 1 ? 4 : 1,
                             i == ENTRIES - 1);
     }
-    struct smb2_cctx       ctx      = { (const uint8_t *) "ExtA", 4, list, length };
+    struct smb2_cctx       ctx = {
+        (const uint8_t *) "ExtA",
+        4,
+        list,
+        length
+    };
     int                    body_len = smb2c_build_create_full(conn, name, MBT_FILE_CREATE,
                                                               MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, NULL,
                                                               &ctx, 1
@@ -1117,7 +1174,11 @@ stream_extended_cases(struct smb2_conn *conn)
     assert(smb2_create(conn, "stream-overwrite:sibling", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                        MBT_FILE_SHARE_RWD, NULL, &sibling) == ST_SUCCESS);
     assert(smb2_write(conn, sibling.file_id, 0, "sibling", 7, &bytes) == ST_SUCCESS);
-    const uint32_t         dispositions[] = { MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF, MBT_FILE_SUPERSEDE };
+    const uint32_t         dispositions[] = {
+        MBT_FILE_OVERWRITE,
+        MBT_FILE_OVERWRITE_IF,
+        MBT_FILE_SUPERSEDE
+    };
     for (unsigned int i = 0; i < 3; i++) {
         char name[96]; snprintf(name, sizeof(name), "stream-overwrite:fork-%u", i);
         assert(smb2_create(conn, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -1156,7 +1217,9 @@ stream_extended_cases(struct smb2_conn *conn)
     /* Old DOS attributes must be checked before OPEN_STREAM creates a fork
      * and stamps shared metadata, including metadata-only truncating opens. */
     for (unsigned int bit = 1; bit <= 4; bit <<= 1) {
-        uint8_t basic[40] = { 0 }; p32(basic, 32, bit);
+        uint8_t basic[40] = {
+            0
+        }; p32(basic, 32, bit);
         assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
                              base.file_id, basic, sizeof(basic)) == ST_SUCCESS);
         for (unsigned int i = 0; i < 3; i++) {
@@ -1182,7 +1245,12 @@ stream_extended_cases(struct smb2_conn *conn)
     uint8_t          list[128], expected[64], result[128];
     uint32_t         length = ea_encode(list, "ForkEA", "one", 3, false);
     length += ea_encode(list + length, "forkea", "two", 3, true);
-    struct smb2_cctx ctx = { (const uint8_t *) "ExtA", 4, list, length };
+    struct smb2_cctx ctx = {
+        (const uint8_t *) "ExtA",
+        4,
+        list,
+        length
+    };
     expected_ea = expected; expected_ea_len = ea_encode(expected, "ForkEA", "two", 3, true);
     create_query_close(conn, "stream-ea:fork", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     length          = ea_encode(list, "FORKEA", NULL, 0, false);
@@ -1225,8 +1293,20 @@ stream_extended_cases(struct smb2_conn *conn)
 static void
 unbuffered_create_cases(struct smb2_conn *conn)
 {
-    const uint32_t access[]  = { MBT_FILE_READ_ATTRIBUTES | 4u, 2u | 4u, 0x40000000u, 0x10000000u, 0x02000000u };
-    const uint32_t granted[] = { MBT_FILE_READ_ATTRIBUTES, 2u, 0x00120112u, 0x001f01fbu, 0 };
+    const uint32_t access[] = {
+        MBT_FILE_READ_ATTRIBUTES | 4u,
+        2u | 4u,
+        0x40000000u,
+        0x10000000u,
+        0x02000000u
+    };
+    const uint32_t granted[] = {
+        MBT_FILE_READ_ATTRIBUTES,
+        2u,
+        0x00120112u,
+        0x001f01fbu,
+        0
+    };
 
     for (unsigned int i = 0; i < sizeof(access) / sizeof(access[0]); i++) {
         char                   name[64]; snprintf(name, sizeof(name), "unbuffered-%u.txt", i);
@@ -1288,8 +1368,14 @@ reparse_option_cases(struct smb2_conn *conn)
 
     data_open_access = 1;
     create_query_close(conn, "reparse-option.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE | option, NULL, 0, 0);
-    const uint32_t         dispositions[] = { MBT_FILE_OPEN, MBT_FILE_OPEN_IF, MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF
-                                              ,              MBT_FILE_SUPERSEDE };
+    const uint32_t         dispositions[] = {
+        MBT_FILE_OPEN,
+        MBT_FILE_OPEN_IF,
+        MBT_FILE_OVERWRITE,
+        MBT_FILE_OVERWRITE_IF
+        ,
+        MBT_FILE_SUPERSEDE
+    };
     for (unsigned int i = 0; i < sizeof(dispositions) / sizeof(dispositions[0]); i++) {
         create_query_close(conn, "reparse-option.txt", dispositions[i], MBT_FILE_NON_DIRECTORY_FILE | option, NULL, 0, 0
                            );
@@ -1306,8 +1392,10 @@ reparse_option_cases(struct smb2_conn *conn)
     assert(smb2_create(conn, "reparse-link.txt", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &link)
            ==
            ST_SUCCESS);
-    uint8_t                reparse[256] = { 0 };
-    unsigned int           nlen         = strlen(target_name) * 2;
+    uint8_t                reparse[256] = {
+        0
+    };
+    unsigned int           nlen = strlen(target_name) * 2;
     p32(reparse, 0, SMB2_IO_REPARSE_TAG_SYMLINK); p16(reparse, 4, 12 + 2 * nlen);
     p16(reparse, 10, nlen); p16(reparse, 12, nlen); p16(reparse, 14, nlen); p32(reparse, 16, 1);
     utf16le(target_name, reparse + 20); utf16le(target_name, reparse + 20 + nlen);
@@ -1337,11 +1425,13 @@ reparse_option_cases(struct smb2_conn *conn)
 static void
 related_creates(struct smb2_conn *conn)
 {
-    uint8_t      packet[2048] = { 0 };
-    int          first_body   = smb2c_build_create_full(conn, "related-first.txt", MBT_FILE_CREATE,
-                                                        MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
-                                                        MBT_FILE_NON_DIRECTORY_FILE, NULL,
-                                                        NULL, 0);
+    uint8_t      packet[2048] = {
+        0
+    };
+    int          first_body = smb2c_build_create_full(conn, "related-first.txt", MBT_FILE_CREATE,
+                                                      MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
+                                                      MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                      NULL, 0);
     uint64_t     mid       = g64(conn->sbuf + 4, 24);
     unsigned int first_len = (SMB2_HDR_SIZE + first_body + 7) & ~7u;
 
@@ -1393,7 +1483,11 @@ int
 main(void)
 {
     struct smb2_env      env;
-    struct smb2_env_opts opts = { .oplocks = 1, .leases = 1, .named_streams = 1 };
+    struct smb2_env_opts opts = {
+        .oplocks       = 1,
+        .leases        = 1,
+        .named_streams = 1
+    };
 
     smb2_env_start_opts(&env, &opts);
     struct smb2_conn    *conn = smb2_conn_open(&env);
@@ -1407,21 +1501,47 @@ main(void)
         assert(smb2_create(conn, oversized, MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
                            MBT_FILE_SHARE_RWD, NULL, &rejected) == 0xc0000106u); /* NAME_TOO_LONG */
     }
-    uint8_t          allocation[8] = { 0 }, sd[48] = { 0 };
+    uint8_t          allocation[8] = {
+        0
+    }, sd[48] = {
+        0
+    };
     p64(allocation, 0, 4096);
     sd[0]  = 1; p16(sd, 2, 0x8004); p32(sd, 16, 20); /* self-relative DACL */
     sd[20] = 2; p16(sd, 22, 28); p16(sd, 24, 1);
     p16(sd, 30, 20); p32(sd, 32, MBT_FILE_ALL_ACCESS); /* allow Everyone */
     sd[36] = 1; sd[37] = 1; sd[43] = 1; p32(sd, 44, 0);
     struct smb2_cctx contexts[] = {
-        { (const uint8_t *) "MxAc", 4, NULL,       0
+
+        {
+            (const uint8_t *) "MxAc",
+            4,
+            NULL,
+            0
         },
-        { (const uint8_t *) "QFid", 4, NULL,       0
+
+        {
+            (const uint8_t *) "QFid",
+            4,
+            NULL,
+            0
         },
-        { (const uint8_t *) "AlSi", 4, allocation, sizeof(allocation)
+
+        {
+            (const uint8_t *) "AlSi",
+            4,
+            allocation,
+            sizeof(allocation)
         },
-        { (const uint8_t *) "SecD", 4, sd,         sizeof(sd)
+
+        {
+            (const uint8_t *) "SecD",
+            4,
+            sd,
+            sizeof(sd)
         },
+
+
     };
     create_query_close(conn, "contexts.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE,
                        contexts, 4, 0);
@@ -1472,7 +1592,11 @@ main(void)
     overwrite_failure_continuation(conn, 1, MBT_FILE_OVERWRITE, MBT_FILE_ALL_ACCESS, true);
     overwrite_failure_continuation(conn, 2, MBT_FILE_OVERWRITE, MBT_FILE_ALL_ACCESS, false);
     overwrite_failure_continuation(conn, 2, MBT_FILE_OVERWRITE, MBT_FILE_ALL_ACCESS, true);
-    const uint32_t truncate_dispositions[] = { MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF, MBT_FILE_SUPERSEDE };
+    const uint32_t truncate_dispositions[] = {
+        MBT_FILE_OVERWRITE,
+        MBT_FILE_OVERWRITE_IF,
+        MBT_FILE_SUPERSEDE
+    };
     for (unsigned int i = 0; i < 3; i++) {
         overwrite_failure_continuation(conn, 0, truncate_dispositions[i], MBT_FILE_READ_ATTRIBUTES, false);
         overwrite_failure_continuation(conn, 0, truncate_dispositions[i], MBT_FILE_READ_ATTRIBUTES, true);

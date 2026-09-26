@@ -173,7 +173,9 @@ park(
 {
     struct fuse_lk_in    in = {
         .fh = file->fh, .owner = owner,
-        .lk = { .start = start,.end   = end,  .type                                                      = F_WRLCK },
+        .lk = { .start = start, .end = end, .type
+                       =
+                        F_WRLCK },
     };
     struct fuse_attr_out attr;
     uint64_t             unique;
@@ -252,7 +254,10 @@ main(void)
     CHECK(atomic_load(&fixture_finishes) == 3);
     struct fuse_lk_in  query = {
         .fh = file.fh, .owner = 2,
-        .lk = { .start = 10,.end   = 29,.type                                                = F_WRLCK },
+        .lk = { .start = 10, .end = 29, .type
+                       =
+                        F_WRLCK }
+        ,
     };
     struct fuse_lk_out rejected_reply;
     size_t             rejected_length = sizeof(rejected_reply);
@@ -289,7 +294,9 @@ main(void)
     CHECK(change(&sim, &entry, &file, 1, F_WRLCK, 400, 499) == 0);
     struct fuse_lk_in held_unlock = {
         .fh = file.fh, .owner = 1,
-        .lk = { .start = 400,.end   = 499,.type                                               = F_UNLCK },
+        .lk = { .start = 400, .end = 499, .type
+                       =
+                        F_UNLCK },
     };
     arm(0);
     atomic_store(&fixture_pause, true);
@@ -312,7 +319,9 @@ main(void)
     * attempt cannot publish over it when its finish eventually accepts. */
     struct fuse_lk_in held_write = {
         .fh = file.fh, .owner = 4,
-        .lk = { .start = 600,.end   = 699,.type                                       = F_WRLCK },
+        .lk = { .start = 600, .end = 699, .type
+                       =
+                        F_WRLCK },
     };
     arm(0);
     atomic_store(&fixture_pause, true);

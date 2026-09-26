@@ -968,14 +968,14 @@ ff_lg_run_complete(
     struct nfs_request                   *req    = ctx->req;
     struct LAYOUTGET4args                *args   = &req->args_compound->argarray[req->index].oplayoutget;
     enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
-    const struct chimera_vfs_compound_op *query  = chimera_vfs_compound_op(compound, 2);
+    const struct chimera_vfs_compound_op *query  = chimera_vfs_compound_op(compound, 3);
 
     if (status != CHIMERA_VFS_OK) {
         chimera_vfs_compound_free(compound);
         ff_lg_complete(ctx, chimera_nfs4_errno_to_nfsstat4(status));
         return;
     }
-    ctx->mds_handle = chimera_vfs_compound_take_handle(compound, 1);
+    ctx->mds_handle = chimera_vfs_compound_take_handle(compound, 2);
     if (ctx->want_class) {
         /* The emitter copies every descriptor into the reply/cache before it
          * returns. The compound keeps the source arrays alive through it. */
@@ -1149,6 +1149,7 @@ chimera_nfs4_layoutget(
     struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
     chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
     chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_gethandle(compound);
     if (ctx->want_class) {
         chimera_vfs_compound_add_get_layout(compound, args->loga_offset, args->loga_length,
                                             args->loga_iomode, ctx->want_class, CHIMERA_VFS_LAYOUT_MAX_SEGMENTS);

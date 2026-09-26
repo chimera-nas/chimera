@@ -2696,8 +2696,14 @@ chimera_linux_claim_release(
         }
         if (range->projected) {
             struct flock fl = {
-                .l_type  = F_UNLCK,       .l_whence                                     = SEEK_SET,
-                .l_start = range->offset, .l_len                                        = range->length,
+                .l_type = F_UNLCK,       .l_whence
+                        =
+                        SEEK_SET,
+                .l_start = range->offset, .l_len
+                         =
+                        range
+                        ->
+                        length,
             };
             if (fcntl(range->file->fd, CHIMERA_LINUX_LOCK_SET, &fl) < 0) {
                 err = errno;

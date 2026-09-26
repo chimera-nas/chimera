@@ -349,9 +349,13 @@ main(
 
     /* The copied writev path must preserve all segments until acceptance. */
     struct iovec pieces[3] = {
-        { .iov_base = pattern,        .iov_len                                    = 7               },
-        { .iov_base = pattern + 7,    .iov_len                                    = 1001            },
-        { .iov_base = pattern + 1008, .iov_len                                    = TEST_LEN - 1008 }
+        { .iov_base = pattern,        .iov_len
+                    = 7               },
+        { .iov_base = pattern + 7,    .iov_len
+                    =
+                  1001            },
+        { .iov_base = pattern + 1008, .iov_len
+                    = TEST_LEN - 1008 }
     };
     ctx = (struct op_ctx) { 0 };
     if (chimera_test_reject_finishes) {

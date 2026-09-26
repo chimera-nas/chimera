@@ -177,9 +177,11 @@ send_compound(
     const struct command *cmd,
     unsigned int          count)
 {
-    uint8_t      packet[2048] = { 0 };
-    uint64_t     first_mid    = c->msg_id;
-    unsigned int size         = 0;
+    uint8_t      packet[2048] = {
+        0
+    };
+    uint64_t     first_mid = c->msg_id;
+    unsigned int size      = 0;
 
     assert(count);
     for (unsigned int i = 0; i < count; i++) {
@@ -511,14 +513,18 @@ main(
 {
     struct smb2_env                 env;
     struct smb2_create_out          opened;
-    uint8_t                         invalid[16] = { 0 }, related[16];
+    uint8_t                         invalid[16] = {
+        0
+    }, related[16];
     uint32_t                        written;
 
     memset(related, 0xff, sizeof(related));
     assert(argc <= 2);
     const struct smb2_wire_profile *profile = argc == 2 ? smb2_wire_profile_find(argv[1]) : NULL;
     assert(argc == 1 || profile);
-    struct smb2_env_opts            options = { 0 };
+    struct smb2_env_opts            options = {
+        0
+    };
     smb2_env_open_wire(&env, &options, profile);
     smb2_env_fs_setup(&env, "fs0");
     struct smb2_conn               *c = smb2_conn_open(&env);
@@ -535,16 +541,52 @@ main(
 /* *INDENT-ON* */
     run(c, "query/read/flush coalesced", ordinary, 3, 0, 0, 0);
     struct command         created[] = {
-        { SMB2_CREATE,     NULL,          0,                                   0,
-          ST_SUCCESS                                                         },
-        { SMB2_WRITE,      related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_SUCCESS                                                                                            },
-        { SMB2_QUERY_INFO, related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_SUCCESS                                                                                                                              },
-        { SMB2_READ,       related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_SUCCESS                                                                                                                                                                },
-        { SMB2_CLOSE,      related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_SUCCESS                                                                                                                                                                }
+
+        {
+            SMB2_CREATE,
+            NULL,
+            0,
+            0,
+
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_WRITE,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_QUERY_INFO,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_READ,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_CLOSE,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_SUCCESS
+        }
+
     };
     run(c, "create/write/query/read/close coalesced with provisional handle", created, 5, 0, 0, 0);
     struct command         create_failed[6];
@@ -555,36 +597,141 @@ main(
     create_failed[5] = (struct command) { SMB2_QUERY_INFO, opened.file_id, 0, 0, ST_SUCCESS };
     run(c, "failed create propagates related error and independent group continues", create_failed, 6, 0, 0, 0);
     struct command         metadata_open[] = {
-        { SMB2_CREATE,     NULL,          0,                                   1,
-          ST_SUCCESS                                                                                                                                                                                                       },
-        { SMB2_QUERY_INFO, related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_SUCCESS                                                                                                                                                                                                                                          },
-        { SMB2_READ,       related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_ACCESS_DENIED                                                                                                                                                                                                                                                                      },
-        { SMB2_CLOSE,      related,       SMB2_FLAGS_RELATED_OPERATIONS,       0,
-          ST_SUCCESS                                                                                                                                                                                                                                                                            }
+
+        {
+            SMB2_CREATE,
+            NULL,
+            0,
+            1,
+
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_QUERY_INFO,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_READ,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_ACCESS_DENIED
+        },
+
+        {
+            SMB2_CLOSE,
+            related,
+            SMB2_FLAGS_RELATED_OPERATIONS,
+            0,
+
+            ST_SUCCESS
+        }
+
     };
     run(c, "metadata open/query/denied read/close coalesced", metadata_open, 4, 0, 0, 0);
     struct command         write_info[] = {
-        { SMB2_WRITE,      opened.file_id,       0,       0,        ST_SUCCESS        },
-        { SMB2_READ,       opened.file_id,       0,       0,        ST_SUCCESS        },
-        { SMB2_QUERY_INFO, opened.file_id,       0,       14,       ST_SUCCESS        },
-        { SMB2_SET_INFO,   opened.file_id,       0,       7,        ST_SUCCESS        }
+
+        {
+            SMB2_WRITE,
+            opened.file_id,
+            0,
+            0,
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_READ,
+            opened.file_id,
+            0,
+            0,
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_QUERY_INFO,
+            opened.file_id,
+            0,
+            14,
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_SET_INFO,
+            opened.file_id,
+            0,
+            7,
+            ST_SUCCESS
+        }
+
     };
     run(c, "write/read/query/set position share one compound", write_info, 4, 0, 0, 0);
     struct command         cursor_snapshots[] = {
-        { SMB2_READ,       opened.file_id,       0,       0,        ST_SUCCESS                                    },
-        { SMB2_QUERY_INFO, opened.file_id,       0,       14,       ST_SUCCESS                                    },
-        { SMB2_READ,       opened.file_id,       0,       4,        ST_SUCCESS                                    }
+
+        {
+            SMB2_READ,
+            opened.file_id,
+            0,
+            0,
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_QUERY_INFO,
+            opened.file_id,
+            0,
+            14,
+            ST_SUCCESS
+        },
+
+        {
+            SMB2_READ,
+            opened.file_id,
+            0,
+            4,
+            ST_SUCCESS
+        }
+
     };
     run(c, "position snapshot survives later cursor change and retry", cursor_snapshots, 3, 2, 1, 0);
     struct smb2_create_out directory;
     assert(smb2_create_opts(c, "compound-dir", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
                             MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &directory) == ST_SUCCESS);
     struct command         pages[] = {
-        { SMB2_QUERY_DIRECTORY, directory.file_id,   0,      3,      ST_SUCCESS      },
-        { SMB2_QUERY_DIRECTORY, directory.file_id,   0,      2,      ST_SUCCESS      },
-        { SMB2_QUERY_INFO,      opened.file_id,      0,      0,      ST_SUCCESS      }
+
+        {
+            SMB2_QUERY_DIRECTORY,
+            directory.file_id,
+            0,
+            3,
+            ST_SUCCESS
+
+        },
+
+        {
+            SMB2_QUERY_DIRECTORY,
+            directory.file_id,
+            0,
+            2,
+            ST_SUCCESS
+
+        },
+
+        {
+            SMB2_QUERY_INFO,
+            opened.file_id,
+            0,
+            0,
+            ST_SUCCESS
+
+        }
+
     };
     run(c, "directory pages share private cursor across finish retries", pages, 3, 2, 1, 0);
     assert(smb2_close(c, directory.file_id) == ST_SUCCESS);
@@ -620,7 +767,9 @@ main(
     };
 /* *INDENT-ON* */
     run(c, "failed related command preserves established handle", related_failure, 3, 0, 0, 0);
-    uint8_t half_related[16] = { 0 };
+    uint8_t half_related[16] = {
+        0
+    };
     memset(half_related, 0xff, 8);
     inherited[1].fid = half_related;
     run(c, "one all-ones FileId half inherits the whole handle", inherited, 3, 0, 0, 0);

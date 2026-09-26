@@ -396,6 +396,18 @@ inherit_two_open_grants_prepare(
     op->inherited_grant_handle2 = sources[1];
 } /* inherit_two_open_grants_prepare */
 
+static void
+inherit_previous_open_grants_prepare(
+    struct chimera_vfs_compound *cp,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    inherit_open_grant_prepare(cp, index, status, private_data);
+    chimera_vfs_compound_op_args(cp, index)->inherited_grant_handle2 =
+        chimera_vfs_compound_op(cp, index - 1)->out_handle;
+} /* inherit_previous_open_grants_prepare */
+
 struct reserve_handle_test {
     struct chimera_vfs_open_handle *handle;
     struct chimera_vfs_claim       *original;
@@ -864,7 +876,7 @@ main(
         unbound.granted_bound = 0;
         cp                    = chimera_vfs_compound_alloc(ctx.vfs_thread, &user);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        chimera_vfs_compound_add_open(cp, "grant-union", 11, CHIMERA_VFS_OPEN_WRITE_ONLY, 0, NULL, 0, 0, 0);
+        opened   = chimera_vfs_compound_add_open(cp, "grant-union", 11, CHIMERA_VFS_OPEN_WRITE_ONLY, 0, NULL, 0, 0, 0);
         upgraded = chimera_vfs_compound_add_open(cp, NULL, 0, CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY,
                                                  0, NULL, 0, 0, 0);
         chimera_vfs_compound_set_op_prepare(cp, upgraded, inherit_open_grant_prepare, &unbound);
@@ -873,7 +885,9 @@ main(
         wait_done(&ctx);
         assert(chimera_vfs_compound_op(cp, upgraded)->status == CHIMERA_VFS_OK);
         assert(chimera_vfs_compound_op(cp, read_index)->status == CHIMERA_VFS_EACCES);
-        new_write = chimera_vfs_compound_take_handle(cp, upgraded);
+        /* Retain the explicitly authorized WRITE open. The inferred RW
+         * reopen may use a separate cache entry and carries no bound grant. */
+        new_write = chimera_vfs_compound_take_handle(cp, opened);
         assert(new_write && new_write->granted_bound);
         assert(new_write->granted_access & CHIMERA_ACE_WRITE_DATA);
         assert(!(new_write->granted_access & CHIMERA_ACE_READ_DATA));
@@ -912,7 +926,7 @@ main(
         opened   = chimera_vfs_compound_add_open(cp, "grant-union", 11, CHIMERA_VFS_OPEN_WRITE_ONLY, 0, NULL, 0, 0, 0);
         upgraded = chimera_vfs_compound_add_open(cp, NULL, 0, CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY,
                                                  0, NULL, 0, 0, 0);
-        chimera_vfs_compound_set_op_prepare(cp, upgraded, inherit_open_grant_prepare, old);
+        chimera_vfs_compound_set_op_prepare(cp, upgraded, inherit_previous_open_grants_prepare, old);
         read_index = chimera_vfs_compound_add_read(cp, NULL, 0, 1, read_iov, 1, 0, NULL, NULL, 0);
         chimera_vfs_compound_set_finish_handler(cp, reject_first_finish, &retry);
         chimera_vfs_compound_submit(cp, finish_retry_complete, &retry);
@@ -920,7 +934,9 @@ main(
         assert(retry.finishes == 2 && retry.publications == 1);
         assert(chimera_vfs_compound_op(cp, read_index)->status == CHIMERA_VFS_OK);
         op = chimera_vfs_compound_op(cp, upgraded);
-        assert(op->out_handle == chimera_vfs_compound_op(cp, opened)->out_handle);
+        assert(op->out_handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RW);
+        assert(op->out_handle->fh_len == file_fh_len);
+        assert(!memcmp(op->out_handle->fh, file_fh, file_fh_len));
         assert(op->out_handle != old);
         assert((op->out_handle->granted_access & (CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA)) ==
                (CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA));

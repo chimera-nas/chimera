@@ -92,9 +92,11 @@ send_commands(
     const struct command *commands,
     unsigned              count)
 {
-    uint8_t  packet[2048] = { 0 };
-    uint64_t mid          = c->msg_id;
-    unsigned size         = 0;
+    uint8_t  packet[2048] = {
+        0
+    };
+    uint64_t mid  = c->msg_id;
+    unsigned size = 0;
 
     assert(!c->signing_on && !c->encrypt_on);
     for (unsigned i = 0; i < count; i++) {
@@ -185,7 +187,14 @@ blocking(
     unsigned          mode)
 {
     assert(smb2_lock(holder, held, 0, 4, SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY) == ST_SUCCESS);
-    struct command cmd = { SMB2_LOCK, wanted, 0, 4, SMB2_LOCKFLAG_EXCLUSIVE, ST_SUCCESS };
+    struct command cmd = {
+        SMB2_LOCK,
+        wanted,
+        0,
+        4,
+        SMB2_LOCKFLAG_EXCLUSIVE,
+        ST_SUCCESS
+    };
     int            interim = waiter->ninterim, replies = waiter->nreply_app;
     atomic_store(&submissions, 0); atomic_store(&attempts, 0); reject_count = 0; expected_groups = 1;
     atomic_store(&armed, 1);
@@ -198,7 +207,14 @@ blocking(
     } else if (mode == 1) {
         smb2c_post_cancel_async(waiter, waiter->last_async_id);
     } else {
-        struct command close = { SMB2_CLOSE, wanted, 0, 0, 0, ST_SUCCESS };
+        struct command close = {
+            SMB2_CLOSE,
+            wanted,
+            0,
+            0,
+            0,
+            ST_SUCCESS
+        };
         send_commands(waiter, &close, 1);
     }
     uint64_t deadline = smb2c_now_ms() + SMB2C_HANG_MS;
@@ -225,55 +241,119 @@ provisional(
 {
     uint8_t                related[16]; memset(related, 0xff, sizeof(related));
     struct command         closed[] = {
-        { .opcode = SMB2_CREATE, .status                                                                           =
-              ST_SUCCESS,
-          .
-          create_name
-              = "private-lock-closed.txt" },
-        { .opcode = SMB2_LOCK,   .fid                                                                              =
-              related
-          ,
-          .
-          length
-              = 4, .flags = 0, .status =
-                  ST_INVALID_PARAMETER
-              , .related = true },
-        { .opcode = SMB2_LOCK,   .fid                                                                              =
-              related
-          ,
-          .
-          length
-                                                            = 4, .flags = SMB2_LOCKFLAG_EXCLUSIVE
-                  | SMB2_LOCKFLAG_FAIL_IMMEDIATELY, .status = ST_SUCCESS, .related = true },
-        { .opcode = SMB2_WRITE,  .fid                                                                              =
-              related
-          ,
-          .
-          status
-              = ST_SUCCESS, .related = true },
-        { .opcode = SMB2_LOCK,   .fid                                                                              =
-              related
-          ,
-          .
-          length
-              = 4,          .flags   = SMB2_LOCKFLAG_UNLOCK, .status = ST_SUCCESS, .related = true },
-        { .opcode = SMB2_CLOSE,  .fid                                                                              =
-              related
-          ,
-          .
-          status = ST_SUCCESS, .related =
-              true },
+
+        {
+            .opcode = SMB2_CREATE,
+            .status
+                =
+                    ST_SUCCESS,
+
+            .
+            create_name
+                = "private-lock-closed.txt"
+        },
+
+        {
+            .opcode = SMB2_LOCK,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            length
+                    = 4,
+            .flags  = 0,
+            .status =
+                ST_INVALID_PARAMETER
+            ,
+            .related = true
+        },
+
+        {
+            .opcode = SMB2_LOCK,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            length
+                   = 4,
+            .flags = SMB2_LOCKFLAG_EXCLUSIVE
+                | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+            .status  = ST_SUCCESS,
+            .related = true
+        },
+
+        {
+            .opcode = SMB2_WRITE,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            status
+                     = ST_SUCCESS,
+            .related = true
+        },
+
+        {
+            .opcode = SMB2_LOCK,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            length
+                     = 4,
+            .flags   = SMB2_LOCKFLAG_UNLOCK,
+            .status  = ST_SUCCESS,
+            .related = true
+        },
+
+        {
+            .opcode = SMB2_CLOSE,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            status   = ST_SUCCESS,
+            .related =
+                true
+        },
+
+
     };
 
     run(c, closed, 6, 0); /* Invalid first LOCK must not strand token production. */
     struct command         surviving[] = {
-        { .opcode                      = SMB2_CREATE, .status                   =
-              ST_SUCCESS, .create_name =
-              "private-lock-survives.txt" },
-        { .opcode                                                                   = SMB2_LOCK,   .fid
-                                                                                    = related,    .length
-                                                                                    = 4, .flags =
-                  SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY, .status = ST_SUCCESS, .related = true },
+
+        {
+            .opcode = SMB2_CREATE,
+            .status =
+                ST_SUCCESS,
+            .create_name =
+                "private-lock-survives.txt"
+        },
+
+        {
+            .opcode = SMB2_LOCK,
+            .fid
+                = related,
+            .length
+                   = 4,
+            .flags =
+                SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+            .status  = ST_SUCCESS,
+            .related = true
+        },
+
+
     };
     run(c, surviving, 2, 0);
     struct smb2_create_out owner, other;
@@ -289,26 +369,50 @@ provisional(
     assert(smb2_close(c, owner.file_id) == ST_SUCCESS);
     assert(smb2_close(peer, other.file_id) == ST_SUCCESS);
     struct command retired[] = {
-        { .opcode = SMB2_CREATE, .status                                                                           =
-              ST_SUCCESS,
-          .
-          create_name
-              =
-                  "private-lock-retired.txt" },
-        { .opcode = SMB2_LOCK,   .fid                                                                              =
-              related
-          ,
-          .
-          length
-                                     =
-                  4,          .flags = SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY, .status = ST_SUCCESS, .
-          related                    = true },
-        { .opcode = SMB2_CLOSE,  .fid                                                                              =
-              related
-          ,
-          .
-          status
-              = ST_SUCCESS, .related = true },
+
+        {
+            .opcode = SMB2_CREATE,
+            .status
+                =
+                    ST_SUCCESS,
+
+            .
+            create_name
+                =
+                    "private-lock-retired.txt"
+        },
+
+        {
+            .opcode = SMB2_LOCK,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            length
+                =
+                    4,
+            .flags  = SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+            .status = ST_SUCCESS,
+            .
+            related = true
+        },
+
+        {
+            .opcode = SMB2_CLOSE,
+            .fid
+                =
+                    related
+                ,
+
+            .
+            status
+                     = ST_SUCCESS,
+            .related = true
+        },
+
+
     };
     run(c, retired, 3, 0); /* CLOSE retires a still-held provisional acquisition. */
     assert(smb2_create(peer, "private-lock-retired.txt", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &
@@ -397,19 +501,63 @@ batch_semantics(
     assert(smb2_create(peer, "exact-batches", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &b) ==
            ST_SUCCESS);
     assert(smb2_lock(peer, b.file_id, 8, 4, acquire) == ST_SUCCESS);
-    struct lock_element    ranges[] = { { 0, 4, acquire }, { 8, 4, acquire }, { 16, 4, acquire } };
+    struct lock_element    ranges[] = {
+        {
+            0,
+            4,
+            acquire
+        },
+        {
+            8,
+            4,
+            acquire
+        },
+        {
+            16,
+            4,
+            acquire
+        }
+    };
     checked_ranges(c, a.file_id, ranges, 2, 0, ST_LOCK_NOT_GRANTED, 0, false, 1);
     /* Conflict in the second element must release the first reservation. */
     assert(smb2_write(peer, b.file_id, 0, "free", 4, &written) == ST_SUCCESS);
     assert(smb2_lock(peer, b.file_id, 8, 4, SMB2_LOCKFLAG_UNLOCK) == ST_SUCCESS);
     checked_ranges(c, a.file_id, ranges, 3, 0, ST_SUCCESS, 3, false, 1);
     struct lock_element    missing[] = {
-        { 0, 4, SMB2_LOCKFLAG_UNLOCK }, { 32, 4, SMB2_LOCKFLAG_UNLOCK }, { 8, 4, SMB2_LOCKFLAG_UNLOCK },
+
+        {
+            0,
+            4,
+            SMB2_LOCKFLAG_UNLOCK
+        },
+        {
+            32,
+            4,
+            SMB2_LOCKFLAG_UNLOCK
+        },
+        {
+            8,
+            4,
+            SMB2_LOCKFLAG_UNLOCK
+        },
+
+
     };
     checked_ranges(c, a.file_id, missing, 3, 0, ST_RANGE_NOT_LOCKED, 2, false, 2);
     assert(smb2_write(peer, b.file_id, 0, "free", 4, &written) == ST_SUCCESS);
     assert(smb2_write(peer, b.file_id, 8, "deny", 4, &written) == ST_FILE_LOCK_CONFLICT);
-    struct lock_element    mixed[] = { { 8, 4, SMB2_LOCKFLAG_UNLOCK }, { 24, 4, acquire } };
+    struct lock_element    mixed[] = {
+        {
+            8,
+            4,
+            SMB2_LOCKFLAG_UNLOCK
+        },
+        {
+            24,
+            4,
+            acquire
+        }
+    };
     checked_ranges(c, a.file_id, mixed, 2, 0, ST_INVALID_PARAMETER, 1, false, 1);
     assert(smb2_write(peer, b.file_id, 8, "free", 4, &written) == ST_SUCCESS);
     assert(smb2_write(peer, b.file_id, 16, "deny", 4, &written) == ST_FILE_LOCK_CONFLICT);
@@ -417,19 +565,43 @@ batch_semantics(
     checked_lock(c, a.file_id, &last, 1, true, 0, false);
 
     /* Exact zero-length and final-byte ranges retain their original geometry. */
-    struct lock_element    zero = { 40, 0, acquire };
+    struct lock_element    zero = {
+        40,
+        0,
+        acquire
+    };
     checked_ranges(c, a.file_id, &zero, 1, 0, ST_SUCCESS, 1, false, 1);
-    struct lock_element    wrong = { 40, 1, SMB2_LOCKFLAG_UNLOCK };
+    struct lock_element    wrong = {
+        40,
+        1,
+        SMB2_LOCKFLAG_UNLOCK
+    };
     checked_ranges(c, a.file_id, &wrong, 1, 0, ST_RANGE_NOT_LOCKED, 1, false, 0);
     zero.flags = SMB2_LOCKFLAG_UNLOCK;
     checked_ranges(c, a.file_id, &zero, 1, 0, ST_SUCCESS, 0, false, 0);
-    struct lock_element    end = { UINT64_MAX, 1, acquire };
+    struct lock_element    end = {
+        UINT64_MAX,
+        1,
+        acquire
+    };
     checked_ranges(c, a.file_id, &end, 1, 0, ST_SUCCESS, 1, false, 0);
     end.flags = SMB2_LOCKFLAG_UNLOCK;
     checked_ranges(c, a.file_id, &end, 1, 0, ST_SUCCESS, 0, false, 0);
     struct lock_element    overlap[] = {
-        { 64, 4, SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY },
-        { 64, 4, SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY },
+
+        {
+            64,
+            4,
+            SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY
+        },
+
+        {
+            64,
+            4,
+            SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY
+        },
+
+
     };
     checked_ranges(c, a.file_id, overlap, 2, 0, ST_INVALID_PARAMETER, 0, false, 0);
     assert(smb2_close(c, a.file_id) == ST_SUCCESS);
@@ -442,8 +614,16 @@ canonical_owner_cases(
     struct smb2_conn *c,
     struct smb2_conn *peer)
 {
-    const uint64_t         offsets[] = { 0, 8, 16, 24 };
-    struct smb2_oplock_req lease     = { .is_lease = 1, .lease_state = SMB2_LEASE_RWH };
+    const uint64_t         offsets[] = {
+        0,
+        8,
+        16,
+        24
+    };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+        .lease_state = SMB2_LEASE_RWH
+    };
 
     memset(lease.lease_key, 0x71, sizeof(lease.lease_key));
     struct smb2_create_out owner, same;
@@ -475,10 +655,26 @@ canonical_owner_cases(
      * Only QUERY is submitted after the first LOCK's allocation fails. */
     uint8_t        related[16]; memset(related, 0xff, sizeof(related));
     struct command allocation_suffix[] = {
-        { SMB2_LOCK,       owner.file_id,       0,          4,          SMB2_LOCKFLAG_EXCLUSIVE |
-          SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
-          ST_INSUFFICIENT_RESOURCES },
-        { .opcode = SMB2_QUERY_INFO,.fid = related,      .status = ST_SUCCESS,.related = true },
+
+        {
+            SMB2_LOCK,
+            owner.file_id,
+            0,
+            4,
+            SMB2_LOCKFLAG_EXCLUSIVE |
+            SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+
+            ST_INSUFFICIENT_RESOURCES
+        },
+
+        {
+            .opcode  = SMB2_QUERY_INFO,
+            .fid     = related,
+            .status  = ST_SUCCESS,
+            .related = true
+        },
+
+
     };
     int            inspected = atomic_load(&lock_test_seen);
     atomic_store(&submissions, 0); atomic_store(&attempts, 0);
@@ -504,10 +700,26 @@ canonical_owner_cases(
     /* Held ranges no longer create a CLOSE boundary. Retirement retries
      * safely and shares this compound with the preceding metadata query. */
     struct command          close[] = {
-        { SMB2_QUERY_INFO, owner.file_id,      0,      0,      0,      ST_SUCCESS
+
+        {
+            SMB2_QUERY_INFO,
+            owner.file_id,
+            0,
+            0,
+            0,
+            ST_SUCCESS
         },
-        { SMB2_CLOSE,      owner.file_id,      0,      0,      0,      ST_SUCCESS
+
+        {
+            SMB2_CLOSE,
+            owner.file_id,
+            0,
+            0,
+            0,
+            ST_SUCCESS
         },
+
+
     };
     run(c, close, 2, 1);
     assert(smb2_write(peer, same.file_id, 0, "free", 4, &written) == ST_SUCCESS);
@@ -516,13 +728,21 @@ canonical_owner_cases(
     struct smb2_conn       *original  = smb2_conn_open(env); smb2_handshake(original);
     struct smb2_conn       *reclaimer = smb2_conn_open(env); smb2_handshake(reclaimer);
     assert(original->guid_tag != reclaimer->guid_tag);
-    struct smb2_oplock_req  batch   = { .level = SMB2_OPLOCK_LEVEL_BATCH };
-    struct smb2_durable_req durable = { .dh2q = 1 };
+    struct smb2_oplock_req  batch = {
+        .level = SMB2_OPLOCK_LEVEL_BATCH
+    };
+    struct smb2_durable_req durable = {
+        .dh2q = 1
+    };
     memset(durable.create_guid, 0x83, sizeof(durable.create_guid));
     assert(smb2_create_dur(original, "canonical-cross-client-durable", MBT_FILE_CREATE,
                            MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, &batch, &durable, &owner) == ST_SUCCESS);
     assert(owner.has_dh2q && owner.oplock == SMB2_OPLOCK_LEVEL_BATCH);
-    struct lock_element     replay = { 0, 4, SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY };
+    struct lock_element     replay = {
+        0,
+        4,
+        SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY
+    };
     /* A failed allocation must not publish a LockSequence outcome. Retrying
      * that sequence acquires once; a later replay cannot add another range. */
     checked_ranges(original, owner.file_id, &replay, 1, 0x10, ST_INSUFFICIENT_RESOURCES, 0, true, 0);
@@ -530,7 +750,9 @@ canonical_owner_cases(
     replay.offset = 128;
     checked_ranges(original, owner.file_id, &replay, 1, 0x10, ST_SUCCESS, 1, false, 0);
     assert(smb2_logoff(original) == ST_SUCCESS); /* synchronous durable park */
-    struct smb2_durable_req reconnect = { .dh2c = 1 };
+    struct smb2_durable_req reconnect = {
+        .dh2c = 1
+    };
     memcpy(reconnect.file_id, owner.file_id, 16);
     memcpy(reconnect.create_guid, durable.create_guid, 16);
     assert(smb2_create_dur(reclaimer, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
@@ -553,7 +775,11 @@ main(void)
     /* Enable ordinary durable handles for the cross-client reconnect case.
      * The share is not continuously available: no persistent-record mutation
      * is introduced into the existing native retry cases. */
-    struct smb2_env_opts   options = { .oplocks = 1, .leases = 1, .persistent_handles = 1 };
+    struct smb2_env_opts   options = {
+        .oplocks            = 1,
+        .leases             = 1,
+        .persistent_handles = 1
+    };
 
     smb2_env_start_opts(&env, &options);
     struct smb2_conn      *c = smb2_conn_open(&env), *peer = smb2_conn_open(&env);
@@ -568,35 +794,138 @@ main(void)
     assert(smb2_create(peer, "locks.txt", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &p) ==
            ST_SUCCESS);
     struct command         io[] = {
-        { SMB2_LOCK,  a.file_id,  0,  4,  SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,  ST_SUCCESS
+
+        {
+            SMB2_LOCK,
+            a.file_id,
+            0,
+            4,
+            SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+            ST_SUCCESS
+
         },
-        { SMB2_WRITE, a.file_id,  0,  4,  0,                                                         ST_SUCCESS
+
+        {
+            SMB2_WRITE,
+            a.file_id,
+            0,
+            4,
+            0,
+            ST_SUCCESS
+
         },
-        { SMB2_WRITE, b.file_id,  0,  4,  0,
-          ST_FILE_LOCK_CONFLICT                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             },
-        { SMB2_LOCK,  a.file_id,  0,  4,  SMB2_LOCKFLAG_UNLOCK,                                      ST_SUCCESS
+
+        {
+            SMB2_WRITE,
+            b.file_id,
+            0,
+            4,
+            0,
+
+            ST_FILE_LOCK_CONFLICT
         },
-        { SMB2_WRITE, b.file_id,  0,  4,  0,                                                         ST_SUCCESS
+
+        {
+            SMB2_LOCK,
+            a.file_id,
+            0,
+            4,
+            SMB2_LOCKFLAG_UNLOCK,
+            ST_SUCCESS
+
         },
+
+        {
+            SMB2_WRITE,
+            b.file_id,
+            0,
+            4,
+            0,
+            ST_SUCCESS
+
+        },
+
+
     };
     run(c, io, 5, 0);
-    struct command         retry[] = { io[0], { SMB2_QUERY_INFO, a.file_id, 0, 0, 0, ST_SUCCESS }, io[3] };
+    struct command         retry[] = {
+        io[0],
+        {
+            SMB2_QUERY_INFO,
+            a.file_id,
+            0,
+            0,
+            0,
+            ST_SUCCESS
+        },
+        io[3]
+    };
     run(c, retry, 3, 2);
     assert(smb2_lock(peer, p.file_id, 0, 4, SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY) == ST_SUCCESS);
     assert(smb2_lock(peer, p.file_id, 0, 4, SMB2_LOCKFLAG_UNLOCK) == ST_SUCCESS);
     struct command         stacked[] = {
-        { SMB2_LOCK,  a.file_id,  8,  4,  SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,  ST_SUCCESS
+
+        {
+            SMB2_LOCK,
+            a.file_id,
+            8,
+            4,
+            SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+            ST_SUCCESS
+
         },
-        { SMB2_LOCK,  a.file_id,  8,  4,  SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,  ST_SUCCESS
+
+        {
+            SMB2_LOCK,
+            a.file_id,
+            8,
+            4,
+            SMB2_LOCKFLAG_SHARED | SMB2_LOCKFLAG_FAIL_IMMEDIATELY,
+            ST_SUCCESS
+
         },
-        { SMB2_LOCK,  a.file_id,  8,  4,  SMB2_LOCKFLAG_UNLOCK,                                   ST_SUCCESS
+
+        {
+            SMB2_LOCK,
+            a.file_id,
+            8,
+            4,
+            SMB2_LOCKFLAG_UNLOCK,
+            ST_SUCCESS
+
         },
-        { SMB2_WRITE, b.file_id,  8,  4,  0,                                                      ST_FILE_LOCK_CONFLICT
+
+        {
+            SMB2_WRITE,
+            b.file_id,
+            8,
+            4,
+            0,
+            ST_FILE_LOCK_CONFLICT
+
         },
-        { SMB2_LOCK,  a.file_id,  8,  4,  SMB2_LOCKFLAG_UNLOCK,                                   ST_SUCCESS
+
+        {
+            SMB2_LOCK,
+            a.file_id,
+            8,
+            4,
+            SMB2_LOCKFLAG_UNLOCK,
+            ST_SUCCESS
+
         },
-        { SMB2_WRITE, b.file_id,  8,  4,  0,                                                      ST_SUCCESS
+
+        {
+            SMB2_WRITE,
+            b.file_id,
+            8,
+            4,
+            0,
+            ST_SUCCESS
+
         },
+
+
     };
     run(c, stacked, 6, 0);
     blocking(peer, c, p.file_id, a.file_id, 0);

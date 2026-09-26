@@ -93,10 +93,15 @@ add_group(
     struct fixture                *f)
 {
     struct chimera_vfs_compound_group_config config = {
-        .first_op          = first,      .num_ops                                        = count,              .cred
-                           = cred,       .
-        context            = f,
-        .dependency        = dependency, .dependency_error                               = CHIMERA_VFS_EACCES,
+        .first_op = first,      .num_ops
+                  =
+                count,
+        .
+        cred
+                    = cred,       .
+        context     = f,
+        .dependency = dependency, .dependency_error                                                                  =
+            CHIMERA_VFS_EACCES,
         .continue_on_error = proceed,
     };
 

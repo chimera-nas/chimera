@@ -1124,6 +1124,12 @@ nfs4_vfs_op_errno(
                                                vop->existing_mode);
     }
 
+    /* A checked filehandle OPEN can reject a special inode before it returns
+     * attributes. Match the ordinary OPEN path's special-file status. */
+    if (argop == OP_OPEN && err == CHIMERA_VFS_ENXIO) {
+        return req->minorversion ? NFS4ERR_WRONG_TYPE : NFS4ERR_INVAL;
+    }
+
     /* I/O the executor refused on the object's type, before it opened it for
      * data.  It reports the nearest POSIX answer; NFSv4 has its own. */
     if ((argop == OP_READ || argop == OP_READ_PLUS || argop == OP_WRITE) && vop->existing_mode &&
@@ -4029,6 +4035,11 @@ nfs4_vfs_io_authorize(
     uint8_t                         state_type;
     nfsstat4                        status;
 
+    /* SEEK inspects allocation metadata through either kind of data open.
+     * Zero requests no new data-access mode, while anonymous/share checks
+     * still treat the metadata query as a read. */
+    uint32_t                        check_access = share_access ? share_access : OPEN4_SHARE_ACCESS_READ;
+
     *out_handle = NULL;
     *have_owner = 0;
 
@@ -4045,7 +4056,7 @@ nfs4_vfs_io_authorize(
     }
     if (reserved) {
         open_state   = reserved;
-        state_handle = open_state->handle;
+        state_handle = nfs_state_io_handle(open_state, NFS4_SLOT_TYPE_OPEN, check_access);
         if (state_handle->fh_len != fhlen || memcmp(state_handle->fh, fh, fhlen)) {
             return NFS4ERR_BAD_STATEID;
         }
@@ -4053,14 +4064,14 @@ nfs4_vfs_io_authorize(
         if (status != NFS4_OK) {
             return status;
         }
-        if (!(open_state->share_access & share_access)) {
+        if (share_access && !(open_state->share_access & share_access)) {
             return NFS4ERR_OPENMODE;
         }
         if (!nfs_open_state_check_principal(open_state, req->principal_flavor,
                                             req->principal_machinename, req->principal_machinename_len)) {
             return NFS4ERR_ACCESS;
         }
-        status = nfs4_vfs_owner_io_denied(ctx, open_state, share_access);
+        status = nfs4_vfs_owner_io_denied(ctx, open_state, check_access);
         if (status != NFS4_OK) {
             return status;
         }
@@ -4075,14 +4086,14 @@ nfs4_vfs_io_authorize(
     }
 
     if (nfs4_stateid_is_special(sid)) {
-        return nfs4_vfs_anonymous_authorize(ctx, fh, fhlen, share_access);
+        return nfs4_vfs_anonymous_authorize(ctx, fh, fhlen, check_access);
     }
 
     struct nfs4_stateid_view view;
     nfs4_stateid_decode(&view, sid);
     if (view.type == NFS4_STATEID_TYPE_DELEG) {
         status = nfs_state_table_delegation_io(table, sid, ctx->client,
-                                               fh, fhlen, share_access, out_owner);
+                                               fh, fhlen, check_access, out_owner);
         *have_owner = status == NFS4_OK;
         return status;
     }
@@ -4109,12 +4120,12 @@ nfs4_vfs_io_authorize(
 
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
         open_state    = state_void;
-        state_handle  = open_state->handle;
+        state_handle  = nfs_state_io_handle(state_void, state_type, check_access);
         current_seqid = open_state->seqid;
     } else {
         lock_state    = state_void;
         open_state    = lock_state->open_state;
-        state_handle  = lock_state->handle;
+        state_handle  = nfs_state_io_handle(state_void, state_type, check_access);
         current_seqid = lock_state->seqid;
     }
 
@@ -4129,13 +4140,13 @@ nfs4_vfs_io_authorize(
 
     /* RFC 7530 §9.1.4 / RFC 8881 §9.1.2: I/O through an open (or lock) stateid
      * is limited to the associated open's granted access mode. */
-    if ((open_state->share_access & share_access) == 0) {
+    if (share_access && (open_state->share_access & share_access) == 0) {
         nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
         return NFS4ERR_OPENMODE;
     }
 
-    status = nfs4_vfs_owner_io_denied(ctx, open_state, share_access);
+    status = nfs4_vfs_owner_io_denied(ctx, open_state, check_access);
 
     if (status != NFS4_OK) {
         nfs_state_table_release(table, state_void, state_type,
@@ -4204,79 +4215,23 @@ nfs4_vfs_setattr_authorize(
     const struct SETATTR4args        *args,
     const uint8_t                    *fh,
     int                               fhlen,
-    struct chimera_vfs_open_handle  **out_handle)
+    struct chimera_vfs_open_handle  **out_handle,
+    struct chimera_claim_actor       *out_owner,
+    int                              *have_owner)
 {
-    struct nfs_state_table *table = &thread->shared->nfs4_state_table;
-    struct nfs_open_state  *open_state;
-    void                   *state_void;
-    uint8_t                 state_type;
-    nfsstat4                status;
-    bool                    has_write;
-
-    *out_handle = NULL;
-
-    if (nfs4_stateid_is_special(&args->stateid)) {
-        return nfs4_vfs_anonymous_authorize(ctx, fh, fhlen, OPEN4_SHARE_ACCESS_WRITE);
+    /* A size change uses the write context of an OPEN or its LOCK stateid.
+     * Share the execution-time owner, principal, version and access checks
+     * with WRITE, including handles broadened by a later OPEN. */
+    if (!nfs4_stateid_is_special(&args->stateid)) {
+        struct nfs4_stateid_view view;
+        nfs4_stateid_decode(&view, &args->stateid);
+        if (view.type != NFS4_STATEID_TYPE_OPEN && view.type != NFS4_STATEID_TYPE_LOCK) {
+            return NFS4ERR_BAD_STATEID;
+        }
     }
-
-    status = (req->session ? nfs_state_table_acquire_no_renew : nfs_state_table_acquire)(table, &args->stateid,
-                                                                                         NFS4_SLOT_TYPE_OPEN,
-                                                                                         &state_void, &state_type);
-
-    if (status != NFS4_OK) {
-        return status;
-    }
-
-    status = nfs_state_check_client(state_void, state_type,
-                                    req->session ?
-                                    ctx->client : NULL);
-
-    if (status != NFS4_OK) {
-        nfs_state_table_release(table, state_void, state_type,
-                                thread->vfs_thread);
-        return status;
-    }
-
-    open_state = state_void;
-
-    /* RFC 7530 §9.1.4.3: the stateid must name an open of the object that is
-     * the current filehandle, not some other open file. */
-    if (open_state->fh_len != (uint32_t) fhlen ||
-        memcmp(open_state->fh, fh, (size_t) fhlen) != 0) {
-        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
-                                thread->vfs_thread);
-        return NFS4ERR_BAD_STATEID;
-    }
-
-    status = nfs4_stateid_check_seqid(open_state->seqid, args->stateid.seqid);
-    if (status == NFS4_OK && !nfs_open_state_check_principal(open_state,
-                                                             req->principal_flavor,
-                                                             req->principal_machinename,
-                                                             req->principal_machinename_len)) {
-        status = NFS4ERR_ACCESS;
-    }
-    if (status == NFS4_OK) {
-        status = nfs4_vfs_owner_io_denied(ctx, open_state, OPEN4_SHARE_ACCESS_WRITE);
-    }
-    if (status != NFS4_OK) {
-        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
-                                thread->vfs_thread);
-        return status;
-    }
-
-    has_write = (open_state->share_access & OPEN4_SHARE_ACCESS_WRITE) != 0;
-
-    if (has_write && open_state->handle) {
-        /* A reference of our own, so the handle outlives the state slot --
-         * which the per-op path takes for the same reason. */
-        chimera_vfs_dup_handle(thread->vfs_thread, open_state->handle);
-        *out_handle = open_state->handle;
-    }
-
-    nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
-                            thread->vfs_thread);
-
-    return has_write ? NFS4_OK : NFS4ERR_OPENMODE;
+    return nfs4_vfs_io_authorize(ctx, thread, req, &args->stateid,
+                                 OPEN4_SHARE_ACCESS_WRITE, fh, fhlen,
+                                 out_handle, out_owner, have_owner);
 } /* nfs4_vfs_setattr_authorize */
 
 /* Stateid wire inputs stay immutable. Resolve the current-stateid placeholder
@@ -4677,9 +4632,9 @@ nfs4_vfs_operation_prepare(
             bool                   data_server_io = nfs4_vfs_data_server_io(req, argop->argop);
             uint32_t               fhlen;
             const uint8_t         *fh   = chimera_vfs_compound_current_fh(compound, &fhlen);
-            uint32_t               want = argop->argop == OP_READ || argop->argop == OP_READ_PLUS || argop->argop ==
-                OP_SEEK ?
-                OPEN4_SHARE_ACCESS_READ : OPEN4_SHARE_ACCESS_WRITE;
+            uint32_t               want = argop->argop == OP_SEEK ? 0 :
+                (argop->argop == OP_READ || argop->argop == OP_READ_PLUS ?
+                 OPEN4_SHARE_ACCESS_READ : OPEN4_SHARE_ACCESS_WRITE);
             if (!fh) {
                 error = NFS4ERR_NOFILEHANDLE;
             }
@@ -4713,7 +4668,8 @@ nfs4_vfs_operation_prepare(
                 struct SETATTR4args local = argop->opsetattr;
                 local.stateid = *sid;
                 error         = nfs4_vfs_setattr_authorize(ctx, req->thread, req, &local,
-                                                           fh, fhlen, &map->io_handle);
+                                                           fh, fhlen, &map->io_handle, &map->io_owner, &map->
+                                                           have_io_owner);
             } else if (error == NFS4_OK) {
                 error = nfs4_vfs_io_authorize(ctx, req->thread, req, sid, want,
                                               fh, fhlen, &map->io_handle, &map->io_owner, &map->have_io_owner);
