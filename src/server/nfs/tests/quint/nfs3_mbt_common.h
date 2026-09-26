@@ -1151,6 +1151,8 @@ mbt_env_open_opts(
         }
         if (opts->rest_port) {
             chimera_server_config_set_rest_http_port(config, opts->rest_port);
+            chimera_server_config_add_rest_module(config, "core", NULL, NULL, 1);
+            chimera_server_config_add_rest_module(config, "docs", NULL, NULL, 1);
             chimera_server_config_set_rest_auth_enabled(config,
                                                         opts->rest_auth);
         }

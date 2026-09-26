@@ -15,781 +15,48 @@
 #include "rest_internal.h"
 #include "rest_auth.h"
 
-/* External handlers from rest_users.c */
-void chimera_rest_handle_users_list(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *);
-void chimera_rest_handle_users_get(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-void chimera_rest_handle_users_create(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-void chimera_rest_handle_users_delete(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-
-/* External handlers from rest_shares.c */
-void chimera_rest_handle_exports_list(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *);
-void chimera_rest_handle_exports_get(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-void chimera_rest_handle_exports_create(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-void chimera_rest_handle_exports_delete(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-
-void chimera_rest_handle_shares_list(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *);
-void chimera_rest_handle_shares_get(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-void chimera_rest_handle_shares_create(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-void chimera_rest_handle_shares_delete(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-
-void chimera_rest_handle_buckets_list(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *);
-void chimera_rest_handle_buckets_get(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-void chimera_rest_handle_buckets_create(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-void chimera_rest_handle_buckets_delete(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-
-void chimera_rest_handle_mounts_list(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *);
-void chimera_rest_handle_mounts_get(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-void chimera_rest_handle_mounts_create(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-void chimera_rest_handle_mounts_delete(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-
-/* External handlers from rest_filesystems.c */
-void chimera_rest_handle_filesystems_create(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-void chimera_rest_handle_filesystems_delete(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *);
-
-/* External handler from rest_config.c */
-void chimera_rest_handle_config(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *);
-
-/* External handlers from rest_swagger.c */
-void chimera_rest_handle_swagger_ui(
-    struct evpl *,
-    struct evpl_http_request *);
-void chimera_rest_handle_swagger_bundle_js(
-    struct evpl *,
-    struct evpl_http_request *);
-void chimera_rest_handle_swagger_preset_js(
-    struct evpl *,
-    struct evpl_http_request *);
-void chimera_rest_handle_swagger_css(
-    struct evpl *,
-    struct evpl_http_request *);
-void chimera_rest_handle_openapi_json(
-    struct evpl *,
-    struct evpl_http_request *);
-
-/* External handler from rest_debug.c (test-only) */
-void chimera_rest_handle_debug_fsop(
-    struct evpl *,
-    struct evpl_http_request *,
-    struct chimera_rest_thread *,
-    const char *,
-    int);
-
-static void
-chimera_rest_handle_not_found(
-    struct evpl              *evpl,
-    struct evpl_http_request *request);
-
-/* Deferred POST handler types */
-enum chimera_rest_post_handler {
-    REST_POST_USERS_CREATE,
-    REST_POST_EXPORTS_CREATE,
-    REST_POST_SHARES_CREATE,
-    REST_POST_BUCKETS_CREATE,
-    REST_POST_MOUNTS_CREATE,
-    REST_POST_FILESYSTEMS_CREATE,
-    REST_POST_DEBUG_FSOP,
-    REST_POST_AUTH_LOGIN,
-    /* Answer an error only once the request body has been consumed; see
-     * chimera_rest_reply_not_found. */
-    REST_POST_NOT_FOUND,
-};
-
-#define REST_POST_MAX_BODY 65536
-
-/* evpl_iovec_ring_copyv writes one output iovec per recv-ring segment it
- * consumes, with no capacity check.  Size the output array to this and bound
- * each copy request (below) so the returned segment count can never exceed it. */
-#define REST_POST_MAX_IOV  256
-
-struct chimera_rest_post_ctx {
-    enum chimera_rest_post_handler handler;
-};
-
-static void
-chimera_rest_notify(
-    struct evpl                *evpl,
-    struct evpl_http_agent     *agent,
-    struct evpl_http_request   *request,
-    enum evpl_http_notify_type  notify_type,
-    enum evpl_http_request_type request_type,
-    const char                 *uri,
-    void                       *notify_data,
-    void                       *private_data)
-{
-    struct chimera_rest_post_ctx *ctx    = notify_data;
-    struct chimera_rest_thread   *thread = private_data;
-    uint64_t                      avail;
-    struct evpl_iovec             iov[REST_POST_MAX_IOV];
-    int                           niov, i;
-    char                          body[REST_POST_MAX_BODY];
-    int                           body_len = 0;
-
-    if (!ctx) {
-        return;
-    }
-
-    /* The request is over and no body is coming.  This is the only other end a
-     * dispatched request has, so it is where the context allocated for it is
-     * released -- returning here as if it were an uninteresting notification
-     * would leak one per connection dropped mid-POST. */
-    if (notify_type == EVPL_HTTP_NOTIFY_FAILED) {
-        free(ctx);
-        return;
-    }
-
-    if (notify_type != EVPL_HTTP_NOTIFY_RECEIVE_COMPLETE) {
-        return;
-    }
-
-    avail = evpl_http_request_get_data_avail(request);
-
-    while (avail > 0 && body_len < REST_POST_MAX_BODY) {
-        int chunk = avail;
-
-        if (chunk > REST_POST_MAX_BODY - body_len) {
-            chunk = REST_POST_MAX_BODY - body_len;
-        }
-
-        /* Bound the request by the iovec array size: copyv emits at most one
-         * output iovec per byte (a one-byte recv segment), so a chunk no larger
-         * than REST_POST_MAX_IOV can never overflow iov[]. */
-        if (chunk > REST_POST_MAX_IOV) {
-            chunk = REST_POST_MAX_IOV;
-        }
-
-        niov = evpl_http_request_get_datav(evpl, request, iov, chunk);
-
-        /* Copy every segment copyv returned (it may split one chunk across
-         * several): copying only iov[0] both under-reads the body and leaves
-         * the ring accounting ahead of body_len. */
-        for (i = 0; i < niov; i++) {
-            memcpy(body + body_len, evpl_iovec_data(&iov[i]), iov[i].length);
-            body_len += iov[i].length;
-            evpl_iovec_release(evpl, &iov[i]);
-        }
-
-        avail = evpl_http_request_get_data_avail(request);
-    }
-
-    switch (ctx->handler) {
-        case REST_POST_USERS_CREATE:
-            chimera_rest_handle_users_create(evpl, request, thread,
-                                             body, body_len);
-            break;
-        case REST_POST_EXPORTS_CREATE:
-            chimera_rest_handle_exports_create(evpl, request, thread,
-                                               body, body_len);
-            break;
-        case REST_POST_SHARES_CREATE:
-            chimera_rest_handle_shares_create(evpl, request, thread,
-                                              body, body_len);
-            break;
-        case REST_POST_BUCKETS_CREATE:
-            chimera_rest_handle_buckets_create(evpl, request, thread,
-                                               body, body_len);
-            break;
-        case REST_POST_MOUNTS_CREATE:
-            chimera_rest_handle_mounts_create(evpl, request, thread,
-                                              body, body_len);
-            break;
-        case REST_POST_FILESYSTEMS_CREATE:
-            chimera_rest_handle_filesystems_create(evpl, request, thread,
-                                                   body, body_len);
-            break;
-        case REST_POST_DEBUG_FSOP:
-            chimera_rest_handle_debug_fsop(evpl, request, thread,
-                                           body, body_len);
-            break;
-        case REST_POST_AUTH_LOGIN:
-            chimera_rest_handle_auth_login(evpl, request, thread,
-                                           body, body_len);
-            break;
-        case REST_POST_NOT_FOUND:
-            chimera_rest_handle_not_found(evpl, request);
-            break;
-    } /* switch */
-
-    free(ctx);
-} /* chimera_rest_notify */
-
-void
+SYMBOL_EXPORT void
 chimera_rest_send_json(
-    struct evpl              *evpl,
-    struct evpl_http_request *request,
-    int                       status,
-    json_t                   *obj)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    int                          status,
+    json_t                      *obj)
 {
-    char             *json_str;
-    struct evpl_iovec iov;
-    int               len;
+    char *body = json_dumps(obj, JSON_COMPACT);
 
-    json_str = json_dumps(obj, JSON_COMPACT);
     json_decref(obj);
-
-    len = strlen(json_str);
-    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), json_str, len);
-    evpl_iovec_set_length(&iov, len);
-    free(json_str);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, len);
-    evpl_http_server_dispatch_default(request, status);
+    if (!body) {
+        chimera_rest_reply(request, 500, "application/json", "{}", 2);
+        return;
+    }
+    chimera_rest_reply(request, status, "application/json", body, strlen(body));
+    free(body);
 } /* chimera_rest_send_json */
 
-void
+SYMBOL_EXPORT void
 chimera_rest_send_error(
-    struct evpl              *evpl,
-    struct evpl_http_request *request,
-    int                       status,
-    const char               *error,
-    const char               *message)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    int                          status,
+    const char                  *error,
+    const char                  *message)
 {
     json_t *obj = json_object();
 
     json_object_set_new(obj, "error", json_string(error));
     json_object_set_new(obj, "message", json_string(message));
-
     chimera_rest_send_json(evpl, request, status, obj);
 } /* chimera_rest_send_error */
 
-void
+SYMBOL_EXPORT void
 chimera_rest_send_json_response(
-    struct evpl              *evpl,
-    struct evpl_http_request *request,
-    int                       status,
-    const char               *json_body)
-{
-    struct evpl_iovec iov;
-    int               len = strlen(json_body);
-
-    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), json_body, len);
-    evpl_iovec_set_length(&iov, len);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, len);
-    evpl_http_server_dispatch_default(request, status);
-} /* chimera_rest_send_json_response */
-
-static void
-chimera_rest_handle_version(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
-{
-    char json_response[256];
-
-    snprintf(json_response, sizeof(json_response),
-             "{\"version\":\"%s\"}", CHIMERA_VERSION);
-
-    chimera_rest_send_json_response(evpl, request, 200, json_response);
-} /* chimera_rest_handle_version */
-
-static void
-chimera_rest_handle_not_found(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
-{
-    chimera_rest_send_json_response(evpl, request, 404,
-                                    "{\"error\":\"Not Found\"}");
-} /* chimera_rest_handle_not_found */
-
-/* Answer 404 for a path that matched no route.
- *
- * A reply dispatched from chimera_rest_dispatch runs at HEADER time, and
- * libevpl only flushes a response once its request is on the connection's
- * pending list -- which happens when the body finishes parsing
- * (evpl_http_server_flush walks conn->pending_requests; a request is appended
- * there from the body handler).  For a GET or DELETE there is no body and the
- * two coincide, but answering a POST that is still sending leaves the reply
- * sitting unflushed behind a body nobody is waiting on, and the client waits
- * for a response that has already been decided.
- *
- * So defer it the same way every real POST route here does: register a
- * context and answer from the RECEIVE_COMPLETE notification, which runs after
- * the body has been drained.  (Seen as a 120s ctest timeout on the first POST
- * to an unrouted path in a slow build.) */
-static void
-chimera_rest_reply_not_found(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    enum evpl_http_request_type req_type,
-    void                      **notify_data)
-{
-    if (req_type == EVPL_HTTP_REQUEST_TYPE_POST ||
-        req_type == EVPL_HTTP_REQUEST_TYPE_PUT) {
-        struct chimera_rest_post_ctx *ctx = calloc(1, sizeof(*ctx));
-
-        ctx->handler = REST_POST_NOT_FOUND;
-        *notify_data = ctx;
-        return;
-    }
-
-    chimera_rest_handle_not_found(evpl, request);
-} /* chimera_rest_reply_not_found */
-
-static void
-chimera_rest_handle_method_not_allowed(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
-{
-    chimera_rest_send_json_response(evpl, request, 405,
-                                    "{\"error\":\"Method Not Allowed\"}");
-} /* chimera_rest_handle_method_not_allowed */
-
-static int
-chimera_rest_url_starts_with(
-    const char *url,
-    int         url_len,
-    const char *prefix,
-    int         prefix_len)
-{
-    if (url_len < prefix_len) {
-        return 0;
-    }
-    return strncmp(url, prefix, prefix_len) == 0;
-} /* chimera_rest_url_starts_with */
-
-static void
-chimera_rest_extract_path_param(
-    const char *url,
-    int         url_len,
-    int         prefix_len,
-    char       *param,
-    int         param_size)
-{
-    int remaining = url_len - prefix_len;
-    int copy_len  = remaining < param_size - 1 ? remaining : param_size - 1;
-
-    if (remaining > 0) {
-        strncpy(param, url + prefix_len, copy_len);
-        param[copy_len] = '\0';
-    } else {
-        param[0] = '\0';
-    }
-} /* chimera_rest_extract_path_param */
-
-static void
-chimera_rest_dispatch(
     struct evpl                 *evpl,
-    struct evpl_http_agent      *agent,
-    struct evpl_http_request    *request,
-    evpl_http_notify_callback_t *notify_callback,
-    void                       **notify_data,
-    void                        *private_data)
+    struct chimera_rest_request *request,
+    int                          status,
+    const char                  *body)
 {
-    struct chimera_rest_thread *thread = private_data;
-    const char                 *url;
-    int                         url_len;
-    enum evpl_http_request_type req_type;
-    char                        param[256];
-
-    *notify_callback = chimera_rest_notify;
-    *notify_data     = NULL;
-
-    url      = evpl_http_request_url(request, &url_len);
-    req_type = evpl_http_request_type(request);
-
-    chimera_rest_debug("REST API request: %s %.*s",
-                       evpl_http_request_type_to_string(request),
-                       url_len, url);
-
-    /* Version endpoint */
-    if (url_len == 8 && strncmp(url, "/version", 8) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_version(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    /* OpenAPI spec */
-    if (url_len == 17 && strncmp(url, "/api/openapi.json", 17) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_openapi_json(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    /* Swagger UI */
-    if (url_len == 9 && strncmp(url, "/api/docs", 9) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_swagger_ui(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (url_len == 10 && strncmp(url, "/api/docs/", 10) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_swagger_ui(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len,
-                                     "/api/docs/swagger-ui-bundle.min.js",
-                                     34)) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_swagger_bundle_js(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len,
-                                     "/api/docs/swagger-ui-standalone-preset.min.js",
-                                     45)) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_swagger_preset_js(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len,
-                                     "/api/docs/swagger-ui.min.css", 28)) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_swagger_css(evpl, request);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    /* Auth login endpoint: /api/v1/auth/login (public, no auth required) */
-    if (url_len == 18 && strncmp(url, "/api/v1/auth/login", 18) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_AUTH_LOGIN;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    /* Auth middleware: all /api/v1/ routes require a Bearer token or
-     * HTTP Basic credentials, unless authentication is disabled by config. */
-    if (thread->shared->auth_enabled &&
-        chimera_rest_url_starts_with(url, url_len, "/api/v1/", 8)) {
-        struct chimera_rest_jwt_claims claims;
-
-        if (chimera_rest_auth_check_request(
-                thread->shared, request, &claims) != 0) {
-            chimera_rest_send_json_response(evpl, request, 401,
-                                            "{\"error\":\"Unauthorized\","
-                                            "\"message\":\"Valid Bearer token "
-                                            "or Basic credentials required\"}");
-            return;
-        }
-    }
-
-    /* Config API: /api/v1/config */
-    if (url_len == 14 && strncmp(url, "/api/v1/config", 14) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_config(evpl, request, thread);
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    /* Users API: /api/v1/users */
-    if (url_len == 13 && strncmp(url, "/api/v1/users", 13) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_users_list(evpl, request, thread);
-        } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_USERS_CREATE;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/users/", 14)) {
-        chimera_rest_extract_path_param(url, url_len, 14, param, sizeof(param));
-        if (param[0] != '\0') {
-            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-                chimera_rest_handle_users_get(evpl, request, thread, param);
-            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
-                chimera_rest_handle_users_delete(evpl, request, thread, param);
-            } else {
-                chimera_rest_handle_method_not_allowed(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Exports API: /api/v1/exports */
-    if (url_len == 15 && strncmp(url, "/api/v1/exports", 15) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_exports_list(evpl, request, thread);
-        } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_EXPORTS_CREATE;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/exports/", 16)) {
-        chimera_rest_extract_path_param(url, url_len, 16, param, sizeof(param));
-        if (param[0] != '\0') {
-            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-                chimera_rest_handle_exports_get(evpl, request, thread, param);
-            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
-                chimera_rest_handle_exports_delete(evpl, request, thread,
-                                                   param);
-            } else {
-                chimera_rest_handle_method_not_allowed(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Shares API: /api/v1/shares */
-    if (url_len == 14 && strncmp(url, "/api/v1/shares", 14) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_shares_list(evpl, request, thread);
-        } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_SHARES_CREATE;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/shares/", 15)) {
-        chimera_rest_extract_path_param(url, url_len, 15, param, sizeof(param));
-        if (param[0] != '\0') {
-            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-                chimera_rest_handle_shares_get(evpl, request, thread, param);
-            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
-                chimera_rest_handle_shares_delete(evpl, request, thread, param);
-            } else {
-                chimera_rest_handle_method_not_allowed(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Buckets API: /api/v1/buckets */
-    if (url_len == 15 && strncmp(url, "/api/v1/buckets", 15) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_buckets_list(evpl, request, thread);
-        } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_BUCKETS_CREATE;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/buckets/", 16)) {
-        chimera_rest_extract_path_param(url, url_len, 16, param, sizeof(param));
-        if (param[0] != '\0') {
-            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-                chimera_rest_handle_buckets_get(evpl, request, thread, param);
-            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
-                chimera_rest_handle_buckets_delete(evpl, request, thread,
-                                                   param);
-            } else {
-                chimera_rest_handle_method_not_allowed(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Mounts API: /api/v1/mounts */
-    if (url_len == 14 && strncmp(url, "/api/v1/mounts", 14) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-            chimera_rest_handle_mounts_list(evpl, request, thread);
-        } else if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_MOUNTS_CREATE;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/mounts/", 15)) {
-        chimera_rest_extract_path_param(url, url_len, 15, param, sizeof(param));
-        if (param[0] != '\0') {
-            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
-                chimera_rest_handle_mounts_get(evpl, request, thread, param);
-            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
-                chimera_rest_handle_mounts_delete(evpl, request, thread, param);
-            } else {
-                chimera_rest_handle_method_not_allowed(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Filesystems API: /api/v1/filesystems */
-    if (url_len == 19 && strncmp(url, "/api/v1/filesystems", 19) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_FILESYSTEMS_CREATE;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/filesystems/", 20)) {
-        chimera_rest_extract_path_param(url, url_len, 20, param, sizeof(param));
-        if (param[0] != '\0') {
-            if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
-                chimera_rest_handle_filesystems_delete(evpl, request, thread,
-                                                       param);
-            } else {
-                chimera_rest_handle_method_not_allowed(evpl, request);
-            }
-            return;
-        }
-    }
-
-    /* Debug fsop API (test-only): POST /api/v1/debug/fsop performs a
-     * server-side filesystem mutation to drive delegation recalls. Routed
-     * only when explicitly enabled via the rest_debug_fsops config flag, so
-     * the endpoint is invisible (404) by default. */
-    if (thread->shared->debug_fsops &&
-        url_len == 18 && strncmp(url, "/api/v1/debug/fsop", 18) == 0) {
-        if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
-            struct chimera_rest_post_ctx *ctx;
-            ctx          = calloc(1, sizeof(*ctx));
-            ctx->handler = REST_POST_DEBUG_FSOP;
-            *notify_data = ctx;
-        } else {
-            chimera_rest_handle_method_not_allowed(evpl, request);
-        }
-        return;
-    }
-
-    chimera_rest_reply_not_found(evpl, request, req_type, notify_data);
-} /* chimera_rest_dispatch */
+    chimera_rest_reply(request, status, "application/json", body, strlen(body));
+} /* chimera_rest_send_json_response */
 
 SYMBOL_EXPORT struct chimera_rest_server *
 chimera_rest_init(
@@ -801,11 +68,14 @@ chimera_rest_init(
     struct chimera_rest_server *rest;
     int                         http_port;
     int                         https_port;
+    int                         module_count;
 
     http_port  = chimera_server_config_get_rest_http_port(config);
     https_port = chimera_server_config_get_rest_https_port(config);
 
+    chimera_server_config_get_rest_modules(config, &module_count);
     if (http_port == 0 && https_port == 0) {
+        chimera_rest_abort_if(module_count, "REST modules configured without a REST listener");
         chimera_rest_info("REST API disabled (no ports configured)");
         return NULL;
     }
@@ -816,8 +86,9 @@ chimera_rest_init(
     rest->https_port   = https_port;
     rest->flavor       = chimera_server_config_get_tcp_flavor(config);
     rest->server       = server;
-    rest->debug_fsops  = chimera_server_config_get_rest_debug_fsops(config);
     rest->auth_enabled = chimera_server_config_get_rest_auth_enabled(config);
+
+    chimera_rest_modules_init(rest, config);
 
     chimera_rest_auth_init_secret(rest,
                                   chimera_server_config_get_state_dir(config));
@@ -917,6 +188,7 @@ chimera_rest_destroy(struct chimera_rest_server *rest)
         evpl_endpoint_close(rest->https_endpoint);
     }
 
+    chimera_rest_modules_destroy(rest);
     free(rest);
 } /* chimera_rest_destroy */
 
@@ -938,6 +210,8 @@ chimera_rest_thread_init(
     thread->shared     = rest;
     thread->vfs_thread = vfs_thread;
     thread->agent      = evpl_http_init(evpl);
+    chimera_rest_requests_init(thread);
+    chimera_rest_modules_thread_init(thread);
 
     if (rest->http_listener) {
         thread->http_server = evpl_http_attach(thread->agent, rest->http_listener,
@@ -961,6 +235,8 @@ chimera_rest_thread_destroy(void *data)
         return;
     }
 
+    chimera_rest_modules_thread_quiesce(thread);
+
     if (thread->http_server) {
         evpl_http_server_destroy(thread->agent, thread->http_server);
     }
@@ -969,6 +245,8 @@ chimera_rest_thread_destroy(void *data)
         evpl_http_server_destroy(thread->agent, thread->https_server);
     }
 
+    chimera_rest_requests_destroy(thread);
+    chimera_rest_modules_thread_destroy(thread);
     evpl_http_destroy(thread->agent);
     free(thread);
 } /* chimera_rest_thread_destroy */

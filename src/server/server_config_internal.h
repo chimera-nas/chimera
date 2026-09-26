@@ -102,7 +102,8 @@ struct chimera_server_config {
     int                                   metrics_port;
     int                                   rest_http_port;
     int                                   rest_https_port;
-    int                                   rest_debug_fsops;
+    int num_rest_modules;
+    struct chimera_server_rest_module_config rest_modules[CHIMERA_REST_MAX_MODULES];
     int                                   rest_auth_enabled;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];

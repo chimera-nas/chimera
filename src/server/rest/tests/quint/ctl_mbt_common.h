@@ -55,8 +55,11 @@
 #include "ctl_http.h"
 
 struct ctl_env_opts {
+    int         no_rest_modules;
+    void        (*configure)(
+        struct chimera_server_config *config);
     int         auth_enabled;    /* REST auth; off by default here */
-    int         debug_fsops;     /* route POST /api/v1/debug/fsop */
+    int         debug_fsops;     /* route POST /api/debug/v1/fsop */
     int         nfs_enabled;
     int         smb_enabled;
     int         s3_enabled;
@@ -124,9 +127,16 @@ ctl_env_open(
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
 
     chimera_server_config_set_rest_http_port(config, CTL_REST_PORT);
+
+    if (!env->opts.no_rest_modules) {
+        chimera_server_config_add_rest_module(config, "core", NULL, NULL, 1);
+        chimera_server_config_add_rest_module(config, "docs", NULL, NULL, 1);
+    }
     chimera_server_config_set_rest_auth_enabled(config,
                                                 env->opts.auth_enabled);
-    chimera_server_config_set_rest_debug_fsops(config, env->opts.debug_fsops);
+    if (env->opts.debug_fsops) {
+        chimera_server_config_add_rest_module(config, "debug", NULL, NULL, 0);
+    }
 
     chimera_server_config_set_nfs_enabled(config, env->opts.nfs_enabled);
     chimera_server_config_set_smb_enabled(config, env->opts.smb_enabled);
@@ -141,6 +151,9 @@ ctl_env_open(
                                                   env->opts.max_exports);
     }
 
+    if (env->opts.configure) {
+        env->opts.configure(config);
+    }
     env->server = chimera_server_init(config, env->registry);
     chimera_server_start(env->server);
 

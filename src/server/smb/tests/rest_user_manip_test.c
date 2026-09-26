@@ -156,7 +156,7 @@ get_auth_token(void)
     snprintf(cmd, sizeof(cmd),
              "curl -s -X POST -H 'Content-Type: application/json' "
              "-d '{\"username\":\"%s\",\"password\":\"%s\"}' "
-             "http://localhost:%d/api/v1/auth/login 2>&1",
+             "http://localhost:%d/api/core/v1/auth/login 2>&1",
              ADMIN_USER, ADMIN_PASS, REST_PORT);
 
     fprintf(stderr, "    Authenticating as %s...\n", ADMIN_USER);
@@ -241,7 +241,7 @@ run_user_tests(void)
                  "\"uid\":%d,\"gid\":%d}",
                  REST_USER, REST_PASS, REST_UID, REST_GID);
 
-        rc = run_curl("POST", "/api/v1/users", body, auth_token, &http_code);
+        rc = run_curl("POST", "/api/core/v1/users", body, auth_token, &http_code);
         if (rc == 0 && http_code == 201) {
             test_pass("REST create user");
         } else {
@@ -266,7 +266,7 @@ run_user_tests(void)
     fprintf(stderr, "\n  Deleting user via REST API...\n");
     {
         char path[256];
-        snprintf(path, sizeof(path), "/api/v1/users/%s", REST_USER);
+        snprintf(path, sizeof(path), "/api/core/v1/users/%s", REST_USER);
 
         rc = run_curl("DELETE", path, NULL, auth_token, &http_code);
         if (rc == 0 && http_code == 204) {
@@ -330,7 +330,7 @@ run_share_tests(struct chimera_server *server)
         const char *body =
             "{\"name\":\"restshare\",\"path\":\"testvfs\"}";
 
-        rc = run_curl("POST", "/api/v1/shares", body, auth_token, &http_code);
+        rc = run_curl("POST", "/api/core/v1/shares", body, auth_token, &http_code);
         if (rc == 0 && http_code == 201) {
             test_pass("REST create share");
         } else {
@@ -353,7 +353,7 @@ run_share_tests(struct chimera_server *server)
 
     /* Step 4: Delete share via REST API */
     fprintf(stderr, "\n  Deleting share via REST API...\n");
-    rc = run_curl("DELETE", "/api/v1/shares/restshare", NULL,
+    rc = run_curl("DELETE", "/api/core/v1/shares/restshare", NULL,
                   auth_token, &http_code);
     if (rc == 0 && http_code == 204) {
         test_pass("REST delete share");
@@ -425,6 +425,8 @@ main(
     config = chimera_server_config_init();
     chimera_server_config_set_smb_enabled(config, 1);
     chimera_server_config_set_rest_http_port(config, REST_PORT);
+    chimera_server_config_add_rest_module(config, "core", NULL, NULL, 1);
+    chimera_server_config_add_rest_module(config, "docs", NULL, NULL, 1);
 
     /* Initialize server */
     server = chimera_server_init(config, metrics);

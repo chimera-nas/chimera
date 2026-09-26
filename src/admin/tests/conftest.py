@@ -49,7 +49,7 @@ def wait_for_rest_api(
     while time.time() - start_time < timeout:
         try:
             response = requests.get(
-                f"{scheme}://{host}:{port}/version",
+                f"{scheme}://{host}:{port}/api/core/v1/version",
                 timeout=1.0,
                 verify=False,  # Allow self-signed certs
             )
@@ -80,6 +80,10 @@ def chimera_server():
             "s3_enabled": True,
             "sync_delegation_threads": 4,
             "rest_http_port": rest_port,
+            "rest_modules": [
+                {"module": "core", "allow_public_routes": True},
+                {"module": "docs", "allow_public_routes": True},
+            ],
             "rest_auth_enabled": False,
         },
         "filesystems": {
@@ -175,6 +179,10 @@ def chimera_server_https():
             "threads": 2,
             "sync_delegation_threads": 4,
             "rest_http_port": http_port,
+            "rest_modules": [
+                {"module": "core", "allow_public_routes": True},
+                {"module": "docs", "allow_public_routes": True},
+            ],
             "rest_https_port": https_port,
             "rest_auth_enabled": False,
             # No rest_ssl_cert/rest_ssl_key - will auto-generate

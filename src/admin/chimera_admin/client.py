@@ -74,7 +74,7 @@ class ChimeraAdminClient:
 
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            endpoint: API endpoint path (e.g., "/version")
+            endpoint: API endpoint path (e.g., "/api/core/v1/version")
             **kwargs: Additional arguments passed to requests
 
         Returns:
@@ -117,7 +117,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/version")
+        return self._request("GET", "/api/core/v1/version")
 
     def get_openapi(self) -> dict:
         """Get the server's OpenAPI specification.
@@ -128,7 +128,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/openapi.json")
+        return self._request("GET", "/api/docs/v1/openapi.json")
 
     def get_config(self) -> dict:
         """Get the running server configuration.
@@ -145,7 +145,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/v1/config")
+        return self._request("GET", "/api/core/v1/config")
 
     # Users API
 
@@ -158,7 +158,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/v1/users")
+        return self._request("GET", "/api/core/v1/users")
 
     def get_user(self, username: str) -> dict:
         """Get a specific user by username.
@@ -172,7 +172,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or user not found
         """
-        return self._request("GET", f"/api/v1/users/{username}")
+        return self._request("GET", f"/api/core/v1/users/{username}")
 
     def create_user(
         self,
@@ -216,7 +216,7 @@ class ChimeraAdminClient:
             data["smbpasswd"] = smbpasswd
         if gids is not None:
             data["gids"] = gids
-        return self._request("POST", "/api/v1/users", json=data)
+        return self._request("POST", "/api/core/v1/users", json=data)
 
     def delete_user(self, username: str) -> None:
         """Delete a user.
@@ -227,7 +227,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or user not found
         """
-        self._request_no_content("DELETE", f"/api/v1/users/{username}")
+        self._request_no_content("DELETE", f"/api/core/v1/users/{username}")
 
     # NFS Exports API
 
@@ -240,7 +240,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/v1/exports")
+        return self._request("GET", "/api/core/v1/exports")
 
     def get_export(self, name: str) -> dict:
         """Get a specific NFS export by name.
@@ -254,7 +254,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or export not found
         """
-        return self._request("GET", f"/api/v1/exports/{name}")
+        return self._request("GET", f"/api/core/v1/exports/{name}")
 
     def create_export(
         self,
@@ -308,7 +308,7 @@ class ChimeraAdminClient:
             data["anongid"] = anongid
         if sec is not None:
             data["sec"] = sec
-        return self._request("POST", "/api/v1/exports", json=data)
+        return self._request("POST", "/api/core/v1/exports", json=data)
 
     def delete_export(self, name: str) -> None:
         """Delete an NFS export.
@@ -319,7 +319,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or export not found
         """
-        self._request_no_content("DELETE", f"/api/v1/exports/{name}")
+        self._request_no_content("DELETE", f"/api/core/v1/exports/{name}")
 
     # SMB Shares API
 
@@ -332,7 +332,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/v1/shares")
+        return self._request("GET", "/api/core/v1/shares")
 
     def get_share(self, name: str) -> dict:
         """Get a specific SMB share by name.
@@ -346,7 +346,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or share not found
         """
-        return self._request("GET", f"/api/v1/shares/{name}")
+        return self._request("GET", f"/api/core/v1/shares/{name}")
 
     def create_share(self, name: str, path: str) -> dict:
         """Create a new SMB share.
@@ -362,7 +362,7 @@ class ChimeraAdminClient:
             ChimeraAdminError: If the request fails
         """
         return self._request(
-            "POST", "/api/v1/shares", json={"name": name, "path": path}
+            "POST", "/api/core/v1/shares", json={"name": name, "path": path}
         )
 
     def delete_share(self, name: str) -> None:
@@ -374,7 +374,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or share not found
         """
-        self._request_no_content("DELETE", f"/api/v1/shares/{name}")
+        self._request_no_content("DELETE", f"/api/core/v1/shares/{name}")
 
     # S3 Buckets API
 
@@ -387,7 +387,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/v1/buckets")
+        return self._request("GET", "/api/core/v1/buckets")
 
     def get_bucket(self, name: str) -> dict:
         """Get a specific S3 bucket by name.
@@ -401,7 +401,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or bucket not found
         """
-        return self._request("GET", f"/api/v1/buckets/{name}")
+        return self._request("GET", f"/api/core/v1/buckets/{name}")
 
     def create_bucket(self, name: str, path: str) -> dict:
         """Create a new S3 bucket.
@@ -417,7 +417,7 @@ class ChimeraAdminClient:
             ChimeraAdminError: If the request fails
         """
         return self._request(
-            "POST", "/api/v1/buckets", json={"name": name, "path": path}
+            "POST", "/api/core/v1/buckets", json={"name": name, "path": path}
         )
 
     def delete_bucket(self, name: str) -> None:
@@ -429,7 +429,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or bucket not found
         """
-        self._request_no_content("DELETE", f"/api/v1/buckets/{name}")
+        self._request_no_content("DELETE", f"/api/core/v1/buckets/{name}")
 
     # VFS Mounts API
 
@@ -444,7 +444,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails
         """
-        return self._request("GET", "/api/v1/mounts")
+        return self._request("GET", "/api/core/v1/mounts")
 
     def get_mount(self, name: str) -> dict:
         """Get a specific VFS mount by name.
@@ -460,7 +460,7 @@ class ChimeraAdminClient:
         Raises:
             ChimeraAdminError: If the request fails or mount not found
         """
-        return self._request("GET", f"/api/v1/mounts/{name}")
+        return self._request("GET", f"/api/core/v1/mounts/{name}")
 
     def create_mount(
         self,
@@ -490,7 +490,7 @@ class ChimeraAdminClient:
         data = {"name": name, "module": module, "path": path}
         if options is not None:
             data["options"] = options
-        return self._request("POST", "/api/v1/mounts", json=data)
+        return self._request("POST", "/api/core/v1/mounts", json=data)
 
     def delete_mount(self, name: str) -> None:
         """Delete a VFS mount.
@@ -503,7 +503,7 @@ class ChimeraAdminClient:
                 (404), or the mount is still in use by a share, export, or
                 bucket (409).
         """
-        self._request_no_content("DELETE", f"/api/v1/mounts/{name}")
+        self._request_no_content("DELETE", f"/api/core/v1/mounts/{name}")
 
     # Named filesystems API
 
@@ -534,7 +534,7 @@ class ChimeraAdminClient:
         data = {"module": module, "name": name}
         if options is not None:
             data["options"] = options
-        return self._request("POST", "/api/v1/filesystems", json=data)
+        return self._request("POST", "/api/core/v1/filesystems", json=data)
 
     def delete_filesystem(self, module: str, name: str) -> None:
         """Delete a named filesystem.
@@ -548,7 +548,7 @@ class ChimeraAdminClient:
                 found (404), or it still has active mounts (409).
         """
         self._request_no_content(
-            "DELETE", f"/api/v1/filesystems/{module}/{name}"
+            "DELETE", f"/api/core/v1/filesystems/{module}/{name}"
         )
 
     def _request_no_content(

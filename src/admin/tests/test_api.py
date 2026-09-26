@@ -400,7 +400,7 @@ class TestMountsAPI:
         # A leading '=' has an empty key, which the parser rejects.
         with pytest.raises(ChimeraAdminError) as exc_info:
             client._request(
-                "POST", "/api/v1/mounts",
+                "POST", "/api/core/v1/mounts",
                 json={
                     "name": "sdk_test_mount_bad",
                     "module": "memfs",

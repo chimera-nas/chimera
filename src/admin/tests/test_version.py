@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the /version endpoint."""
+"""Tests for the /api/core/v1/version endpoint."""
 
 import pytest
 

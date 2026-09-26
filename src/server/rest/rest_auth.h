@@ -10,6 +10,7 @@
 struct chimera_rest_server;
 struct evpl;
 struct evpl_http_request;
+struct chimera_rest_request;
 struct chimera_rest_thread;
 
 #define CHIMERA_REST_JWT_SECRET_LEN 32
@@ -68,8 +69,8 @@ chimera_rest_auth_check_request(
 
 void
 chimera_rest_handle_auth_login(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len);
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len);

@@ -50,7 +50,7 @@ makes the exports API an access control rather than a directory listing, and it
 is the reason this suite exists. See below.
 
 Plus one cross-check that costs nothing and catches a whole class of drift:
-`GET /api/v1/config` is a second, independent rendering of the same facts as
+`GET /api/core/v1/config` is a second, independent rendering of the same facts as
 the four listings, produced by different code. `--paranoid` requires them to
 agree after every step.
 
@@ -69,7 +69,7 @@ The consequence is not that the handle merely keeps working. Read-only, squash
 and the security-flavor list all live on the record the id no longer finds, so
 the handle keeps working **with no access policy at all**:
 
-| after `DELETE /api/v1/exports/<name>` | chimera | Linux knfsd |
+| after `DELETE /api/core/v1/exports/<name>` | chimera | Linux knfsd |
 |---|---|---|
 | a request on a held handle | `NFS3_OK` | ESTALE |
 | a write through a held **read-only** handle | `NFS3_OK` | ESTALE |

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 /*
- * Test-only debug endpoint: POST /api/v1/debug/fsop
+ * Test-only debug endpoint: POST /api/debug/v1/fsop
  *
  * Performs a server-side filesystem mutation (unlink/rename/link/chmod) on a
  * path within an exported share, issued directly through the VFS layer. The
@@ -12,8 +12,8 @@
  * DELEG16-20 tests drive an "out-of-band" recall that chimera otherwise has no
  * way to simulate on an in-memory backend.
  *
- * This route is only reachable when the rest_debug_fsops config flag is set;
- * it is never enabled in production.
+ * This module is built only with tests and loaded explicitly by the suites
+ * that need out-of-band mutations. It is not installed with the server.
  *
  * Request body (JSON):
  *   { "op": "unlink", "path": "/share/foo" }
@@ -39,7 +39,7 @@
 
 struct rest_fsop_ctx {
     struct evpl                    *evpl;
-    struct evpl_http_request       *request;
+    struct chimera_rest_request    *request;
     struct chimera_vfs_thread      *vfs_thread;
     char                            path[CHIMERA_VFS_PATH_MAX];
     char                            path2[CHIMERA_VFS_PATH_MAX];
@@ -52,22 +52,12 @@ struct rest_fsop_ctx {
 
 static void
 rest_fsop_send_json(
-    struct evpl              *evpl,
-    struct evpl_http_request *request,
-    int                       status,
-    const char               *json_body)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    int                          status,
+    const char                  *json_body)
 {
-    struct evpl_iovec iov;
-    int               len = strlen(json_body);
-
-    evpl_iovec_alloc(evpl, len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), json_body, len);
-    evpl_iovec_set_length(&iov, len);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, len);
-    evpl_http_server_dispatch_default(request, status);
+    chimera_rest_send_json_response(evpl, request, status, json_body);
 } /* rest_fsop_send_json */
 
 /*
@@ -180,11 +170,11 @@ rest_fsop_chmod_lookup_cb(
 
 void
 chimera_rest_handle_debug_fsop(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t                        *root;
     json_error_t                   error;
@@ -278,3 +268,35 @@ chimera_rest_handle_debug_fsop(
 
     json_decref(root);
 } /* chimera_rest_handle_debug_fsop */
+
+static void
+debug_fsop(
+    struct chimera_rest_request *request,
+    void                        *state)
+{
+    chimera_rest_handle_debug_fsop(request->thread->evpl, request, request->thread,
+                                   (const char *) request->body, request->body_length);
+} /* debug_fsop */
+
+static const struct chimera_rest_route        debug_route = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "POST",
+    .path        = "/fsop",
+    .max_body    = CHIMERA_REST_MAX_BODY,
+    .handle      = debug_fsop,
+};
+static const struct chimera_rest_route *const debug_routes[]            = { &debug_route };
+const struct chimera_rest_module              chimera_rest_debug_module = {
+    .abi_version = CHIMERA_REST_ABI_VERSION,
+    .struct_size = sizeof(struct chimera_rest_module),
+    .name        = "debug",
+    .api_version = 1,
+    .routes      = debug_routes,
+    .num_routes  = 1,
+};
+
+CHIMERA_REST_EXPORT const struct chimera_rest_module *
+chimera_rest_module_get_v1(void)
+{
+    return &chimera_rest_debug_module;
+} /* chimera_rest_module_get_v1 */
