@@ -44,6 +44,7 @@
 #include <utlist.h>
 #include <jansson.h>
 #include <linux/version.h>
+#include <limits.h>
 
 #include "vfs/sdk/vfs_error.h"
 
@@ -277,6 +278,91 @@ chimera_io_uring_get_personality(
     return id;
 } /* chimera_io_uring_get_personality */
 
+/* Failure-only, best-effort snapshots. Bound both buffers and line counts so
+ * diagnostics remain usable when allocations are already failing. */
+static void
+chimera_io_uring_log_resource_file(const char *path)
+{
+    char  line[512];
+    FILE *file = fopen(path, "r");
+
+    if (!file) {
+        chimera_io_uring_error("io_uring resource snapshot %s: %s", path, strerror(errno));
+        return;
+    }
+    for (unsigned int i = 0; i < 64 && fgets(line, sizeof(line), file); i++) {
+        line[strcspn(line, "\n")] = '\0';
+        chimera_io_uring_error("io_uring resource snapshot %s: %s", path, line);
+    }
+    fclose(file);
+} /* chimera_io_uring_log_resource_file */
+
+static void
+chimera_io_uring_log_cgroup_memory(const char *directory)
+{
+    const char *files[] = { "memory.current", "memory.max", "memory.peak", "memory.events" };
+    char        path[PATH_MAX];
+
+    for (unsigned int i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        int len = snprintf(path, sizeof(path), "%s/%s", directory, files[i]);
+
+        if (len > 0 && (size_t) len < sizeof(path)) {
+            chimera_io_uring_log_resource_file(path);
+        }
+    }
+} /* chimera_io_uring_log_cgroup_memory */
+
+static void
+chimera_io_uring_log_init_failure(
+    const char                   *kind,
+    unsigned int                  entries,
+    unsigned int                  max_inflight,
+    const struct io_uring_params *params,
+    int                           rc)
+{
+    char  line[PATH_MAX];
+    char  directory[PATH_MAX];
+    FILE *file;
+
+    chimera_io_uring_error(
+        "io_uring %s queue initialization failed: entries=%u max_inflight=%u flags=0x%x wq_fd=%u rc=%d (%s)",
+        kind, entries, max_inflight, params->flags, params->wq_fd, rc, strerror(-rc));
+    if (rc != -ENOMEM) {
+        return;
+    }
+
+    chimera_io_uring_log_resource_file("/proc/meminfo");
+    chimera_io_uring_log_resource_file("/proc/self/status");
+    chimera_io_uring_log_resource_file("/proc/self/limits");
+    chimera_io_uring_log_resource_file("/proc/self/cgroup");
+
+    /* Hosted CI uses cgroup v2 at the conventional mountpoint. Capture its
+     * visible root (the container limit in a cgroup namespace) and, when the
+     * process is in a child group, that group's counters too. Membership is
+     * logged above even on hosts with v1 or a nonstandard mount layout. */
+    chimera_io_uring_log_cgroup_memory("/sys/fs/cgroup");
+    file = fopen("/proc/self/cgroup", "r");
+    if (!file) {
+        return;
+    }
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "0::/", 4) == 0) {
+            int len;
+
+            line[strcspn(line, "\n")] = '\0';
+            if (strcmp(line + 3, "/") == 0) {
+                break;
+            }
+            len = snprintf(directory, sizeof(directory), "/sys/fs/cgroup%s", line + 3);
+            if (len > 0 && (size_t) len < sizeof(directory)) {
+                chimera_io_uring_log_cgroup_memory(directory);
+            }
+            break;
+        }
+    }
+    fclose(file);
+} /* chimera_io_uring_log_init_failure */
+
 static void *
 chimera_io_uring_init(
     const char                *cfgdata,
@@ -335,6 +421,7 @@ chimera_io_uring_init(
     rc = io_uring_queue_init_params(256, &shared->ring, &params);
 
     if (rc < 0) {
+        chimera_io_uring_log_init_failure("shared", 256, shared->max_inflight, &params, rc);
         chimera_io_uring_error("Failed to create shared io_uring queue, io_uring disabled: %s", strerror(-rc));
         free(shared);
         return NULL;
@@ -1161,6 +1248,11 @@ chimera_io_uring_thread_init(
 
     // Initialize io_uring with params
     rc = io_uring_queue_init_params(4 * thread->max_inflight, &thread->ring, &params);
+
+    if (rc < 0) {
+        chimera_io_uring_log_init_failure("worker", 4 * thread->max_inflight,
+                                          thread->max_inflight, &params, rc);
+    }
 
     chimera_io_uring_abort_if(rc < 0, "Failed to create io_uring queue (%u entries, %u max_inflight): %s",
                               4 * shared->max_inflight, shared->max_inflight, strerror(-rc));

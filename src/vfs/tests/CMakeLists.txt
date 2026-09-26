@@ -21,6 +21,12 @@ if(CHIMERA_VFS_IO_URING AND CHIMERA_LIMITS_TESTING)
     add_test(NAME chimera/vfs/io_uring_sizing
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
                 $<TARGET_FILE:vfs_io_uring_sizing_test>)
+    add_executable(vfs_io_uring_diagnostics_test vfs_io_uring_diagnostics_test.c)
+    target_link_libraries(vfs_io_uring_diagnostics_test
+        chimera_vfs_io_uring chimera_vfs evpl uring ${CMAKE_DL_LIBS})
+    add_test(NAME chimera/vfs/io_uring_diagnostics
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
+                $<TARGET_FILE:vfs_io_uring_diagnostics_test>)
     set(CHIMERA_TEST_TIER "${_sizing_saved_tier}")
 endif()
 
