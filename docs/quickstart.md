@@ -67,7 +67,7 @@ aws --endpoint-url http://localhost:5000 s3 ls s3://export/
 aws --endpoint-url http://localhost:5000 s3 ls s3://memfs/
 
 # Admin REST API
-curl http://localhost:8080/api/v1/exports
+curl http://localhost:8080/api/core/v1/exports
 
 # Metrics
 curl http://localhost:9000/metrics

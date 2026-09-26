@@ -7,14 +7,18 @@ permalink: /api-reference
 
 # REST API Reference
 
+Load the `core` module explicitly to enable administration, and `docs` for live
+documentation; see [REST module SDK](rest-module-sdk.md). All core URLs start
+with `/api/core/v1/`.
+
 Chimera exposes a REST API for server administration: managing builtin users, VFS
 mounts, NFS exports, SMB shares, and S3 buckets. This page documents every endpoint
 and its arguments.
 
 The same API is also available interactively:
 
-- **Swagger UI** (live, served by the daemon): `http://<host>:8080/api/docs`
-- **OpenAPI spec** (live): `http://<host>:8080/api/openapi.json`
+- **Swagger UI** (live, served by the daemon): `http://<host>:8080/api/docs/v1`
+- **OpenAPI spec** (live): `http://<host>:8080/api/docs/v1/openapi.json`
 - **ReDoc** (static): [api.html](api.html), rendered from
   [openapi.json](openapi.json)
 
@@ -22,10 +26,10 @@ The same API is also available interactively:
 
 | Property        | Value                                                       |
 |-----------------|-------------------------------------------------------------|
-| Base URL        | `http://<host>:8080/api/v1`                                 |
+| Base URL        | `http://<host>:8080/api/core/v1`                                 |
 | Admin REST port | `8080` (see [Quick Start](quickstart))                      |
 | Content type    | `application/json` for request and response bodies          |
-| Authentication  | None (the admin API is unauthenticated)                     |
+| Authentication  | Bearer token or HTTP Basic by default; login/version/docs are public                     |
 | Max request body| 65536 bytes for `POST` bodies                               |
 
 ### Status codes
@@ -69,7 +73,7 @@ Users are stored in the VFS user cache. Those created through this API are "pinn
 ### List users
 
 ```
-GET /api/v1/users
+GET /api/core/v1/users
 ```
 
 Returns an array of user objects.
@@ -97,13 +101,13 @@ Returns an array of user objects.
 | `gids`     | array<integer> | Supplementary group IDs              |
 
 ```bash
-curl http://localhost:8080/api/v1/users
+curl http://localhost:8080/api/core/v1/users
 ```
 
 ### Get user
 
 ```
-GET /api/v1/users/{username}
+GET /api/core/v1/users/{username}
 ```
 
 | Path parameter | Type   | Description           |
@@ -115,13 +119,13 @@ GET /api/v1/users/{username}
 **Errors:** `404` if the user does not exist.
 
 ```bash
-curl http://localhost:8080/api/v1/users/alice
+curl http://localhost:8080/api/core/v1/users/alice
 ```
 
 ### Create user
 
 ```
-POST /api/v1/users
+POST /api/core/v1/users
 ```
 
 **Request body**
@@ -145,7 +149,7 @@ POST /api/v1/users
 `500` (creation failed).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/users \
+curl -X POST http://localhost:8080/api/core/v1/users \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","uid":1000,"gid":1000,"gids":[1000,27,44]}'
 ```
@@ -153,7 +157,7 @@ curl -X POST http://localhost:8080/api/v1/users \
 ### Delete user
 
 ```
-DELETE /api/v1/users/{username}
+DELETE /api/core/v1/users/{username}
 ```
 
 | Path parameter | Type   | Description      |
@@ -165,7 +169,7 @@ DELETE /api/v1/users/{username}
 **Errors:** `404` if the user does not exist.
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/users/alice
+curl -X DELETE http://localhost:8080/api/core/v1/users/alice
 ```
 
 ---
@@ -180,7 +184,7 @@ because the NFSv4 pseudo-root could not present it to clients.
 ### List exports
 
 ```
-GET /api/v1/exports
+GET /api/core/v1/exports
 ```
 
 **Response `200`**
@@ -211,13 +215,13 @@ GET /api/v1/exports
 | `sec`       | array  | Allowed RPC security flavors (`sys`/`krb5`/`krb5i`/`krb5p`); present only when a restriction is configured, absent means any flavor |
 
 ```bash
-curl http://localhost:8080/api/v1/exports
+curl http://localhost:8080/api/core/v1/exports
 ```
 
 ### Get export
 
 ```
-GET /api/v1/exports/{name}
+GET /api/core/v1/exports/{name}
 ```
 
 | Path parameter | Type   | Description     |
@@ -231,13 +235,13 @@ plus `sec` when a security-flavor restriction is configured).
 **Errors:** `404` if the export does not exist.
 
 ```bash
-curl http://localhost:8080/api/v1/exports/export
+curl http://localhost:8080/api/core/v1/exports/export
 ```
 
 ### Create export
 
 ```
-POST /api/v1/exports
+POST /api/core/v1/exports
 ```
 
 **Request body**
@@ -268,7 +272,7 @@ already in use, or the `nfs_max_exports` limit is reached), `500`
 (creation failed).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/exports \
+curl -X POST http://localhost:8080/api/core/v1/exports \
   -H "Content-Type: application/json" \
   -d '{"name":"export","path":"/memfs/export","export_id":7,"access":"ro","squash":"root"}'
 ```
@@ -276,7 +280,7 @@ curl -X POST http://localhost:8080/api/v1/exports \
 ### Delete export
 
 ```
-DELETE /api/v1/exports/{name}
+DELETE /api/core/v1/exports/{name}
 ```
 
 | Path parameter | Type   | Description    |
@@ -288,7 +292,7 @@ DELETE /api/v1/exports/{name}
 **Errors:** `404` if the export does not exist.
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/exports/export
+curl -X DELETE http://localhost:8080/api/core/v1/exports/export
 ```
 
 ---
@@ -300,7 +304,7 @@ SMB shares map a share name to a VFS path served over SMB2/SMB3.
 ### List shares
 
 ```
-GET /api/v1/shares
+GET /api/core/v1/shares
 ```
 
 **Response `200`**
@@ -317,13 +321,13 @@ GET /api/v1/shares
 | `path` | string | VFS path    |
 
 ```bash
-curl http://localhost:8080/api/v1/shares
+curl http://localhost:8080/api/core/v1/shares
 ```
 
 ### Get share
 
 ```
-GET /api/v1/shares/{name}
+GET /api/core/v1/shares/{name}
 ```
 
 | Path parameter | Type   | Description    |
@@ -335,13 +339,13 @@ GET /api/v1/shares/{name}
 **Errors:** `404` if the share does not exist.
 
 ```bash
-curl http://localhost:8080/api/v1/shares/export
+curl http://localhost:8080/api/core/v1/shares/export
 ```
 
 ### Create share
 
 ```
-POST /api/v1/shares
+POST /api/core/v1/shares
 ```
 
 **Request body**
@@ -360,7 +364,7 @@ POST /api/v1/shares
 **Errors:** `400` (invalid JSON, or missing `name`/`path`), `500` (creation failed).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/shares \
+curl -X POST http://localhost:8080/api/core/v1/shares \
   -H "Content-Type: application/json" \
   -d '{"name":"export","path":"/memfs/export"}'
 ```
@@ -368,7 +372,7 @@ curl -X POST http://localhost:8080/api/v1/shares \
 ### Delete share
 
 ```
-DELETE /api/v1/shares/{name}
+DELETE /api/core/v1/shares/{name}
 ```
 
 | Path parameter | Type   | Description   |
@@ -380,7 +384,7 @@ DELETE /api/v1/shares/{name}
 **Errors:** `404` if the share does not exist.
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/shares/export
+curl -X DELETE http://localhost:8080/api/core/v1/shares/export
 ```
 
 ---
@@ -392,7 +396,7 @@ S3 buckets map a bucket name to a VFS path served over the S3-compatible API.
 ### List buckets
 
 ```
-GET /api/v1/buckets
+GET /api/core/v1/buckets
 ```
 
 **Response `200`**
@@ -409,13 +413,13 @@ GET /api/v1/buckets
 | `path` | string | VFS path    |
 
 ```bash
-curl http://localhost:8080/api/v1/buckets
+curl http://localhost:8080/api/core/v1/buckets
 ```
 
 ### Get bucket
 
 ```
-GET /api/v1/buckets/{name}
+GET /api/core/v1/buckets/{name}
 ```
 
 | Path parameter | Type   | Description     |
@@ -427,13 +431,13 @@ GET /api/v1/buckets/{name}
 **Errors:** `404` if the bucket does not exist.
 
 ```bash
-curl http://localhost:8080/api/v1/buckets/export
+curl http://localhost:8080/api/core/v1/buckets/export
 ```
 
 ### Create bucket
 
 ```
-POST /api/v1/buckets
+POST /api/core/v1/buckets
 ```
 
 **Request body**
@@ -452,7 +456,7 @@ POST /api/v1/buckets
 **Errors:** `400` (invalid JSON, or missing `name`/`path`), `500` (creation failed).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/buckets \
+curl -X POST http://localhost:8080/api/core/v1/buckets \
   -H "Content-Type: application/json" \
   -d '{"name":"export","path":"/memfs/export"}'
 ```
@@ -460,7 +464,7 @@ curl -X POST http://localhost:8080/api/v1/buckets \
 ### Delete bucket
 
 ```
-DELETE /api/v1/buckets/{name}
+DELETE /api/core/v1/buckets/{name}
 ```
 
 | Path parameter | Type   | Description    |
@@ -472,7 +476,7 @@ DELETE /api/v1/buckets/{name}
 **Errors:** `404` if the bucket does not exist.
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/buckets/export
+curl -X DELETE http://localhost:8080/api/core/v1/buckets/export
 ```
 
 ---
@@ -486,7 +490,7 @@ options string; when present it is echoed back on reads.
 ### List mounts
 
 ```
-GET /api/v1/mounts
+GET /api/core/v1/mounts
 ```
 
 **Response `200`**
@@ -505,13 +509,13 @@ GET /api/v1/mounts
 | `options` | string | Options string; present only when the mount has options  |
 
 ```bash
-curl http://localhost:8080/api/v1/mounts
+curl http://localhost:8080/api/core/v1/mounts
 ```
 
 ### Get mount
 
 ```
-GET /api/v1/mounts/{name}
+GET /api/core/v1/mounts/{name}
 ```
 
 | Path parameter | Type   | Description   |
@@ -524,13 +528,13 @@ if the mount was created with options).
 **Errors:** `404` if the mount does not exist.
 
 ```bash
-curl http://localhost:8080/api/v1/mounts/share
+curl http://localhost:8080/api/core/v1/mounts/share
 ```
 
 ### Create mount
 
 ```
-POST /api/v1/mounts
+POST /api/core/v1/mounts
 ```
 
 **Request body**
@@ -553,7 +557,7 @@ POST /api/v1/mounts
 failed).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/mounts \
+curl -X POST http://localhost:8080/api/core/v1/mounts \
   -H "Content-Type: application/json" \
   -d '{"name":"share","module":"memfs","path":"/","options":"ro,foo=bar"}'
 ```
@@ -561,7 +565,7 @@ curl -X POST http://localhost:8080/api/v1/mounts \
 ### Delete mount
 
 ```
-DELETE /api/v1/mounts/{name}
+DELETE /api/core/v1/mounts/{name}
 ```
 
 | Path parameter | Type   | Description   |
@@ -573,7 +577,7 @@ DELETE /api/v1/mounts/{name}
 **Errors:** `404` if the mount does not exist.
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/mounts/share
+curl -X DELETE http://localhost:8080/api/core/v1/mounts/share
 ```
 
 The same operations are available from the `chimera-admin` CLI, where the create
@@ -587,12 +591,12 @@ chimera-admin mount create share --module memfs --path / --options ro,foo=bar
 
 ## Utility endpoints
 
-These endpoints live at the server root rather than under `/api/v1`.
+These endpoints live at the server root rather than under `/api/core/v1`.
 
 ### Version
 
 ```
-GET /version
+GET /api/core/v1/version
 ```
 
 **Response `200`**
@@ -602,25 +606,25 @@ GET /version
 ```
 
 ```bash
-curl http://localhost:8080/version
+curl http://localhost:8080/api/core/v1/version
 ```
 
 ### OpenAPI specification
 
 ```
-GET /api/openapi.json
+GET /api/docs/v1/openapi.json
 ```
 
-Returns the raw OpenAPI 3.0 document describing the `/api/v1` API.
+Returns the raw OpenAPI 3.0 document describing the `/api/core/v1` API.
 
 ### Swagger UI
 
 ```
-GET /api/docs
+GET /api/docs/v1
 ```
 
 Serves the interactive Swagger UI (with its bundled JS/CSS assets under
-`/api/docs/`).
+`/api/docs/v1/`).
 
 ### Global behavior
 

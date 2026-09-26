@@ -1,116 +1,130 @@
-// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-
-#include "evpl/evpl.h"
-#include "evpl/evpl_http.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
-/* These are defined in the generated swagger_embedded.c */
 extern const unsigned char swagger_index_html[];
 extern const unsigned int  swagger_index_html_len;
+
+static void
+docs_ui(
+    struct chimera_rest_request *request,
+    void                        *state)
+{
+    chimera_rest_reply(request, 200, "text/html; charset=utf-8", swagger_index_html, swagger_index_html_len);
+} /* docs_ui */
 extern const unsigned char swagger_ui_bundle_min_js[];
 extern const unsigned int  swagger_ui_bundle_min_js_len;
+
+static void
+docs_bundle(
+    struct chimera_rest_request *request,
+    void                        *state)
+{
+    chimera_rest_reply(request, 200, "application/javascript", swagger_ui_bundle_min_js, swagger_ui_bundle_min_js_len);
+} /* docs_bundle */
 extern const unsigned char swagger_ui_standalone_preset_min_js[];
 extern const unsigned int  swagger_ui_standalone_preset_min_js_len;
+
+static void
+docs_preset(
+    struct chimera_rest_request *request,
+    void                        *state)
+{
+    chimera_rest_reply(request, 200, "application/javascript", swagger_ui_standalone_preset_min_js,
+                       swagger_ui_standalone_preset_min_js_len);
+} /* docs_preset */
 extern const unsigned char swagger_ui_min_css[];
 extern const unsigned int  swagger_ui_min_css_len;
-extern const unsigned char openapi_json[];
-extern const unsigned int  openapi_json_len;
 
-void
-chimera_rest_handle_swagger_ui(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
+static void
+docs_css(
+    struct chimera_rest_request *request,
+    void                        *state)
 {
-    struct evpl_iovec iov;
+    chimera_rest_reply(request, 200, "text/css", swagger_ui_min_css, swagger_ui_min_css_len);
+} /* docs_css */
 
-    evpl_iovec_alloc(evpl, swagger_index_html_len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), swagger_index_html, swagger_index_html_len);
-    evpl_iovec_set_length(&iov, swagger_index_html_len);
-
-    evpl_http_request_add_header(request, "Content-Type",
-                                 "text/html; charset=utf-8");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, swagger_index_html_len);
-    evpl_http_server_dispatch_default(request, 200);
-} /* chimera_rest_handle_swagger_ui */
-
-void
-chimera_rest_handle_swagger_bundle_js(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
+static void
+docs_openapi(
+    struct chimera_rest_request *request,
+    void                        *state)
 {
-    struct evpl_iovec iov;
+    const char *body = request->thread->shared->openapi;
 
-    evpl_iovec_alloc(evpl, swagger_ui_bundle_min_js_len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), swagger_ui_bundle_min_js,
-           swagger_ui_bundle_min_js_len);
-    evpl_iovec_set_length(&iov, swagger_ui_bundle_min_js_len);
+    chimera_rest_reply(request, 200, "application/json", body, strlen(body));
+} /* docs_openapi */
 
-    evpl_http_request_add_header(request, "Content-Type",
-                                 "application/javascript");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, swagger_ui_bundle_min_js_len);
-    evpl_http_server_dispatch_default(request, 200);
-} /* chimera_rest_handle_swagger_bundle_js */
+static const struct chimera_rest_route        docs_route_ui = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "GET",
+    .path        = "/",
+    .flags       = CHIMERA_REST_PUBLIC,
+    .handle      = docs_ui,
+};
 
-void
-chimera_rest_handle_swagger_preset_js(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
+static const struct chimera_rest_route        docs_route_bundle = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "GET",
+    .path        = "/swagger-ui-bundle.min.js",
+    .flags       = CHIMERA_REST_PUBLIC,
+    .handle      = docs_bundle,
+};
+
+static const struct chimera_rest_route        docs_route_preset = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "GET",
+    .path        = "/swagger-ui-standalone-preset.min.js",
+    .flags       = CHIMERA_REST_PUBLIC,
+    .handle      = docs_preset,
+};
+
+static const struct chimera_rest_route        docs_route_css = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "GET",
+    .path        = "/swagger-ui.min.css",
+    .flags       = CHIMERA_REST_PUBLIC,
+    .handle      = docs_css,
+};
+
+static const struct chimera_rest_route        docs_route_openapi = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "GET",
+    .path        = "/openapi.json",
+    .flags       = CHIMERA_REST_PUBLIC,
+    .handle      = docs_openapi,
+};
+
+static const struct chimera_rest_route        docs_route_index = {
+    .struct_size = sizeof(struct chimera_rest_route),
+    .method      = "GET",
+    .path        = "",
+    .flags       = CHIMERA_REST_PUBLIC,
+    .handle      = docs_ui,
+};
+
+static const struct chimera_rest_route *const docs_routes[] = {
+    &docs_route_ui,
+    &docs_route_bundle,
+    &docs_route_preset,
+    &docs_route_css,
+    &docs_route_openapi,
+    &docs_route_index,
+};
+const struct chimera_rest_module              chimera_rest_docs_module = {
+    .abi_version = CHIMERA_REST_ABI_VERSION,
+    .struct_size = sizeof(struct chimera_rest_module),
+    .name        = "docs",
+    .api_version = 1,
+    .routes      = docs_routes,
+    .num_routes  = sizeof(docs_routes) / sizeof(docs_routes[0]),
+};
+
+CHIMERA_REST_EXPORT const struct chimera_rest_module *
+chimera_rest_module_get_v1(void)
 {
-    struct evpl_iovec iov;
-
-    evpl_iovec_alloc(evpl, swagger_ui_standalone_preset_min_js_len, 0, 1, 0,
-                     &iov);
-    memcpy(evpl_iovec_data(&iov), swagger_ui_standalone_preset_min_js,
-           swagger_ui_standalone_preset_min_js_len);
-    evpl_iovec_set_length(&iov, swagger_ui_standalone_preset_min_js_len);
-
-    evpl_http_request_add_header(request, "Content-Type",
-                                 "application/javascript");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request,
-                                         swagger_ui_standalone_preset_min_js_len
-                                         );
-    evpl_http_server_dispatch_default(request, 200);
-} /* chimera_rest_handle_swagger_preset_js */
-
-void
-chimera_rest_handle_swagger_css(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
-{
-    struct evpl_iovec iov;
-
-    evpl_iovec_alloc(evpl, swagger_ui_min_css_len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), swagger_ui_min_css, swagger_ui_min_css_len);
-    evpl_iovec_set_length(&iov, swagger_ui_min_css_len);
-
-    evpl_http_request_add_header(request, "Content-Type", "text/css");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, swagger_ui_min_css_len);
-    evpl_http_server_dispatch_default(request, 200);
-} /* chimera_rest_handle_swagger_css */
-
-void
-chimera_rest_handle_openapi_json(
-    struct evpl              *evpl,
-    struct evpl_http_request *request)
-{
-    struct evpl_iovec iov;
-
-    evpl_iovec_alloc(evpl, openapi_json_len, 0, 1, 0, &iov);
-    memcpy(evpl_iovec_data(&iov), openapi_json, openapi_json_len);
-    evpl_iovec_set_length(&iov, openapi_json_len);
-
-    evpl_http_request_add_header(request, "Content-Type", "application/json");
-    evpl_http_request_add_datav(request, &iov, 1);
-    evpl_http_server_set_response_length(request, openapi_json_len);
-    evpl_http_server_dispatch_default(request, 200);
-} /* chimera_rest_handle_openapi_json */
+    return &chimera_rest_docs_module;
+} /* chimera_rest_module_get_v1 */

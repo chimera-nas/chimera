@@ -20,6 +20,7 @@
 #include "server/server.h"
 #include "server/nfs/nfs.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 
 struct export_list_ctx {
@@ -29,8 +30,8 @@ struct export_list_ctx {
 /* Populate every export field except the name (path, export_id, access
  * mode, squash, anon ids, sec) into obj.  Shared with the config serializer
  * (rest_config.c), whose entries are keyed by export name, so the export
- * objects returned by /api/v1/exports and the exports section of
- * /api/v1/config cannot drift apart. */
+ * objects returned by /api/core/v1/exports and the exports section of
+ * /api/core/v1/config cannot drift apart. */
 void
 chimera_rest_export_options_to_json(
     const struct chimera_nfs_export *export,
@@ -101,9 +102,9 @@ export_to_json_callback(
 
 void
 chimera_rest_handle_exports_list(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread)
 {
     struct export_list_ctx ctx;
 
@@ -117,10 +118,10 @@ chimera_rest_handle_exports_list(
 
 void
 chimera_rest_handle_exports_get(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *name)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *name)
 {
     const struct chimera_nfs_export *export;
     json_t                          *obj;
@@ -142,11 +143,11 @@ chimera_rest_handle_exports_get(
 
 void
 chimera_rest_handle_exports_create(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t                        *root;
     json_error_t                   error;
@@ -381,10 +382,10 @@ chimera_rest_handle_exports_create(
 
 void
 chimera_rest_handle_exports_delete(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *name)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *name)
 {
     int rc;
 
@@ -396,5 +397,5 @@ chimera_rest_handle_exports_delete(
         return;
     }
 
-    evpl_http_server_dispatch_default(request, 204);
+    chimera_rest_reply(request, 204, NULL, NULL, 0);
 } /* chimera_rest_handle_exports_delete */

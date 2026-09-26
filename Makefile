@@ -129,6 +129,7 @@ reuse-lint:
 .PHONY: sdk-include-check
 sdk-include-check:
 	@bash scripts/check_vfs_sdk_includes.sh
+	@bash scripts/check_rest_sdk_includes.sh
 
 .PHONY: check
 check: syntax-check sdk-include-check build_release test_release build_debug test_debug build_clang reuse-lint copyright-check

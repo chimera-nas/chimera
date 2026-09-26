@@ -13,7 +13,7 @@
  *   5. Public endpoints work without token
  *   6. Invalid/garbage token returns 401
  *   7. Protected endpoints succeed with valid HTTP Basic credentials
- *   8. The test-only /api/v1/debug/fsop endpoint is also protected by auth
+ *   8. The test-only /api/debug/v1/fsop endpoint is also protected by auth
  */
 
 #include "common/logging.h"
@@ -148,9 +148,11 @@ main(
 
     config = chimera_server_config_init();
     chimera_server_config_set_rest_http_port(config, REST_PORT);
+    chimera_server_config_add_rest_module(config, "core", NULL, NULL, 1);
+    chimera_server_config_add_rest_module(config, "docs", NULL, NULL, 1);
     /* Enable the test-only debug/fsop endpoint so we can verify it stays
      * reachable without credentials (it drives pynfs delegation recalls). */
-    chimera_server_config_set_rest_debug_fsops(config, 1);
+    chimera_server_config_add_rest_module(config, "debug", NULL, NULL, 0);
 
     server = chimera_server_init(config, metrics);
     if (!server) {
@@ -176,27 +178,27 @@ main(
 
     /* ===== Test 1: Protected endpoints return 401 without token ===== */
     fprintf(stderr, "\n  Test: Protected endpoints require auth...\n");
-    rc = curl_get_code("GET", "/api/v1/users", NULL, NULL, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/users", NULL, NULL, &http_code);
     if (rc == 0 && http_code == 401) {
-        test_pass("GET /api/v1/users without token returns 401");
+        test_pass("GET /api/core/v1/users without token returns 401");
     } else {
-        test_fail("GET /api/v1/users without token should return 401");
+        test_fail("GET /api/core/v1/users without token should return 401");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/v1/shares", NULL, NULL, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/shares", NULL, NULL, &http_code);
     if (rc == 0 && http_code == 401) {
-        test_pass("GET /api/v1/shares without token returns 401");
+        test_pass("GET /api/core/v1/shares without token returns 401");
     } else {
-        test_fail("GET /api/v1/shares without token should return 401");
+        test_fail("GET /api/core/v1/shares without token should return 401");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
     /* ===== Test 2: Login with bad credentials returns 401 ===== */
     fprintf(stderr, "\n  Test: Bad credentials rejected...\n");
-    rc = curl_get_code("POST", "/api/v1/auth/login",
+    rc = curl_get_code("POST", "/api/core/v1/auth/login",
                        "{\"username\":\"admin\",\"password\":\"wrong\"}",
                        NULL, &http_code);
     if (rc == 0 && http_code == 401) {
@@ -207,7 +209,7 @@ main(
         failures++;
     }
 
-    rc = curl_get_code("POST", "/api/v1/auth/login",
+    rc = curl_get_code("POST", "/api/core/v1/auth/login",
                        "{\"username\":\"nouser\",\"password\":\"nopass\"}",
                        NULL, &http_code);
     if (rc == 0 && http_code == 401) {
@@ -226,7 +228,7 @@ main(
                  "{\"username\":\"%s\",\"password\":\"%s\"}",
                  ADMIN_USER, ADMIN_PASS);
 
-        rc = curl_get_body("POST", "/api/v1/auth/login",
+        rc = curl_get_body("POST", "/api/core/v1/auth/login",
                            login_body, NULL,
                            response, sizeof(response), &http_code);
         if (rc == 0 && http_code == 200) {
@@ -250,74 +252,74 @@ main(
 
     /* ===== Test 4: Protected endpoints succeed with valid Bearer token === */
     fprintf(stderr, "\n  Test: Authenticated requests succeed...\n");
-    rc = curl_get_code("GET", "/api/v1/users", NULL, token, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/users", NULL, token, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("GET /api/v1/users with token returns 200");
+        test_pass("GET /api/core/v1/users with token returns 200");
     } else {
-        test_fail("GET /api/v1/users with token should return 200");
+        test_fail("GET /api/core/v1/users with token should return 200");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/v1/shares", NULL, token, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/shares", NULL, token, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("GET /api/v1/shares with token returns 200");
+        test_pass("GET /api/core/v1/shares with token returns 200");
     } else {
-        test_fail("GET /api/v1/shares with token should return 200");
+        test_fail("GET /api/core/v1/shares with token should return 200");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/v1/exports", NULL, token, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/exports", NULL, token, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("GET /api/v1/exports with token returns 200");
+        test_pass("GET /api/core/v1/exports with token returns 200");
     } else {
-        test_fail("GET /api/v1/exports with token should return 200");
+        test_fail("GET /api/core/v1/exports with token should return 200");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/v1/buckets", NULL, token, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/buckets", NULL, token, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("GET /api/v1/buckets with token returns 200");
+        test_pass("GET /api/core/v1/buckets with token returns 200");
     } else {
-        test_fail("GET /api/v1/buckets with token should return 200");
+        test_fail("GET /api/core/v1/buckets with token should return 200");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
     /* ===== Test 5: Public endpoints work without token ===== */
     fprintf(stderr, "\n  Test: Public endpoints don't require auth...\n");
-    rc = curl_get_code("GET", "/version", NULL, NULL, &http_code);
+    rc = curl_get_code("GET", "/api/core/v1/version", NULL, NULL, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("/version accessible without token");
+        test_pass("/api/core/v1/version accessible without token");
     } else {
-        test_fail("/version should be accessible without token");
+        test_fail("/api/core/v1/version should be accessible without token");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/openapi.json", NULL, NULL, &http_code);
+    rc = curl_get_code("GET", "/api/docs/v1/openapi.json", NULL, NULL, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("/api/openapi.json accessible without token");
+        test_pass("/api/docs/v1/openapi.json accessible without token");
     } else {
-        test_fail("/api/openapi.json should be accessible without token");
+        test_fail("/api/docs/v1/openapi.json should be accessible without token");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/docs", NULL, NULL, &http_code);
+    rc = curl_get_code("GET", "/api/docs/v1", NULL, NULL, &http_code);
     if (rc == 0 && http_code == 200) {
-        test_pass("/api/docs accessible without token");
+        test_pass("/api/docs/v1 accessible without token");
     } else {
-        test_fail("/api/docs should be accessible without token");
+        test_fail("/api/docs/v1 should be accessible without token");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }
 
     /* ===== Test 6: Invalid/garbage token returns 401 ===== */
     fprintf(stderr, "\n  Test: Invalid tokens rejected...\n");
-    rc = curl_get_code("GET", "/api/v1/users", NULL,
+    rc = curl_get_code("GET", "/api/core/v1/users", NULL,
                        "garbage.token.here", &http_code);
     if (rc == 0 && http_code == 401) {
         test_pass("Garbage token returns 401");
@@ -327,7 +329,7 @@ main(
         failures++;
     }
 
-    rc = curl_get_code("GET", "/api/v1/users", NULL,
+    rc = curl_get_code("GET", "/api/core/v1/users", NULL,
                        "not-a-jwt", &http_code);
     if (rc == 0 && http_code == 401) {
         test_pass("Non-JWT string returns 401");
@@ -343,37 +345,37 @@ main(
         char userpass[256];
 
         snprintf(userpass, sizeof(userpass), "%s:%s", ADMIN_USER, ADMIN_PASS);
-        rc = curl_get_code_basic("GET", "/api/v1/users", userpass, &http_code);
+        rc = curl_get_code_basic("GET", "/api/core/v1/users", userpass, &http_code);
         if (rc == 0 && http_code == 200) {
-            test_pass("GET /api/v1/users with valid Basic creds returns 200");
+            test_pass("GET /api/core/v1/users with valid Basic creds returns 200");
         } else {
-            test_fail("GET /api/v1/users with valid Basic creds should return 200");
+            test_fail("GET /api/core/v1/users with valid Basic creds should return 200");
             fprintf(stderr, "    Got: %ld\n", http_code);
             failures++;
         }
 
         snprintf(userpass, sizeof(userpass), "%s:%s", ADMIN_USER, "wrongpass");
-        rc = curl_get_code_basic("GET", "/api/v1/users", userpass, &http_code);
+        rc = curl_get_code_basic("GET", "/api/core/v1/users", userpass, &http_code);
         if (rc == 0 && http_code == 401) {
-            test_pass("GET /api/v1/users with bad Basic password returns 401");
+            test_pass("GET /api/core/v1/users with bad Basic password returns 401");
         } else {
-            test_fail("GET /api/v1/users with bad Basic password should return 401");
+            test_fail("GET /api/core/v1/users with bad Basic password should return 401");
             fprintf(stderr, "    Got: %ld\n", http_code);
             failures++;
         }
     }
 
-    /* ===== Test 8: debug/fsop is protected like any other /api/v1 route ===== */
-    /* The endpoint is exposed here (rest_debug_fsops enabled) but is not
+    /* ===== Test 8: debug/fsop is protected like any other /api/core/v1 route ===== */
+    /* The endpoint is exposed here (debug module loaded) but is not
      * specially exempt from auth: when auth is on it still requires
      * credentials. The pynfs DELEG16-20 deleg config disables auth wholesale
      * (rest_auth_enabled=false) rather than relying on a per-endpoint carve-out. */
-    fprintf(stderr, "\n  Test: /api/v1/debug/fsop requires auth when enabled...\n");
-    rc = curl_get_code("POST", "/api/v1/debug/fsop", "{}", NULL, &http_code);
+    fprintf(stderr, "\n  Test: /api/debug/v1/fsop requires auth when enabled...\n");
+    rc = curl_get_code("POST", "/api/debug/v1/fsop", "{}", NULL, &http_code);
     if (rc == 0 && http_code == 401) {
-        test_pass("POST /api/v1/debug/fsop without creds returns 401");
+        test_pass("POST /api/debug/v1/fsop without creds returns 401");
     } else {
-        test_fail("POST /api/v1/debug/fsop without creds should return 401");
+        test_fail("POST /api/debug/v1/fsop without creds should return 401");
         fprintf(stderr, "    Got: %ld\n", http_code);
         failures++;
     }

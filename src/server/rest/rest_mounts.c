@@ -13,6 +13,7 @@
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/vfs_procs.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 /* ======================== VFS Mounts ======================== */
 
@@ -52,9 +53,9 @@ mount_to_json_callback(
 
 void
 chimera_rest_handle_mounts_list(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread)
 {
     struct mount_list_ctx ctx;
 
@@ -104,10 +105,10 @@ mount_get_callback(
 
 void
 chimera_rest_handle_mounts_get(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *name)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *name)
 {
     struct mount_get_ctx ctx;
     const char          *path = name;
@@ -166,9 +167,9 @@ mount_exists_callback(
 } /* mount_exists_callback */
 
 struct mount_create_ctx {
-    struct evpl              *evpl;
-    struct evpl_http_request *request;
-    json_t                   *root;
+    struct evpl                 *evpl;
+    struct chimera_rest_request *request;
+    json_t                      *root;
 };
 
 static void
@@ -221,11 +222,11 @@ mount_create_complete(
 
 void
 chimera_rest_handle_mounts_create(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t                  *root;
     json_error_t             error;
@@ -312,8 +313,8 @@ chimera_rest_handle_mounts_create(
 } /* chimera_rest_handle_mounts_create */
 
 struct mount_delete_ctx {
-    struct evpl              *evpl;
-    struct evpl_http_request *request;
+    struct evpl                 *evpl;
+    struct chimera_rest_request *request;
 };
 
 static void
@@ -335,7 +336,7 @@ mount_delete_complete(
                                 "Internal Server Error",
                                 "Failed to delete mount");
     } else {
-        evpl_http_server_dispatch_default(ctx->request, 204);
+        chimera_rest_reply(ctx->request, 204, NULL, NULL, 0);
     }
 
     free(ctx);
@@ -343,10 +344,10 @@ mount_delete_complete(
 
 void
 chimera_rest_handle_mounts_delete(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *name)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *name)
 {
     struct mount_delete_ctx *ctx;
 

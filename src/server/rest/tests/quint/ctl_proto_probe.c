@@ -232,9 +232,9 @@ main(
     r = mbt_mnt(&env, "/e0");
     ck_nfs(r->status, MNT3ERR_NOENT, "P1/mnt-unknown-export-is-noent");
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/filesystems",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/filesystems",
             "{\"module\":\"memfs\",\"name\":\"fs0\"}", 201, "create fs0");
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/mounts",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/mounts",
             "{\"name\":\"m0\",\"module\":\"memfs\",\"path\":\"fs0\"}", 201,
             "mount m0");
 
@@ -242,7 +242,7 @@ main(
     r = mbt_mnt(&env, "/m0");
     ck_nfs(r->status, MNT3ERR_NOENT, "P1/mnt-mount-without-export-is-noent");
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/exports",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/exports",
             "{\"name\":\"/e0\",\"path\":\"/m0\",\"access\":\"rw\"}", 201,
             "export e0");
 
@@ -257,7 +257,7 @@ main(
 
     /* ============ P2: deleting an export vs. live filehandles ========== */
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/v1/exports//e0", NULL,
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/core/v1/exports//e0", NULL,
             204, "delete e0");
 
     /* Reachability by name is gone immediately -- that part is not in doubt. */
@@ -278,13 +278,13 @@ main(
                  "nothing, so the inner VFS handle still resolves");
 
     /* Recreate it so the rest of the probe has a working export. */
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/exports",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/exports",
             "{\"name\":\"/e0\",\"path\":\"/m0\",\"access\":\"rw\"}", 201,
             "recreate e0");
 
     /* ---- P2b: a read-only export, then deleted ------------------------ */
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/exports",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/exports",
             "{\"name\":\"/ro\",\"path\":\"/m0\",\"access\":\"ro\"}", 201,
             "export ro");
 
@@ -295,7 +295,7 @@ main(
     r = mbt_create(&env, &ro_root, "f", 1, UNCHECKED, 0644, NULL);
     ck_nfs(r->status, NFS3ERR_ROFS, "P2b/create-on-ro-export-is-rofs");
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/v1/exports//ro", NULL,
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/core/v1/exports//ro", NULL,
             204, "delete ro");
 
     /*
@@ -312,7 +312,7 @@ main(
 
     /* ---- P2c: a root-squashing export, then deleted -------------------- */
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/exports",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/exports",
             "{\"name\":\"/sq\",\"path\":\"/m0\",\"access\":\"rw\","
             "\"squash\":\"all\",\"anonuid\":65534,\"anongid\":65534}", 201,
             "export sq");
@@ -329,7 +329,7 @@ main(
        "P2c/squash-applies-anonuid",
        "the created file is not owned by anonuid");
 
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/v1/exports//sq", NULL,
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/core/v1/exports//sq", NULL,
             204, "delete sq");
 
     r = mbt_create(&env, &sq_root, "sq2", 3, UNCHECKED, 0644, NULL);
@@ -358,9 +358,9 @@ main(
     /* /e0 still exists from above; give it an explicit new identity by
      * deleting and recreating it with a pinned export_id.  The handle taken
      * before still carries the OLD id. */
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/v1/exports//e0", NULL,
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/core/v1/exports//e0", NULL,
             204, "delete e0 again");
-    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/v1/exports",
+    rest_ok(api, EVPL_HTTP_REQUEST_TYPE_POST, "/api/core/v1/exports",
             "{\"name\":\"/e0\",\"path\":\"/m0\",\"access\":\"ro\","
             "\"export_id\":4242}", 201, "recreate e0 read-only with id 4242");
 
@@ -383,12 +383,12 @@ main(
 
     /* ================= P3: referential integrity ======================= */
 
-    ctl_http(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/v1/mounts/m0", NULL,
+    ctl_http(api, EVPL_HTTP_REQUEST_TYPE_DELETE, "/api/core/v1/mounts/m0", NULL,
              &res);
     ck_http(&res, 409, "P3/mount-delete-refused-while-exported");
 
     ctl_http(api, EVPL_HTTP_REQUEST_TYPE_DELETE,
-             "/api/v1/filesystems/memfs/fs0", NULL, &res);
+             "/api/core/v1/filesystems/memfs/fs0", NULL, &res);
     ck_http(&res, 409, "P3/fs-delete-refused-while-mounted");
 
     /* And the mount survived both refusals, so NFS still works. */

@@ -866,6 +866,7 @@ endif()
 add_subdirectory(src)
 add_subdirectory(tools)
 add_subdirectory(examples/vfs_module)
+add_subdirectory(examples/rest_module)
 
 # Emit the corpus build edges -- one per model family, covering every cell the
 # quint suites registered above.  Must come after add_subdirectory(src): a
