@@ -643,6 +643,11 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     int                           use_nfs_rdma     = env->use_nfs_rdma;
 
     server_config = chimera_server_config_init();
+    /* Each VFS thread initializes every registered backend, including unused
+     * io_uring rings. Keep concurrent test processes sized to a fixture while
+     * retaining multiple workers for concurrency coverage. */
+    chimera_server_config_set_core_threads(server_config, 4);
+    chimera_server_config_set_sync_delegation_threads(server_config, 4);
     chimera_server_config_set_state_dir(server_config, env->session_dir);
 
     /* Serve over the in-process transport rather than a socket.  The client is
@@ -1000,6 +1005,12 @@ posix_test_init(
 
         posix_json_root   = json_object();
         posix_json_config = json_object();
+
+        /* The production client defaults to 16 core and 64 delegation
+         * threads. Four of each is sufficient for the POSIX fixtures; apply
+         * this before backend-specific overrides, including external modules. */
+        json_object_set_new(posix_json_config, "core_threads", json_integer(4));
+        json_object_set_new(posix_json_config, "sync_delegation_threads", json_integer(4));
 
         if (!is_nfs) {
             if (posix_test_is_ext_module(backend)) {
