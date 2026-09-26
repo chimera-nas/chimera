@@ -565,11 +565,14 @@ jobs:
           # process and takes an unrelated test with it.  The VFS backend has
           # separate rings: 256 in-flight requests reserve 1024 entries per
           # worker, down from 4096; the request limit shrinks with the ring.
+          # FUSE-over-io_uring entries reserve ~1 MiB each per CPU queue, so
+          # a FUSE mount keeps 2 per queue instead of 16.
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e CCACHE_MAXSIZE \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e CHIMERA_FUSE_URING_DEPTH=2 \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
@@ -764,11 +767,14 @@ jobs:
           # process and takes an unrelated test with it.  The VFS backend has
           # separate rings: 256 in-flight requests reserve 1024 entries per
           # worker, down from 4096; the request limit shrinks with the ring.
+          # FUSE-over-io_uring entries reserve ~1 MiB each per CPU queue, so
+          # a FUSE mount keeps 2 per queue instead of 16.
           docker run --rm --privileged \
             -e CATEGORY=${{ matrix.category }} \
             -e KVM_SHARDS="kvm-ubuntu2404 kvm-ubuntu2404-nfstest kvm-ubuntu2604 kvm-ubuntu2604-nfstest kvm-ubuntu2404_hwe kvm-ubuntu2204_hwe" \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e CHIMERA_FUSE_URING_DEPTH=2 \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -1253,10 +1259,13 @@ jobs:
           # process and takes an unrelated test with it.  The VFS backend has
           # separate rings: 256 in-flight requests reserve 1024 entries per
           # worker, down from 4096; the request limit shrinks with the ring.
+          # FUSE-over-io_uring entries reserve ~1 MiB each per CPU queue, so
+          # a FUSE mount keeps 2 per queue instead of 16.
           docker run --rm --privileged \
             -e SMBTORTURE_BACKENDS \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e CHIMERA_FUSE_URING_DEPTH=2 \
             -e SMBTORTURE_FILTER \
             -e SMBTORTURE_PARALLEL \
             -v "${{ github.workspace }}:/workspace" \
