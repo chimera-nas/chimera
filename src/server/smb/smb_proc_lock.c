@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
@@ -393,7 +394,8 @@ smb_lock_compound_prepare(
                         command->status = SMB2_STATUS_INVALID_PARAMETER;
                         break;
                     }
-                    if ((__uint128_t) lock->ranges[i].offset + lock->ranges[i].length > ((__uint128_t) 1 << 64)) {
+                    if (chimera_range_compare(chimera_range_end(lock->ranges[i].offset, lock->ranges[i].length),
+                                              chimera_range_eof()) > 0) {
                         command->status = SMB2_STATUS_INVALID_LOCK_RANGE;
                         break;
                     }
@@ -401,7 +403,8 @@ smb_lock_compound_prepare(
             } else if (request->lock.lock_count == 1) {
                 if (request->lock.l_flags != SMB2_LOCKFLAG_UNLOCK) {
                     command->status = SMB2_STATUS_INVALID_PARAMETER;
-                } else if ((__uint128_t) lock->ranges[0].offset + lock->ranges[0].length > ((__uint128_t) 1 << 64)) {
+                } else if (chimera_range_compare(chimera_range_end(lock->ranges[0].offset, lock->ranges[0].length),
+                                                 chimera_range_eof()) > 0) {
                     command->status = SMB2_STATUS_INVALID_LOCK_RANGE;
                 }
             }

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
@@ -2004,11 +2005,11 @@ chimera_vfs_claim_replacement_complete(struct chimera_vfs_file_state *file)
     chimera_vfs_claim_backend_reeval(file->state, file);
 } /* chimera_vfs_claim_replacement_complete */
 
-static __uint128_t
+static struct chimera_range_endpoint
 chimera_vfs_claim_range_end(const struct chimera_vfs_claim *claim)
 {
-    return claim->length == UINT64_MAX ? ((__uint128_t) 1 << 64) :
-           (__uint128_t) claim->offset + claim->length;
+    return claim->length == UINT64_MAX ? chimera_range_eof() :
+           chimera_range_end(claim->offset, claim->length);
 } /* chimera_vfs_claim_range_end */
 
 SYMBOL_EXPORT void
@@ -2047,21 +2048,22 @@ chimera_vfs_claim_range_publish(
         }
         /* A final interval may span several adjacent admitted fragments.
          * Validate the complete union before detaching any of its protection. */
-        __uint128_t cursor = claim->offset;
-        __uint128_t end    = chimera_vfs_claim_range_end(claim);
-        while (cursor < end) {
-            __uint128_t covered = cursor;
+        struct chimera_range_endpoint cursor = chimera_range_offset(claim->offset);
+        struct chimera_range_endpoint end    = chimera_vfs_claim_range_end(claim);
+        while (chimera_range_compare(cursor, end) < 0) {
+            struct chimera_range_endpoint covered = cursor;
             for (uint32_t j = 0; j < num_previous; j++) {
                 const struct chimera_vfs_claim *old = previous[j];
-                if (old->offset <= cursor && !(claim->used & ~old->used) &&
+                if (chimera_range_compare(chimera_range_offset(old->offset), cursor) <= 0 && !(claim->used & ~old->used)
+                    &&
                     !(claim->advertised & ~old->advertised) && !(claim->denied & ~old->denied)) {
-                    __uint128_t old_end = chimera_vfs_claim_range_end(old);
-                    if (old_end > covered) {
+                    struct chimera_range_endpoint old_end = chimera_vfs_claim_range_end(old);
+                    if (chimera_range_compare(old_end, covered) > 0) {
                         covered = old_end;
                     }
                 }
             }
-            chimera_vfs_abort_if(covered == cursor, "range publication: unreserved coverage");
+            chimera_vfs_abort_if(chimera_range_compare(covered, cursor) == 0, "range publication: unreserved coverage");
             cursor = covered;
         }
     }

@@ -841,7 +841,7 @@ main(void)
     struct packet          p      = { 0 };
     uint32_t               ok[]   = { ST_SUCCESS, ST_SUCCESS, ST_SUCCESS, ST_SUCCESS };
     struct smb2_env_opts   opts   = { .oplocks          = 1, .leases        = 1,
-                                      .directory_leases = 1, .named_streams = 1,.persistent_handles   = 1 };
+                                      .directory_leases = 1, .named_streams = 1, .persistent_handles   = 1 };
 
     smb2_env_start_opts(&env, &opts);
     struct smb2_conn      *c = smb2_conn_open(&env), *peer = smb2_conn_open(&env);

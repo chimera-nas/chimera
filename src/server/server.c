@@ -1340,7 +1340,10 @@ chimera_server_resolve_ipv4(
     char       *out_buf,
     size_t      out_size)
 {
-    struct addrinfo  hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
+    struct addrinfo  hints = {
+        .ai_family   = AF_INET,
+        .ai_socktype = SOCK_STREAM
+    };
     struct addrinfo *res;
     int              gai_rc;
 
@@ -1516,11 +1519,18 @@ chimera_server_config_set_smb_min_dialect(
      * SMB 2.1; SMB 2.0.2 is off by default because it lacks large-MTU/leasing
      * and is only needed by conformance cases that explicitly request it. */
     static const uint32_t all_dialects[] = {
+
         SMB2_DIALECT_2_0_2,
+
         SMB2_DIALECT_2_1,
+
         SMB2_DIALECT_3_0,
+
         SMB2_DIALECT_3_0_2,
+
         SMB2_DIALECT_3_1_1,
+
+
     };
     int                   n = 0;
 
@@ -1752,7 +1762,10 @@ chimera_server_mount(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 
@@ -1781,7 +1794,10 @@ chimera_server_mkfs(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 
@@ -1809,7 +1825,10 @@ chimera_server_rmfs(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 
@@ -2046,14 +2065,46 @@ struct chimera_seed_step {
 };
 
 static const struct chimera_seed_step chimera_seed_symlink_steps[] = {
-    { "SymlinkTest",      NULL,                   S_IFDIR | 0755                                              },
-    { "SymlinkTest/link", "target",               0                                                           },
-    { "badlink",          "nonexistent",          0                                                           },
+
+    {
+        "SymlinkTest",
+        NULL,
+        S_IFDIR | 0755
+    }
+    ,
+
+    {
+        "SymlinkTest/link",
+        "target",
+        0
+    }
+    ,
+
+    {
+        "badlink",
+        "nonexistent",
+        0
+    }
+    ,
+
+
 };
 
 static const struct chimera_seed_step chimera_seed_fsa_steps[] = {
-    { "ExistingFolder",   NULL,   S_IFDIR | 0755     },
-    { "ExistingFile.txt", NULL,   S_IFREG | 0644     },
+
+    {
+        "ExistingFolder",
+        NULL,
+        S_IFDIR | 0755
+    },
+
+    {
+        "ExistingFile.txt",
+        NULL,
+        S_IFREG | 0644
+    },
+
+
 };
 
 struct chimera_seed_ctx {
@@ -2277,7 +2328,10 @@ chimera_server_unmount(
 {
     struct evpl               *evpl;
     struct chimera_vfs_thread *thread;
-    struct mount_ctx           ctx = { .done = 0, .status = 0 };
+    struct mount_ctx           ctx = {
+        .done   = 0,
+        .status = 0
+    };
 
     evpl = evpl_create(NULL);
 

@@ -705,7 +705,7 @@ test_owned_native_gate(
     struct chimera_claim_actor      actor  = { .owner = { .proto = CHIMERA_CLAIM_PROTO_SMB2, .client_key = 456 } }
     ;
     struct chimera_vfs_module      *module       = dst->vfs_module;
-    unsigned int                    capabilities = module->capabilities;
+    uint64_t                        capabilities = module->capabilities;
 
     native_original       = module->dispatch;
     module->dispatch      = native_gate_dispatch;

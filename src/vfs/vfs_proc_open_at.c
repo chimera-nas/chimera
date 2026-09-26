@@ -276,6 +276,15 @@ chimera_vfs_open_at_hdl_callback(
         trunc->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
         trunc->va_size     = (request->open_at.original_flags & CHIMERA_VFS_OPEN_TRUNCATE)
             ? 0 : request->open_at.deferred_set_attr->va_size;
+        if (request->open_at.r_created) {
+            /* Applying a nonzero initial size must not overwrite explicit
+             * creation times (NFS exclusive verifiers live in those fields). */
+            const struct chimera_vfs_attrs *created = request->open_at.deferred_set_attr;
+            trunc->va_set_mask |= created->va_set_mask &
+                (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME);
+            trunc->va_atime = created->va_atime;
+            trunc->va_mtime = created->va_mtime;
+        }
         chimera_vfs_fsetattr(thread, request->cred, handle, trunc, 0,
                              request->open_at.r_attr.va_req_mask,
                              chimera_vfs_open_at_truncate_complete, request);

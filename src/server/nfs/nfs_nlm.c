@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include <string.h>
 #include <stdlib.h>
 #include "common/thread.h"
@@ -74,13 +75,13 @@ nlm_conn_peer_addr(
  * carve atomically so a partial unlock/downgrade never drops outside coverage.
  * The caller holds nlm_state.mutex and releases retired handles on its own
  * worker after dropping that mutex. Pending LOCK reservations are excluded. */
-static __uint128_t
+static struct chimera_range_endpoint
 nlm_range_end(
     uint64_t offset,
     uint64_t length)
 {
-    return !length || (__uint128_t) offset + length >= ((__uint128_t) 1 << 64)
-        ? ((__uint128_t) 1 << 64) : (__uint128_t) offset + length;
+    return !length || chimera_range_end(offset, length).carry
+        ? chimera_range_eof() : chimera_range_end(offset, length);
 } /* nlm_range_end */
 
 static bool
@@ -146,11 +147,11 @@ nlm_carve_locked(
     struct nlm_lock_entry           **retired,
     struct chimera_vfs_file_state   **changed)
 {
-    struct nlm_lock_entry     *entry, *next, *fragments = NULL;
-    struct chimera_vfs_claim **previous = client->carve_previous;
-    struct chimera_vfs_claim  *replacement[2];
-    uint32_t                   count = 0, nprevious = 0, nreplacement = 0;
-    __uint128_t                end = nlm_range_end(request->offset, request->length);
+    struct nlm_lock_entry        *entry, *next, *fragments = NULL;
+    struct chimera_vfs_claim    **previous = client->carve_previous;
+    struct chimera_vfs_claim     *replacement[2];
+    uint32_t                      count = 0, nprevious = 0, nreplacement = 0;
+    struct chimera_range_endpoint end = nlm_range_end(request->offset, request->length);
 
     *retired = NULL;
     *changed = NULL;
@@ -171,21 +172,21 @@ nlm_carve_locked(
             continue;
         }
         previous[nprevious++] = &entry->claim;
-        __uint128_t old_end = nlm_range_end(entry->offset, entry->length);
+        struct chimera_range_endpoint old_end = nlm_range_end(entry->offset, entry->length);
         for (int side = 0; side < 2; side++) {
-            uint64_t    start;
-            __uint128_t stop;
+            uint64_t                      start;
+            struct chimera_range_endpoint stop;
             if (!side) {
                 if (entry->offset >= request->offset) {
                     continue;
                 }
                 start = entry->offset;
-                stop  = request->offset;
+                stop  = chimera_range_offset(request->offset);
             } else {
-                if (old_end <= end) {
+                if (chimera_range_compare(old_end, end) <= 0) {
                     continue;
                 }
-                start = (uint64_t) end;
+                start = end.value;
                 stop  = old_end;
             }
             chimera_nfs_abort_if(nreplacement >= 2, "NLM owner ranges not normalized");
@@ -201,7 +202,7 @@ nlm_carve_locked(
             fragment->svid       = entry->svid;
             fragment->exclusive  = entry->exclusive;
             fragment->offset     = start;
-            fragment->length     = stop == ((__uint128_t) 1 << 64) ? 0 : (uint64_t) (stop - start);
+            fragment->length     = stop.carry ? 0 : (stop.value - start);
             fragment->handle     = entry->handle;
             fragment->file_state = entry->file_state;
             chimera_vfs_claim_init_range(&fragment->claim, fragment->exclusive,

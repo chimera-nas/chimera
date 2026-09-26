@@ -8353,23 +8353,48 @@ smb_create_recall_start(
     struct chimera_vfs_state         *state   = thread->vfs_thread->vfs->vfs_state;
     struct smb_create_attempt        *attempt = command->private_data;
     struct chimera_claim_actor        actor   = {
-        .owner                             = { .proto =
-                                                   CHIMERA_CLAIM_PROTO_SMB2,
-                                               .client_key
-                                                   = request->session_handle
-                                                       ->session->
-                                                       client_key,
-                                               .owner_lo
-                                                   = command->open->file_id.
-                                                       pid,
-                                               .owner_hi
-                                                   = command->open->
-                                                       file_id.vid },
-        .op_handle                         = chimera_vfs_compound_op
-                (compound,
-                attempt
-                ->open_op)->
-            out_handle,
+        .owner
+            = { .
+                proto
+                    =
+                        CHIMERA_CLAIM_PROTO_SMB2,
+                .
+                client_key
+                    =
+                        request
+                        ->
+                        session_handle
+                        ->
+                        session
+                        ->
+                        client_key,
+                .
+                owner_lo
+                    =
+                        command
+                        ->
+                        open
+                        ->
+                        file_id
+                        .
+                        pid,
+                .
+                owner_hi
+                    =
+                        command
+                        ->
+                        open
+                        ->
+                        file_id
+                        .
+                        vid },
+        .op_handle
+            =
+                chimera_vfs_compound_op
+                    (compound,
+                    attempt
+                    ->open_op)->
+                out_handle,
     };
 
     if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {

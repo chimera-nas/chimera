@@ -95,3 +95,7 @@ if(WIN32)
     add_test(NAME chimera/native/watchdog_expire COMMAND native_watchdog_test expire)
     set_tests_properties(chimera/native/watchdog_expire PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
 endif()
+
+add_executable(native_range_test range_test.c)
+target_include_directories(native_range_test PRIVATE "${CHIMERA_SOURCE_ROOT}/src")
+add_test(NAME chimera/native/range COMMAND native_range_test)

@@ -340,18 +340,18 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_CAP_WRITE_SAME             (1U << 28)
 /* REMOVE_AT atomically compares child_fh before unlinking and reports
  * r_unmatched without removing a replacement name. No lookup/remove fallback. */
-#define CHIMERA_VFS_CAP_REMOVE_MATCH_FH        (1ULL << 30)
+#define CHIMERA_VFS_CAP_REMOVE_MATCH_FH        (1ULL << 32)
 /* Atomic destination-absence check and rename, never a lookup/rename fallback. */
-#define CHIMERA_VFS_CAP_RENAME_NOREPLACE       (1ULL << 31)
+#define CHIMERA_VFS_CAP_RENAME_NOREPLACE       (1ULL << 33)
 /* Atomic expected source FH comparison and rename; mismatch returns ESTALE. */
-#define CHIMERA_VFS_CAP_RENAME_MATCH_FH        (1ULL << 32)
+#define CHIMERA_VFS_CAP_RENAME_MATCH_FH        (1ULL << 34)
 /* REMOVE_STREAM compares the complete expected stream FH atomically with
  * unlinking its name. A mismatched name binding returns ESTALE unchanged. */
-#define CHIMERA_VFS_CAP_REMOVE_STREAM_MATCH_FH (1ULL << 33)
+#define CHIMERA_VFS_CAP_REMOVE_STREAM_MATCH_FH (1ULL << 35)
 /* Atomic occupied destination FH comparison; mismatch/absence returns ESTALE. */
-#define CHIMERA_VFS_CAP_RENAME_MATCH_DEST_FH   (1ULL << 34)
+#define CHIMERA_VFS_CAP_RENAME_MATCH_DEST_FH   (1ULL << 36)
 /* Successful RENAME always reports MOVED or same-inode NOOP atomically. */
-#define CHIMERA_VFS_CAP_RENAME_OUTCOME         (1ULL << 35)
+#define CHIMERA_VFS_CAP_RENAME_OUTCOME         (1ULL << 37)
 
 /* If set, the module cannot derive a new object's POSIX group from its parent
  * directory, so the engine must name it.  Every create on such a backend

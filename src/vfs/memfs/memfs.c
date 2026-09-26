@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include "common/atomic.h"
 #include "common/compiler.h"
 #include <stdint.h>
@@ -335,7 +336,7 @@ struct memfs_fs {
     /* Only cross-directory directory moves change existing ancestry edges.
      * They take this exclusively; other renames share it. Namespace/data
      * operations retain their inode locking and do not serialize here. */
-    evpl_rwlock_t         rename_lock;
+    evpl_rwlock_t            rename_lock;
     struct memfs_shared     *shared;
     char                    *name;
     struct memfs_inode_list *inode_list;
@@ -7362,13 +7363,8 @@ memfs_claim_geometry(
     if (!inode) {
         return CHIMERA_VFS_ESTALE;
     }
-    __int128 start = (__int128) inode->size + (int64_t) *offset;
-    __int128 size  = (int64_t) *length;
-    if (size < 0) {
-        start += size;
-        size   = -size;
-    }
-    if (start < 0 || start > INT64_MAX || (size && start + size - 1 > INT64_MAX)) {
+    uint64_t start, size;
+    if (!chimera_range_seek_end(inode->size, (int64_t) *offset, (int64_t) *length, &start, &size)) {
         evpl_mutex_unlock(&inode->lock);
         return CHIMERA_VFS_EINVAL;
     }
@@ -7399,23 +7395,27 @@ memfs_claim_carve_prepare(
     uint64_t                          length,
     struct memfs_claim_range        **pieces)
 {
-    __uint128_t end = length == UINT64_MAX ? ((__uint128_t) 1 << 64) : (__uint128_t) offset + length;
+    struct chimera_range_endpoint end = length == UINT64_MAX ? chimera_range_eof() : chimera_range_end(offset, length);
 
     for (struct memfs_claim_range *range = file->ranges; range; range = range->next) {
         if (!chimera_claim_owner_equal(&range->owner, owner) ||
             !chimera_vfs_claim_range_overlap_i(range->offset, range->length, offset, length)) {
             continue;
         }
-        __uint128_t stop = range->length == UINT64_MAX ? ((__uint128_t) 1 << 64) : (__uint128_t) range->offset + range->
-            length;
+        struct chimera_range_endpoint stop = range->length == UINT64_MAX ? chimera_range_eof() : chimera_range_end(range
+                                                                                                                   ->
+                                                                                                                   offset,
+                                                                                                                   range
+                                                                                                                   ->
+                                                                                                                   length);
         for (unsigned side = 0; side < 2; side++) {
             uint64_t start_piece, length_piece;
             if (side == 0 && range->offset < offset) {
                 start_piece  = range->offset;
                 length_piece = offset - range->offset;
-            } else if (side == 1 && stop > end) {
-                start_piece  = end;
-                length_piece = stop == ((__uint128_t) 1 << 64) ? UINT64_MAX : stop - end;
+            } else if (side == 1 && chimera_range_compare(stop, end) > 0) {
+                start_piece  = end.value;
+                length_piece = stop.carry ? UINT64_MAX : stop.value - end.value;
             } else {
                 continue;
             }

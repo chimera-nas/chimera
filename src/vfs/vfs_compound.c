@@ -4909,6 +4909,17 @@ chimera_vfs_compound_open_fh_callback(
     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
 } /* chimera_vfs_compound_open_fh_callback */
 
+static void
+chimera_vfs_compound_open_self_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    (void) attr;
+    chimera_vfs_compound_open_fh_callback(error_code, handle, private_data);
+} /* chimera_vfs_compound_open_self_callback */
+
 /*
  * A CREATE finished.  The three underlying calls answer with the same three
  * things -- the new object's attributes and the parent's, either side -- so one
@@ -6967,6 +6978,22 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
                 /* Re-open the current object by handle. */
                 if (compound->fh_len == 0) {
                     chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                    break;
+                }
+                /* An explicit data OPEN must authorize and bind its rights
+                 * just like a pathname open. An upgrade carrying retained
+                 * grants has already authorized its newly requested rights;
+                 * rechecking the union would revoke older grants on chmod.
+                 * SMB supplies its own authorization through AUTH_ATTR. */
+                if (!op->handle_state && !op->inherited_grant_handle &&
+                    !op->inherited_grant_handle2 &&
+                    !(op->open_flags & (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH)) &&
+                    compound->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+                    chimera_vfs_open(compound->thread, compound->cred,
+                                     compound->fh, (int) compound->fh_len,
+                                     NULL, 0, op->open_flags, NULL, 0,
+                                     chimera_vfs_compound_open_self_callback,
+                                     compound);
                     break;
                 }
                 chimera_vfs_open_fh_hs(compound->thread, compound->cred,

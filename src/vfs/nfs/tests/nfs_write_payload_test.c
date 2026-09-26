@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif /* ifdef NDEBUG */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+SPDX-License-Identifier: Unlicense
+-->
+
 # Compound frontend review memory
 
 Recorded 2026-09-22 at the user's request. The earlier sections preserve the original review and read-only investigation; the implementation follow-up below supersedes their checkout and authorization notes.
@@ -2500,7 +2505,7 @@ frontend implementation changes. Do not force-push away that remote history
 without explicit direction. Preserve this checkpoint as compounds-refinement
 while resolving which implementation should occupy the existing draft PR.
 
-## 2026-09-26 branch reconciliation in progress
+## 2026-09-26 branch reconciliation history (superseded below)
 
 User explicitly authorized preserving both diverged lines of work, pushing the
 reconciled result to draft PR #1692 (`compound-boilerplate`), then rebasing that
@@ -2524,3 +2529,54 @@ POSIX-over-SMB. Do not report a clean suite. Fixed the NFS delegation fixture
 which returned an empty filehandle and misread an unexecuted op as success.
 NLM partial-unlock and partial-upgrade model self-tests pass (nine full-profile
 tests); use an explicit EOF sentinel compatible with Quint Rust integer limits.
+
+## 2026-09-26 main rebase and validation
+
+The reconciliation checkpoint WAS pushed to PR #1692 as bc13021f. Older sections
+above describe intermediate history. Integration worktree is
+/tmp/chimera-compound-reconcile, branch compounds-reconciled. The PR history was
+rebased onto main eb322605, including Windows, lock-stateid SETATTR and Cairn
+metadata read-conflict tracking. The pre-validation tip is f97f6512; a final
+validation-repair commit follows. The original worktree is aligned to the PR
+when that commit is published. Backup refs preserve original PR18035808,
+checkpoint21104a97, reconciledbc13021f and the first main rebase.
+
+Read docs/reviews/compound-branch-reconciliation.md for integration choices.
+Main dependency pins: libevpl 8a3db7c7 and ndrzcc 451d11fc. Specs merge 8dfc579
+combines main 7ac0dec with reconciliation b290aee. All 104 SMB selftests at 20
+samples each and full corpus generation passed; the default 10,000 samples were
+NOT completed. The user explicitly approved a specs PR after automatic review
+initially denied the separate-repository push. Specs 8dfc579 is now pushed and
+reachable in draft PR https://github.com/chimera-nas/specs/pull/33. Publication
+must use a lease against root PR bc13021fa100318a496a3cb48d5d2bb1c99f761d.
+
+Rebase regressions fixed: portable shared range arithmetic (carry bit; million-
+case oracle passed); disjoint capability bits 30..37; optimized journal loop;
+NFS exclusive-create verifier timestamps; filehandle OPEN authorization and
+bound grants; lock-stateid SETATTR and retained I/O handle selection; SEEK from
+write-only OPEN; pNFS missing GETHANDLE retention; nonregular OPEN error mapping;
+SMB directory-stream READ type check; optimized fixture correctness; license
+headers. Diskfs test helpers snapshot completion status before freeing the
+compound, so an unrelated callback cannot change the value used to validate
+whether outputs were initialized.
+
+Final GCC Debug and Release builds pass. Both final quick runs have 214 passed,
+29 skipped and 30 failed out of 273 (same failing names; lease timing differs). Seventeen final range/locking/compound focused tests pass.
+NFS OPEN authorization, POSIX-over-NFSv4 batch/strict, five pNFS suites and three
+SMB stream/reconnect probes pass. Earlier focused VFS, S3 and SDK checks pass.
+make check was invoked and is NOT green: initial ClangDebug scan has 42 reports
+not fully triaged, plus remaining model/probe failures. ClangRelease completed
+after fixture repairs; the incremental final scan does not erase earlier reports.
+No native Windows build performed. Syntax, SDK boundary, REUSE and copyright
+checks pass. Some Linux/io_uring filehandle fixtures cannot run on this container's
+backing filesystem; separate these aborts/skips from behavioral failures.
+Remaining behavior includes NLM blocking, SMB grant/lease/identity/info, POSIX-
+over-SMB, and remote NFSv3 RMDIR type-check mismatches. Do not claim conversion
+complete or the LockSequence publication race fixed. Backend transactions remain
+future work.
+
+Submodule linked worktrees initially shared core.worktree settings; these were
+repaired for libevpl/ndrzcc using extensions.worktreeConfig and per-worktree
+core.worktree values. Both original and integration source trees were verified
+clean before aligning them; do not mistake Git reading the wrong worktree for
+user edits or discard changes to unrelated worktrees.

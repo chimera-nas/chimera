@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
@@ -3302,9 +3303,9 @@ nfs_lock_owner_finish_compound(
 #define NFS4_COMPOUND_MAX_ORIGINAL_RANGES 256
 
 struct nfs_lock_range_interval {
-    uint64_t    start;
-    __uint128_t end;
-    bool        write;
+    uint64_t                      start;
+    struct chimera_range_endpoint end;
+    bool                          write;
 };
 
 struct nfs_lock_range_journal {
@@ -3316,15 +3317,15 @@ struct nfs_lock_range_journal {
     struct nfs_lock_range_interval *original, *intervals, *scratch;
 };
 
-static __uint128_t
+static struct chimera_range_endpoint
 nfs_lock_range_end(
     uint64_t offset,
     uint64_t length)
 {
-    __uint128_t eof = ((__uint128_t) 1) << 64;
-    __uint128_t end = (__uint128_t) offset + length;
+    struct chimera_range_endpoint eof = chimera_range_eof();
+    struct chimera_range_endpoint end = chimera_range_end(offset, length);
 
-    return length == UINT64_MAX || end > eof ? eof : end;
+    return length == UINT64_MAX || chimera_range_compare(end, eof) > 0 ? eof : end;
 } /* nfs_lock_range_end */
 
 static void
@@ -3337,8 +3338,7 @@ nfs_lock_range_refresh(struct nfs_lock_range_journal *journal)
         struct chimera_vfs_claim       *claim = &journal->nodes[i]->claim;
         chimera_nfs_abort_if(!template, "compound range has no admitted source");
         chimera_vfs_claim_init_range(claim, range->write, false, range->start,
-                                     range->end == (((__uint128_t) 1) << 64) ? UINT64_MAX : (uint64_t) (range->end -
-                                                                                                        range->start),
+                                     range->end.carry ? UINT64_MAX : range->end.value - range->start,
                                      &template->owner);
         claim->is_alive_cb  = template->is_alive_cb;
         claim->revoked_cb   = template->revoked_cb;
@@ -3365,13 +3365,13 @@ nfs_lock_range_normalize(
     }
     uint32_t out = 0;
     for (uint32_t i = 0; i < *count; i++) {
-        if (out && ranges[out - 1].end > ranges[i].start &&
+        if (out && chimera_range_compare(ranges[out - 1].end, chimera_range_offset(ranges[i].start)) > 0 &&
             ranges[out - 1].write != ranges[i].write) {
             return false;
         }
-        if (out && ranges[out - 1].end >= ranges[i].start &&
+        if (out && chimera_range_compare(ranges[out - 1].end, chimera_range_offset(ranges[i].start)) >= 0 &&
             ranges[out - 1].write == ranges[i].write) {
-            if (ranges[i].end > ranges[out - 1].end) {
+            if (chimera_range_compare(ranges[i].end, ranges[out - 1].end) > 0) {
                 ranges[out - 1].end = ranges[i].end;
             }
         } else {
@@ -3485,8 +3485,8 @@ nfs_lock_range_transform(
     bool                           write,
     struct chimera_vfs_claim      *admitted)
 {
-    uint32_t    count = 0;
-    __uint128_t end   = nfs_lock_range_end(offset, length);
+    uint32_t                      count = 0;
+    struct chimera_range_endpoint end   = nfs_lock_range_end(offset, length);
 
     if (journal->published || !length ||
         (add && (!admitted || journal->num_previous == journal->num_original + journal->max_modifications))) {
@@ -3494,7 +3494,8 @@ nfs_lock_range_transform(
     }
     for (uint32_t i = 0; i < journal->count; i++) {
         struct nfs_lock_range_interval old = journal->intervals[i];
-        if (old.end <= offset || old.start >= end) {
+        if (chimera_range_compare(old.end, chimera_range_offset(offset)) <= 0 || chimera_range_compare(
+                chimera_range_offset(old.start), end) >= 0) {
             if (count == journal->capacity) {
                 return false;
             }
@@ -3504,13 +3505,14 @@ nfs_lock_range_transform(
                 if (count == journal->capacity) {
                     return false;
                 }
-                journal->scratch[count++] = (struct nfs_lock_range_interval) { old.start, offset, old.write };
+                journal->scratch[count++] = (struct nfs_lock_range_interval) { old.start, chimera_range_offset(offset),
+                                                                               old.write };
             }
-            if (old.end > end) {
+            if (chimera_range_compare(old.end, end) > 0) {
                 if (count == journal->capacity) {
                     return false;
                 }
-                journal->scratch[count++] = (struct nfs_lock_range_interval) { (uint64_t) end, old.end, old.write };
+                journal->scratch[count++] = (struct nfs_lock_range_interval) { end.value, old.end, old.write };
             }
         }
     }

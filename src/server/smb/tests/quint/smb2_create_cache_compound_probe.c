@@ -195,8 +195,12 @@ create_chain(
     const char       *name,
     uint8_t           level)
 {
-    struct packet          p      = { 0 };
-    struct smb2_oplock_req oplock = { .level = level };
+    struct packet          p = {
+        0
+    };
+    struct smb2_oplock_req oplock = {
+        .level = level
+    };
 
     query(&p, c, prefix);
     int                    size = smb2c_build_create(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -302,8 +306,12 @@ caching_create_suffixes(
     struct smb2_conn *c,
     const uint8_t    *other_fid)
 {
-    const uint8_t levels[] = { SMB2_OPLOCK_LEVEL_II, SMB2_OPLOCK_LEVEL_EXCLUSIVE,
-                               SMB2_OPLOCK_LEVEL_BATCH };
+    const uint8_t levels[] = {
+        SMB2_OPLOCK_LEVEL_II,
+        SMB2_OPLOCK_LEVEL_EXCLUSIVE,
+
+        SMB2_OPLOCK_LEVEL_BATCH
+    };
 
     for (unsigned int i = 0; i < sizeof(levels); i++) {
         char                   name[64]; snprintf(name, sizeof(name), "cache-private-suffix-%u", i);
@@ -313,8 +321,12 @@ caching_create_suffixes(
                            NULL, &setup) == ST_SUCCESS);
         assert(smb2_write(c, setup.file_id, 0, "seed", 4, &bytes) == ST_SUCCESS && bytes == 4);
         assert(smb2_close(c, setup.file_id) == ST_SUCCESS);
-        struct smb2_oplock_req cache = { .level = levels[i] };
-        struct packet          p     = { 0 };
+        struct smb2_oplock_req cache = {
+            .level = levels[i]
+        };
+        struct packet          p = {
+            0
+        };
         suffix_create(&p, c, name, MBT_FILE_ALL_ACCESS, &cache);
         query(&p, c, NULL); suffix_read(&p, c); suffix_flush(&p, c);
         reject_first = 1; atomic_store(&finishes, 0); atomic_store(&hold_next, 1); arm(4, 0);
@@ -331,10 +343,18 @@ caching_create_suffixes(
         assert(smb2_close(c, opened.file_id) == ST_SUCCESS);
     }
 
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0xb0,                                                0x20 }, .
-                                     lease_epoch  = 70 };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0xb0,
+            0x20
+        },
+        .
+        lease_epoch  = 70
+    };
     struct smb2_create_out holder, joined;
     uint32_t               bytes;
     assert(smb2_create(c, "lease-private-suffix", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -342,7 +362,9 @@ caching_create_suffixes(
     assert(smb2_write(c, holder.file_id, 0, "seed", 4, &bytes) == ST_SUCCESS && bytes == 4);
     expected_lease_members = 1; expected_lease_epoch = holder.lease_epoch;
     expected_lease_state   = holder.lease_state;
-    struct packet          p = { 0 };
+    struct packet          p = {
+        0
+    };
     suffix_create(&p, c, "lease-private-suffix", MBT_FILE_ALL_ACCESS, &lease);
     query(&p, c, NULL); suffix_read(&p, c);
     reject_first = 1; atomic_store(&finishes, 0); atomic_store(&hold_next, 1); arm(3, 0);
@@ -398,7 +420,9 @@ caching_create_suffixes(
 
     /* Legacy LEVEL_II WRITE keeps its acceptance boundary and its ordinary
      * self-break; caching CREATE+QUERY+CLOSE boundaries are covered above. */
-    struct smb2_oplock_req level2 = { .level = SMB2_OPLOCK_LEVEL_II };
+    struct smb2_oplock_req level2 = {
+        .level = SMB2_OPLOCK_LEVEL_II
+    };
     memset(&p, 0, sizeof(p));
     suffix_create(&p, c, "cache-private-suffix-0", MBT_FILE_ALL_ACCESS, &level2);
     suffix_write(&p, c); arm(1, 1); suffix_send(&p, c);
@@ -430,15 +454,28 @@ capture_create(
 static void
 overwrite_client_cap(struct smb2_conn *c)
 {
-    const uint32_t dispositions[] = { MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF, MBT_FILE_SUPERSEDE };
+    const uint32_t dispositions[] = {
+        MBT_FILE_OVERWRITE,
+        MBT_FILE_OVERWRITE_IF,
+        MBT_FILE_SUPERSEDE
+    };
 
     for (unsigned int i = 0; i < 3; i++) {
         char                   name[64]; snprintf(name, sizeof(name), "same-client-overwrite-%u", i);
-        struct smb2_oplock_req lease = { .is_lease    = 1,
-                                         .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                         .lease_key   = { 0x64,                                                0x12 } };
+        struct smb2_oplock_req lease = {
+            .is_lease    = 1,
+
+            .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+            .lease_key   = {
+                0x64,
+                0x12
+            }
+        };
         lease.lease_key[2] = i;
-        struct smb2_oplock_req req = { .level = SMB2_OPLOCK_LEVEL_EXCLUSIVE };
+        struct smb2_oplock_req req = {
+            .level = SMB2_OPLOCK_LEVEL_EXCLUSIVE
+        };
         struct smb2_create_out holder, opened;
         assert(smb2_create(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                            MBT_FILE_SHARE_RWD, &lease, &holder) == ST_SUCCESS);
@@ -482,12 +519,21 @@ regular_lease_chain(
     const uint8_t    *prefix,
     unsigned int      mode)
 {
-    struct packet          p     = { 0 };
-    struct smb2_oplock_req lease = { .is_lease = 1,    .lease_state
-                                               =
-                                             mode
-                                         ,
-                                     .lease_key = { 0x63,0x13     } };
+    struct packet          p = {
+        0
+    };
+    struct smb2_oplock_req lease = {
+        .is_lease  = 1,
+        .lease_state
+            =
+                mode
+            ,
+
+        .lease_key = {
+            0x63,
+            0x13
+        }
+    };
     char                   name[64]; snprintf(name, sizeof(name), "lease-chain-%u", mode);
 
     query(&p, c, prefix);
@@ -523,15 +569,24 @@ read_lease_cases(
     }
     for (unsigned int v1 = 0; v1 < 2; v1++) {
         char                   name[64]; snprintf(name, sizeof(name), "native-read-lease-%u", v1);
-        struct smb2_oplock_req lease = { .is_lease = 1,    .lease_state
-                                                   =
-                                                 SMB2_LEASE_READ
-                                             ,
-                                         .lease_key = { 0x64,0x13     }, .lease_epoch
-                                                    =
-                                                 42,
-                                         .
-                                         force_v1   = v1 };
+        struct smb2_oplock_req lease = {
+            .is_lease  = 1,
+            .lease_state
+                =
+                    SMB2_LEASE_READ
+                ,
+
+            .lease_key = {
+                0x64,
+                0x13
+            },
+            .lease_epoch
+                =
+                    42,
+
+            .
+            force_v1   = v1
+        };
         lease.lease_key[2] = v1;
         struct smb2_create_out holder, joined, none;
         arm(1, 0);
@@ -576,10 +631,18 @@ read_lease_cases(
         assert(smb2_close(c, joined.file_id) == ST_SUCCESS);
         assert(smb2_close(c, none.file_id) == ST_SUCCESS);
     }
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0x65,                                                0x13 }, .
-                                     lease_epoch  = 51 };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x65,
+            0x13
+        },
+        .
+        lease_epoch  = 51
+    };
     struct smb2_create_out holder, joined, opened;
     assert(smb2_create(c, "native-read-join-strong", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                        MBT_FILE_SHARE_RWD, &lease, &holder) == ST_SUCCESS);
@@ -652,15 +715,24 @@ regular_lease_cases(
     for (unsigned int v1 = 0; v1 < 2; v1++) {
         for (unsigned int mode = 0; mode < 8; mode++) {
             char                   name[64]; snprintf(name, sizeof(name), "native-full-lease-%u-%u", v1, mode);
-            struct smb2_oplock_req lease = { .is_lease = 1,    .lease_state
-                                                       =
-                                                     mode,
-                                             .lease_key = { 0x74,0x14     }, .lease_epoch
-                                                        =
-                                                     60
-                                                 ,
-                                             .
-                                             force_v1   = v1 };
+            struct smb2_oplock_req lease = {
+                .is_lease  = 1,
+                .lease_state
+                    =
+                        mode,
+
+                .lease_key = {
+                    0x74,
+                    0x14
+                },
+                .lease_epoch
+                    =
+                        60
+                    ,
+
+                .
+                force_v1   = v1
+            };
             lease.lease_key[2] = v1; lease.lease_key[3] = mode;
             struct smb2_create_out first, joined;
             uint32_t               granted = mode & SMB2_LEASE_READ ? mode : 0;
@@ -684,12 +756,20 @@ regular_lease_cases(
             assert(smb2_close(c, first.file_id) == ST_SUCCESS);
         }
     }
-    struct smb2_oplock_req lease = { .is_lease = 1,    .lease_state
-                                               =
-                                             SMB2_LEASE_READ,
-                                     .lease_key = { 0x75,0x14     }, .lease_epoch
-                                                =
-                                             70 }
+    struct smb2_oplock_req lease = {
+        .is_lease  = 1,
+        .lease_state
+            =
+                SMB2_LEASE_READ,
+
+        .lease_key = {
+            0x75,
+            0x14
+        },
+        .lease_epoch
+            =
+                70
+    }
     ;
     struct smb2_create_out holder, joined, opened;
     arm(1, 0);
@@ -754,8 +834,15 @@ regular_lease_cases(
 static void
 hintless_and_overwrite_cases(struct smb2_conn *c)
 {
-    const uint32_t dispositions[] = { MBT_FILE_CREATE,    MBT_FILE_OPEN,         MBT_FILE_OPEN_IF,
-                                      MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF, MBT_FILE_SUPERSEDE };
+    const uint32_t dispositions[] = {
+        MBT_FILE_CREATE,
+        MBT_FILE_OPEN,
+        MBT_FILE_OPEN_IF,
+
+        MBT_FILE_OVERWRITE,
+        MBT_FILE_OVERWRITE_IF,
+        MBT_FILE_SUPERSEDE
+    };
 
     for (unsigned int hinted = 0; hinted < 2; hinted++) {
         for (unsigned int existing = 0; existing < 2; existing++) {
@@ -770,13 +857,21 @@ hintless_and_overwrite_cases(struct smb2_conn *c)
                     assert(smb2_write(c, seed.file_id, 0, "keep!", 5, &bytes) == ST_SUCCESS && bytes == 5);
                     assert(smb2_close(c, seed.file_id) == ST_SUCCESS);
                 }
-                struct smb2_oplock_req lease = { .is_lease    = 1,
-                                                 .lease_state = SMB2_LEASE_READ |
-                                                     SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                                 .lease_key   = { 0x77
-                                                                  ,
-                                                                  0x15 }, .lease_epoch=
-                                                     100 };
+                struct smb2_oplock_req lease = {
+                    .is_lease    = 1,
+
+                    .lease_state = SMB2_LEASE_READ |
+                        SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+                    .lease_key   = {
+                        0x77
+                        ,
+
+                        0x15
+                    },
+                    .lease_epoch =
+                        100
+                };
                 lease.lease_key[2] = hinted; lease.lease_key[3] = existing; lease.lease_key[4] = i;
                 uint32_t               expected = existing && dispositions[i] == MBT_FILE_CREATE ?
                     ST_OBJECT_NAME_COLLISION
@@ -811,10 +906,18 @@ hintless_and_overwrite_cases(struct smb2_conn *c)
     /* Same-key overwrite has an existing live cache member. Its private
      * reservation, completed truncate and reply remain unpublished at finish;
      * the existing grant must not recall itself or change epoch/membership. */
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0x78,                                                0x15 }, .
-                                     lease_epoch  = 110 };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x78,
+            0x15
+        },
+        .
+        lease_epoch  = 110
+    };
     struct smb2_create_out holder, opened;
     uint32_t               bytes;
     assert(smb2_create_opts(c, "lease-own-overwrite", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -902,12 +1005,20 @@ directory_lease_cases(
 {
     for (unsigned int mode = 0; mode < 8; mode++) {
         char                   name[64]; snprintf(name, sizeof(name), "native-directory-lease-%u", mode);
-        struct smb2_oplock_req lease = { .is_lease = 1,    .lease_state
-                                                   =
-                                                 mode,
-                                         .lease_key = { 0x81,0x16     }, .lease_epoch
-                                                    =
-                                                 120 };
+        struct smb2_oplock_req lease = {
+            .is_lease  = 1,
+            .lease_state
+                =
+                    mode,
+
+            .lease_key = {
+                0x81,
+                0x16
+            },
+            .lease_epoch
+                =
+                    120
+        };
         lease.lease_key[2] = mode;
         struct smb2_create_out first, joined;
         unsigned int           granted = (mode & SMB2_LEASE_READ) ?
@@ -949,11 +1060,21 @@ directory_lease_cases(
 
     /* A prefix shares the directory CREATE run; suffix commands see only its
      * accepted grant and cached CLOSE remains terminal. */
-    struct packet          p     = { 0 };
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0x82,                                                0x16 }, .
-                                     lease_epoch  = 130 };
+    struct packet          p = {
+        0
+    };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x82,
+            0x16
+        },
+        .
+        lease_epoch  = 130
+    };
     query(&p, c, prefix);
     int                    size = smb2c_build_create(c, "native-directory-chain", MBT_FILE_CREATE,
                                                      MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, &
@@ -1047,10 +1168,18 @@ directory_lease_fallback(
     bool              v1,
     bool              persistent)
 {
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0x85,                                                0x16 }, .
-                                     force_v1     = v1 };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x85,
+            0x16
+        },
+        .
+        force_v1     = v1
+    };
     struct smb2_create_out directory;
 
     arm(0, 0);
@@ -1070,8 +1199,18 @@ directory_parent_key_compound(
     struct smb2_conn *c,
     struct smb2_conn *peer)
 {
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,.lease_key     = { 0x86, 0x18 }
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
+        .lease_key   = {
+
+            0x86
+            ,
+
+            0x18
+
+        }
     }
     ;
     /* Same bytes on another client must not share the parent exemption. */
@@ -1151,16 +1290,29 @@ legacy_namespace_parent_key(
                                NULL, &setup) == ST_SUCCESS);
             assert(smb2_close(c, setup.file_id) == ST_SUCCESS);
         }
-        struct smb2_oplock_req  lease = { .is_lease    = 1,
-                                          .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
-                                          .lease_key   = { 0xe1,                             0x19 } };
+        struct smb2_oplock_req  lease = {
+            .is_lease    = 1,
+
+            .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
+
+            .lease_key   = {
+                0xe1,
+                0x19
+            }
+        };
         lease.lease_key[2] = doc;
         struct smb2_oplock_req  child_lease = lease;
         child_lease.lease_key[3] = 1;
         if (!doc) {
             child_lease.lease_state = 0;
         }
-        struct smb2_durable_req durable = { .dh2q = 1, .create_guid = { 0xe2, 0x19 } };
+        struct smb2_durable_req durable = {
+            .dh2q        = 1,
+            .create_guid = {
+                0xe2,
+                0x19
+            }
+        };
         struct smb2_cctx        contexts[4]; uint8_t scratch[100];
         int                     nctx = smb2c_durable_contexts(doc ? &durable : NULL, scratch, contexts);
         int                     size = smb2c_build_create_full(c, source, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -1193,7 +1345,9 @@ legacy_namespace_parent_key(
         if (doc) {
             assert(smb2_close(c, child.file_id) == ST_SUCCESS);
         } else {
-            uint8_t link[256] = { 1 }; size_t len = strlen(target);
+            uint8_t link[256] = {
+                1
+            }; size_t len = strlen(target);
             assert(20 + len * 2 <= sizeof(link)); p32(link, 16, len * 2);
             for (size_t i = 0; i < len; i++) {
                 p16(link, 20 + i * 2, target[i]);
@@ -1229,9 +1383,16 @@ client_lease_key_cases(
     struct smb2_conn *peer)
 {
     struct smb2_conn      *sibling = smb2_conn_reopen(c->env, c);
-    struct smb2_oplock_req lease   = { .is_lease    = 1,
-                                       .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                       .lease_key   = { 0x91,                                                0x18 } };
+    struct smb2_oplock_req lease   = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x91,
+            0x18
+        }
+    };
     struct smb2_create_out first, second, rejected;
 
     assert(smb2_create(c, "global-key-first", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -1296,9 +1457,21 @@ bound_lease_disappearing_name(struct smb2_conn *c)
         for (unsigned int directory = 0; directory < 2; directory++) {
             char                    name[80]; snprintf(name, sizeof(name), "bound-key-disappears-%u-%u", legacy,
                                                        directory);
-            struct smb2_oplock_req  lease = { .is_lease = 1, .lease_key = { 0xa1, 0x18 } };
+            struct smb2_oplock_req  lease = {
+                .is_lease  = 1,
+                .lease_key = {
+                    0xa1,
+                    0x18
+                }
+            };
             lease.lease_key[2] = legacy; lease.lease_key[3] = directory;
-            struct smb2_durable_req dur = { .dh2q = 1, .create_guid = { 0xa2, 0x18 } };
+            struct smb2_durable_req dur = {
+                .dh2q        = 1,
+                .create_guid = {
+                    0xa2,
+                    0x18
+                }
+            };
             dur.create_guid[2] = legacy; dur.create_guid[3] = directory;
             struct smb2_create_out  holder, opened;
             unsigned int            options = directory ? MBT_FILE_DIRECTORY_FILE : MBT_FILE_NON_DIRECTORY_FILE;
@@ -1328,8 +1501,16 @@ cross_client_durable_io(struct smb2_env *env)
 
     smb2_handshake(original); smb2_handshake(reclaimed);
     assert(original->guid_tag != reclaimed->guid_tag);
-    struct smb2_oplock_req  batch   = { .level = SMB2_OPLOCK_LEVEL_BATCH };
-    struct smb2_durable_req durable = { .dh2q = 1, .create_guid = { 0xc1, 0x18 } };
+    struct smb2_oplock_req  batch = {
+        .level = SMB2_OPLOCK_LEVEL_BATCH
+    };
+    struct smb2_durable_req durable = {
+        .dh2q        = 1,
+        .create_guid = {
+            0xc1,
+            0x18
+        }
+    };
     struct smb2_create_out  first, reopened;
     assert(smb2_create_dur(original, "durable-cross-client-actor", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                            MBT_FILE_SHARE_RWD, &batch, &durable, &first) == ST_SUCCESS);
@@ -1339,7 +1520,9 @@ cross_client_durable_io(struct smb2_env *env)
     assert(smb2_lock(original, first.file_id, 0, 4,
                      SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY) == ST_SUCCESS);
     smb2_conn_disconnect(original); smb2_quiesce(env);
-    struct smb2_durable_req reconnect = { .dh2c = 1 };
+    struct smb2_durable_req reconnect = {
+        .dh2c = 1
+    };
     memcpy(reconnect.create_guid, durable.create_guid, 16);
     memcpy(reconnect.file_id, first.file_id, 16);
     assert(smb2_create_dur(reclaimed, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
@@ -1362,7 +1545,11 @@ static void
 directory_disabled_policy(void)
 {
     struct smb2_env      env;
-    struct smb2_env_opts opts = { .oplocks = 1, .leases = 1, .directory_leases = 0 };
+    struct smb2_env_opts opts = {
+        .oplocks          = 1,
+        .leases           = 1,
+        .directory_leases = 0
+    };
 
     smb2_env_start_opts(&env, &opts);
     struct smb2_conn    *c = smb2_conn_open(&env);
@@ -1377,33 +1564,51 @@ static void
 regular_lease_policy_cases(bool enabled)
 {
     struct smb2_env      env;
-    struct smb2_env_opts opts = { .oplocks = 1,       .leases
-                                           =
-                                          enabled,
-                                  .force_level2 = enabled, .directory_leases
-                                                =
-                                          1 };
+    struct smb2_env_opts opts = {
+        .oplocks      = 1,
+        .leases
+            =
+                enabled,
+
+        .force_level2 = enabled,
+        .directory_leases
+            =
+                1
+    };
 
     smb2_env_start_opts(&env, &opts);
     struct smb2_conn    *c = smb2_conn_open(&env);
     smb2_handshake(c);
-    const unsigned int   modes[] = { SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
-                                     SMB2_LEASE_READ | SMB2_LEASE_WRITE,
-                                     SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE };
+    const unsigned int   modes[] = {
+        SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
+
+        SMB2_LEASE_READ | SMB2_LEASE_WRITE,
+
+        SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE
+    };
     for (unsigned int v1 = 0; v1 < 2; v1++) {
         for (unsigned int i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
             char                   name[64]; snprintf(name, sizeof(name), "lease-policy-%u-%u", v1, i);
-            struct smb2_oplock_req lease = { .is_lease = 1,    .lease_state
-                                                       =
-                                                     modes
-                                                     [i]
-                                                 ,
-                                             .lease_key = { 0x76,0x14     }, .lease_epoch
-                                                        =
-                                                     90
-                                                 ,
-                                             .
-                                             force_v1   = v1 };
+            struct smb2_oplock_req lease = {
+                .is_lease  = 1,
+                .lease_state
+                    =
+                        modes
+                        [i]
+                    ,
+
+                .lease_key = {
+                    0x76,
+                    0x14
+                },
+                .lease_epoch
+                    =
+                        90
+                    ,
+
+                .
+                force_v1   = v1
+            };
             lease.lease_key[2] = v1; lease.lease_key[3] = i;
             struct smb2_create_out first, joined;
             arm(1, 0);
@@ -1424,10 +1629,18 @@ regular_lease_policy_cases(bool enabled)
             assert(smb2_close(c, first.file_id) == ST_SUCCESS);
         }
     }
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0x84,                                                0x16 }, .
-                                     lease_epoch  = 140 };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x84,
+            0x16
+        },
+        .
+        lease_epoch  = 140
+    };
     struct smb2_create_out directory;
     arm(1, 0);
     assert(smb2_create_opts(c, "directory-lease-policy", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
@@ -1444,8 +1657,15 @@ static void
 persistent_create_truth_cases(void)
 {
     struct smb2_env      env;
-    struct smb2_env_opts opts = { .oplocks       = 1, .leases             = 1, .directory_leases        = 1,
-                                  .named_streams = 1, .persistent_handles = 1, .continuous_availability = 1 };
+    struct smb2_env_opts opts = {
+        .oplocks          = 1,
+        .leases           = 1,
+        .directory_leases = 1,
+
+        .named_streams           = 1,
+        .persistent_handles      = 1,
+        .continuous_availability = 1
+    };
 
     smb2_env_start_opts(&env, &opts);
     unsigned int         expected_checks = smb_persistent_create_checks();
@@ -1465,12 +1685,29 @@ persistent_create_truth_cases(void)
                 assert(smb2_close(c, setup.file_id) == ST_SUCCESS);
             }
             snprintf(name, sizeof(name), stream ? "%s:fork" : "%s", base);
-            struct smb2_oplock_req  lease = { .is_lease    = 1,
-                                              .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
-                                              .lease_key   = { 0x91,                             0x17 } };
+            struct smb2_oplock_req  lease = {
+                .is_lease    = 1,
+
+                .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
+
+                .lease_key   = {
+                    0x91,
+                    0x17
+                }
+            };
             lease.lease_key[2] = fixture; lease.lease_key[3] = cached;
-            struct smb2_durable_req dur = { .dh2q  = 1,
-                                            .flags = SMB2_DHANDLE_FLAG_PERSISTENT,.create_guid     = { 0x92, 0x17 } };
+            struct smb2_durable_req dur = {
+                .dh2q        = 1,
+
+                .flags       = SMB2_DHANDLE_FLAG_PERSISTENT,
+                .create_guid = {
+                    0x92
+                    ,
+
+                    0x17
+                }
+            }
+            ;
             dur.create_guid[2] = fixture; dur.create_guid[3] = cached;
             smb_persistent_create_expect(false, false); expected_checks++;
             assert(smb2_create_dur_opts(c, name, fixture == 1 ? MBT_FILE_OPEN_IF : MBT_FILE_CREATE,
@@ -1496,8 +1733,11 @@ persistent_create_truth_cases(void)
                                MBT_FILE_SHARE_RWD, &lease, &setup) == ST_INVALID_PARAMETER);
             assert(smb2_create(reconnect, wrong_name, MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
                                MBT_FILE_SHARE_RWD, NULL, &setup) == ST_OBJECT_NAME_NOT_FOUND);
-            struct smb2_durable_req claim = { .dh2c            = 1,
-                                              .reconnect_flags = SMB2_DHANDLE_FLAG_PERSISTENT };
+            struct smb2_durable_req claim = {
+                .dh2c            = 1,
+
+                .reconnect_flags = SMB2_DHANDLE_FLAG_PERSISTENT
+            };
             memcpy(claim.file_id, created.file_id, sizeof(claim.file_id));
             memcpy(claim.create_guid, dur.create_guid, sizeof(claim.create_guid));
             assert(smb2_create_dur(reconnect, "", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
@@ -1522,10 +1762,17 @@ persistent_create_truth_cases(void)
     struct smb2_conn       *c = smb2_conn_open(&env);
     smb2_handshake(c);
     struct smb2_create_out  created, setup;
-    struct smb2_durable_req dur = { .dh2q = 1,    .flags
-                                          =
-                                            SMB2_DHANDLE_FLAG_PERSISTENT,
-                                    .create_guid = { 0x93,0x17   } };
+    struct smb2_durable_req dur = {
+        .dh2q        = 1,
+        .flags
+            =
+                SMB2_DHANDLE_FLAG_PERSISTENT,
+
+        .create_guid = {
+            0x93,
+            0x17
+        }
+    };
     for (unsigned int directory = 0; directory < 2; directory++) {
         const char *name = directory ? "persistent-record-directory" : "persistent-record-regular";
         if (directory) {
@@ -1578,7 +1825,12 @@ int
 main(void)
 {
     struct smb2_env        env;
-    struct smb2_env_opts   opts = { .oplocks = 1, .leases = 1, .persistent_handles = 1, .directory_leases = 1 };
+    struct smb2_env_opts   opts = {
+        .oplocks            = 1,
+        .leases             = 1,
+        .persistent_handles = 1,
+        .directory_leases   = 1
+    };
 
     smb2_env_start_opts(&env, &opts);
     struct smb2_conn      *c = smb2_conn_open(&env), *peer = smb2_conn_open(&env);
@@ -1586,14 +1838,20 @@ main(void)
     struct smb2_create_out prefix, opened, holder;
     assert(smb2_create(c, "cache-create-prefix", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                        MBT_FILE_SHARE_RWD, NULL, &prefix) == ST_SUCCESS);
-    const uint8_t          levels[] = { SMB2_OPLOCK_LEVEL_II, SMB2_OPLOCK_LEVEL_EXCLUSIVE, SMB2_OPLOCK_LEVEL_BATCH };
+    const uint8_t          levels[] = {
+        SMB2_OPLOCK_LEVEL_II,
+        SMB2_OPLOCK_LEVEL_EXCLUSIVE,
+        SMB2_OPLOCK_LEVEL_BATCH
+    };
     for (unsigned int i = 0; i < sizeof(levels); i++) {
         char name[64]; snprintf(name, sizeof(name), "cache-create-%u", i);
         create_chain(c, prefix.file_id, name, levels[i]);
     }
     /* Reject only a read-only existing OPEN. No filesystem mutation is undone.
      * Before both attempts finish, FileId/grant/member remain unpublished. */
-    struct smb2_oplock_req req = { .level = SMB2_OPLOCK_LEVEL_BATCH };
+    struct smb2_oplock_req req = {
+        .level = SMB2_OPLOCK_LEVEL_BATCH
+    };
     assert(smb2_create(c, "cache-retry", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                        MBT_FILE_SHARE_RWD, NULL, &opened) == ST_SUCCESS);
     assert(smb2_close(c, opened.file_id) == ST_SUCCESS);
@@ -1629,9 +1887,16 @@ main(void)
     assert(smb2_close(c, opened.file_id) == ST_SUCCESS); assert(smb2_close(peer, holder.file_id) == ST_SUCCESS);
     /* A same-client HANDLE lease excludes legacy oplocks even when the
      * ordinary conflict matrix would otherwise allow a shared READ grant. */
-    struct smb2_oplock_req lease = { .is_lease    = 1,
-                                     .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
-                                     .lease_key   = { 0x63,                             0x12 } };
+    struct smb2_oplock_req lease = {
+        .is_lease    = 1,
+
+        .lease_state = SMB2_LEASE_READ | SMB2_LEASE_HANDLE,
+
+        .lease_key   = {
+            0x63,
+            0x12
+        }
+    };
     assert(smb2_create(c, "same-client-cache", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                        MBT_FILE_SHARE_RWD, &lease, &holder) == ST_SUCCESS);
     assert(holder.has_lease && (holder.lease_state & SMB2_LEASE_HANDLE));
@@ -1643,7 +1908,9 @@ main(void)
     overwrite_client_cap(c);
     /* V1 durable requests without BATCH caching have no replay identity and
      * are declined in the native path, with no durable response context. */
-    struct smb2_durable_req dur = { .dhnq = 1 };
+    struct smb2_durable_req dur = {
+        .dhnq = 1
+    };
     req.level = SMB2_OPLOCK_LEVEL_II; arm(1, 0);
     assert(smb2_create_dur(c, "declined-dhnq", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                            MBT_FILE_SHARE_RWD, &req, &dur, &opened) == ST_SUCCESS); disarm(1);
