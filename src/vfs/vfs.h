@@ -407,7 +407,6 @@ chimera_vfs_watchdog(
  * everything else leaves it clear and gets the both-filters class.  Read by
  * chimera_vfs_rename_at and set on a sequence's RENAME by
  * chimera_vfs_compound_op_set_rename_opts. */
-#define CHIMERA_VFS_RENAME_SRC_IS_DIR 0x00000001
 
 
 /* ------------------------------------------------------------------------

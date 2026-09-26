@@ -6,175 +6,82 @@
 
 #include "vfs.h"
 #include "vfs_claim_types.h"
+#include "vfs_lock.h"
+#include "vfs_claim_journal.h"
+#include "vfs_claim_access.h"
 
 /*
- * VFS compounds: submit a whole sequence of operations, get one callback.
+ * VFS compounds own a sequence of filesystem operations and report its final
+ * result through one completion callback. Backends currently execute the
+ * ordinary per-operation requests; transactional backend integration is a
+ * separate step.
  *
- * This is how the VFS is entered.  A protocol front end, the client and the SDK
- * reach a file system through a sequence and through nothing else: they build
- * the whole thing, submit it, and are called back once when it is over.  That
- * suits them, because each already knows at the time it starts everything it
- * wants to do -- one NFS3 RPC, one NFS4 COMPOUND, one SMB2 chain, one FUSE
- * request, one S3 handler, one POSIX call, one SDK call.
+ * EXECUTION AND FRONTEND CALLOUTS. Build the known prefix before submission.
+ * An operation's prepare callback can bind inputs from earlier results, skip
+ * that operation, or reject it before its filesystem action. Its complete
+ * callback can inspect the result, change its status, and append dependent
+ * operations. These callbacks are synchronous and replayable: they may update
+ * attempt-private state, but must not send replies, consume input, change
+ * shared frontend state, or perform unrelated I/O. Reserve fallible protocol
+ * admission/resources before submission; publish only after accepted finish.
+ * Streaming enumeration callbacks obey the same rule.
  *
- * The per-op API is no longer an entrance.  It lives in vfs_internal_procs.h
- * and is the executor's own implementation vocabulary: the path walkers, the
- * DAC gate, the open cache, `find`, the copy fallback, the recall machinery and
- * the root module call it from inside src/vfs, no header exposes it, and
- * nothing above the VFS includes it.
+ * ERRORS AND FINISH. By default an ordinary operation error stops execution
+ * and preserves the successful prefix. Explicit operation groups may continue
+ * after an error; groups are not transaction savepoints. A finish rejection instead rejects the attempt,
+ * including that prefix. Callers must inspect the compound's finish/aggregate
+ * status before using individual results. A backend finish adapter may delay
+ * final completion; without one, execution finishes immediately. This adapter
+ * is a lifecycle seam, not a transaction implementation.
  *
- * A handful of calls into the VFS are not sequence ops, and they are
- * enumerated rather than left to taste: the lifecycle calls and the
- * synchronous queries (vfs.h), reference drops and the open cache's own close
- * (vfs_release.h, vfs_open_cache.h), claim transitions (vfs_claim.h), change
- * notification (vfs_notify.h), the key-value side-store (vfs_kv.h), and the
- * protocol-only state machines that keep their own tables (the NFSv4 state
- * table, NLM's lock list).  Each is there for one reason, which is THE RULE
- * below: it addresses no object through the cursors and mutates nothing the
- * sequence holds.  Anything that does either is an op here.
+ * RETRY. Original operation inputs are snapshotted at submission. Retry frees
+ * attempt outputs, discards dynamically appended operations, restores those
+ * inputs, and invokes the frontend reset callback before executing again.
+ * Referenced credentials, buffers, names, and callback contexts must remain
+ * valid across attempts; resetting the operation structs cannot restore data
+ * the caller has overwritten. Retry is valid only after backend rollback (or
+ * for a read-only attempt). An ordinary EAGAIN from an operation is not proof
+ * of rollback. Current backends do not provide transactional rollback.
  *
- * WHY.  Two things follow from the VFS owning the sequence rather than the
- * caller driving it op by op.  The obvious one is that the chaining every
- * protocol already does by hand -- "the object the previous operation
- * resolved" -- moves into one place: ops address CURRENT, the VFS threads the
- * result forward, and the caller never handles an intermediate file handle.
- * The one that matters more is that the caller is no longer between the
- * operations.  It sees results only when the sequence has finished, so
- * anything the VFS does in the middle -- waiting on a lease recall, and later,
- * retrying the sequence after a conflict -- is invisible, and the caller
- * cannot have acted on an answer that a retry would invalidate.
+ * ADDRESSING. CURRENT FH and SAVED FH name objects; SAVEFH copies the name.
+ * CURRENT OPEN and SAVED OPEN hold references; SAVEHANDLE moves its reference.
+ * PUTFH/LOOKUP/path operations select the current object, and OPEN selects its
+ * current open handle. The executor can acquire an inferred handle for an
+ * operation that needs one. PUTHANDLE and per-operation in_handle/src_handle
+ * borrow caller-held references. An explicit per-operation handle addresses
+ * that operation without changing the current cursor. RENAME/LINK use the
+ * saved and current names; range operations can use explicit open handles.
  *
- * ADDRESSING: FOUR CURSORS.  A sequence carries four pieces of state, and every
- * op reads whichever ones its underlying VFS call takes.  No op is handed a file
- * handle or an open handle as an argument -- that is what the cursors are for,
- * and four different ways of saying "act on this object" is what this design
- * replaced.
+ * OWNERSHIP. Primary attribute ACL snapshots, staged directory entries,
+ * buffers, open handles, claims, and READ iovecs belong to the compound until
+ * freed, retried, or explicitly taken after accepted finish. A struct copy of
+ * a result does not extend the lifetime of its pointers. Auxiliary directory
+ * attributes do not retain ACLs; staged READDIR entries omit their ACLs.
+ * GETHANDLE acquires an
+ * independent reference, including when the current reference was borrowed;
+ * take_handle/take_iov/take_reservation transfer their respective resources.
+ * PUTHANDLE itself never transfers ownership. CLOSE of a borrowed handle
+ * consumes the caller's reference only during accepted teardown; a rejected
+ * attempt leaves that reference available for retry. CLOSE of an internal
+ * provisional handle can release it during execution.
  *
- *   CURRENT FH     a file handle: a NAME.  Set by PUTFH/PUTROOT, and by the ops
- *                  that resolve an object (LOOKUP, and the path ops).
- *   SAVED FH       a parked copy of it.  SAVEFH COPIES -- a name may exist in
- *                  two places, and NFSv4's wire SAVEFH leaves the current
- *                  filehandle in place, so the sequence must too.
- *   CURRENT OPEN   an open handle: a REFERENCE.  Set by OPEN (which opens the
- *                  current FH) and by PUTHANDLE (which lends the caller's).
- *   SAVED OPEN     a parked one.  SAVEHANDLE MOVES -- a reference has exactly
- *                  one owner, so parking it takes it out of the current slot.
- *                  (A copy would mean two owners; see the SAVED SLOT note in
- *                  vfs_compound.c for why that was avoided.)
- *
- * So the two two-operand families fall out symmetrically: RENAME and LINK name
- * two objects and read (SAVED FH, CURRENT FH); COPY_RANGE, CLONE_RANGE and
- * MOVE_RANGE act on two open files and read (SAVED OPEN, CURRENT OPEN).
- *
- * THE RULE.  An operation belongs in a sequence when it addresses an object
- * through the cursors, or when it mutates state the sequence itself holds.  A
- * lock release, a claim ack, a delete-on-close FLAG set, a notify watch, a
- * key-value record, a refcount drop touch neither and stay out of band -- for
- * every front end alike, which is the point of stating it: an exception that
- * one protocol takes and another does not is a bug in one of them.
- *
- * OPENING IS EXPLICIT.  The sequence never opens anything by itself.  A caller
- * that wants to GETATTR an object says PUTFH, OPEN, GETATTR -- which is what it
- * already wrote by hand before sequences existed, and it is the caller, not the
- * VFS, that knows what the open is for.  The alternative (the executor choosing
- * open flags from a per-op-type table) is what produced an O_PATH descriptor
- * handed to fgetxattr, and a data open of a FIFO that blocked.
- *
- * It also buys what an implicit open cannot: three lookups in one directory are
- * OPEN once and LOOKUP three times, where an implicitly-opened sequence must
- * re-PUTFH the parent between them and re-open it each time.
- *
- * HANDLE OWNERSHIP, in three rules:
- *
- *   1. The sequence owns what OPEN opened, and releases it when the slot is
- *      overwritten or the sequence ends.
- *   2. GETHANDLE transfers that ownership to the caller, which collects the
- *      handle from the op's result and releases it itself.  PUTHANDLE's handle
- *      is the caller's already and is never released by the sequence.
- *   3. CLOSE ends the handle whatever its provenance -- that is the point of
- *      it, and it is what an SMB2 CLOSE or an NFSv4 CLOSE means.  After a CLOSE
- *      the caller must NOT release that handle itself, including one it lent
- *      with PUTHANDLE.
- *
- * WHAT THIS IS NOT.  The sequence is not handed to a backend as a batch and it
- * is not atomic.  The executor runs the ops one at a time through the per-op
- * calls, so every backend, every cache and every claim behaves exactly as it
- * did when a front end made those calls itself.  Nothing here changes what an
- * operation means; it changes who holds the sequence.
- *
- * ERRORS.  Execution stops at the first op that fails -- the NFS4 rule, and
- * the only sane one for a sequence whose later ops address what the earlier
- * ones resolved.  Ops that ran carry their own status and results; ops after
- * the failure did not run and are left CHIMERA_VFS_UNSET.
- *
- * MUTATION.  Most ops here are read-only, but SETXATTR and REMOVEXATTR are not.
- * Stopping at a failure therefore leaves the mutations of the ops that already
- * ran applied: a sequence is not a transaction and is not rolled back.  That is
- * exactly what the same calls made one at a time would leave behind -- the ops
- * are the same ops -- and it is the only behaviour available while nothing
- * retries, which nothing does yet.  A caller that needs all-or-nothing wants the
- * VFS transaction API, not this.
- *
- * PARKING.  An op that must wait -- for a lease break, for a peer's ack --
- * parks exactly as it would outside a sequence.  The sequence simply does not
- * advance until it completes.  Nothing is held that would not otherwise be
- * held, because the ops are the same ops.
- *
- * A caller that has a client waiting on the other end wants to know, and
- * sometimes wants to stop waiting: chimera_vfs_compound_set_park_cb asks to
- * be told the first time the run parks, and chimera_vfs_compound_cancel
- * abandons a parked run and completes it CHIMERA_VFS_ECANCELED.  Which parks
- * are visible to either -- the ones the executor drives itself, not the ones
- * an ordinary op takes below it -- is on the park callback's own contract.
- * A cancel whose trigger arrives on another thread, which is most of them --
- * a FUSE_INTERRUPT, an SMB2 CANCEL, a teardown -- uses
- * chimera_vfs_compound_cancel_post instead, which marshals rather than
- * arbitrate where it is called.
- *
- * ADDRESSING SOMETHING OTHER THAN CURRENT.  Ops address the current object,
- * which is what makes a sequence a sequence.  One kind of caller cannot: a
- * protocol whose request names an object by something it resolved itself -- an
- * NFSv4 stateid, an SMB2 file id -- already holds an open handle for it, and
- * the operation has to run against that handle rather than against whatever the
- * sequence last resolved.
- *
- * Such an op carries an `in_handle`.  It is BORROWED: the caller opened it, the
- * caller holds the reference for as long as the sequence runs, and the caller
- * releases it afterwards.  The executor uses it and does nothing else with it,
- * which is the whole of the rule -- the mirror of OPEN's out_handle, where the
- * ownership runs the other way.
- *
- * An in_handle does not move the current object.  The op acts on the handle;
- * the sequence's own idea of where it is stays where it was.
- *
- * It names the object the op ACTS ON, so it is accepted by every op that
- * addresses one -- the I/O ops, SETATTR, GETATTR, ACCESS, READLINK, COMMIT,
- * READDIR and the xattr ops.  An op that resolves a NAME (LOOKUP, CREATE,
- * REMOVE, RENAME, LINK, a named OPEN) takes its directory from the current
- * object instead: there the handle is where the name is looked up rather than
- * the thing being acted on, and a caller that wants a different directory says
- * so by making it current.
- *
- * OPEN HANDLE OWNERSHIP.  Most ops leave nothing behind: the executor opens
- * what it needs, and releases it when the current object moves on or the
- * sequence ends.  Two are different, because what they produce is the whole
- * point of them and has to outlive the sequence -- an OPEN's handle, and a
- * READ's data iovecs.
- *
- * The rule for both is that the compound owns it until the caller takes it.  On
- * the completion callback they are readable as op->out_handle and op->iov;
- * chimera_vfs_compound_take_handle() and chimera_vfs_compound_take_iov()
- * transfer them, after which the caller releases them.  Anything the caller does
- * NOT take is released by chimera_vfs_compound_free(), so the failure paths -- a
- * later op failed, the caller decided not to install the state, the caller
- * simply forgot -- leak nothing.  Defaulting to "the compound still owns it" is
- * deliberate: a caller that must remember to release on every error path is a
- * caller that eventually does not.
+ * Calls may complete synchronously or asynchronously. The executor advances
+ * synchronous operations through a trampoline and parks for asynchronous VFS
+ * work. Frontend op callouts must not wait; asynchronous filesystem work must
+ * be expressed as operations in the sequence.
  */
 
 struct chimera_vfs_compound;
 
+int chimera_vfs_compound_add_checkpoint(
+    struct chimera_vfs_compound *compound);
+
 enum chimera_vfs_compound_op_type {
+    /* Ordered frontend decision; no filesystem work. Callbacks obey the
+     * same attempt-private contract as callbacks on filesystem operations. */
+    CHIMERA_VFS_COMPOUND_OP_CHECKPOINT,
+    /* Request coordination with external peers, memoized across attempts. */
+    CHIMERA_VFS_COMPOUND_OP_COORDINATE,
     /* Make `fh` the current object.  Any sequence that addresses an object
      * starts with one of these. */
     CHIMERA_VFS_COMPOUND_OP_PUTFH,
@@ -293,12 +200,19 @@ enum chimera_vfs_compound_op_type {
      * Without either, the current object is opened and the attributes applied
      * against the object's mode.  MUTATES. */
     CHIMERA_VFS_COMPOUND_OP_SETATTR,
+    /* Apply an admitted overwrite (SIZE=0), including base named-stream
+     * removal. The caller retains its overwrite/share reservation through
+     * acceptance; this is a filesystem mutation, not an input callback. */
+    CHIMERA_VFS_COMPOUND_OP_OVERWRITE,
     /* Extended attributes of the current object.  SETXATTR and REMOVEXATTR
      * MUTATE -- see the MUTATION note above. */
     CHIMERA_VFS_COMPOUND_OP_GETXATTR,
     CHIMERA_VFS_COMPOUND_OP_SETXATTR,
     CHIMERA_VFS_COMPOUND_OP_LISTXATTRS,
     CHIMERA_VFS_COMPOUND_OP_REMOVEXATTR,
+    CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM,
+    CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS,
+    CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM,
     CHIMERA_VFS_COMPOUND_OP_ALLOCATE,
     CHIMERA_VFS_COMPOUND_OP_SEEK,
     CHIMERA_VFS_COMPOUND_OP_COPY_RANGE,
@@ -505,9 +419,9 @@ enum chimera_vfs_compound_op_type {
      * per-op calls are: a backend without it fails the op ENOTSUP.  What a
      * backend WITH it refuses -- a stream on a symlink, say -- comes back as
      * that backend's own status. */
-    CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM,
-    CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS,
-    CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM,
+
+
+
     /* pNFS: where the current object's data lives.  Asks the backend for up
      * to `layout_max_segments` segments covering [layout_offset, +length)
      * at `layout_iomode`, in `layout_class`, and COPIES what comes back --
@@ -548,6 +462,19 @@ enum chimera_vfs_compound_op_type {
     /* Path-addressed.  See the note on ->path. */
     CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH,
     CHIMERA_VFS_COMPOUND_OP_OPEN_PATH,
+
+
+    CHIMERA_VFS_COMPOUND_OP_REMOVE_PATHS,
+    CHIMERA_VFS_COMPOUND_OP_RESERVE,
+    CHIMERA_VFS_COMPOUND_OP_RESERVE_ACCESS,
+    CHIMERA_VFS_COMPOUND_OP_RETIRE_ACCESS,
+    CHIMERA_VFS_COMPOUND_OP_NARROW_ACCESS,
+    CHIMERA_VFS_COMPOUND_OP_RETIRE_OPEN_CLAIMS,
+    CHIMERA_VFS_COMPOUND_OP_RANGE_BATCH,
+    CHIMERA_VFS_COMPOUND_OP_RANGE_OWNER,
+    CHIMERA_VFS_COMPOUND_OP_LOCK_TEST,
+    CHIMERA_VFS_COMPOUND_OP_LOCK_CHANGE,
+    CHIMERA_VFS_COMPOUND_OP_LOCK_RELEASE_OWNER,
     CHIMERA_VFS_COMPOUND_OP_CREATE_PATH,
     CHIMERA_VFS_COMPOUND_OP_REMOVE_PATH,
     CHIMERA_VFS_COMPOUND_OP_RENAME_PATH,
@@ -560,10 +487,49 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_CLOSE,
     CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE,
     CHIMERA_VFS_COMPOUND_OP_RESTOREHANDLE,
+    /* Mutating handle-state records routed through the current object's FH. */
+    CHIMERA_VFS_COMPOUND_OP_PUT_KEY_AT,
+    CHIMERA_VFS_COMPOUND_OP_DELETE_KEY_AT,
+    CHIMERA_VFS_COMPOUND_OP_SEARCH_KEYS_AT,
 };
 
-#define CHIMERA_VFS_COMPOUND_MAX_OPS             32
-#define CHIMERA_VFS_COMPOUND_NAME_MAX            255
+#define CHIMERA_VFS_COMPOUND_MAX_OPS  1024
+#define CHIMERA_VFS_COMPOUND_NAME_MAX 255
+
+/* Key/value bytes are copied at construction. Both operations preserve the
+ * cursor and use its FH to select the same backend as the *_key_at API. */
+int chimera_vfs_compound_add_put_key_at(
+    struct chimera_vfs_compound *compound,
+    const void                  *key,
+    uint32_t                     key_len,
+    const void                  *value,
+    uint32_t                     value_len);
+int chimera_vfs_compound_add_delete_key_at(
+    struct chimera_vfs_compound *compound,
+    const void                  *key,
+    uint32_t                     key_len);
+
+/* Bounded FH-routed search. Start is inclusive; end follows SEARCH_KEYS flags.
+ * Inputs are copied. Results own their binary bytes until reset/free. kv_more
+ * supplies the first unconsumed key for the next page's inclusive start; build
+ * that page before freeing the prior result. Result payload is bounded by
+ * max_bytes (<=16 MiB), entry array by max_entries (<=65536), with at most one
+ * continuation key of <=4096 bytes. A first row exceeding the payload budget
+ * returns ERANGE, ensuring pagination cannot loop without progress. Backend
+ * scan/snapshot allocation is outside this frontend result budget. */
+struct chimera_vfs_compound_kv_entry {
+    uint8_t *key, *value;
+    uint32_t key_len, value_len;
+};
+int chimera_vfs_compound_add_search_keys_at(
+    struct chimera_vfs_compound *compound,
+    const void                  *start_key,
+    uint32_t                     start_len,
+    const void                  *end_key,
+    uint32_t                     end_len,
+    uint32_t                     flags,
+    uint32_t                     max_entries,
+    uint32_t                     max_bytes);
 
 /*
  * A READDIR's result is a page, not the whole directory: the caller says how
@@ -597,6 +563,8 @@ enum chimera_vfs_compound_create_type {
      * takes them, so there is nothing here to translate. */
     CHIMERA_VFS_COMPOUND_CREATE_NODE,
     CHIMERA_VFS_COMPOUND_CREATE_SYMLINK,
+    /* CREATE_PATH only: materialize the entire directory chain. */
+    CHIMERA_VFS_COMPOUND_CREATE_DIR_TREE,
 };
 
 /*
@@ -740,79 +708,147 @@ struct chimera_vfs_compound_dirent {
     struct chimera_vfs_attrs attr;
 };
 
+/* Execution-time decisions belong to the operation that needs them. Prepare
+ * runs once before any VFS work for the operation; complete runs with its
+ * results before a following operation may execute. Both callbacks may update
+ * only attempt-private state and the supplied status. They must not publish
+ * protocol state, consume request data, send replies, perform I/O, or wait.
+ * The original arguments and callback context must survive retries. A retry
+ * can produce different results; decisions are recomputed from those results.
+ * A complete callback may normalize an optional error to OK. */
+typedef void (*chimera_vfs_compound_op_callback_t)(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data);
+
+typedef void (*chimera_vfs_compound_attempt_reset_t)(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data);
+
+/* Unlike pure operation callbacks, this explicit operation may initiate
+ * external protocol coordination. The executor parks until coordinate_done;
+ * completion may be inline, but must run on the compound's owning VFS thread.
+ * By default it is called at most once per original operation and resolved
+ * current FH. coordinate_each_attempt is reserved for repeatable cache-input
+ * resolution (e.g. principals read from current attributes), never one-shot
+ * protocol notifications. Such resolution runs again after finish rejection.
+ * FH bytes and token belong to the compound and remain valid until free.
+ * Coordination is independent of a backend transaction: do not publish the
+ * request's result, mutate the filesystem, or publish tentative protocol state.
+ * Pure prepare/complete checks still run on every attempt and must reject a
+ * new blocker that appeared after coordination. Frontend cached data must be
+ * keyed by these FH bytes and live outside its resettable attempt state. */
+typedef void (*chimera_vfs_compound_coordinate_t)(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    uint64_t                     token,
+    const uint8_t               *fh,
+    uint32_t                     fh_len,
+    void                        *private_data);
+
+/* FIND traverses beneath the current FH. The filter/append callbacks may
+ * inspect inputs and accumulate attempt-private results only. reset releases
+ * those results before each traversal, including a retry. */
+typedef int (*chimera_vfs_compound_find_entry_t)(
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data);
+
 struct chimera_vfs_compound_op {
-    uint8_t                               type;
-    /* CHIMERA_VFS_UNSET until the op has run -- and still UNSET afterwards for
-     * an op that did not run: one behind a failure, or one a gate skipped. */
-    enum chimera_vfs_error                status;
+    uint8_t                                     type;
+    /* CHIMERA_VFS_UNSET until the op has run. */
+    enum chimera_vfs_error                      status;
+
+    chimera_vfs_compound_op_callback_t          prepare;
+    chimera_vfs_compound_op_callback_t          complete;
+    void                                       *prepare_private;
+    void                                       *callback_private;
+    chimera_vfs_compound_coordinate_t           coordinate;
+    void                                       *coordinate_private;
+    uint8_t                                     coordinate_each_attempt;
+    uint8_t                                     prepared;
+    uint8_t                                     skipped;
+    /* Completed execution/callouts, independent of physical operation order.
+     * False for group/dependency-skipped operations (whose status is UNSET). */
+    uint8_t                                     completed;
+    /* Executor-owned link: dynamic group suffixes keep stable op indices. */
+    int32_t                                     group_next;
+    uint32_t                                    cancel_scope_end; /* construction, end index + 1 */
+    uint32_t                                    access_ready; /* opt-in private reservation endpoint + 1 */
+
+    chimera_vfs_compound_find_filter_t          find_stream_filter;
+    chimera_vfs_compound_find_append_t          find_stream_append;
+    chimera_vfs_compound_find_entry_t           find_filter;
+    chimera_vfs_compound_find_entry_t           find_append;
+    chimera_vfs_compound_readdir_reset_t        find_reset;
+    void                                       *find_private;
+
+    /* REMOVE_PATHS borrows a stable list of NUL-terminated paths for this
+     * attempt. Each removal remains an ordinary VFS operation. */
+    const char *const                          *remove_paths;
+    uint32_t                                    remove_num_paths;
+    uint32_t                                    remove_path_index;
+    uint8_t                                     remove_ignore_errors;
+
+    /* LINK namespace options. With NO_NOTIFY the frontend must emit the
+     * accepted notification itself. io_owner.op_handle preserves the source
+     * open's lease identity when have_io_owner is set. */
+    uint32_t                                    namespace_flags;
+    /* Borrowed immutable credential, bound by prepare if necessary. Applies
+     * only to OPEN_CURRENT/REMOVE and the latter's implicit parent open. */
+    const struct chimera_vfs_cred              *namespace_cred;
+    uint8_t                                     remove_match_child_fh;
+    uint8_t                                     remove_unmatched;
+    uint8_t                                     namespace_parent_lease_key[16];
+    uint8_t                                     namespace_parent_lease_key_valid;
 
     /* ---- arguments ---- */
-    /* A gate set this: the executor runs PAST this op without dispatching it.
-     * Only a gate consulted on an EARLIER op may set it -- see the gate's
-     * contract, which is also where the idempotence rule that makes an edited
-     * sequence re-runnable lives.  Cleared by every submit, so the gate's
-     * decision is made afresh on each execution. */
-    uint8_t                               skip;
-    /* The CALLER set this, before submitting -- see
-     * chimera_vfs_compound_op_set_skip.  Identical in effect, different in
-     * lifetime: it is an argument of the sequence as built and survives
-     * submission, where `skip` does not.  The two are ORed and neither can
-     * clear the other. */
-    uint8_t                               skip_build;
-    uint8_t                               arg_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                              arg_fh_len;
-    char                                  name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
-    uint32_t                              name_len;
-    uint64_t                              attr_mask;
-    /* Attributes to sample BEFORE the op runs, landing in `pre_attr`.  The
-     * pair (pre_attr_mask, attr_mask) is what a protocol needs to report a
-     * change atomically with the change itself: NFSv3's wcc_data, and SMB2's
-     * write-time-sticky handle, which restores the mtime a write advanced. */
-    uint64_t                              pre_attr_mask;
-    /* Attributes of the DIRECTORY an op names a child in, landing in
-     * `dir_post_attr`.  Separate from pre_attr_mask because these are a second
-     * object's attributes, not this one's at an earlier moment: NFSv3's
-     * LOOKUP3resok returns obj_attributes and dir_attributes side by side.
-     *
-     * For an op that CHANGES the directory, `dir_pre_attr_mask` is the reading
-     * taken before it, into `dir_pre_attr`, and this one is the reading after.
-     * That pair is NFSv3's wcc_data.  The executor always adds CHANGE and CTIME
-     * to both, because NFSv4's change_info4 is built from them whatever the
-     * caller asked for. */
-    uint64_t                              dir_attr_mask;
-    uint64_t                              dir_pre_attr_mask;
-    uint32_t                              requested;
-    uint64_t                              offset; /* COMMIT                             */
-    uint64_t                              count; /* COMMIT                             */
-    uint64_t                              cookie; /* READDIR, LISTXATTRS                */
-    uint64_t                              verifier; /* READDIR                            */
-    uint32_t                              dircount; /* READDIR (advisory; see the adder)  */
-    uint32_t                              maxcount; /* READDIR (advisory; see the adder)  */
-    uint32_t                              max_entries; /* READDIR                            */
+    /* PUTFH input; REMOVE may also use these as the resolved child identity
+     * for VFS lease recall and silly-rename handling. Zero length means none. */
+    uint8_t                                     arg_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                                    arg_fh_len;
+    char                                        name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    uint32_t                                    name_len;
+    uint64_t                                    attr_mask;
+    /* Optional protocol result masks; otherwise each builder's defaults apply. */
+    uint8_t                                     result_masks_set;
+    uint64_t                                    result_attr_mask;
+    uint64_t                                    result_pre_attr_mask;
+    uint64_t                                    result_post_attr_mask;
+    uint32_t                                    requested;
+    uint64_t                                    offset; /* COMMIT                             */
+    uint64_t                                    count; /* COMMIT                             */
+    uint64_t                                    cookie; /* READDIR, LISTXATTRS                */
+    uint32_t                                    readdir_flags; /* CHIMERA_VFS_READDIR_* */
+    uint64_t                                    verifier; /* READDIR                            */
+    uint32_t                                    dircount; /* READDIR (advisory; see the adder)  */
+    uint32_t                                    maxcount; /* READDIR (advisory; see the adder)  */
+    uint32_t                                    max_entries; /* READDIR                            */
     /* READDIR, streaming variant: with these set the sequence stages nothing
      * and the caller marshals each entry itself.  See the typedefs above. */
-    chimera_vfs_compound_readdir_reset_t  readdir_reset;
-    chimera_vfs_compound_readdir_append_t readdir_append;
-    void                                 *readdir_private;
+    chimera_vfs_compound_readdir_reset_t        readdir_reset;
+    chimera_vfs_compound_readdir_append_t       readdir_append;
+    void                                       *readdir_private;
     /* READDIR: CHIMERA_VFS_READDIR_* and the caller's search pattern, which the
      * VFS core matches on the caller's behalf.  The pattern is BORROWED and is
      * re-matched on every execution, so it has to outlive a retry. */
-    uint32_t                              readdir_flags;
-    const char                           *readdir_pattern;
-    uint32_t                              readdir_pattern_len;
+    const char                                 *readdir_pattern;
+    uint32_t                                    readdir_pattern_len;
     /* Address this handle instead of the current object.  BORROWED from the
      * caller -- see ADDRESSING SOMETHING OTHER THAN CURRENT above.  NULL for
      * every op that addresses the current object, which is most of them. */
-    struct chimera_vfs_open_handle       *in_handle;
-    uint8_t                               create_type; /* CREATE                             */
+    struct chimera_vfs_open_handle             *in_handle;
+    uint8_t                                     create_type; /* CREATE                             */
     /* CREATE of a symlink: its target.  Copied by the adder and owned by the
      * compound, so the caller need not keep it alive. */
-    char                                 *link_target;
-    uint32_t                              link_target_len;
+    char                                       *link_target;
+    uint32_t                                    link_target_len;
     /* RENAME: the name in the CURRENT object to rename to.  `name` is the one
      * in the saved object to rename from. */
-    char                                  new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
-    uint32_t                              new_name_len;
+    char                                        new_name[CHIMERA_VFS_COMPOUND_NAME_MAX + 1];
+    uint32_t                                    new_name_len;
     /* OPEN: the CHIMERA_VFS_OPEN_* word to open with -- and, for PUTHANDLE,
      * the word the caller says its LENT handle was opened with.
      *
@@ -825,223 +861,173 @@ struct chimera_vfs_compound_op {
      * alone is not describing a restriction, it is withholding a capability,
      * and the op that needs the withheld one fails.  See the serves rules on
      * PUTHANDLE. */
-    unsigned int                          open_flags;
+    unsigned int                                open_flags;
     /* CLOSE: CHIMERA_VFS_COMPOUND_CLOSE_* -- whether this close honours the
      * handle's delete-on-close.  See the adder. */
-    unsigned int                          close_flags;
+    unsigned int                                close_flags;
     /* REMOVE, RENAME: CHIMERA_VFS_REMOVE_* -- the type assertion and the
      * lease-recall request, which are the caller's to make. */
-    unsigned int                          remove_flags;
-    uint32_t                              open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
-    /* SETATTR, OPEN, CREATE (and CREATE_UNLINKED, OPEN_STREAM, the path
-     * creates): the attributes to apply.  Read by the executor at execution
-     * time, so ATTRS_ON_CREATE_ONLY can clear it once the name has been
-     * resolved.
-     *
-     * SET-SIDE va_acl IS BORROWED, and so are va_owner_sid / va_group_sid.
-     * The adders copy this struct by value, which carries the caller's
-     * pointers across unchanged; the executor hands them to the backend in
-     * place, never copies what they point at, and never frees it.  The caller
-     * keeps those buffers alive for the life of the run -- exactly as it
-     * keeps a WRITE's payload -- and a retried run reads them again.  (An
-     * ACL is the one settable attribute that is not a value in this struct,
-     * so it takes the WRITE payload's terms rather than the struct copy's.) */
-    struct chimera_vfs_attrs              set_attr;
-    /* Only metadata publication for a data write already authorized by the
-     * protocol (for example pNFS LAYOUTCOMMIT), never a fresh mutation. */
-    uint8_t                               setattr_after_write;
-
-    /* ---- the name-op knobs: exempt handle, lease skip, match fh ----
-     * Set by chimera_vfs_compound_op_set_remove_match / _set_rename_opts /
-     * _set_link_opts after the adder, because only SMB and a few NFSv4 paths
-     * supply any of them and every other caller would carry arguments it
-     * never uses.  The file handles and the lease key are COPIED -- they are
-     * values, and a caller assembling them in a stack buffer should not have
-     * to keep it alive across the submission.  The handle is BORROWED on the
-     * in_handle terms. */
-    /* REMOVE: the doomed object's fh.  With `child_fh_match` the name is
-     * unlinked only while it still resolves to this object
-     * (remove_at_match_fh): a name that now belongs to something else is left
-     * alone and the op reports OK, because the caller's object is already
-     * gone.  Without it the fh is the recall target remove_at would otherwise
-     * resolve for itself.  child_fh_len 0 is a plain remove_at. */
-    uint8_t                               child_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                              child_fh_len;
-    uint8_t                               child_fh_match;
-    /* RENAME, REMOVE, LINK -- and the unlink a CLOSE(CLOSE_DOC) performs: the
-     * directory lease to spare from the break the op raises -- the operating
-     * open's own ParentLeaseKey, so a client does not break the lease it holds
-     * on the directory it is changing.  Valid only when
-     * parent_lease_skip_valid is set; the executor passes NULL otherwise,
-     * which breaks every directory lease as NFS and S3 do. */
-    uint8_t                               parent_lease_skip[16];
-    uint8_t                               parent_lease_skip_valid;
-    /* RENAME, LINK: the operating handle whose own file lease the source
-     * recall must not break -- renaming a file one holds a lease on is not
-     * a reason to lose the lease.  BORROWED; NULL exempts nothing. */
-    struct chimera_vfs_open_handle       *op_exempt_handle;
-    /* RENAME: the fh of the object already at the destination name, when the
-     * caller has resolved it; target_fh_len 0 leaves rename_at to resolve
-     * it.  And CHIMERA_VFS_RENAME_SRC_IS_DIR, which the executor ORs into the
-     * word it hands rename_at beside remove_flags: the open is the only layer
-     * that knows the renamed object's type, and the notify filters want it. */
-    uint8_t                               target_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                              target_fh_len;
-    unsigned int                          rename_flags;
-    /* LINK: clobber an existing destination name -- linkat(2) never does, an
-     * SMB rename-via-link with ReplaceIfExists and an S3 publish both do. */
-    uint8_t                               link_replace;
-
-    /* OPEN, OPEN_PATH: an opaque record to persist atomically with the open
-     * (CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE) -- an SMB durable or persistent
-     * handle's reconnect record.  BORROWED, and it must outlive the run: the
-     * per-op call keeps the pointer until the backend has stored it.  NULL is
-     * a plain open.  Set by chimera_vfs_compound_op_set_handle_state, where
-     * what a backend WITHOUT the capability does with it is spelled out. */
-    struct chimera_vfs_handle_state      *handle_state;
-
-    /* CREATE_PATH of a directory: create the interior components too and
-     * accept the ones already there -- mkdir -p.  See the adder. */
-    uint8_t                               path_intermediates;
-
-    /* ---- streams ---- */
-    /* OPEN_STREAM: CHIMERA_VFS_OPEN_* for the fork -- CREATE, EXCLUSIVE and
-     * TRUNCATE mean what they mean to chimera_vfs_open_stream, and the rest
-     * become the handle's flags, which is how the sequence knows what the
-     * stream handle serves.  The stream's name rides in `name`, and the
-     * attributes a creating open stamps on the base in `set_attr`.  (Its own
-     * word rather than open_flags, so an OPEN_STREAM cannot be misread as an
-     * OPEN by anything that switches on the flags alone.) */
-    unsigned int                          stream_flags;
-    /* LIST_STREAMS: carry each stream's file handle in its record.  NFSv4's
-     * named-attribute READDIR needs them; SMB's FILE_STREAM_INFORMATION does
-     * not and keeps the compact record. */
-    int                                   stream_want_fh;
-
-    /* READ into the caller's buffers -- see the READ op.  BORROWED on the
-     * WRITE payload's terms: the caller holds them for the life of the
-     * sequence and releases them afterwards.  NULL / 0 is an ordinary READ. */
-    struct evpl_iovec                    *dest_iov;
-    int                                   dest_niov;
-
-    /* ---- GET_LAYOUT ---- */
-    uint64_t                              layout_offset;
-    uint64_t                              layout_length;
-    uint32_t                              layout_iomode;
-    uint32_t                              layout_class;
-    uint32_t                              layout_max_segments;
-
-    /* ---- FIND: the walk's three callbacks -- see the typedefs.  `reset`
-     * is READDIR's: the reversibility contract is the same one, and a
-     * caller that stages into request-local arrays gives a reset that
-     * truncates them. */
-    chimera_vfs_compound_find_filter_t    find_filter;
-    chimera_vfs_compound_find_append_t    find_append;
-    chimera_vfs_compound_readdir_reset_t  find_reset;
-    void                                 *find_private;
-    /* Executor scratch: append refused an entry and the walk is being
-     * drained -- see the FIND typedefs.  Cleared before every execution. */
-    uint8_t                               find_stopped;
-
-    /* ---- RECALL: the object, when it is not the current one (COPIED;
-     * recall_fh_len 0 means the current object), the CHIMERA_CLAIM_* floor
-     * the parking recall leaves each holder at, and CHIMERA_VFS_COMPOUND_
-     * RECALL_*.  See the adder. */
-    uint8_t                               recall_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                              recall_fh_len;
-    uint8_t                               recall_retain;
-    unsigned int                          recall_flags;
-
+    unsigned int                                remove_flags;
+    uint8_t                                     rename_target_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                                    rename_target_fh_len;
+    enum chimera_vfs_rename_outcome             rename_outcome;
+    uint32_t                                    open_opts; /* OPEN: CHIMERA_VFS_COMPOUND_OPEN_*  */
+    /* Unnamed OPEN may inherit retained permissions from another authorized
+     * open of the same FH. Borrowed and pinned through completion; prepare may
+     * bind it to an earlier result. Only OPEN-bound grants are inherited;
+     * a lazy stateless access-cache entry never becomes permanent this way.
+     * The executor combines these rights with those already on the result. */
+    const struct chimera_vfs_open_handle       *inherited_grant_handle;
+    /* Second authorized grant source, e.g. the newly requested OPEN when the
+     * union reopen instead selects the older write-capable cache entry. */
+    const struct chimera_vfs_open_handle       *inherited_grant_handle2;
+    /* Immutable OPEN/CREATE/SETATTR input. Scalars are copied by the builder;
+     * va_acl is borrowed and must remain valid through completion/retries.
+     * ATTRS_ON_CREATE_ONLY clears only the execution copy below. */
+    struct chimera_vfs_attrs                    set_attr;
+    /* Execution copy: resolving an existing name must not erase the original
+     * create attributes needed by a subsequent attempt. */
+    struct chimera_vfs_attrs                    applied_attr;
+    /* Attempt-local anonymous admission; excluded claims remain pinned by
+    * the frontend. Owned actors still use io_owner/src_io_owner below. */
+    struct chimera_vfs_io_view                  io_view;
+    struct chimera_vfs_io_view                  src_io_view;
+    /* Writable ACL supplied to this attempt. set_attr.va_acl remains the
+     * caller's immutable input for the lifetime of the compound. */
+    struct chimera_acl                         *applied_acl;
+    /* Metadata publication for an already-authorized data write. */
+    uint8_t                                     setattr_after_write;
     /* A PATH-ADDRESSED op resolves this, relative to the sequence's current
      * file handle, instead of addressing the current object.  Owned by the
-     * compound and copied by the adder.
+     * compound and copied by the adder. OPEN-at also stores its potentially
+     * longer name here, but resolves against the current open directory.
      *
      * This is the only way to reach an object on a path-only mount, where a
      * child's handle is an opaque per-open token that open_fh cannot reopen --
      * so the current object there can only ever be the mount root, and every
      * operation has to name its target by path from it.  It is also one call
      * where chaining would be several, on every backend. */
-    char                                 *path;
-    uint32_t                              path_len;
+    char                                       *path;
+    uint32_t                                    path_len;
     /* RENAME and LINK name two paths; this is the destination. */
-    char                                 *new_path;
-    uint32_t                              new_path_len;
+    char                                       *new_path;
+    uint32_t                                    new_path_len;
     /* Address the handle that op `handle_from` produced, rather than the
      * current object -- for the op after a path OPEN, whose result is the only
      * usable reference to an object a path-only mount will not reopen.  -1
      * when unused, which the adders leave it as. */
-    int                                   handle_from;
-    /* The range ops (COPY_RANGE, CLONE_RANGE, MOVE_RANGE) address TWO objects,
-     * and both are caller-supplied: `in_handle` is the destination, the object
-     * being written, and this is the source.  Neither ever addresses the
-     * current object -- a sequence cannot hold two of those, and every caller
-     * of these already holds both handles (two open files for FUSE, two
-     * stateids for NFSv4).  Both are BORROWED on the usual terms. */
-    struct chimera_vfs_open_handle       *src_handle;
-    uint64_t                              src_offset;
-    uint32_t                              copy_flags; /* COPY_RANGE                        */
+    int                                         handle_from;
+    /* Range endpoints are borrowed: in_handle is the destination and
+    * src_handle the source. Prepare may bind either from prior owned results.
+    * If omitted, execution uses the saved/current open cursors; both handles
+    * must be available before dispatch. These are distinct from SAVEFH's
+    * saved filehandle, which does not itself keep an open handle. */
+    struct chimera_vfs_open_handle             *src_handle;
+    uint64_t                                    src_offset;
+    uint32_t                                    copy_flags; /* COPY_RANGE                        */
     /* WRITE_SAME: the pattern is BORROWED, like a WRITE's payload. */
-    uint32_t                              block_size;
-    uint64_t                              block_count;
-    const void                           *pattern;
-    uint32_t                              pattern_len;
-    uint32_t                              reloff_pattern;
-    uint32_t                              allocate_flags; /* ALLOCATE: CHIMERA_VFS_ALLOCATE_* */
-    uint64_t                              length; /* ALLOCATE                           */
+    uint32_t                                    block_size;
+    uint64_t                                    block_count;
+    const void                                 *pattern;
+    uint32_t                                    pattern_len;
+    uint32_t                                    reloff_pattern;
+    uint32_t                                    allocate_flags; /* ALLOCATE: CHIMERA_VFS_ALLOCATE_* */
+    uint64_t                                    length; /* ALLOCATE                           */
     /* ALLOCATE: the attributes to fetch after the change.  `attr_mask` is the
      * pre-change one, as it is for COMMIT. */
-    uint64_t                              post_attr_mask;
-    uint32_t                              seek_what; /* SEEK: data (0) or hole (1)         */
-    uint32_t                              xattr_option; /* SETXATTR                          */
-    const void                           *xattr_value; /* SETXATTR (borrowed from caller)    */
-    uint32_t                              xattr_value_len;
-    uint32_t                              buffer_max; /* GETXATTR, LISTXATTRS               */
-    int                                   max_iov; /* READ                               */
+    uint64_t                                    post_attr_mask;
+    uint32_t                                    seek_what; /* SEEK: data (0) or hole (1)         */
+    uint32_t                                    xattr_option; /* SETXATTR                          */
+    const void                                 *xattr_value; /* SETXATTR (borrowed from caller)    */
+    uint32_t                                    xattr_value_len;
+    /* Immutable binary inputs copied by the KV builders, retained on retry. */
+    uint8_t                                    *kv_key;
+    uint8_t                                    *kv_value;
+    uint32_t                                    kv_key_len;
+    uint32_t                                    kv_value_len;
+    uint32_t                                    kv_flags, kv_max_entries, kv_max_bytes;
+    struct chimera_vfs_compound_kv_entry       *kv_entries;
+    uint32_t                                    kv_num_entries, kv_result_bytes;
+    uint8_t                                    *kv_next_key;
+    uint32_t                                    kv_next_key_len;
+    bool                                        kv_more;
+    enum chimera_vfs_error                      kv_error;
+    uint32_t                                    buffer_max; /* GETXATTR, LISTXATTRS               */
+    uint8_t                                     stream_want_fh;
+    int                                         max_iov; /* READ                               */
     /* WRITE: the data, BORROWED from the caller -- see ADDRESSING SOMETHING
      * OTHER THAN CURRENT, which these are owned on the same terms as. */
-    struct evpl_iovec                    *w_iov;
-    int                                   w_niov;
-    uint32_t                              sync; /* WRITE: requested stability         */
+    struct evpl_iovec                          *w_iov;
+    int                                         w_niov;
+    uint32_t                                    sync; /* WRITE: requested stability         */
     /* READ, WRITE: whose I/O this is.  A caller holding a lease on the object
      * has to say so, or the claim layer arbitrates its own I/O against its own
      * reservation -- denying the write, and recalling the delegation the write
-     * is being done under.  ARGUMENTS, so a caller that cannot know the owner
-     * at build time has a gate fill them in -- see the WRITE adder. */
-    struct chimera_claim_actor            io_owner;
-    uint8_t                               have_io_owner;
+     * is being done under. */
+    struct chimera_claim_actor                  io_owner;
+    uint8_t                                     have_io_owner;
+    struct chimera_claim_actor                  src_io_owner;
+    uint8_t                                     have_src_io_owner;
     /* Executor scratch: whether the two-step I/O type check has run.  Lives on
      * the op only so the open-flags decision, which sees an op and not the
      * sequence, can tell the two steps apart. */
-    uint8_t                               io_typechecked_flag;
+    uint8_t                                     io_typechecked_flag;
+
+    /* RESERVE: caller-owned attempt-private claim storage. The VFS owns its
+     * acquisition and release until accepted completion takes the reservation. */
+    struct chimera_vfs_claim                   *claim;
+    struct chimera_vfs_claim_access_owner      *access_owner; /* owned RESERVE_ACCESS result */
+    struct chimera_vfs_claim_access_owner      *access_retire_owner; /* borrowed input */
+    uint32_t                                    access_narrow_from;
+    uint8_t                                     access_narrow_used, access_narrow_denied;
+    struct chimera_vfs_claim_access_owner      *base_access_retire_owner;
+    struct chimera_vfs_claim_owner             *range_retire_owner;
+    /* Same-file private range overlay, borrowed through this operation. */
+    const struct chimera_vfs_claim *const      *claim_ranges;
+    uint32_t                                    num_claim_ranges;
+
+    /* Exact local claim journal inputs and per-batch result. */
+    struct chimera_vfs_claim_owner             *range_owner;
+    struct chimera_vfs_claim_owner             *out_range_owner; /* owned typed allocation */
+    bool                                        range_zero_point;
+    const struct chimera_vfs_claim_exact_range *exact_ranges;
+    uint32_t                                    num_exact_ranges;
+    uint8_t                                     range_unlock;
+    uint8_t                                     range_wait;
+    uint32_t                                    range_timeout_ms;
+    struct chimera_vfs_claim_range_attempt     *range_attempt;
+    void                                        (*range_on_wait)(
+        struct chimera_vfs_compound *,
+        uint32_t,
+        void *);
+    bool                                        (*range_is_canceled)(
+        struct chimera_vfs_compound *,
+        uint32_t,
+        void *);
+    void                                       *range_wait_private;
+    struct chimera_vfs_claim_batch_result       range_result;
+    const struct chimera_vfs_claim            **journal_excluded;
+    const struct chimera_vfs_claim            **journal_src_excluded;
+
+    struct chimera_vfs_lock_request             lock_request;
+    struct chimera_vfs_lock_attempt            *lock_attempt;
+    uint8_t                                     nonretryable;
+    uint32_t                                    lock_pid;
 
     /* ---- results ---- */
-    /* LOOKUP, GETATTR, ACCESS, OPEN, CREATE, and the I/O and change ops that
-     * sample the object after themselves.
-     *
-     * ACLs BY VALUE.  When an op is asked for CHIMERA_VFS_ATTR_ACL -- in its
-     * attr_mask, its pre_attr_mask, or one of its directory masks -- the
-     * executor copies the backend's live ACL into heap storage the op owns
-     * and re-points the result's va_acl at the copy, and the ACL bit stays
-     * set; va_owner_sid and va_group_sid, which share va_acl's lifetime
-     * contract, are copied the same way.  This holds for every attribute
-     * result slot on the op: attr, pre_attr, dir_pre_attr, dir_post_attr,
-     * from_dir_pre_attr and from_dir_post_attr.  A caller reads the ACL from
-     * the completion callback until it frees the compound, which is what
-     * frees the copies.  A backend reports an ACL by pointing at storage
-     * valid only for its own completion, so a struct copy that survived the
-     * callback used to carry a dangling pointer; every result once dropped
-     * the ACL for that reason, and the copy removes the hazard rather than
-     * the attribute.  ACCESS's `granted` was always computed while the ACL
-     * was live; its attr now carries the ACL it was computed from.
-     *
-     * The staged READDIR entry is the one exception -- see the dirent. */
-    struct chimera_vfs_attrs            attr;
-    /* The same object BEFORE this op ran, sampled under whatever lock makes
-     * it atomic with the change -- which is the whole reason it comes back
-     * from the op rather than from a GETATTR the caller issues first.  Only
-     * the attributes named in `pre_attr_mask` are filled, the ACL by value as
-     * above. */
-    struct chimera_vfs_attrs            pre_attr;
+    /* CLOSE of an external borrowed reference is deferred until acceptance. */
+    struct chimera_vfs_open_handle             *close_handle;
+    /* Attempt-owned CLOSE output, unavailable to consumers immediately but
+     * retained through journal/claim drain on accepted or rejected cleanup. */
+    struct chimera_vfs_open_handle             *closed_output_handle;
+    enum chimera_vfs_error                      result_error;
+    struct chimera_vfs_file_state              *claim_file;
+    uint8_t                                     claim_held;
+    uint8_t                                     claim_result;
+    struct chimera_vfs_claim_conflict           claim_conflict;
+    /* LOOKUP, GETATTR, ACCESS and OPEN. ACL storage is copied and owned by
+     * the compound, valid through accepted completion until free/retry. */
+    struct chimera_vfs_attrs                    attr;
     /* The current object AFTER this op ran: what a LOOKUP resolved, what a
      * PUTFH selected, and for everything else the object the op addressed.
      * A streaming READDIR is the one op that fills this BEFORE it runs rather
@@ -1049,26 +1035,26 @@ struct chimera_vfs_compound_op {
      * is listing and a READDIR cannot move the current object anyway.
      * A caller that must describe the object an op acted on -- which is most
      * of what a protocol reply is -- would otherwise have to re-derive it. */
-    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                            fh_len;
-    uint32_t                            granted;   /* ACCESS                            */
+    uint8_t                                     fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                                    fh_len;
+    uint32_t                                    granted; /* ACCESS                            */
     /* READ_PLUS: whether the range it reported is data rather than a hole.
      * Its length and eof land in read_len and eof_read, as a READ's do. */
-    uint32_t                            is_data;
+    uint32_t                                    is_data;
     /* SEEK: where the next data or hole begins, and whether the search ran off
      * the end of the file without finding one. */
-    uint64_t                            seek_offset;
-    uint32_t                            seek_eof;
-    char                               *target;   /* READLINK (owned by the compound)  */
-    uint32_t                            target_len;
+    uint64_t                                    seek_offset;
+    uint32_t                                    seek_eof;
+    char                                       *target; /* READLINK (owned by the compound)  */
+    uint32_t                                    target_len;
 
     /* SETXATTR, REMOVEXATTR, REMOVE_STREAM.  Only the ctime is kept: it is
      * the whole of what a change_info reply needs, and keeping two more
      * attribute sets per op would double the size of a sequence for one
      * field.  (remove_stream asks its backend for no attributes at all today,
      * so for it these stay zero unless the backend volunteers a ctime.) */
-    struct timespec                     pre_ctime;
-    struct timespec                     post_ctime;
+    struct timespec                             pre_ctime;
+    struct timespec                             post_ctime;
 
     /* ---- READ results ---- */
     /* The data, as references to the backend's buffers, written into the array
@@ -1079,46 +1065,46 @@ struct chimera_vfs_compound_op {
      * dest_niov handed back -- the caller's own buffers, with the first
      * read_len bytes filled -- and the compound owns none of it.  take_iov
      * then answers NULL / 0, and free releases nothing. */
-    struct evpl_iovec                  *iov;
-    int                                 niov;
-    uint32_t                            read_len;
-    uint32_t                            eof_read;
+    struct evpl_iovec                          *iov;
+    int                                         niov;
+    uint32_t                                    read_len;
+    uint32_t                                    eof_read;
 
     /* ---- WRITE results ---- */
-    uint32_t                            written;
+    uint64_t                                    written;
     /* Durability actually achieved, which may exceed what was asked for and
      * may fall short of it only by the backend's own report. */
-    uint32_t                            committed;
+    uint32_t                                    committed;
 
     /* ---- OPEN results (and CREATE_UNLINKED's and OPEN_STREAM's) ---- */
     /* The open handle, owned by the CALLER once the sequence has finished --
      * see OPEN HANDLE OWNERSHIP below.  NULL if the op did not run or failed.
      * CREATE_UNLINKED and OPEN_STREAM produce theirs here on the same terms. */
-    struct chimera_vfs_open_handle     *out_handle;
+    struct chimera_vfs_open_handle             *out_handle;
     /* Whether the open created the object (the fork, for OPEN_STREAM; always
      * set for CREATE_UNLINKED, which creates by definition). */
-    uint8_t                             created;
+    uint8_t                                     created;
     /* Set when the executor resolved the name before opening (which it does
      * for REGULAR_ONLY or ATTRS_ON_CREATE_ONLY) and found an existing object.
      * `existing_mode` is that object's mode -- the whole point of the
      * REGULAR_ONLY failure, whose status says only that the open was refused
      * and not what was in the way. */
-    uint8_t                             existed;
-    uint32_t                            existing_mode;
+    uint8_t                                     existed;
+    uint32_t                                    existing_mode;
     /* The parent directory before and after, for a change_info reply.  Set by
      * CREATE and REMOVE, and by an OPEN that named a child. */
-    struct chimera_vfs_attrs            dir_pre_attr;
-    struct chimera_vfs_attrs            dir_post_attr;
+    struct chimera_vfs_attrs                    dir_pre_attr;
+    struct chimera_vfs_attrs                    dir_post_attr;
     /* RENAME only: the SOURCE directory's change_info.  The pair above is the
      * target's, which is what every other name-changing op reports.  Both are
      * filled because rename_at hands back both and NFSv4's RENAME reply has a
      * slot for each -- source_cinfo and target_cinfo. */
-    struct chimera_vfs_attrs            from_dir_pre_attr;
-    struct chimera_vfs_attrs            from_dir_post_attr;
+    struct chimera_vfs_attrs                    from_dir_pre_attr;
+    struct chimera_vfs_attrs                    from_dir_post_attr;
 
     /* READDIR.  `entries` is allocated on demand and owned by the compound. */
-    struct chimera_vfs_compound_dirent *entries;
-    uint32_t                            num_entries;
+    struct chimera_vfs_compound_dirent         *entries;
+    uint32_t                                    num_entries;
     /* CLAIM_TEST and CLAIM.  `claim` and `ticket` are BORROWED and outlive
      * the sequence AND, for a granted CLAIM, the claim it inserts: the claim
      * core keeps pointers INTO the claim once it is inserted, so its address
@@ -1144,11 +1130,9 @@ struct chimera_vfs_compound_op {
      * with chimera_vfs_compound_take_file_state(); NULL from that on a
      * GRANTED op means the sequence failed after the grant and the claim was
      * released with it (see RELEASE AND TRANSFER on the CLAIM op). */
-    struct chimera_vfs_claim           *claim;
     struct chimera_vfs_pending_acquire *ticket;
     struct chimera_vfs_file_state      *lock_file_state;
     struct chimera_vfs_claim_conflict   conflict;
-    enum chimera_vfs_claim_result claim_result;
     /* CHIMERA_VFS_COMPOUND_CLAIM_* -- WAIT / WAIT_HARD / TRY / OPTIONAL /
      * TEST_BACKEND. */
     unsigned int                        claim_flags;
@@ -1227,7 +1211,41 @@ struct chimera_vfs_compound_op {
      * (the object survived), not swallowed.  It is NOT the op's status: the
      * CLOSE itself succeeded, and the handle is gone either way.  OK when
      * doc_fired is clear. */
-    enum chimera_vfs_error doc_status;
+    enum chimera_vfs_error              doc_status;
+    /* Additional sequence inputs and results retained from the PR. */
+    uint8_t                             dest_published;
+    uint8_t                             skip_build;
+    uint8_t                             skip;
+    uint64_t                            pre_attr_mask;
+    uint64_t                            dir_attr_mask;
+    uint64_t                            dir_pre_attr_mask;
+    uint8_t                             child_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            child_fh_len;
+    uint8_t                             child_fh_match;
+    uint8_t                             parent_lease_skip[16];
+    uint8_t                             parent_lease_skip_valid;
+    struct chimera_vfs_open_handle     *op_exempt_handle;
+    uint8_t                             target_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            target_fh_len;
+    unsigned int                        rename_flags;
+    uint8_t                             link_replace;
+    struct chimera_vfs_handle_state    *handle_state;
+    uint8_t                             path_intermediates;
+    unsigned int                        stream_flags;
+    struct evpl_iovec                  *dest_iov;
+    int                                 dest_niov;
+    uint64_t                            layout_offset;
+    uint64_t                            layout_length;
+    uint32_t                            layout_iomode;
+    uint32_t                            layout_class;
+    uint32_t                            layout_max_segments;
+    uint8_t                             find_stopped;
+    uint8_t                             recall_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            recall_fh_len;
+    uint8_t                             recall_retain;
+    unsigned int                        recall_flags;
+    struct chimera_vfs_attrs            pre_attr;
+
 };
 
 /*
@@ -1295,6 +1313,14 @@ typedef void (*chimera_vfs_compound_gate_t)(
     enum chimera_vfs_error      *status,
     void                        *private_data);
 
+/* Backend finish seam. The handler runs after operations stop, and eventually
+ * calls finish_result exactly once. A retryable rejection must mean backend
+ * effects were aborted before finish_result is called. No backend transaction
+ * support is implied by installing this handler; the default accepts immediately. */
+typedef void (*chimera_vfs_compound_finish_handler_t)(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data);
+
 typedef void (*chimera_vfs_compound_callback_t)(
     struct chimera_vfs_compound *compound,
     void                        *private_data);
@@ -1357,6 +1383,138 @@ chimera_vfs_compound_alloc(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred);
 
+/* Optional command-sized operation groups. Register after constructing each
+ * group's operations, before submit. Groups must partition the original op
+ * array in increasing order, without holes or empty groups. With no groups,
+ * the existing stop-at-first-error and shared-cursor behavior is unchanged.
+ *
+ * The first error terminates its group, leaving remaining ops uncompleted with
+ * status UNSET. continue_on_error permits the next group to run. The aggregate
+ * execution status remains the first failure even if later groups succeed.
+ * dependency is an earlier group ID or -1; an unsuccessful dependency skips
+ * this entire group with dependency_error (which must be non-OK/non-UNSET).
+ * A skipped group's prepare/complete callbacks do not run. These are execution
+ * boundaries, NOT savepoints: a failed group's successful prefix remains.
+ *
+ * Each group starts with empty current/saved cursors. Bind handles explicitly
+ * or use earlier op results; credentials never authorize implicit inherited
+ * cursors. cred=NULL selects the allocation credential. Credentials/context
+ * are borrowed immutable request inputs, valid until the compound is freed.
+ *
+ * Existing add_* calls from execution prepare/complete callbacks append to the
+ * CURRENT GROUP's tail, before later groups, preserving physical op indices.
+ * Appending never inserts before the group's already-planned remaining ops.
+ * A dynamic producer may have a higher physical index than its consumer:
+ * bind through op_use_handle during the consumer's prepare; it accepts a
+ * higher index only after successful producer completion. Ordinary I/O may
+ * also borrow out_handle via in_handle. Cursor binding MUST use
+ * add_puthandle_from/op_use_handle to preserve CLOSE reference provenance.
+ * Group registration is construction-only. Retry discards dynamic suffixes and
+ * resets group statuses/links, retaining the original immutable descriptors.
+ */
+struct chimera_vfs_compound_group_config {
+    uint32_t                       first_op;
+    uint32_t                       num_ops;
+    const struct chimera_vfs_cred *cred;
+    void                          *context;
+    int32_t                        dependency;
+    enum chimera_vfs_error dependency_error;
+    bool                           continue_on_error;
+};
+
+int
+chimera_vfs_compound_add_group(
+    struct chimera_vfs_compound                    *compound,
+    const struct chimera_vfs_compound_group_config *config);
+
+enum chimera_vfs_error
+chimera_vfs_compound_group_status(
+    const struct chimera_vfs_compound *compound,
+    uint32_t                           group);
+
+void *
+chimera_vfs_compound_group_context(
+    const struct chimera_vfs_compound *compound,
+    uint32_t                           group);
+
+/* Cooperative cancellation, on the owning VFS thread only. Stops subsequent
+ * operations with EINTR after outstanding work/callouts drain. It does not
+ * undo successful operations, cancel underlying I/O, or settle COORDINATE:
+ * that owner must still call coordinate_done before freeing its context.
+ * Returns false if not executing or already in finish; otherwise the request
+ * remains owned until its normal terminal callback. Canceled compounds cannot
+ * retry. Cancellation never certifies transaction rollback. */
+
+
+/* Read-only cancellation request state, including during an active cleanup
+ * suffix and after acceptance. Valid until compound_free. */
+bool
+chimera_vfs_compound_is_canceled(
+    const struct chimera_vfs_compound *compound);
+
+/* Declare a static cancellation-deferral suffix within one command group.
+ * Once start completes successfully (not skipped), cancellation is recorded
+ * but stops execution only after end completes. Activation precedes start's
+ * complete callback. Errors still stop the group; callbacks may explicitly
+ * normalize optional cleanup errors while preserving them in private results.
+ * Scopes cannot overlap, cross groups, or include dynamically appended ops.
+ * Does not cancel/settle underlying I/O or COORDINATE, promise cleanup after an
+ * unhandled error, or certify rollback. Cancellation before start stays prompt.
+ * Construction only; group registration may follow this declaration. */
+bool chimera_vfs_compound_set_cancel_scope(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     start,
+    uint32_t                     end);
+/* Borrowed immutable identity for typed ACCESS admissions (default: compound).
+ * Frontend fences that outlive compound_free must use a separate stable cookie
+ * until every fence is released; a pooled compound address can be reused.
+ * Construction only, non-NULL; pure callbacks cannot change the identity. */
+bool chimera_vfs_compound_set_admission_cookie(
+    struct chimera_vfs_compound *compound,
+    const void                  *cookie);
+
+/* Execute an exact local range batch through the compound-owned journal.
+ * Construction only; original aggregate batch counts may not exceed MAX_OPS.
+ * owner/ranges are borrowed immutable request inputs; prepare may bind a
+ * deferred NULL owner, but must not mutate shared claims itself. Results are
+ * op->range_result. Acquires are atomic per batch; unlock keeps its successful
+ * prefix. Seal/publish/reset follow compound acceptance; accepted teardown
+ * completes publication only after the frontend terminal callback has staged
+ * its protocol state. Old POSIX typed-lock dedicated restriction is unchanged.
+ * Cache coordination and backend projection remain separate. Set range_wait
+ * for asynchronous local admission (1..100ms polling); timeout_ms=0 waits
+ * indefinitely. range_on_wait is an explicit coordination callback, may emit
+ * an interim, and needs a request-lifetime memo across retries. It is not a
+ * pure prepare/complete callback. range_is_canceled is a pure owning-loop
+ * predicate sharing range_wait_private and checked before every poll. Prior
+ * deltas remain pinned while waiting. */
+int
+chimera_vfs_compound_add_range_batch(
+    struct chimera_vfs_compound                *compound,
+    struct chimera_vfs_claim_owner             *owner,
+    const struct chimera_vfs_claim_exact_range *ranges,
+    uint32_t                                    count,
+    bool                                        unlock);
+
+/* Cancel only this pending range batch on its owning thread. This reports
+ * ordinary EINTR to its group; successful prefixes and later independent
+ * groups retain normal semantics. Completion may synchronously free compound. */
+bool
+chimera_vfs_compound_range_cancel(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
+
+/* Pure mandatory-I/O observation including this attempt's range overlay.
+ * Without an exact journal this is the ordinary public claim predicate. */
+bool
+chimera_vfs_compound_io_denied(
+    struct chimera_vfs_compound          *compound,
+    const struct chimera_vfs_open_handle *handle,
+    uint64_t                              offset,
+    uint64_t                              length,
+    bool                                  write,
+    const struct chimera_claim_actor     *actor);
+
 /* Append one op.  Returns its index, or -1 if the sequence is full (or the
  * name is too long).  A caller that cannot express an operation should build
  * no sequence at all and answer the request from what it already knows, rather
@@ -1391,6 +1549,20 @@ int
 chimera_vfs_compound_add_access(
     struct chimera_vfs_compound *compound,
     uint32_t                     requested);
+
+/* Override result masks without changing filesystem semantics. OPEN/CREATE/LINK
+ * return object attributes and parent before/after attributes; LOOKUP returns
+ * object and parent-after attributes; READ returns object attributes; READDIR
+ * returns entry and directory-after attributes. WRITE/SETATTR/COMMIT return
+ * before/after attributes in dir_pre_attr/dir_post_attr. Auxiliary attributes
+ * omit ACL pointers. Configure before submission (inputs survive retry). */
+void
+chimera_vfs_compound_set_result_masks(
+    struct chimera_vfs_compound *compound,
+    int                          index,
+    uint64_t                     object_mask,
+    uint64_t                     pre_mask,
+    uint64_t                     post_mask);
 
 int
 chimera_vfs_compound_add_getfh(
@@ -1444,7 +1616,9 @@ chimera_vfs_compound_add_allocate(
     uint64_t                        post_attr_mask);
 
 /* The three range operations.  Each takes BOTH objects from the caller and
- * never addresses the current one -- see the note on src_handle.
+ * never addresses the current one -- see the note on src_handle. Endpoints
+ * may be NULL during construction and bound by prepare; both must exist at
+ * execution (explicit arguments or saved/current open cursors).
  *
  * COPY_RANGE reads from the source and writes to the destination; its result
  * is how many bytes moved (op->written), which may be short.  CLONE_RANGE
@@ -1618,12 +1792,7 @@ chimera_vfs_compound_add_removexattr(
  * is required by the underlying call and is copied; the mode's type bits are
  * the backend's to supply (memfs makes a regular file whatever is asked).
  * `attr_mask` describes the new object; the fh is always included. */
-int
-chimera_vfs_compound_add_create_unlinked(
-    struct chimera_vfs_compound    *compound,
-    unsigned int                    flags,
-    const struct chimera_vfs_attrs *set_attr,
-    uint64_t                        attr_mask);
+
 
 /* Open the fork `name` on the base the op addresses; the stream becomes
  * current -- see the op.  `flags` is CHIMERA_VFS_OPEN_*: CREATE, EXCLUSIVE and
@@ -1655,12 +1824,7 @@ chimera_vfs_compound_add_open_stream(
  *
  * eof and r_cookie are as for LISTXATTRS.  A page too small for its first
  * record is the backend's ERANGE. */
-int
-chimera_vfs_compound_add_list_streams(
-    struct chimera_vfs_compound *compound,
-    uint64_t                     cookie,
-    uint32_t                     max_bytes,
-    int                          want_fh);
+
 
 /* Remove the fork `name` from the base the op addresses, which stays
  * current.  The ctime pair lands in pre_ctime / post_ctime as REMOVEXATTR's
@@ -1692,14 +1856,7 @@ chimera_vfs_compound_add_get_layout(
  * added to it because the walk descends on them.  All three callbacks are
  * required: a walk that stages nothing has nowhere to put an entry but
  * `append`, and a walk that cannot be reset cannot be re-run. */
-int
-chimera_vfs_compound_add_find(
-    struct chimera_vfs_compound         *compound,
-    uint64_t                             attr_mask,
-    chimera_vfs_compound_find_filter_t   filter,
-    chimera_vfs_compound_find_append_t   append,
-    chimera_vfs_compound_readdir_reset_t reset,
-    void                                *private_data);
+
 
 /* RECALL kicks the recall and answers at once instead of parking: the
  * chimera_vfs_claim_break_caching shape, a FULL recall (every caching
@@ -1813,6 +1970,11 @@ chimera_vfs_compound_add_open(
  * release the share claim granted just before it.  Without OPTIONAL a
  * non-GRANTED answer is EAGAIN and stops the run. */
 #define CHIMERA_VFS_COMPOUND_CLAIM_OPTIONAL     (1U << 4)
+/* Allocate canonical ACCESS storage before admission, including a possible
+* wait. The builder's claim is a template; take_access_owner transfers the
+* admitted token and its file-state reference after accepted completion. */
+#define CHIMERA_VFS_COMPOUND_CLAIM_ACCESS_OWNER (1U << 5)
+
 
 /* Ask whether `claim` WOULD be granted against the current open handle,
  * changing nothing.  This is NFSv4 LOCKT, F_GETLK, NLM TEST, and SMB2's
@@ -1984,7 +2146,7 @@ chimera_vfs_compound_add_gethandle(
  * IS armed: the arming caller is the one that asked for the unlink, and a CLOSE
  * that did not ask does not perform it. */
 int
-chimera_vfs_compound_add_close(
+chimera_vfs_compound_add_close_doc(
     struct chimera_vfs_compound *compound,
     unsigned int                 flags,
     const uint8_t               *parent_lease_skip);
@@ -2068,6 +2230,20 @@ chimera_vfs_compound_add_puthandle(
     struct chimera_vfs_open_handle *handle,
     unsigned int                    open_flags);
 
+/* Select an operation-owned result as the cursor without taking ownership.
+ * Unlike external PUTHANDLE, CLOSE consumes that producer's reference exactly
+ * once and clears its out_handle. GETHANDLE still creates a separate reference.
+ * Use this for provisional OPEN/GETHANDLE results across group boundaries;
+ * never pass those result pointers to external-borrowing add_puthandle.
+ * from=-1 permits a prepare callback to bind a dynamically discovered producer
+ * with op_use_handle (or handle_from). An unbound/failed/consumed source fails
+ * EINVAL at execution. Inputs and provenance are restored on finish retry. */
+int
+chimera_vfs_compound_add_puthandle_from(
+    struct chimera_vfs_compound *compound,
+    int32_t                      from,
+    unsigned int                 open_flags);
+
 int
 chimera_vfs_compound_add_lookup_path(
     struct chimera_vfs_compound *compound,
@@ -2075,6 +2251,18 @@ chimera_vfs_compound_add_lookup_path(
     int                          pathlen,
     uint64_t                     attr_mask,
     uint32_t                     flags);
+
+/* OPEN relative to the current open directory. Unlike the component-only
+ * OPEN builder, accepts a full path for FS_PATH_OP backends, with the same
+ * semantics and limits as chimera_vfs_open_at. The path is copied. */
+int
+chimera_vfs_compound_add_open_at(
+    struct chimera_vfs_compound    *compound,
+    const char                     *path,
+    int                             pathlen,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
 
 int
 chimera_vfs_compound_add_open_path(
@@ -2110,6 +2298,32 @@ chimera_vfs_compound_add_create_path(
     uint64_t                        attr_mask,
     uint8_t                         intermediates);
 
+/* Materialize the directory chain and leave its final directory current,
+ * using the same semantics as chimera_vfs_create(). */
+int
+chimera_vfs_compound_add_create_tree(
+    struct chimera_vfs_compound    *compound,
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+/* Create an unnamed file in the current directory. The compound owns the
+ * resulting handle, which becomes current and can be taken at completion. */
+
+
+/* Resolve a directory path and remove one leaf without changing the current
+ * cursor. Empty leaf names are passed through to the backend, as remove_at
+ * does; this preserves callers whose namespace represents an empty leaf. */
+int
+chimera_vfs_compound_add_remove_at_path(
+    struct chimera_vfs_compound *compound,
+    const char                  *directory,
+    int                          directory_len,
+    const char                  *name,
+    int                          namelen,
+    unsigned int                 flags);
+
 int
 chimera_vfs_compound_add_remove_path(
     struct chimera_vfs_compound *compound,
@@ -2138,17 +2352,9 @@ chimera_vfs_compound_add_link_path(
 /* Make op `index` address the handle op `from` produced, instead of the
  * current object.  For the operation after a path OPEN: on a path-only mount
  * that handle is the only usable reference to what the open resolved.
- *
- * `from` must be an op that LEAVES a handle -- OPEN, OPEN_PATH, OPEN_STREAM,
- * CREATE_UNLINKED, GETHANDLE.  Every other op resolves to no handle at all, and
- * the op addressing it would dereference NULL inside a backend; naming one
- * fails the BUILD, so submit answers EINVAL and the run never starts.
- *
- * Two near misses are worth naming, because both read as if they belonged.
- * OPEN_CURRENT opens the current object, but the handle it opens belongs to the
- * cursor and is published by a GETHANDLE after it -- name the GETHANDLE.  And a
- * PUTHANDLE's handle is the caller's own and is already the current object,
- * which is what a PUTHANDLE is for: address it by not calling this at all. */
+ * Construction references must have a lower physical index; the consumer's
+ * prepare may also bind a higher index whose producer successfully completed.
+ * For PUTHANDLE_FROM this preserves ownership; in_handle must remain NULL. */
 void
 chimera_vfs_compound_op_use_handle(
     struct chimera_vfs_compound *compound,
@@ -2187,6 +2393,228 @@ chimera_vfs_compound_op_set_skip(
     uint32_t                     index,
     int                          skip);
 
+/* Acquire a provisional claim through the handle produced by an
+ * earlier operation. Failed attempts release it automatically. Claim storage
+ * must outlive the compound and must be reinitialized by prepare on retry.
+ * RANGE claims must be locally arbitrated; projected ranges return ENOTSUP.
+ * The result includes a copied conflict snapshot. Prepare may bind a same-file
+ * private interval view through claim_ranges/num_claim_ranges in addition to
+ * claim->admit_excluded; admission checks that view before public claims. */
+int
+chimera_vfs_compound_add_reserve(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     handle_from,
+    struct chimera_vfs_claim    *claim);
+
+/* Canonical ACCESS reservation: typed execution clones the unlinked template
+ * into owner-owned storage before admission. op->access_owner is a borrowed
+ * attempt result until take_access_owner transfers it after acceptance. */
+int chimera_vfs_compound_add_reserve_access(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     handle_from,
+    struct chimera_vfs_claim    *template_claim);
+/* Opt-in failed-producer cleanup. RESERVE_ACCESS remains provisional until a
+* later CHECKPOINT in the same logical group completes OK without being skipped
+* and that group succeeds. Otherwise group exit retires ONLY this reservation,
+* before later groups run. Its owner/file/result storage remains borrowed and
+* valid through ordinary compound cleanup, but take_access_owner cannot take it.
+* This does not undo filesystem effects, retire earlier groups' reservations,
+* or rewind prior journal edits. The owner must never have been externally
+* published. Register during construction or grouped completion suffix append;
+* both operations must still be unexecuted. Rejected attempts recreate it. */
+bool chimera_vfs_compound_reserve_access_until(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     reserve_index,
+    uint32_t                     ready_index);
+
+/* Subset-only private rights view for this compound's RESERVE_ACCESS result.
+ * Use after a successful typed mutation and before producer readiness. Other
+ * clients retain the original conservative claim until accepted publish; later
+ * reservations in this attempt see the narrowed row. No public token input,
+ * widening, reinsertion, or allocation/admission during accepted publication.
+ * Supports ordinary grouped completion suffix append and replay. */
+int chimera_vfs_compound_add_narrow_access(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     reserve_index,
+    uint8_t                      used,
+    uint8_t                      denied);
+
+/* Transfer token plus the reservation's file-state reference together. file
+ * must be non-NULL. The owner has its own separate file-state reference. */
+struct chimera_vfs_claim_access_owner * chimera_vfs_compound_take_access_owner(
+    struct chimera_vfs_compound    *compound,
+    uint32_t                        index,
+    struct chimera_vfs_file_state **file);
+/* Construction only. A deferred NULL owner may be bound through prepare's
+ * access_retire_owner. Exclusions affect later RESERVE in the same attempt;
+ * public unlink waits accepted publication. Teardown must use owner_retire. */
+int chimera_vfs_compound_add_retire_access(
+    struct chimera_vfs_compound           *compound,
+    struct chimera_vfs_claim_access_owner *owner);
+/* Atomically reserve retirement of canonical range, ordinary ACCESS, and base
+ * ACCESS owners before backend CLOSE. Inputs are borrowed/pinned by frontend;
+ * NULL means absent, and prepare may bind them from an attempt-private open.
+ * Failure withdraws only this op's reservations; earlier command edits survive.
+ * No frontend or filesystem effects occur here. Successful retirement remains
+ * staged even if a later independent operation fails: the CLOSE mapper must
+ * preserve its accepted-prefix semantics. Local canonical owners only. */
+int chimera_vfs_compound_add_retire_open_claims(
+    struct chimera_vfs_compound           *compound,
+    struct chimera_vfs_claim_owner        *range_owner,
+    struct chimera_vfs_claim_access_owner *access_owner,
+    struct chimera_vfs_claim_access_owner *base_access_owner);
+int chimera_vfs_compound_add_retire_range_owner(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_claim_owner *range_owner);
+/* Allocate canonical local SMB RANGE ownership during typed execution using
+ * the current handle and actor (copied input, or prepare-bound io_owner).
+ * Results stay compound-owned until accepted transfer. Reset/free retires
+ * untransferred tokens before releasing handle anchors. */
+int chimera_vfs_compound_add_range_owner(
+    struct chimera_vfs_compound      *compound,
+    const struct chimera_claim_actor *actor,
+    bool                              zero_point);
+struct chimera_vfs_claim_owner * chimera_vfs_compound_take_range_owner(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
+
+
+
+/* As above, with a borrowed pinned handle; no reopen or DAC recheck. NULL may
+ * be bound by prepare through op_args->in_handle, otherwise uses the current
+ * handle. The handle must remain live until the reservation has completed. */
+int
+chimera_vfs_compound_add_reserve_handle(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_claim       *claim);
+
+/* Transfer the held reservation and file-state reference after acceptance. */
+struct chimera_vfs_file_state *
+chimera_vfs_compound_take_reservation(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
+
+int
+chimera_vfs_compound_add_link_replace(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen,
+    uint64_t                     attr_mask);
+
+void
+chimera_vfs_compound_set_finish_handler(
+    struct chimera_vfs_compound          *compound,
+    chimera_vfs_compound_finish_handler_t handler,
+    void                                 *private_data);
+
+/* Construct statically, or append to a grouped compound from an op complete
+ * callback. Prepare, parked coordination, finish, and cancellation-deferral
+ * scopes cannot introduce dynamic coordination. A current FH is required.
+ * Outcomes (including errors) are cached across finish rejection by physical
+ * index, start function, private context identity, and FH. Dynamic suffix shape
+ * changes cannot reuse another context's result. The callback and context must
+ * retain stable semantic identity and stay alive until compound_free, even
+ * after a dynamic op is discarded on retry; mutable attempt results are fine.
+ * At most MAX_OPS distinct keys are retained; exhaustion fails ENOSPC before
+ * new coordination starts. Neither free nor retry is allowed while parked.
+ * Disconnect/cancellation must settle the outstanding callback first. */
+int
+chimera_vfs_compound_add_coordinate(
+    struct chimera_vfs_compound      *compound,
+    chimera_vfs_compound_coordinate_t start,
+    void                             *private_data);
+
+/* Complete exactly once. False rejects an inactive/stale token without
+ * affecting the current attempt. The token prevents a late duplicate from
+ * completing a different FH's coordination at the same operation index. */
+bool
+chimera_vfs_compound_coordinate_done(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     token,
+    enum chimera_vfs_error       status);
+
+void
+chimera_vfs_compound_finish_result(
+    struct chimera_vfs_compound *compound,
+    enum chimera_vfs_error       status);
+
+/* Execution status is the first operation error; finish status is independent
+ * and takes precedence in compound_status when the backend rejects an attempt. */
+enum chimera_vfs_error
+chimera_vfs_compound_execution_status(
+    const struct chimera_vfs_compound *compound);
+enum chimera_vfs_error
+chimera_vfs_compound_finish_status(
+    const struct chimera_vfs_compound *compound);
+
+/* Callbacks are stored per operation; registration is part of construction. */
+void
+chimera_vfs_compound_set_op_callbacks(
+    struct chimera_vfs_compound       *compound,
+    uint32_t                           index,
+    chimera_vfs_compound_op_callback_t prepare,
+    chimera_vfs_compound_op_callback_t complete,
+    void                              *private_data);
+
+/* Set a conditional operation to succeed without issuing VFS work. Only its
+ * prepare callback may call this, and complete still runs. */
+void
+chimera_vfs_compound_op_skip(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
+
+/* Bind scalar arguments/borrowed handles during prepare. Never replace owned
+ * pointers (path, new_path, link_target, entries, buffer), callbacks, or type.
+ * The immutable submission snapshot is restored on retry. Returned operation
+ * addresses remain stable even when a complete callback appends a suffix. */
+struct chimera_vfs_compound_op *
+chimera_vfs_compound_op_args(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index);
+
+/* Install a prepare check without replacing the operation's result callback.
+ * Both callbacks retain independent private contexts. */
+void
+chimera_vfs_compound_set_op_prepare(
+    struct chimera_vfs_compound       *compound,
+    uint32_t                           index,
+    chimera_vfs_compound_op_callback_t prepare,
+    void                              *private_data);
+
+/* Borrow the current execution cursor for a synchronous callout. The pointer
+ * must not be retained; copy it to keep a snapshot. NULL means no current FH. */
+const uint8_t *
+chimera_vfs_compound_current_fh(
+    const struct chimera_vfs_compound *compound,
+    uint32_t                          *length);
+
+/* Same borrowing contract as current_fh; NULL means no saved filehandle. */
+const uint8_t *
+chimera_vfs_compound_saved_fh(
+    const struct chimera_vfs_compound *compound,
+    uint32_t                          *length);
+
+/* Reset all frontend attempt-private state before each attempt, including the
+ * first. Dynamic suffixes appended by callbacks are discarded on retry. */
+void
+chimera_vfs_compound_set_attempt_reset(
+    struct chimera_vfs_compound         *compound,
+    chimera_vfs_compound_attempt_reset_t reset,
+    void                                *private_data);
+
+/* Re-execute a finished attempt ONLY after its backend transaction has been
+ * aborted. This does not itself undo filesystem effects. No handles/iovecs may
+ * have been taken and no result may have been published. Backend transaction
+ * integration calls this on finish-time EAGAIN; ordinary op errors preserve
+ * successful-prefix semantics and must not trigger an automatic retry.
+ * Returns false without starting if still running, ownership was taken, or no
+ * submitted input snapshot exists. True means started; synchronous completion
+ * may already have called the final callback and freed the compound. */
+bool
+chimera_vfs_compound_retry(
+    struct chimera_vfs_compound *compound);
+
 /* Register a veto consulted as each op finishes -- see
  * chimera_vfs_compound_gate_t.  Optional; without one the sequence is governed
  * by the ops' own statuses alone. */
@@ -2196,18 +2624,10 @@ chimera_vfs_compound_set_gate(
     chimera_vfs_compound_gate_t  gate,
     void                        *private_data);
 
-/* Register the park notification -- see chimera_vfs_compound_park_cb_t.
- * Optional; without one a run that parks simply waits in silence.  Set it
- * before submitting: a run can park inside chimera_vfs_compound_submit. */
-void
-chimera_vfs_compound_set_park_cb(
-    struct chimera_vfs_compound   *compound,
-    chimera_vfs_compound_park_cb_t park_cb,
-    void                          *private_data);
-
-/* Execute the sequence.  The callback fires exactly once, on the submitting
- * thread, when execution has stopped -- because every op ran or because one
- * failed.  The compound stays valid until the caller frees it. */
+/* Execute an attempt. The callback fires once per attempt, on the submitting
+ * thread, after operations stop and the finish adapter resolves acceptance.
+ * A finish adapter may complete asynchronously. Retrying starts a new attempt
+ * with another completion; the compound remains valid until explicitly freed. */
 void
 chimera_vfs_compound_submit(
     struct chimera_vfs_compound    *compound,
@@ -2270,9 +2690,7 @@ chimera_vfs_compound_submit(
  * them.  Cancelling from inside the park callback is not: the run has not
  * finished parking yet, and the executor aborts rather than corrupt it.
  */
-int
-chimera_vfs_compound_cancel(
-    struct chimera_vfs_compound *compound);
+
 
 /*
  * Ask for a run to be cancelled FROM ANY THREAD.
@@ -2371,18 +2789,21 @@ chimera_vfs_compound_thread_destroy(
 /* ---- results ---- */
 
 uint32_t
+chimera_vfs_compound_num_groups(
+    const struct chimera_vfs_compound *compound);
+
+uint32_t
 chimera_vfs_compound_num_ops(
     const struct chimera_vfs_compound *compound);
 
-/* How far the sequence got: the ops that ran (the index of the failure, or all
- * of them).  A skipped op -- a gate's or the caller's -- did not run: inside
- * the count it is the CHIMERA_VFS_UNSET status that says so, and a sequence
- * whose LAST op was skipped reports fewer than it has. */
+/* How many ops actually ran (index of the failure, or all of them). */
+/* Count of completed operations, not an array prefix when groups are used.
+ * Inspect op->completed/status when enumerating physical operation slots. */
 uint32_t
 chimera_vfs_compound_num_completed(
     const struct chimera_vfs_compound *compound);
 
-/* The first failing status, or CHIMERA_VFS_OK. */
+/* Finish rejection takes precedence; otherwise the first operation error. */
 enum chimera_vfs_error
 chimera_vfs_compound_status(
     const struct chimera_vfs_compound *compound);
@@ -2412,9 +2833,10 @@ chimera_vfs_compound_op_edit(
     uint32_t                     index);
 
 /* Create `name` in the current object; it becomes current.  `set_attr` may be
- * NULL; its struct is copied and its ACL / SIDs are BORROWED, as for OPEN.
- * `target` is the symlink target and is required for -- and only read
- * for -- CHIMERA_VFS_COMPOUND_CREATE_SYMLINK; it is copied. */
+ * NULL.  `target` is the symlink target and is required for -- and only read
+ * for -- CHIMERA_VFS_COMPOUND_CREATE_SYMLINK; it is copied.
+ * namespace_flags accepts the matching MKDIR/MKNOD/SYMLINK_NO_NOTIFY flag;
+ * the frontend then owns notification publication after accepted finish. */
 int
 chimera_vfs_compound_add_create(
     struct chimera_vfs_compound    *compound,
@@ -2431,7 +2853,12 @@ chimera_vfs_compound_add_create(
 /* Rename `name` in the saved object to `new_name` in the current object.  A
  * sequence that reaches this without a SAVEFH fails the op with EINVAL, the
  * same answer RESTOREFH gives an empty saved slot -- the adder cannot tell,
- * because whether a SAVEFH ran is a property of the sequence as it executes. */
+ * because whether a SAVEFH ran is a property of the sequence as it executes.
+ * Strict MATCH_SOURCE_FH uses op.arg_fh/arg_fh_len as the immutable expected
+ * source identity. MATCH_DEST_FH uses rename_target_fh/rename_target_fh_len;
+ * rename_outcome reports atomic MOVED/NOOP or UNKNOWN without backend support.
+ * NOREPLACE/MATCH require explicit backend capabilities; NO_NOTIFY leaves
+ * observer events to accepted frontend publication. */
 int
 chimera_vfs_compound_add_rename(
     struct chimera_vfs_compound *compound,
@@ -2550,19 +2977,10 @@ chimera_vfs_compound_add_write(
     uint64_t                          post_attr_mask,
     const struct chimera_claim_actor *io_owner);
 
-/* Apply `set_attr` to the current object, or -- when `handle` is non-NULL, or
- * chimera_vfs_compound_op_use_handle names an earlier op's (a PATH open's
- * excepted) -- to that handle with descriptor rights.  `handle` is BORROWED:
- * see ADDRESSING
- * SOMETHING OTHER THAN CURRENT.  So is anything `set_attr` points at -- its
- * va_acl and SIDs, which the caller keeps alive for the life of the run (the
- * struct itself is copied).  On return the op's `set_attr` reports which
- * attributes were actually applied.
- *
- * `pre_attr_mask` and `attr_mask` sample the object either side of the change,
- * into the op's pre_attr and attr.  NFSv3's SETATTR3resok.obj_wcc needs that
- * pair to be atomic with the change, which a getattr in front of the op is
- * not. */
+/* Apply `set_attr` to the current object, or -- when `handle` is non-NULL -- to
+ * that handle with descriptor rights.  `handle` is BORROWED: see ADDRESSING
+ * SOMETHING OTHER THAN CURRENT.  On return the op's `applied_attr` reports which
+ * attributes were actually applied. */
 int
 chimera_vfs_compound_add_setattr(
     struct chimera_vfs_compound    *compound,
@@ -2570,6 +2988,18 @@ chimera_vfs_compound_add_setattr(
     const struct chimera_vfs_attrs *set_attr,
     uint64_t                        pre_attr_mask,
     uint64_t                        attr_mask);
+
+/* Overwrite the exact current/borrowed object after frontend admission. Uses
+ * chimera_vfs_overwrite semantics, including removal of a base file's named
+ * streams. set_attr must request SIZE=0; attr/applied_attr report the post-state
+ * and applied fields. The actor and attributes are copied; handle is borrowed. */
+int
+chimera_vfs_compound_add_overwrite(
+    struct chimera_vfs_compound      *compound,
+    struct chimera_vfs_open_handle   *handle,
+    const struct chimera_vfs_attrs   *set_attr,
+    uint64_t                          attr_mask,
+    const struct chimera_claim_actor *io_owner);
 
 /* Give an op the handle it should act on, after appending it -- see ADDRESSING
  * SOMETHING OTHER THAN CURRENT.  Separate from the adders because most callers
@@ -2711,3 +3141,87 @@ chimera_vfs_compound_take_iov(
     uint32_t                     index,
     struct evpl_iovec          **iov,
     int                         *niov);
+
+
+
+/* Remove a discovered list without allocating an operation slot per path.
+ * paths and its strings must outlive the compound attempt; a retry's FIND
+ * callback may construct a new suffix with a new private list. */
+int
+chimera_vfs_compound_add_remove_paths(
+    struct chimera_vfs_compound *compound,
+    const char *const           *paths,
+    uint32_t                     num_paths,
+    unsigned int                 flags,
+    int                          ignore_errors);
+
+/* Named data forks. OPEN_STREAM selects the stream as current and owns its
+ * out_handle under the ordinary OPEN rules. LIST/REMOVE address the current
+ * base object (or explicit op handle); list results are compound-owned packed
+ * chimera_vfs_stream_entry records in buffer with buffer_len/buffer_count,
+ * eof/r_cookie. Names and attribute inputs follow the ordinary builder rules. */
+int chimera_vfs_compound_add_open_stream(
+    struct chimera_vfs_compound    *compound,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+int chimera_vfs_compound_add_remove_stream(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen);
+
+/* Owns a copy of the expected stream FH. Strict atomic identity mismatch is
+ * ESTALE, unsupported backend is ENOTSUP before mutation. */
+int chimera_vfs_compound_add_remove_stream_checked(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen,
+    const uint8_t               *expected_fh,
+    uint32_t                     expected_fh_len);
+
+bool
+chimera_vfs_compound_cancel(
+    struct chimera_vfs_compound *compound);
+
+int
+chimera_vfs_compound_add_create_unlinked(
+    struct chimera_vfs_compound    *compound,
+    unsigned int                    flags,
+    const struct chimera_vfs_attrs *set_attr,
+    uint64_t                        attr_mask);
+
+int
+chimera_vfs_compound_add_find(
+    struct chimera_vfs_compound         *compound,
+    uint64_t                             attr_mask,
+    chimera_vfs_compound_readdir_reset_t reset,
+    chimera_vfs_compound_find_entry_t    filter,
+    chimera_vfs_compound_find_entry_t    append,
+    void                                *private_data);
+
+int chimera_vfs_compound_add_list_streams(
+    struct chimera_vfs_compound *compound,
+    uint64_t                     cookie,
+    uint32_t                     max_bytes,
+    bool                         want_fh);
+
+int chimera_vfs_compound_add_close(
+    struct chimera_vfs_compound *compound);
+
+void chimera_vfs_compound_set_park_cb(
+    struct chimera_vfs_compound   *compound,
+    chimera_vfs_compound_park_cb_t park_cb,
+    void                          *private_data);
+
+/* FIND with operation-aware streaming callbacks. Both callback forms share
+ * staging, reset, type validation and early-stop semantics. */
+int chimera_vfs_compound_add_find_stream(
+    struct chimera_vfs_compound         *compound,
+    uint64_t                             attr_mask,
+    chimera_vfs_compound_find_filter_t   filter,
+    chimera_vfs_compound_find_append_t   append,
+    chimera_vfs_compound_readdir_reset_t reset,
+    void                                *private_data);

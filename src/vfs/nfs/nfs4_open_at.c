@@ -12,6 +12,7 @@ struct chimera_nfs4_open_at_ctx {
     struct chimera_nfs_client_server *server;
     void                             *dispatch_private;
     int                               nocreate;
+    uint32_t                          access;
     uint32_t                          attr_mask[2];
     uint8_t                           attr_vals[128];
     uint8_t                           lookup_fallback; /* resolve a leaf symlink
@@ -247,6 +248,7 @@ chimera_nfs4_open_at_callback(
         state->server_index = ctx->server->index;
         state->stateid      = open_res->opopen.resok4.stateid;
         state->open_file    = open_file;
+        state->access       = ctx->access;
 
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
@@ -263,6 +265,10 @@ chimera_nfs4_open_at_callback(
         request->open_at.r_created = 1;
     }
 
+    if (!path_open) {
+        chimera_nfs4_unmarshall_cinfo(&open_res->opopen.resok4.cinfo,
+                                      &request->open_at.r_dir_pre_attr, &request->open_at.r_dir_post_attr);
+    }
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_open_at_callback */
@@ -378,6 +384,7 @@ chimera_nfs4_open_at_send(
         open_args->share_access = OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE;
     }
     open_args->share_deny = OPEN4_SHARE_DENY_NONE;
+    ctx->access           = open_args->share_access;
 
     /* Owner identification */
     open_args->owner.clientid   = session->clientid;

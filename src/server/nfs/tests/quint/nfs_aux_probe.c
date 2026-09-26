@@ -419,14 +419,12 @@ probe_nlm(struct mbt_env *env)
     check_eq("LOCK shared [64,80) as A (shared/shared)", r->nlm_stat,
              NLM4_GRANTED);
 
-    /* A already holds [64,80) shared, so this names a range it holds: the
-     * request is answered as an idempotent retry WITHOUT re-evaluating the
-     * mode, so the upgrade silently does not happen.  (The third-party case
-     * below, where the requester holds nothing, does conflict.) */
+    /* Upgrading A's shared range must recheck B's surviving shared lock.
+     * A denied upgrade leaves both shared reservations intact. */
     r = mbt_nlm_lock(env, 2, PROBE_CALLER_A, &file_fh[0], oh_a, sizeof(oh_a),
                      1, 1, 0, 0, 0, 64, 16, ck, sizeof(ck));
     check_eq("LOCK excl [64,80) as A over its own shared", r->nlm_stat,
-             NLM4_GRANTED);
+             NLM4_DENIED);
 
     /* TEST reports the conflicting holder's range and mode. */
     r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[0], oh_b, sizeof(oh_b),

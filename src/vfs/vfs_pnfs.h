@@ -248,6 +248,14 @@ int chimera_vfs_pnfs_fh_is_ds_backing(
     const void               *fh,
     int                       fhlen);
 
+/* Match an existing NFS-proxy data file to its configured DS mount. A layout
+ * may expose this exact backing; metadata-only blobs do not establish that
+ * the MDS and DS share authoritative data. */
+const struct chimera_vfs_ds * chimera_vfs_pnfs_find_backing(
+    const struct chimera_vfs *vfs,
+    const void               *fh,
+    uint32_t                  fh_len);
+
 /*
  * Choose a data server for a newly created file.  Returns the chosen device,
  * or NULL if pNFS is disabled / no devices are configured / no DS has had its

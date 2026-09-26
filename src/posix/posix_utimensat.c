@@ -12,7 +12,6 @@
 #include "posix_internal.h"
 #include "../client/client_setattr.h"
 #include "../client/client_fsetattr.h"
-#include "../client/client_stat.h"
 
 #ifndef AT_FDCWD
 #define AT_FDCWD            -100
@@ -131,7 +130,6 @@ chimera_posix_futimens(
 
     req.opcode                = CHIMERA_CLIENT_OP_FSETATTR;
     req.fsetattr.handle       = entry->handle;
-    req.fsetattr.open_flags   = chimera_posix_fd_open_flags(entry);
     req.fsetattr.callback     = chimera_posix_futimens_callback;
     req.fsetattr.private_data = &comp;
 
@@ -156,67 +154,101 @@ chimera_posix_futimens(
 /* ---- utimensat(dirfd, path, times, flags) ---- */
 
 /*
- * utimensat is a setattr by path: the path-based dispatchers from the export
- * root for AT_FDCWD and an absolute path, chimera_dispatch_setattr_at from a
- * real dirfd -- which lends the descriptor and checks it is a directory
- * against the live inode, so an unlinked-while-open non-directory answers
- * ENOTDIR rather than the ENOENT a re-resolve of its stale name would give.
- * AT_SYMLINK_NOFOLLOW applies the times to a final-component symlink itself.
+ * utimensat resolves `pathname` (relative to `dirfd`, or absolute) via the
+ * generic path-walker chimera_vfs_lookup, which follows symlinks in
+ * intermediate components and (when CHIMERA_VFS_LOOKUP_FOLLOW is set) the final
+ * component as well, using each backend's readlink primitive.  This gives
+ * consistent symlink-follow semantics across every VFS backend (memfs, cairn,
+ * diskfs and the NFS3/NFS4 clients).  AT_SYMLINK_NOFOLLOW drops the FOLLOW flag
+ * so the times are applied to the symlink itself.
  *
- * Both timestamps omitted is a resolve and nothing else (see
- * chimera_posix_utimes_noop): POSIX forbids any permission check beyond the
- * path walk, so that case is a stat's sequence -- a LOOKUP_PATH from the
- * root or the descriptor, on the same dircheck -- whose answer is thrown
- * away.
+ * One compound validates the starting descriptor, resolves and opens the
+ * target (O_PATH), then applies setattr. A both-omitted call resolves the
+ * path without opening or changing the target.
  */
+struct chimera_posix_utimensat_ctx {
+    struct chimera_posix_completion comp;
+    struct chimera_vfs_attrs        set_attr;
+    uint32_t                        lookup_flags;   /* CHIMERA_VFS_LOOKUP_FOLLOW or 0 */
+    /* Both timestamps omitted: validate the path resolution, change
+     * nothing (see chimera_posix_utimes_noop). */
+    int                             validate_only;
+    int                             start_fh_len;
+    uint8_t                         start_fh[CHIMERA_VFS_FH_SIZE + 16];
+    char                            path[CHIMERA_VFS_PATH_MAX];
+    int                             path_len;
+    /* When the path is resolved relative to a real dirfd, the fd's live open
+     * handle: a non-directory dirfd is ENOTDIR (checked against the live inode,
+     * so an unlinked-while-open non-dir answers correctly rather than the
+     * ENOENT re-opening its stale path via start_fh would give).  NULL for
+     * AT_FDCWD / an absolute path. */
+    struct chimera_vfs_open_handle *dir_handle;
+};
 
 static void
-chimera_posix_utimensat_callback(
-    struct chimera_client_thread *thread,
-    enum chimera_vfs_error        status,
-    void                         *private_data)
+chimera_posix_utimensat_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_posix_completion *comp = private_data;
+    struct chimera_posix_utimensat_ctx *ctx    = private_data;
+    enum chimera_vfs_error              status = chimera_vfs_compound_status(compound);
 
-    chimera_posix_complete(comp, status);
-} /* chimera_posix_utimensat_callback */
+    chimera_vfs_compound_free(compound);
+    chimera_posix_complete(&ctx->comp, status);
+} /* chimera_posix_utimensat_sequence_complete */
 
 static void
-chimera_posix_utimensat_validate_callback(
-    struct chimera_client_thread *thread,
-    enum chimera_vfs_error        status,
-    const struct chimera_stat    *st,
-    void                         *private_data)
+chimera_posix_utimensat_dircheck(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_posix_completion *comp = private_data;
+    const struct chimera_vfs_attrs *attr = &chimera_vfs_compound_op(compound, index)->attr;
 
-    /* Resolution is the whole of the answer; the attributes are not kept. */
-    (void) st;
-
-    chimera_posix_complete(comp, status);
-} /* chimera_posix_utimensat_validate_callback */
+    if (*status == CHIMERA_VFS_OK && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(attr->va_mode)) {
+        *status = CHIMERA_VFS_ENOTDIR;
+    }
+} /* chimera_posix_utimensat_dircheck */
 
 static void
 chimera_posix_utimensat_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    if (request->setattr.parent_handle) {
-        chimera_dispatch_setattr_at(thread, request);
-    } else if (request->setattr.nofollow) {
-        chimera_dispatch_lsetattr(thread, request);
-    } else {
-        chimera_dispatch_setattr(thread, request);
-    }
-} /* chimera_posix_utimensat_exec */
+    struct chimera_posix_utimensat_ctx *ctx      = request->setattr.private_data;
+    struct chimera_vfs_compound        *compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, chimera_client_req_cred(request));
 
-static void
-chimera_posix_utimensat_validate_exec(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request)
-{
-    chimera_dispatch_stat(thread, request);
-} /* chimera_posix_utimensat_validate_exec */
+    request->compound = compound;
+    if (ctx->dir_handle) {
+        chimera_vfs_compound_add_puthandle(compound, ctx->dir_handle, CHIMERA_VFS_OPEN_INFERRED);
+        int check = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+        if (check >= 0) {
+            chimera_vfs_compound_op_set_handle(compound, check, ctx->dir_handle);
+            chimera_vfs_compound_set_op_callbacks(compound, check, NULL,
+                                                  chimera_posix_utimensat_dircheck, ctx);
+        }
+    }
+    chimera_vfs_compound_add_putfh(compound, ctx->start_fh, ctx->start_fh_len);
+    if (ctx->validate_only) {
+        chimera_vfs_compound_add_lookup_path(compound, ctx->path, ctx->path_len,
+                                             CHIMERA_VFS_ATTR_FH, ctx->lookup_flags);
+    } else {
+        unsigned int flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
+        if (!(ctx->lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW)) {
+            flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
+        }
+        int          opened = chimera_vfs_compound_add_open_path(compound, ctx->path,
+                                                                 ctx->path_len, flags, NULL, 0);
+        int          attr = chimera_vfs_compound_add_setattr(compound, NULL, &ctx->set_attr, 0, 0);
+        if (opened >= 0 && attr >= 0) {
+            chimera_vfs_compound_op_use_handle(compound, attr, opened);
+        }
+    }
+    chimera_frontend_compound_submit(compound, chimera_posix_utimensat_sequence_complete, ctx);
+} /* chimera_posix_utimensat_exec */
 
 SYMBOL_EXPORT int
 chimera_posix_utimensat(
@@ -225,97 +257,69 @@ chimera_posix_utimensat(
     const struct timespec times[2],
     int                   flags)
 {
-    struct chimera_posix_client    *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
-    struct chimera_client_request   req;
-    struct chimera_posix_completion comp;
-    struct chimera_posix_fd_entry  *dir_entry     = NULL;
-    int                             validate_only = chimera_posix_utimes_noop(times);
-    int                             nofollow      = (flags & AT_SYMLINK_NOFOLLOW) ? 1 : 0;
-    int                             at_root;
-    int                             path_len, err;
-    char                           *path;
+    struct chimera_posix_client       *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker       *worker = chimera_posix_choose_worker(posix);
+    struct chimera_client_request      req;
+    struct chimera_posix_utimensat_ctx ctx;
+    struct chimera_posix_fd_entry     *dir_entry = NULL;
+    int                                err;
 
-    /* An empty path names nothing -- see openat. */
-    if (pathname[0] == '\0') {
-        errno = ENOENT;
-        return -1;
-    }
+    chimera_posix_completion_init(&ctx.comp, &req);
 
-    chimera_posix_completion_init(&comp, &req);
+    ctx.validate_only = chimera_posix_utimes_noop(times);
 
-    /* Both request shapes carry the path in the same fixed buffer; which one
-     * is filled is decided by validate_only below. */
-    path = validate_only ? req.stat.path : req.setattr.path;
+    /* By default follow a final symlink and set times on its target; with
+     * AT_SYMLINK_NOFOLLOW operate on the symlink itself. */
+    ctx.lookup_flags = (flags & AT_SYMLINK_NOFOLLOW) ? 0 : CHIMERA_VFS_LOOKUP_FOLLOW;
 
-    at_root = (dirfd == AT_FDCWD || pathname[0] == '/');
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
+        /* Resolve relative to the namespace root.  chimera_vfs_lookup strips
+         * leading slashes, so an absolute path works as-is. */
+        struct chimera_client *client = worker->client_thread->client;
 
-    if (!at_root) {
+        memcpy(ctx.start_fh, client->root_fh, client->root_fh_len);
+        ctx.start_fh_len = client->root_fh_len;
+        ctx.dir_handle   = NULL;
+    } else {
         dir_entry = chimera_posix_fd_acquire(posix, dirfd, 0);
         if (!dir_entry) {
             errno = EBADF;
-            chimera_posix_completion_destroy(&comp);
+            chimera_posix_completion_destroy(&ctx.comp);
             return -1;
         }
+
+        memcpy(ctx.start_fh, dir_entry->handle->fh, dir_entry->handle->fh_len);
+        ctx.start_fh_len = dir_entry->handle->fh_len;
+        ctx.dir_handle   = dir_entry->handle;
     }
 
-    path_len = strlen(pathname);
-
-    /* A relative path from the root is rooted by a leading '/' the way every
-     * other path-based call roots one. */
-    if (at_root && pathname[0] != '/') {
-        path_len++;
-    }
-
-    if (path_len >= CHIMERA_VFS_PATH_MAX) {
+    ctx.path_len = strlen(pathname);
+    if (ctx.path_len >= CHIMERA_VFS_PATH_MAX) {
         if (dir_entry) {
             chimera_posix_fd_release(dir_entry, 0);
         }
         errno = ENAMETOOLONG;
-        chimera_posix_completion_destroy(&comp);
+        chimera_posix_completion_destroy(&ctx.comp);
         return -1;
     }
+    memcpy(ctx.path, pathname, ctx.path_len);
+    ctx.path[ctx.path_len] = '\0';
 
-    if (at_root && pathname[0] != '/') {
-        path[0] = '/';
-        memcpy(path + 1, pathname, path_len - 1);
-    } else {
-        memcpy(path, pathname, path_len);
-    }
-    path[path_len] = '\0';
+    chimera_posix_fill_utimes(&ctx.set_attr, times);
 
-    if (validate_only) {
-        req.opcode            = CHIMERA_CLIENT_OP_STAT;
-        req.stat.handle       = dir_entry ? dir_entry->handle : NULL;
-        req.stat.open_flags   = dir_entry ? chimera_posix_fd_open_flags(dir_entry) : 0;
-        req.stat.callback     = chimera_posix_utimensat_validate_callback;
-        req.stat.private_data = &comp;
-        req.stat.flags        = nofollow ? 0 : CHIMERA_VFS_LOOKUP_FOLLOW;
-        req.stat.path_len     = path_len;
+    req.opcode               = CHIMERA_CLIENT_OP_SETATTR;
+    req.setattr.callback     = NULL;
+    req.setattr.private_data = &ctx;
 
-        chimera_posix_worker_enqueue(worker, &req,
-                                     chimera_posix_utimensat_validate_exec);
-    } else {
-        req.opcode                 = CHIMERA_CLIENT_OP_SETATTR;
-        req.setattr.parent_handle  = dir_entry ? dir_entry->handle : NULL;
-        req.setattr.dir_open_flags = dir_entry ? chimera_posix_fd_open_flags(dir_entry) : 0;
-        req.setattr.nofollow       = nofollow;
-        req.setattr.callback       = chimera_posix_utimensat_callback;
-        req.setattr.private_data   = &comp;
-        req.setattr.path_len       = path_len;
+    chimera_posix_worker_enqueue(worker, &req, chimera_posix_utimensat_exec);
 
-        chimera_posix_fill_utimes(&req.setattr.set_attr, times);
-
-        chimera_posix_worker_enqueue(worker, &req, chimera_posix_utimensat_exec);
-    }
-
-    err = chimera_posix_wait(&comp);
+    err = chimera_posix_wait(&ctx.comp);
 
     if (dir_entry) {
         chimera_posix_fd_release(dir_entry, 0);
     }
 
-    chimera_posix_completion_destroy(&comp);
+    chimera_posix_completion_destroy(&ctx.comp);
 
     if (err) {
         errno = err;

@@ -4,6 +4,7 @@
 
 #include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
@@ -17,8 +18,8 @@
  * by streaming the byte range through the backend's ordinary async read and
  * write ops: read a bounded slice from the source handle, write it to the
  * destination handle, repeat until the range is exhausted or the source hits
- * EOF.  Both handles are served by the same module (the protocol layer only
- * issues same-module copies), so this never crosses backends.
+ * EOF.  Different modules use the same fallback through their ordinary I/O
+ * interfaces, including NFS proxies whose WRITE sends clone borrowed payloads.
  */
 
 /* Bound a single read/write hop.  At the 4 KiB minimum block size a 256 KiB hop
@@ -35,6 +36,10 @@ struct chimera_vfs_copy_fallback {
     uint64_t                          dst_offset;
     uint64_t                          remaining;
     uint64_t                          copied;
+    struct chimera_claim_actor        src_owner, dst_owner;
+    struct chimera_vfs_io_view        src_view, dst_view;
+    int                               stepping, step_pending, finished;
+    enum chimera_vfs_error            finish_status;
     /* The last read came up short or reported EOF: the source has no more
      * bytes to give as of this copy, so the in-flight write is the final hop.
      * Without this the loop keeps reading -- and a same-file copy whose
@@ -63,11 +68,37 @@ static void
 chimera_vfs_copy_fallback_step(
     struct chimera_vfs_copy_fallback *ctx);
 
+static int
+chimera_vfs_copy_fallback_attr(
+    struct chimera_vfs_attrs       *dst,
+    const struct chimera_vfs_attrs *src)
+{
+    struct chimera_acl *acl = NULL;
+
+    if ((src->va_set_mask & CHIMERA_VFS_ATTR_ACL) && src->va_acl) {
+        size_t size = chimera_acl_size(src->va_acl->num_aces);
+        acl = malloc(size);
+        if (!acl) {
+            return -1;
+        }
+        memcpy(acl, src->va_acl, size);
+    }
+    free(dst->va_acl);
+    *dst        = *src;
+    dst->va_acl = acl;
+    return 0;
+} /* chimera_vfs_copy_fallback_attr */
+
 static void
 chimera_vfs_copy_fallback_finish(
     struct chimera_vfs_copy_fallback *ctx,
     enum chimera_vfs_error            error_code)
 {
+    if (ctx->stepping) {
+        ctx->finished      = 1;
+        ctx->finish_status = error_code;
+        return;
+    }
     chimera_vfs_copy_range_callback_t callback     = ctx->callback;
     void                             *private_data = ctx->private_data;
     uint64_t                          copied       = ctx->copied;
@@ -77,6 +108,8 @@ chimera_vfs_copy_fallback_finish(
     free(ctx);
 
     callback(error_code, copied, &pre, &post, private_data);
+    free(pre.va_acl);
+    free(post.va_acl);
 } /* chimera_vfs_copy_fallback_finish */
 
 static void
@@ -101,13 +134,24 @@ chimera_vfs_copy_fallback_write_cb(
         return;
     }
 
+    if (length != ctx->read_len) {
+        chimera_vfs_copy_fallback_finish(ctx, CHIMERA_VFS_EIO);
+        return;
+    }
+
     /* Capture destination pre-attrs from the first write, post-attrs from the
      * most recent one, mirroring a native copy_range's reporting. */
     if (ctx->copied == 0 && pre_attr) {
-        ctx->r_pre_attr = *pre_attr;
+        if (chimera_vfs_copy_fallback_attr(&ctx->r_pre_attr, pre_attr)) {
+            chimera_vfs_copy_fallback_finish(ctx, CHIMERA_VFS_ENOSPC);
+            return;
+        }
     }
     if (post_attr) {
-        ctx->r_post_attr = *post_attr;
+        if (chimera_vfs_copy_fallback_attr(&ctx->r_post_attr, post_attr)) {
+            chimera_vfs_copy_fallback_finish(ctx, CHIMERA_VFS_ENOSPC);
+            return;
+        }
     }
 
     ctx->copied     += length;
@@ -175,6 +219,7 @@ chimera_vfs_copy_fallback_read_cb(
         return;
     }
 
+    ctx->read_len           = count;
     ctx->hold_niov          = 1;
     ctx->hold_iov[0].length = count;
 
@@ -196,23 +241,24 @@ chimera_vfs_copy_fallback_read_cb(
     /* Release the backend's read buffers now that the data is copied out. */
     evpl_iovecs_release(ctx->thread->evpl, iov, niov);
 
-    chimera_vfs_write(
+    chimera_vfs_write_view(
         ctx->thread,
         &ctx->cred,
         ctx->dst_handle,
         ctx->dst_offset,
         count,
         1, /* stable: copy completes durably as a native copy_range would */
-        ctx->copied == 0 ? CHIMERA_VFS_ATTR_MASK_STAT : 0,
+        ctx->copied == 0 ? ctx->r_pre_attr.va_req_mask : 0,
         ctx->post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE,
         ctx->hold_iov,
         ctx->hold_niov,
+        &ctx->dst_view,
         chimera_vfs_copy_fallback_write_cb,
         ctx);
 } /* chimera_vfs_copy_fallback_read_cb */
 
 static void
-chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
+chimera_vfs_copy_fallback_step_once(struct chimera_vfs_copy_fallback *ctx)
 {
     uint32_t chunk;
 
@@ -228,7 +274,7 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
     ctx->hold_niov = 0;
     ctx->read_len  = chunk;
 
-    chimera_vfs_read(
+    chimera_vfs_read_view(
         ctx->thread,
         &ctx->cred,
         ctx->src_handle,
@@ -237,8 +283,31 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
         ctx->read_iov,
         CHIMERA_VFS_COPY_FALLBACK_IOV,
         0,
+        &ctx->src_view,
         chimera_vfs_copy_fallback_read_cb,
         ctx);
+} /* chimera_vfs_copy_fallback_step_once */
+
+/* A synchronous backend may complete both hops inline.  Defer continuation
+ * until their callbacks unwind instead of consuming stack per copied chunk.
+ * Completion is also deferred while driving, so no callback frees ctx while
+ * this loop still owns it. Async completions resume through the same entry. */
+static void
+chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
+{
+    ctx->step_pending = 1;
+    if (ctx->stepping) {
+        return;
+    }
+    ctx->stepping = 1;
+    while (ctx->step_pending && !ctx->finished) {
+        ctx->step_pending = 0;
+        chimera_vfs_copy_fallback_step_once(ctx);
+    }
+    ctx->stepping = 0;
+    if (ctx->finished) {
+        chimera_vfs_copy_fallback_finish(ctx, ctx->finish_status);
+    }
 } /* chimera_vfs_copy_fallback_step */
 
 static void
@@ -252,6 +321,8 @@ chimera_vfs_copy_range_fallback(
     uint64_t                          length,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_vfs_io_view *src_view,
+    const struct chimera_vfs_io_view *dst_view,
     chimera_vfs_copy_range_callback_t callback,
     void                             *private_data)
 {
@@ -264,6 +335,8 @@ chimera_vfs_copy_range_fallback(
         return;
     }
 
+    chimera_vfs_io_view_copy(&ctx->src_view, &ctx->src_owner, src_view);
+    chimera_vfs_io_view_copy(&ctx->dst_view, &ctx->dst_owner, dst_view);
     ctx->thread         = thread;
     ctx->cred           = *cred;
     ctx->src_handle     = src_handle;
@@ -289,6 +362,8 @@ chimera_vfs_copy_range_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_copy_range_callback_t callback = request->proto_callback;
 
+    chimera_vfs_io_claim_release(request);
+
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
                                       request->copy_range.dst_handle->fh_hash,
@@ -309,7 +384,7 @@ chimera_vfs_copy_range_complete(struct chimera_vfs_request *request)
 } /* chimera_vfs_copy_range_complete */
 
 SYMBOL_EXPORT void
-chimera_vfs_copy_range(
+chimera_vfs_copy_range_owned(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *src_handle,
@@ -320,44 +395,56 @@ chimera_vfs_copy_range(
     uint32_t                          flags,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *src_owner,
+    const struct chimera_claim_actor *dst_owner,
+    chimera_vfs_copy_range_callback_t callback,
+    void                             *private_data)
+{
+    struct chimera_vfs_io_view src_view = { .owner = src_owner };
+    struct chimera_vfs_io_view dst_view = { .owner = dst_owner };
+
+    chimera_vfs_copy_range_view(thread, cred, src_handle, src_offset,
+                                dst_handle, dst_offset, length, flags,
+                                pre_attr_mask, post_attr_mask,
+                                &src_view, &dst_view, callback, private_data);
+} /* chimera_vfs_copy_range_owned */
+
+SYMBOL_EXPORT void
+chimera_vfs_copy_range_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *src_handle,
+    uint64_t                          src_offset,
+    struct chimera_vfs_open_handle   *dst_handle,
+    uint64_t                          dst_offset,
+    uint64_t                          length,
+    uint32_t                          flags,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    const struct chimera_vfs_io_view *src_view,
+    const struct chimera_vfs_io_view *dst_view,
     chimera_vfs_copy_range_callback_t callback,
     void                             *private_data)
 {
     struct chimera_vfs_request *request;
 
-    /* A storage module without native server-side copy still gets working copy
-     * semantics via a generic read/write streaming fallback.
-     *
-     * The fallback assumes the standard write contract: the backend borrows the
-     * supplied iovecs and the caller releases them after the write completes.
-     * The NFS proxy module breaks that contract — it zero-copy-marshals (moves)
-     * the write iovecs onto the upstream RPC, consuming them — so the fallback
-     * cannot drive it safely.  A proxy doing server-side copy by round-tripping
-     * every byte to its upstream would also defeat the point, so the proxy keeps
-     * surfacing ENOTSUP (its prior behaviour) and lets the client copy. */
-    /* Server-side range copy is declined outright while pNFS is configured.
-     * Either handle may be DS-resident, so a correct implementation would have
-     * to resolve both and drive the copy between two backing files; until it
-     * does, ENOTSUP sends the caller down the read+write fallback, which is
-     * redirected and therefore correct.  This costs an optimization, never
-     * correctness -- every protocol that offers a server-side copy is required
-     * to cope with the server refusing it. */
+    /* A storage module without native server-side copy uses bounded read/write
+     * streaming. This includes NFS proxies: their RPC writes clone the borrowed
+     * input references, and the fallback retains its own gathered read buffer
+     * until the write callback releases it. */
+    /* Anonymous or scoped views traverse ordinary read/write gates. A native
+     * owned copy uses the same WRITE invalidation gate at its destination;
+     * the supplied source actor already represents its read-side claim. */
     if (chimera_vfs_pnfs_io_possible(thread, dst_handle) ||
-        chimera_vfs_pnfs_io_possible(thread, src_handle)) {
-        callback(CHIMERA_VFS_ENOTSUP, 0, NULL, NULL, private_data);
-        return;
-    }
-
-    if (!(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
-        if (dst_handle->vfs_module->fh_magic == CHIMERA_VFS_FH_MAGIC_NFS ||
-            src_handle->vfs_module->fh_magic == CHIMERA_VFS_FH_MAGIC_NFS) {
-            callback(CHIMERA_VFS_ENOTSUP, 0, NULL, NULL, private_data);
-            return;
-        }
+        chimera_vfs_pnfs_io_possible(thread, src_handle) ||
+        !src_view || !src_view->owner || !dst_view || !dst_view->owner ||
+        src_view->num_excluded || dst_view->num_excluded ||
+        src_handle->vfs_module != dst_handle->vfs_module ||
+        !(dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
         chimera_vfs_copy_range_fallback(thread, cred, src_handle, src_offset,
                                         dst_handle, dst_offset, length,
                                         pre_attr_mask, post_attr_mask,
-                                        callback, private_data);
+                                        src_view, dst_view, callback, private_data);
         return;
     }
 
@@ -384,5 +471,28 @@ chimera_vfs_copy_range(
     request->proto_callback                     = callback;
     request->proto_private_data                 = private_data;
 
-    chimera_vfs_dispatch(request);
+    request->io_handle = dst_handle;
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, dst_view);
+    request->io_owner_valid = request->io_view.owner != NULL;
+    chimera_vfs_io_claim_acquire(request, request->io_view.owner, chimera_vfs_dispatch);
+} /* chimera_vfs_copy_range */
+
+SYMBOL_EXPORT void
+chimera_vfs_copy_range(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *src_handle,
+    uint64_t                          src_offset,
+    struct chimera_vfs_open_handle   *dst_handle,
+    uint64_t                          dst_offset,
+    uint64_t                          length,
+    uint32_t                          flags,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_copy_range_callback_t callback,
+    void                             *private_data)
+{
+    chimera_vfs_copy_range_owned(thread, cred, src_handle, src_offset,
+                                 dst_handle, dst_offset, length, flags, pre_attr_mask, post_attr_mask,
+                                 NULL, NULL, callback, private_data);
 } /* chimera_vfs_copy_range */

@@ -1850,7 +1850,7 @@ struct chimera_mkpath_ctx {
     char                       path[256];
     int                        pathlen;
     struct chimera_vfs_attrs   set_attr;
-    enum chimera_vfs_error     status;
+    enum chimera_vfs_error status;
     int                        done;
 };
 
@@ -2046,14 +2046,14 @@ struct chimera_seed_step {
 };
 
 static const struct chimera_seed_step chimera_seed_symlink_steps[] = {
-    { "SymlinkTest",      NULL,          S_IFDIR | 0755 },
-    { "SymlinkTest/link", "target",      0              },
-    { "badlink",          "nonexistent", 0              },
+    { "SymlinkTest",      NULL,                   S_IFDIR | 0755                                              },
+    { "SymlinkTest/link", "target",               0                                                           },
+    { "badlink",          "nonexistent",          0                                                           },
 };
 
 static const struct chimera_seed_step chimera_seed_fsa_steps[] = {
-    { "ExistingFolder",   NULL, S_IFDIR | 0755 },
-    { "ExistingFile.txt", NULL, S_IFREG | 0644 },
+    { "ExistingFolder",   NULL,   S_IFDIR | 0755     },
+    { "ExistingFile.txt", NULL,   S_IFREG | 0644     },
 };
 
 struct chimera_seed_ctx {
@@ -2064,7 +2064,7 @@ struct chimera_seed_ctx {
     int                             step;
     uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        root_fh_len;
-    enum chimera_vfs_error          status;
+    enum chimera_vfs_error status;
     int                             done;
 };
 

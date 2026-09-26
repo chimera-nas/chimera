@@ -23,8 +23,10 @@
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
+#include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_procs.h"
 
 #define CHIMERA_S3_DEL_BODY_HARD_CAP (4 * 1024 * 1024)
@@ -285,10 +287,7 @@ chimera_s3_del_parse_body(struct chimera_s3_request *request)
     return CHIMERA_S3_STATUS_OK;
 } /* chimera_s3_del_parse_body */
 
-/* ----- sequential deletion driver ----- */
-
-static void chimera_s3_del_drive(
-    struct chimera_s3_request *request);
+/* ----- compound deletion and accepted-result publication ----- */
 
 static void
 chimera_s3_del_finalize(
@@ -353,156 +352,92 @@ chimera_s3_del_finalize(
     }
 } /* chimera_s3_del_finalize */
 
-/*
- * Record the outcome for the current key. If we are unwinding from an
- * inline (synchronous) sequence completion, just clear the pending flag and
- * let chimera_s3_del_drive()'s loop advance; otherwise advance and resume the
- * loop here. This trampoline keeps a long batch from recursing per key.
- */
+/* Each key has an independent protocol result. Stage it privately and let
+ * later keys run even after a per-key failure. A compound-finish error is
+ * checked separately and must never be converted into a successful batch. */
 static void
 chimera_s3_del_record(
-    struct chimera_s3_request *request,
-    int                        deleted,
-    const char                *code,
-    const char                *msg)
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_s3_delete_entry *e = &request->del.entries[request->del.cur];
+    struct chimera_s3_delete_entry *entry = private_data;
 
-    e->deleted  = deleted;
-    e->err_code = code;
-    e->err_msg  = msg;
-
-    request->del.pending = 0;
-
-    if (!request->del.synchronous) {
-        request->del.cur++;
-        chimera_s3_del_drive(request);
+    entry->deleted = *status == CHIMERA_VFS_OK || *status == CHIMERA_VFS_ENOENT ||
+        *status == CHIMERA_VFS_ENOTDIR;
+    if (entry->deleted) {
+        entry->err_code = NULL;
+        entry->err_msg  = NULL;
+    } else if (*status == CHIMERA_VFS_EACCES || *status == CHIMERA_VFS_EPERM) {
+        entry->err_code = "AccessDenied";
+        entry->err_msg  = "Access Denied";
+    } else {
+        entry->err_code = "InternalError";
+        entry->err_msg  = "We encountered an internal error. Please try again.";
     }
+    *status = CHIMERA_VFS_OK;
 } /* chimera_s3_del_record */
 
-/*
- * One key's sequence -- PUTFH(bucket) -> LOOKUP_PATH(prefix) -> REMOVE(name)
- * -- is over.  Each key is its own sequence because the per-key outcomes are
- * the S3 contract: one key's failure must not stop the keys behind it.
- * Which op failed says what the failure means, as it did per op.
- */
 static void
-chimera_s3_del_sequence_complete(
+chimera_s3_del_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
-    struct chimera_s3_request *request = private_data;
-    enum chimera_vfs_error     error_code;
-    uint32_t                   completed;
 
-    error_code = chimera_vfs_compound_status(compound);
-    completed  = chimera_vfs_compound_num_completed(compound);
+    struct chimera_s3_request *request = private_data;
+    enum chimera_vfs_error     status  = chimera_vfs_compound_status(compound);
 
     chimera_vfs_compound_free(compound);
-
-    if (error_code == CHIMERA_VFS_OK) {
-        chimera_s3_del_record(request, 1, NULL, NULL);
-    } else if (completed < 3) {
-        /* The prefix directory could not be resolved (or, at the remove's
-         * own open of it, opened). */
-        if (error_code == CHIMERA_VFS_ENOENT || error_code == CHIMERA_VFS_ENOTDIR) {
-            /* Parent path does not exist: object is effectively gone. */
-            chimera_s3_del_record(request, 1, NULL, NULL);
-        } else {
-            /* Any other lookup failure (ESTALE, EIO, ...) must not masquerade
-             * as a successful delete: the object may well still exist. */
-            chimera_s3_del_record(request, 0, "InternalError",
-                                  "We encountered an internal error. "
-                                  "Please try again.");
+    if (status != CHIMERA_VFS_OK) {
+        free(request->del.entries);
+        request->del.entries = NULL;
+        free(request->del.body_buf);
+        request->del.body_buf = NULL;
+        free(request->del.resp_buf);
+        request->del.resp_buf = NULL;
+        request->status       = status == CHIMERA_VFS_ENOENT ? CHIMERA_S3_STATUS_NO_SUCH_BUCKET :
+            (status == CHIMERA_VFS_EACCES || status == CHIMERA_VFS_EPERM ?
+             CHIMERA_S3_STATUS_ACCESS_DENIED : CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(request->thread->evpl, request);
         }
-    } else if (error_code == CHIMERA_VFS_ENOENT) {
-        /* Already absent: counts as success. */
-        chimera_s3_del_record(request, 1, NULL, NULL);
-    } else if (error_code == CHIMERA_VFS_EACCES) {
-        chimera_s3_del_record(request, 0, "AccessDenied", "Access Denied");
-    } else {
-        chimera_s3_del_record(request, 0, "InternalError",
-                              "We encountered an internal error. Please try again.");
+        goto request_drop;
     }
-} /* chimera_s3_del_sequence_complete */
+    chimera_s3_del_finalize(request->thread->evpl, request);
+ request_drop:
+    chimera_s3_request_drop(private_data);
+} /* chimera_s3_del_complete */
 
 static void
 chimera_s3_del_drive(struct chimera_s3_request *request)
 {
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct evpl                     *evpl   = thread->evpl;
-    struct chimera_vfs_compound     *compound;
+    struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
 
-    while (request->del.cur < request->del.n_keys) {
-        struct chimera_s3_delete_entry *e       = &request->del.entries[request->del.cur];
-        const char                     *key     = e->key;
-        int                             key_len = e->key_len;
-        const char                     *dirpath, *name;
-        int                             dirpathlen, name_len, i;
-        const char                     *slash = NULL;
+    /* REMOVE_PATH preserves the bucket cursor, so the protocol maximum of
+     * 1000 independent keys fits in one compound with its bucket lookup. */
+    for (int i = 0; i < request->del.n_keys; i++) {
+        struct chimera_s3_delete_entry *entry = &request->del.entries[i];
+        int                             index;
 
-        for (i = key_len - 1; i >= 0; i--) {
-            if (key[i] == '/') {
-                slash = key + i;
-                break;
-            }
-        }
-
-        if (slash) {
-            dirpath    = key;
-            dirpathlen = slash - key;
-            name       = slash + 1;
-            while (name < key + key_len && *name == '/') {
-                name++;
-            }
-            name_len = (key + key_len) - name;
-        } else {
-            dirpath    = "/";
-            dirpathlen = 1;
-            name       = key;
-            name_len   = key_len;
-        }
-
-        /* Empty key, or a key naming only directories: nothing to remove. */
-        if (name_len == 0) {
-            e->deleted = 1;
-            request->del.cur++;
+        if (!entry->key_len) {
+            entry->deleted = 1;
             continue;
         }
-
-        request->del.cur_name     = name;
-        request->del.cur_name_len = name_len;
-
-        request->del.synchronous = 1;
-        request->del.pending     = 1;
-
-        compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-        chimera_vfs_compound_add_putfh(compound, request->bucket_fh,
-                                       request->bucket_fhlen);
-        chimera_vfs_compound_add_lookup_path(compound, dirpath, dirpathlen,
-                                             CHIMERA_VFS_ATTR_FH,
-                                             CHIMERA_VFS_LOOKUP_FOLLOW);
-        chimera_vfs_compound_add_remove(compound, name, name_len, 0, 0, 0);
-
-        chimera_s3_request_get(request);
-
-        chimera_vfs_compound_submit(compound, chimera_s3_del_sequence_complete,
-                                    request);
-
-        if (request->del.pending) {
-            /* Completion is asynchronous; the callback chain will resume the
-             * loop via chimera_s3_del_record(). */
-            request->del.synchronous = 0;
-            return;
+        if (entry->key[entry->key_len - 1] == '/') {
+            index = chimera_vfs_compound_add_remove_at_path(compound,
+                                                            entry->key, entry->key_len - 1, "", 0,
+                                                            CHIMERA_VFS_REMOVE_ISNOTDIR);
+        } else {
+            index = chimera_vfs_compound_add_remove_path(compound,
+                                                         entry->key, entry->key_len, 0);
         }
-
-        /* Completed inline; result already recorded. Advance and continue. */
-        request->del.cur++;
+        chimera_vfs_compound_set_op_callbacks(compound, index, NULL,
+                                              chimera_s3_del_record, entry);
     }
-
-    chimera_s3_del_finalize(evpl, request);
+    chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_del_complete, request);
 } /* chimera_s3_del_drive */
 
 /* ----- entry points ----- */

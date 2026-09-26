@@ -18,9 +18,10 @@
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
 #include "vfs/vfs.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 #include "common/format.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_procs.h"
 #include "s3_etag.h"
 
@@ -32,20 +33,14 @@
 /*
  * S3 object listing (ListObjects V1 + ListObjectsV2 + ListObjectVersions).
  *
- * One sequence walks the bucket subtree -- PUTFH(bucket), OPEN_CURRENT as a
- * directory, FIND -- invoking our filter to decide descent and our append for
- * every entry. We collect the matching objects and rolled-up CommonPrefixes
- * into an in-memory array, sort it lexicographically (S3 mandates sorted
- * keys), apply the requested page window (marker / continuation-token /
- * start-after + max-keys), and render the V1 or V2 response shape once the
- * sequence has finished. There is no server-side cursor: each page re-walks
- * and re-sorts, then slices past the caller's token. This is O(n) per page
- * but correct and stateless.
- *
- * The append is REVERSIBLE on the streaming contract: it stages into the
- * request-local array and nothing else, so the reset the executor runs before
- * every execution of the FIND has only that array to truncate, and no XML is
- * rendered until the completion.
+ * The VFS `find` walks the bucket subtree depth-first, invoking our filter to
+ * decide descent and our callback for every entry. We collect the matching
+ * objects and rolled-up CommonPrefixes into an in-memory array, sort it
+ * lexicographically (S3 mandates sorted keys), apply the requested page window
+ * (marker / continuation-token / start-after + max-keys), and render the V1 or
+ * V2 response shape. There is no server-side cursor: each page re-walks and
+ * re-sorts, then slices past the caller's token. This is O(n) per page but
+ * correct and stateless.
  *
  * chimera has no object versioning: every object is its own single, latest,
  * "null" version. ListObjectVersions therefore reuses the same collection/sort/
@@ -486,33 +481,12 @@ chimera_s3_list_key(
 } /* chimera_s3_list_key */
 
 /* ---------------------------------------------------------------------------
-* FIND filter (descent control), append (collection) and reset
+* VFS find filter (descent control) and callback (collection)
 * ------------------------------------------------------------------------- */
-
-/* The reversibility half of the streaming contract: everything the append
- * below staged is dropped, so a re-run of the walk starts from an empty
- * array.  The array's capacity is kept -- it is the request's, and a re-run
- * will want about as much of it. */
-static void
-chimera_s3_list_reset(
-    struct chimera_vfs_compound *compound,
-    uint32_t                     index,
-    void                        *private_data)
-{
-    struct chimera_s3_request *request = private_data;
-    int                        i;
-
-    for (i = 0; i < request->list.n_entries; i++) {
-        free(request->list.entries[i].key);
-    }
-    request->list.n_entries = 0;
-} /* chimera_s3_list_reset */
 
 /* Returns non-zero to PRUNE (do not descend into this directory). */
 static int
 chimera_s3_list_filter(
-    struct chimera_vfs_compound    *compound,
-    uint32_t                        index,
     const char                     *path,
     int                             pathlen,
     const struct chimera_vfs_attrs *attr,
@@ -541,13 +515,8 @@ chimera_s3_list_filter(
     return (memcmp(k, p, klen) == 0 && p[klen] == '/') ? 0 : 1;
 } /* chimera_s3_list_filter */
 
-/* Stage one entry.  Always takes it (returns 0): the page window is applied
- * after the sort, so no entry can be refused here without losing a key that
- * sorts before one already staged. */
 static int
-chimera_s3_list_append(
-    struct chimera_vfs_compound    *compound,
-    uint32_t                        index,
+chimera_s3_list_find_callback(
     const char                     *path,
     int                             pathlen,
     const struct chimera_vfs_attrs *attr,
@@ -652,7 +621,7 @@ chimera_s3_list_append(
         }
         return 0;
     }
-} /* chimera_s3_list_append */
+} /* chimera_s3_list_find_callback */
 
 /* ---------------------------------------------------------------------------
 * Sort, page, render
@@ -669,16 +638,16 @@ chimera_s3_list_cmp(
     return strcmp(ea->key, eb->key);
 } /* chimera_s3_list_cmp */
 
-/* The walk is over: sort, page and render what it staged.  The sequence's
- * own status is not consulted, exactly as the per-op find's completion status
- * never was: the bucket was resolved by the dispatcher, and what a failed walk
- * leaves staged is rendered as the listing it amounts to. */
 static void
-chimera_s3_list_render(struct chimera_s3_request *request)
+chimera_s3_list_find_complete(
+    enum chimera_s3_status error_code,
+    void                  *private_data)
 {
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct evpl                     *evpl   = thread->evpl;
-    struct chimera_s3_list_entry    *ents   = request->list.entries;
+
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+    struct evpl                     *evpl    = thread->evpl;
+    struct chimera_s3_list_entry    *ents    = request->list.entries;
     struct chimera_s3_out            out;
     int                              n = request->list.n_entries;
     int                              w, r, i;
@@ -688,6 +657,21 @@ chimera_s3_list_render(struct chimera_s3_request *request)
     char                             enc[CHIMERA_S3_KEY_MAX * 6 + 8];
     const char                      *next = NULL;
     uint64_t                         total;
+
+    if (error_code != CHIMERA_S3_STATUS_OK) {
+        for (i = 0; i < n; i++) {
+            free(ents[i].key);
+        }
+        free(ents);
+        request->list.entries   = NULL;
+        request->list.n_entries = request->list.cap_entries = 0;
+        request->status         = error_code;
+        request->vfs_state      = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        goto request_drop;
+    }
 
     /* S3 returns keys in lexicographic order; the VFS walk does not. */
     if (n > 0) {
@@ -934,23 +918,35 @@ chimera_s3_list_render(struct chimera_s3_request *request)
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
-} /* chimera_s3_list_render */
+ request_drop:
+    chimera_s3_request_drop(private_data);
+} /* chimera_s3_list_find_complete */
 
 static void
-chimera_s3_list_sequence_complete(
+chimera_s3_list_reset(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    void                        *private_data)
+{
+    struct chimera_s3_request *request = private_data;
+
+    for (int i = 0; i < request->list.n_entries; i++) {
+        free(request->list.entries[i].key);
+    }
+    request->list.n_entries = 0;
+} /* chimera_s3_list_reset */
+
+static void
+chimera_s3_list_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    CHIMERA_S3_HOLD_REQUEST(private_data);
-    struct chimera_s3_request *request = private_data;
+    enum chimera_s3_status status = chimera_s3_compound_error(compound, private_data,
+                                                              CHIMERA_S3_STATUS_INTERNAL_ERROR);
 
-    /* Nothing of the sequence's is read back: the staged entries are the
-     * request's own, and the directory open belonged to the sequence and
-     * goes with it. */
     chimera_vfs_compound_free(compound);
-
-    chimera_s3_list_render(request);
-} /* chimera_s3_list_sequence_complete */
+    chimera_s3_list_find_complete(status, private_data);
+} /* chimera_s3_list_complete */
 
 void
 chimera_s3_list(
@@ -958,28 +954,11 @@ chimera_s3_list(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
 
-    /* One reference for the whole sequence: the per-entry append runs many
-     * times, the completion exactly once, so the completion is what drops
-     * it. */
+    chimera_vfs_compound_add_find(compound, CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                                  chimera_s3_list_reset, chimera_s3_list_filter,
+                                  chimera_s3_list_find_callback, request);
     chimera_s3_request_get(request);
-
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_vfs_compound_add_putfh(compound, request->bucket_fh,
-                                   request->bucket_fhlen);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH |
-                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
-    chimera_vfs_compound_add_find(compound,
-                                  CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                                  chimera_s3_list_filter,
-                                  chimera_s3_list_append,
-                                  chimera_s3_list_reset,
-                                  request);
-
-    chimera_vfs_compound_submit(compound, chimera_s3_list_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(compound, chimera_s3_list_complete, request);
 } /* chimera_s3_list */

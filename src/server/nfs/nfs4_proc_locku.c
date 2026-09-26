@@ -9,17 +9,39 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 
-/*
- * Everything LOCKU does, with a current filehandle established and the reply
- * left to the caller.  See chimera_nfs4_close_apply for why the operation is
- * reachable from two entrances: LOCKU drives no VFS operation, so a sequence
- * can apply it when its results are filled.
- */
-nfsstat4
-chimera_nfs4_locku_apply(
+/* Once an owner seqid is accepted as new, consumed errors are replies too.
+ * Keep the acquired state (and therefore its owner) alive until the cache is
+ * updated, then release it on every completion path. */
+static void
+chimera_nfs4_locku_finish(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct LOCKU4args                *args,
+    struct LOCKU4res                 *res,
+    struct nfs_lock_state            *lock_state)
+{
+    struct nfs_lock_owner *owner = lock_state->lock_owner;
+
+    if (req->minorversion == 0 && nfs4_seqid_should_advance(res->status)) {
+        evpl_mutex_lock(&owner->lock);
+        owner->seqid = args->seqid;
+        nfs4_replay_record(&owner->replay, args->seqid, OP_LOCKU,
+                           res->status,
+                           res->status == NFS4_OK ? &res->lock_stateid : NULL);
+        evpl_mutex_unlock(&owner->lock);
+    }
+    nfs_state_table_release(&thread->shared->nfs4_state_table, lock_state,
+                            NFS4_SLOT_TYPE_LOCK, thread->vfs_thread);
+    req->nfs_state_ref = NULL;
+    chimera_nfs4_compound_complete(req, res->status);
+} /* chimera_nfs4_locku_finish */
+
+void
+chimera_nfs4_locku(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
@@ -38,6 +60,13 @@ chimera_nfs4_locku_apply(
     uint64_t                  vfs_length;
     nfsstat4                  status;
 
+    /* RFC 7530 §16.12.3: current filehandle must be set */
+    if (req->fhlen == 0) {
+        res->status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->lock_stateid);
 
@@ -46,7 +75,8 @@ chimera_nfs4_locku_apply(
                                      &state_void, &state_type);
     if (status != NFS4_OK) {
         res->status = status;
-        return res->status;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
     }
 
     lock_state          = state_void;
@@ -63,6 +93,10 @@ chimera_nfs4_locku_apply(
         int seqid_class = nfs4_owner_seqid_classify(lock_owner->seqid,
                                                     &lock_owner->replay,
                                                     args->seqid);
+        if (seqid_class == NFS4_SEQID_REPLAY &&
+            lock_owner->replay.op != OP_LOCKU) {
+            seqid_class = NFS4_SEQID_BAD;
+        }
         if (seqid_class == NFS4_SEQID_REPLAY) {
             res->status       = lock_owner->replay.status;
             res->lock_stateid = lock_owner->replay.stateid;
@@ -70,7 +104,8 @@ chimera_nfs4_locku_apply(
             nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
-            return res->status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
         }
         if (seqid_class != NFS4_SEQID_NEW) {
             evpl_mutex_unlock(&lock_owner->lock);
@@ -78,7 +113,8 @@ chimera_nfs4_locku_apply(
                                     thread->vfs_thread);
             req->nfs_state_ref = NULL;
             res->status        = NFS4ERR_BAD_SEQID;
-            return res->status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
         }
         evpl_mutex_unlock(&lock_owner->lock);
     }
@@ -90,22 +126,18 @@ chimera_nfs4_locku_apply(
         status = nfs4_stateid_check_seqid(lock_state->seqid,
                                           args->lock_stateid.seqid);
         if (status != NFS4_OK) {
-            nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                    thread->vfs_thread);
-            req->nfs_state_ref = NULL;
-            res->status        = status;
-            return res->status;
+            res->status = status;
+            chimera_nfs4_locku_finish(thread, req, args, res, lock_state);
+            return;
         }
     }
 
     /* RFC 7530 §16.12.4: same length rules as LOCK */
     if (args->length == 0 ||
         (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
-        nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                thread->vfs_thread);
-        req->nfs_state_ref = NULL;
-        res->status        = NFS4ERR_INVAL;
-        return res->status;
+        res->status = NFS4ERR_INVAL;
+        chimera_nfs4_locku_finish(thread, req, args, res, lock_state);
+        return;
     }
 
     /* NFSv4 and the VFS range layer share UINT64_MAX as the to-EOF sentinel. */
@@ -211,38 +243,5 @@ chimera_nfs4_locku_apply(
     res->status = NFS4_OK;
     chimera_nfs4_set_current_stateid(req, &res->lock_stateid);
 
-    /* RFC 7530 §9.1.7: record cached reply for the lock_owner. */
-    if (is_v40 && lock_owner) {
-        evpl_mutex_lock(&lock_owner->lock);
-        lock_owner->seqid = args->seqid;
-        nfs4_replay_record(&lock_owner->replay, args->seqid, OP_LOCKU,
-                           NFS4_OK, &res->lock_stateid);
-        evpl_mutex_unlock(&lock_owner->lock);
-    }
-
-    nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                            thread->vfs_thread);
-    req->nfs_state_ref = NULL;
-
-    return NFS4_OK;
-} /* chimera_nfs4_locku_apply */
-
-void
-chimera_nfs4_locku(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop)
-{
-    nfsstat4 status;
-
-    /* RFC 7530 §16.12.3: current filehandle must be set */
-    if (req->fhlen == 0) {
-        status                = NFS4ERR_NOFILEHANDLE;
-        resop->oplocku.status = status;
-    } else {
-        status = chimera_nfs4_locku_apply(thread, req, argop, resop);
-    }
-
-    chimera_nfs4_compound_complete(req, status);
+    chimera_nfs4_locku_finish(thread, req, args, res, lock_state);
 } /* chimera_nfs4_locku */

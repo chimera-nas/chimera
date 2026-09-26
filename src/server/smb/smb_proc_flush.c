@@ -132,3 +132,49 @@ chimera_smb_parse_flush(
 
     return 0;
 } /* chimera_smb_parse_ioctl */
+static int
+smb_flush_compound_eligible(struct chimera_smb_request *request)
+{
+    (void) request;
+    return 1;
+} /* smb_flush_compound_eligible */
+
+static int
+smb_flush_compound_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    (void) command;
+    return chimera_vfs_compound_add_commit(compound, 0, UINT64_MAX, 0, 0);
+} /* smb_flush_compound_build */
+
+static void
+smb_flush_compound_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    (void) compound;
+    (void) index;
+    (void) status;
+    if (!(command->open->granted_access & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA))) {
+        command->status = SMB2_STATUS_ACCESS_DENIED;
+    }
+} /* smb_flush_compound_prepare */
+
+static struct chimera_smb_file_id
+smb_flush_compound_file_id(struct chimera_smb_request *request)
+{
+    return request->flush.file_id;
+} /* smb_flush_compound_file_id */
+
+const struct smb_vfs_command_ops chimera_smb_flush_compound_ops = {
+    .file_id   = smb_flush_compound_file_id,
+    .map_error = chimera_smb_flush_error_status,
+    .eligible  = smb_flush_compound_eligible,
+    .build     = smb_flush_compound_build,
+    .prepare   = smb_flush_compound_prepare,
+};

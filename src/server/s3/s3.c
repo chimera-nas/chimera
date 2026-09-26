@@ -23,7 +23,7 @@
 #include "s3_tagging.h"
 #include "s3.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 
 static inline int
 chimera_s3_hexval(int c)
@@ -136,13 +136,13 @@ chimera_s3_request_alloc(struct chimera_server_s3_thread *thread)
     /* The HTTP layer's reference, held until libevpl reports the request over
      * one way or the other.  Everything else that outlives the call it was
      * made from takes its own; see chimera_s3_request_get. */
-    request->refcount  = 1;
-    request->abandoned = 0;
+    request->refcount           = 1;
+    request->abandoned          = 0;
+    request->bucket_path        = NULL;
+    request->put_transfer       = NULL;
+    request->multipart_transfer = NULL;
 
-    /* Pooled requests are not zeroed on reuse, so the GET reassembly queue has
-     * to be reset explicitly. */
-    request->read_queue      = NULL;
-    request->read_queue_tail = NULL;
+    request->get_active = 0;
 
     return request;
 } /* chimera_s3_request_alloc */
@@ -166,6 +166,11 @@ chimera_s3_request_put(
     }
 
     chimera_s3_tagging_request_cleanup(request);
+    chimera_s3_get_cleanup(request);
+    chimera_s3_put_cleanup(request);
+    chimera_s3_upload_part_cleanup(request);
+    free(request->bucket_path);
+    request->bucket_path = NULL;
 
     otel_span_end(&request->otel);
 
@@ -358,7 +363,7 @@ s3_server_notify(
                  * once the bucket FH is resolved. If the bucket lookup is still
                  * in flight, its callback drives body_done instead. */
                 chimera_s3_put_tagging_recv(evpl, s3_request);
-                if (s3_request->bucket_fhlen != 0 &&
+                if ((s3_request->bucket_fhlen != 0 || s3_request->bucket_path) &&
                     s3_request->vfs_state != CHIMERA_S3_VFS_STATE_COMPLETE) {
                     chimera_s3_put_tagging_body_done(evpl, s3_request);
                 }
@@ -490,30 +495,11 @@ s3_server_notify(
     } /* switch */
 } /* chimera_metrics_notify */
 
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_dispatch_callback,
-                            (enum chimera_vfs_error error_code,
-                             struct chimera_vfs_attrs *attr,
-                             void *private_data),
-                            (error_code, attr, private_data))
+static void
+chimera_s3_dispatch_operation(struct chimera_s3_request *s3_request)
 {
-    struct chimera_s3_request       *s3_request = private_data;
-    struct chimera_server_s3_thread *thread     = s3_request->thread;
-    struct evpl                     *evpl       = thread->evpl;
-
-    if (error_code) {
-        s3_request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
-        s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        /* This is a VFS completion callback: on an asynchronous backend the
-         * RECEIVE_COMPLETE notification may already have passed, so an error
-         * completed here must answer the request itself or nothing will. */
-        if (s3_request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(evpl, s3_request);
-        }
-        return;
-    }
-
-    memcpy(s3_request->bucket_fh, attr->va_fh, attr->va_fh_len);
-    s3_request->bucket_fhlen = attr->va_fh_len;
+    struct chimera_server_s3_thread *thread = s3_request->thread;
+    struct evpl                     *evpl   = thread->evpl;
 
     /* ?acl subresource (object or bucket): the ACL is a projection of the
      * target's owner and mode, so both directions run against the same
@@ -627,38 +613,13 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_dispatch_callback,
             break;
     } /* switch */
 
-    /* Routing that completed the request in this VFS-callback context (the
-    * unimplemented-method arms above) must answer it: on an asynchronous
-    * backend the RECEIVE_COMPLETE notification may already have passed. */
+    /* A body may already be complete when a routed handler finishes. */
     if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE &&
         s3_request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, s3_request);
     }
 
-} /* chimera_s3_dispatch_callback */
-
-/* The bucket prelude sequence (PUTROOT -> LOOKUP_PATH) is over: the
- * lookup's attributes carry the bucket fh the handlers start from. */
-static void
-chimera_s3_dispatch_sequence_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    enum chimera_vfs_error   error_code;
-    struct chimera_vfs_attrs attr;
-
-    error_code = chimera_vfs_compound_status(compound);
-
-    if (error_code == CHIMERA_VFS_OK) {
-        attr = chimera_vfs_compound_op(compound, 1)->attr;
-    } else {
-        attr.va_set_mask = 0;
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_s3_dispatch_callback(error_code, &attr, private_data);
-} /* chimera_s3_dispatch_sequence_complete */
+} /* chimera_s3_dispatch_operation */
 
 static void
 s3_server_dispatch(
@@ -673,7 +634,6 @@ s3_server_dispatch(
     struct chimera_server_s3_shared *shared = thread->shared;
     struct chimera_s3_request       *s3_request;
     struct s3_bucket                *bucket;
-    struct chimera_vfs_compound     *compound;
     const char                      *urlp, *slash, *dot, *host_header;
     int                              host_pathing = 0;
     const char                      *range_str;
@@ -1178,7 +1138,7 @@ s3_server_dispatch(
         /* CreateBucket: PUT /bucket with no object key. The target bucket does
          * not exist yet, so this is handled before the bucket-map lookup. */
         if (method == EVPL_HTTP_REQUEST_TYPE_PUT && s3_request->path_len == 0 &&
-            !s3_request->has_upload_id && !s3_request->has_tagging) {
+            !s3_request->has_upload_id && !s3_request->has_tagging && !s3_request->has_acl) {
             s3_request->op_bucket = 1;
             chimera_s3_create_bucket(evpl, thread, s3_request);
             return;
@@ -1197,7 +1157,7 @@ s3_server_dispatch(
          * no object-style subresource query. */
         if (s3_request->path_len == 0 && !s3_request->has_uploads &&
             !s3_request->has_delete && !s3_request->has_upload_id &&
-            !s3_request->is_list && !s3_request->has_tagging) {
+            !s3_request->is_list && !s3_request->has_tagging && !s3_request->has_acl) {
 
             if (method == EVPL_HTTP_REQUEST_TYPE_DELETE) {
                 s3_request->op_bucket = 1;
@@ -1209,7 +1169,8 @@ s3_server_dispatch(
                 chimera_s3_delete_bucket(evpl, thread, s3_request);
                 return;
             } else if (method == EVPL_HTTP_REQUEST_TYPE_HEAD) {
-                s3_request->op_bucket = 1;
+                s3_request->op_bucket   = 1;
+                s3_request->bucket_path = strdup(bucket->path);
                 s3_bucket_map_release(shared->bucket_map);
                 chimera_s3_head_bucket(evpl, thread, s3_request);
                 return;
@@ -1236,25 +1197,8 @@ s3_server_dispatch(
          * request issues) under the S3 span. */
         thread->vfs->otel_parent = &s3_request->otel;
 
-        /* The bucket prelude: PUTROOT -> LOOKUP_PATH(bucket path).  Its
-         * answer is the bucket fh every handler starts its own sequences
-         * from.  The path is copied into the sequence, so the map's lock
-         * can go before the sequence runs. */
-        compound = chimera_vfs_compound_alloc(thread->vfs, &s3_request->cred);
-
-        chimera_vfs_compound_add_putroot(compound);
-        chimera_vfs_compound_add_lookup_path(compound,
-                                             bucket_path, strlen(bucket_path),
-                                             CHIMERA_VFS_ATTR_FH,
-                                             CHIMERA_VFS_LOOKUP_FOLLOW);
-
-        free(bucket_path);
-
-        chimera_s3_request_get(s3_request);
-
-        chimera_vfs_compound_submit(compound,
-                                    chimera_s3_dispatch_sequence_complete,
-                                    s3_request);
+        s3_request->bucket_path = bucket_path;
+        chimera_s3_dispatch_operation(s3_request);
     }
 
 } /* s3_server_dispatch */

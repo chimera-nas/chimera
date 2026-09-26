@@ -6,7 +6,8 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "nfs4_access.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
+#include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_access.h"
 
@@ -57,28 +58,33 @@ void
 chimera_nfs4_access_fill(
     struct nfs_request             *req,
     struct ACCESS4res              *res,
-    const struct chimera_vfs_attrs *attr,
     uint32_t                        requested,
-    uint32_t                        granted)
+    uint32_t                        granted,
+    const struct chimera_vfs_attrs *attr)
 {
-    /* RFC 8881 18.1.4: the server SHOULD NOT set ACCESS4_EXECUTE unless an
-     * execute bit is set.  A privileged caller's DAC override grants
-     * ACE_EXECUTE on a file with no execute bit anywhere in its mode, which is
-     * right for the OPEN that follows and wrong for the advisory answer -- so
-     * withhold that ONE bit here rather than weakening the override.
-     *
-     * Restricted to non-directories on purpose: a directory's search
-     * permission travels as ACCESS4_LOOKUP, which maps to the same ACE bit and
-     * which the RFC does NOT qualify this way -- stripping it there would
-     * refuse a privileged caller the traversal it really does have. */
-    if (!S_ISDIR(attr->va_mode) &&
-        !(attr->va_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-        granted &= ~CHIMERA_ACE_EXECUTE;
-    }
-
     res->status           = NFS4_OK;
     res->resok4.supported = requested;
     res->resok4.access    = chimera_nfs4_access_from_granted(requested, granted);
+
+    /* RFC 8881 18.1.4: even privileged callers may receive EXECUTE only
+     * when a mode execute bit or an ALLOW ACE marks the object executable.
+     * This ACCESS reporting rule does not change the shared DAC engine. */
+    if (res->resok4.access & ACCESS4_EXECUTE) {
+        bool                      executable = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && (attr->va_mode & 0111);
+        const struct chimera_acl *acl        = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
+        if (!executable && acl) {
+            for (uint32_t i = 0; i < acl->num_aces; i++) {
+                if (acl->aces[i].type == CHIMERA_ACE_ALLOWED &&
+                    (acl->aces[i].access_mask & CHIMERA_ACE_EXECUTE)) {
+                    executable = true;
+                    break;
+                }
+            }
+        }
+        if (!executable) {
+            res->resok4.access &= ~ACCESS4_EXECUTE;
+        }
+    }
 
     /* A read-only export never grants write-class access, regardless of what
      * the ACL/mode would allow.  `supported` stays unmasked: the bits were
@@ -89,47 +95,59 @@ chimera_nfs4_access_fill(
     }
 } /* chimera_nfs4_access_fill */
 
-/* PUTFH, OPEN_CURRENT, GETATTR: the stat is op 2 of the run. */
-#define NFS4_ACCESS_OP_GETATTR 2
-
 static void
 chimera_nfs4_access_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
 {
-    struct nfs_request                   *req  = private_data;
-    struct ACCESS4args                   *args = &req->args_compound->argarray[req->index].opaccess;
-    struct ACCESS4res                    *res  = &req->res_compound.resarray[req->index].opaccess;
-    const struct chimera_vfs_compound_op *gop;
-    enum chimera_vfs_error                error_code;
-    uint32_t                              requested, granted;
-
-    error_code = chimera_vfs_compound_status(compound);
+    struct nfs_request *req  = private_data;
+    struct ACCESS4args *args = &req->args_compound->argarray[req->index].opaccess;
+    struct ACCESS4res  *res  = &req->res_compound.resarray[req->index].opaccess;
+    uint32_t            requested, granted;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_free(compound);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    gop = chimera_vfs_compound_op(compound, NFS4_ACCESS_OP_GETATTR);
-
-    requested = chimera_nfs4_access_requested(req, args, &gop->attr,
+    requested = chimera_nfs4_access_requested(req, args, attr,
                                               req->fh, req->fhlen);
 
     /* Evaluate the canonical ACL (or mode fallback) once via the shared gate,
-     * then map the granted ACE bits back to the ACCESS4_* result bits.  The ACL
-     * belongs to the compound, so both readings happen before the free. */
-    granted = chimera_vfs_access_check(&gop->attr, &req->cred,
+     * then map the granted ACE bits back to the ACCESS4_* result bits. */
+    granted = chimera_vfs_access_check(attr, &req->cred,
                                        chimera_nfs4_access4_to_mask(requested));
 
-    chimera_nfs4_access_fill(req, res, &gop->attr, requested, granted);
-
-    chimera_vfs_compound_free(compound);
+    chimera_nfs4_access_fill(req, res, requested, granted, attr);
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_access_complete */
+
+static void
+chimera_nfs4_access_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs4_compound_complete(req, chimera_nfs4_errno_to_nfsstat4(error_code));
+        return;
+    }
+
+    req->handle = handle;
+
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        handle,
+                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+                        chimera_nfs4_access_complete,
+                        req);
+} /* chimera_nfs4_access_open_callback */
 
 void
 chimera_nfs4_access(
@@ -138,9 +156,8 @@ chimera_nfs4_access(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct ACCESS4args          *args = &argop->opaccess;
-    struct ACCESS4res           *res  = &resop->opaccess;
-    struct chimera_vfs_compound *compound;
+    struct ACCESS4args *args = &argop->opaccess;
+    struct ACCESS4res  *res  = &resop->opaccess;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -162,18 +179,10 @@ chimera_nfs4_access(
         return;
     }
 
-    /* A PATH open, because the whole of this op is a stat: the object's mode and
-     * its ACL, which this server evaluates itself.  Nothing is read or written
-     * through the handle, and a data open of a FIFO blocks. */
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH, 0);
-    chimera_vfs_compound_add_getattr(compound,
-                                     CHIMERA_VFS_ATTR_MASK_STAT |
-                                     CHIMERA_VFS_ATTR_ACL);
-
-    chimera_vfs_compound_submit(compound, chimera_nfs4_access_complete, req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_nfs4_access_open_callback,
+                        req);
 } /* chimera_nfs4_access */

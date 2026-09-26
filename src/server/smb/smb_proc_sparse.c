@@ -479,3 +479,233 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
 
     chimera_smb_qar_seek_data(request);
 } /* chimera_smb_ioctl_query_allocated_ranges */
+
+/* Coalesced sparse commands keep scans and their wire results private to one
+ * attempt. Dynamic SEEKs are inserted before the next SMB command group. */
+static void
+smb_sparse_scan_done(struct smb_vfs_command *command)
+{
+    struct chimera_smb_request *request = command->request;
+    uint32_t                    max     = request->ioctl.max_output_response / 16;
+
+    if (request->ioctl.sp_qar_count && !max) {
+        command->status = SMB2_STATUS_BUFFER_TOO_SMALL;
+    } else if (request->ioctl.sp_qar_count > max) {
+        request->ioctl.sp_qar_count = max;
+        command->status             = SMB2_STATUS_BUFFER_OVERFLOW;
+    }
+} /* smb_sparse_scan_done */
+
+static void
+smb_sparse_scan_next(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+    int                                   hole    = op->seek_what == CHIMERA_SMB_SEEK_HOLE;
+
+    if (!hole && *status == CHIMERA_VFS_ENXIO) {
+        *status = CHIMERA_VFS_OK;
+        smb_sparse_scan_done(command);
+        return;
+    }
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (!request->ioctl.sp_qar_length) {
+        return;
+    }
+    if (!hole) {
+        if (op->seek_eof || op->seek_offset >= request->ioctl.sp_qar_end) {
+            smb_sparse_scan_done(command);
+            return;
+        }
+        request->ioctl.sp_qar_data_start = op->seek_offset;
+    } else {
+        uint64_t end = op->seek_offset;
+        if (end <= request->ioctl.sp_qar_data_start) {
+            end = request->ioctl.sp_qar_end;
+        }
+        uint64_t clipped = end < request->ioctl.sp_qar_end ? end : request->ioctl.sp_qar_end;
+        if (clipped > request->ioctl.sp_qar_data_start && request->ioctl.sp_qar_count < CHIMERA_SMB_QAR_MAX) {
+            unsigned int at = request->ioctl.sp_qar_count++;
+            request->ioctl.sp_qar_ranges[at].offset = request->ioctl.sp_qar_data_start;
+            request->ioctl.sp_qar_ranges[at].length = clipped - request->ioctl.sp_qar_data_start;
+        }
+        request->ioctl.sp_qar_cursor = end;
+        if (op->seek_eof || request->ioctl.sp_qar_count >= CHIMERA_SMB_QAR_MAX || end >= request->ioctl.sp_qar_end) {
+            smb_sparse_scan_done(command);
+            return;
+        }
+    }
+    int next = chimera_vfs_compound_add_seek(compound, command->handle,
+                                             hole ? request->ioctl.sp_qar_cursor : request->ioctl.sp_qar_data_start,
+                                             hole ? CHIMERA_SMB_SEEK_DATA : CHIMERA_SMB_SEEK_HOLE);
+    if (next >= 0) {
+        chimera_vfs_compound_set_op_callbacks(compound, next, NULL, smb_sparse_scan_next, command);
+    }
+} /* smb_sparse_scan_next */
+
+static void
+smb_sparse_set_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command         *command = private_data;
+    struct chimera_smb_request     *request = command->request;
+    const struct chimera_vfs_attrs *attrs   = &chimera_vfs_compound_op(compound, index - 1)->attr;
+    struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op_args(compound, index);
+
+    if (S_ISDIR(attrs->va_mode)) {
+        command->status = SMB2_STATUS_INVALID_PARAMETER;
+        *status         = CHIMERA_VFS_EINVAL;
+        return;
+    }
+    memset(&op->set_attr, 0, sizeof(op->set_attr));
+    op->set_attr.va_req_mask       = op->set_attr.va_set_mask = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    op->set_attr.va_dos_attributes = attrs->va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
+    if (request->ioctl.sp_set_sparse) {
+        op->set_attr.va_dos_attributes |= SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
+    }
+} /* smb_sparse_set_prepare */
+
+static int
+smb_sparse_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct chimera_smb_request *request = command->request;
+    int                         op;
+
+    switch (request->ioctl.ctl_code) {
+        case SMB2_FSCTL_SET_SPARSE:
+            op = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MASK_STAT);
+            chimera_vfs_compound_op_set_handle(compound, op, command->handle);
+            op = chimera_vfs_compound_add_setattr(compound, command->handle, NULL, 0, 0);
+            chimera_vfs_compound_set_op_prepare(compound, op, smb_sparse_set_prepare, command);
+            return op;
+        case SMB2_FSCTL_SET_ZERO_DATA:
+            if (request->ioctl.sp_zero_beyond == request->ioctl.sp_zero_offset) {
+                return chimera_vfs_compound_add_checkpoint(compound);
+            }
+            op = chimera_vfs_compound_add_allocate(compound, command->handle,
+                                                   request->ioctl.sp_zero_offset, request->ioctl.sp_zero_beyond -
+                                                   request->ioctl.sp_zero_offset,
+                                                   CHIMERA_VFS_ALLOCATE_DEALLOCATE, 0, 0);
+            if (op >= 0) {
+                chimera_vfs_compound_op_args(compound, op)->have_io_owner = 1;
+            }
+            return op;
+        default:
+            if (!request->ioctl.sp_qar_length) {
+                return chimera_vfs_compound_add_checkpoint(compound);
+            }
+            return chimera_vfs_compound_add_seek(compound, command->handle,
+                                                 request->ioctl.sp_qar_offset, CHIMERA_SMB_SEEK_DATA);
+    } /* switch */
+} /* smb_sparse_build */
+
+static void
+smb_sparse_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command     *command = private_data;
+    struct chimera_smb_request *request = command->request;
+    uint32_t                    required;
+
+    (void) compound; (void) index; (void) status;
+    if (request->ioctl.ctl_code != SMB2_FSCTL_QUERY_ALLOCATED_RANGES) {
+        if (command->state->channel_sequence_valid &&
+            (uint16_t) (request->channel_sequence - command->state->channel_sequence) >= 0x8000) {
+            command->status = SMB2_STATUS_FILE_NOT_AVAILABLE;
+            return;
+        }
+        command->state->channel_sequence       = request->channel_sequence;
+        command->state->channel_sequence_valid = command->state->sequence_dirty = 1;
+    }
+    switch (request->ioctl.ctl_code) {
+        case SMB2_FSCTL_SET_SPARSE:
+            required = SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA | SMB2_FILE_WRITE_ATTRIBUTES;
+            break;
+        case SMB2_FSCTL_SET_ZERO_DATA:
+            if (request->ioctl.sp_zero_beyond < request->ioctl.sp_zero_offset) {
+                command->status = SMB2_STATUS_INVALID_PARAMETER;
+                return;
+            }
+            required = SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA;
+            break;
+        default:
+            required                    = SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE;
+            request->ioctl.sp_qar_count = 0;
+            if (request->ioctl.sp_qar_length > UINT64_MAX - request->ioctl.sp_qar_offset) {
+                command->status = SMB2_STATUS_INVALID_PARAMETER;
+                return;
+            }
+            request->ioctl.sp_qar_end    = request->ioctl.sp_qar_offset + request->ioctl.sp_qar_length;
+            request->ioctl.sp_qar_cursor = request->ioctl.sp_qar_offset;
+            break;
+    } /* switch */
+    if (!(command->open->granted_access & required)) {
+        command->status = SMB2_STATUS_ACCESS_DENIED;
+        return;
+    }
+    if (request->ioctl.ctl_code == SMB2_FSCTL_SET_ZERO_DATA) {
+        command->actor.owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        command->actor.owner.client_key = request->session_handle->session->client_key;
+        command->actor.owner.owner_lo   = command->open->file_id.pid;
+        command->actor.owner.owner_hi   = command->open->file_id.vid;
+        if (command->open->grant) {
+            command->actor.owner = command->open->grant->claim.owner;
+        }
+        uint64_t length = request->ioctl.sp_zero_beyond - request->ioctl.sp_zero_offset;
+        if (length && chimera_vfs_compound_io_denied(compound, command->handle,
+                                                     request->ioctl.sp_zero_offset, length, true, &command->actor)) {
+            command->status = SMB2_STATUS_FILE_LOCK_CONFLICT;
+        }
+    }
+} /* smb_sparse_prepare */
+
+static void
+smb_sparse_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    if (command->request->ioctl.ctl_code == SMB2_FSCTL_QUERY_ALLOCATED_RANGES) {
+        smb_sparse_scan_next(compound, index, status, command);
+    }
+} /* smb_sparse_complete */
+
+static struct chimera_smb_file_id
+smb_sparse_file_id(struct chimera_smb_request *request)
+{
+    return request->ioctl.file_id;
+} /* smb_sparse_file_id */
+
+static int
+smb_sparse_eligible(struct chimera_smb_request *request)
+{
+    (void) request;
+    return 1;
+} /* smb_sparse_eligible */
+
+const struct smb_vfs_command_ops chimera_smb_sparse_compound_ops = {
+    .file_id   = smb_sparse_file_id,
+    .eligible  = smb_sparse_eligible,
+    .map_error = chimera_smb_sparse_status,
+    .build     = smb_sparse_build,
+    .prepare   = smb_sparse_prepare,
+    .complete  = smb_sparse_complete,
+};

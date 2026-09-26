@@ -392,7 +392,7 @@ nfs4_root_export_fh_peek(
         return 0;
     }
 
-    pthread_mutex_lock(&shared->exports_lock);
+    evpl_mutex_lock(&shared->exports_lock);
 
     if (shared->root_export_fh_id == root_id && shared->root_export_fh_len) {
         answer = (shared->root_export_fh_len == fh_len &&
@@ -400,7 +400,7 @@ nfs4_root_export_fh_peek(
     } else {
         answer = -1;
     }
-    pthread_mutex_unlock(&shared->exports_lock);
+    evpl_mutex_unlock(&shared->exports_lock);
 
     return answer;
 } /* nfs4_root_export_fh_peek */

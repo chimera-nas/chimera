@@ -4,6 +4,14 @@
 
 #pragma once
 
+struct chimera_s3_request;
+void chimera_s3_get_cleanup(
+    struct chimera_s3_request *request);
+void chimera_s3_put_cleanup(
+    struct chimera_s3_request *request);
+void chimera_s3_upload_part_cleanup(
+    struct chimera_s3_request *request);
+
 
 void
 chimera_s3_put_recv(

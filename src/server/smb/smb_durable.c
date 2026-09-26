@@ -30,15 +30,39 @@
 
 #include "common/thread.h"
 #include "smb_internal.h"
+#include "smb_procs.h"
+#include "smb_durable_compound.h"
 #include "common/misc.h"
+#include "common/compound_retry.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_kv.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_compound.h"
 
 struct chimera_smb_durable_recover_ctx {
-    struct chimera_server_smb_shared *shared;
+    struct chimera_server_smb_thread *thread;
+    struct chimera_smb_durable_entry *prepared;
+    struct chimera_vfs_compound      *next_page;
+    struct evpl_timer                 continuation;
+    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                          fh_len;
 };
+
+/* A parked open outlives its original tree, so the registry independently
+ * pins its share.  Share retirement is observed without taking shares_lock
+ * under the registry lock; cleanup still runs on an SMB/VFS event thread. */
+static bool
+chimera_smb_durable_share_retired(const struct chimera_smb_durable_entry *entry)
+{
+    return entry->share && __atomic_load_n(&entry->share->retired, __ATOMIC_ACQUIRE);
+} /* chimera_smb_durable_share_retired */
+
+static void
+chimera_smb_durable_entry_free(struct chimera_smb_durable_entry *entry)
+{
+    chimera_smb_share_release(entry->share);
+    free(entry);
+} /* chimera_smb_durable_entry_free */
 
 SYMBOL_EXPORT void
 chimera_smb_durable_table_init(struct chimera_smb_durable_table *table)
@@ -60,7 +84,7 @@ chimera_smb_durable_table_destroy(struct chimera_smb_durable_table *table)
     HASH_CLEAR(hh, table->by_pid);
     while (entry) {
         tmp = entry->hh.next;
-        free(entry);
+        chimera_smb_durable_entry_free(entry);
         entry = tmp;
     }
 
@@ -84,9 +108,13 @@ chimera_smb_durable_register(
     entry->session_id    = session_id;
     entry->owner_uid     = owner_uid;
     entry->open_file     = open_file;
-    entry->parked        = false;
-    entry->persistent    = persistent;
-    entry->cold          = false;
+    entry->share         = open_file->tree ? open_file->tree->share : NULL;
+    if (entry->share) {
+        __atomic_fetch_add(&entry->share->refcnt, 1, __ATOMIC_RELAXED);
+    }
+    entry->parked     = false;
+    entry->persistent = persistent;
+    entry->cold       = false;
     memcpy(entry->create_guid, open_file->create_guid, sizeof(entry->create_guid));
     memcpy(entry->client_guid, client_guid, sizeof(entry->client_guid));
 
@@ -101,18 +129,89 @@ chimera_smb_durable_register(
     evpl_mutex_unlock(&shared->durable.lock);
 } /* chimera_smb_durable_register */
 
-/* Insert a cold entry recovered from a backend record at startup.  open_file is
- * NULL until a reconnect re-opens the file.  Skips duplicates (idempotent). */
-SYMBOL_EXPORT void
-chimera_smb_durable_recover_entry(
-    struct chimera_server_smb_shared        *shared,
-    const struct chimera_smb_durable_record *record)
+struct chimera_smb_durable_entry *
+chimera_smb_durable_registration_prepare(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open)
 {
-    struct chimera_smb_durable_entry *entry, *existing;
-    uint64_t                          pid = record->persistent_id;
+    struct chimera_smb_durable_entry *entry    = calloc(1, sizeof(*entry));
+    struct chimera_smb_durable_entry *prepared = NULL;
+
+    if (!entry) {
+        return NULL;
+    }
+    entry->persistent_id = open->file_id.pid;
+    entry->session_id    = request->session_handle->session->session_id;
+    entry->owner_uid     = request->session_handle->session->cred.uid;
+    entry->open_file     = open;
+    entry->share         = open->tree ? open->tree->share : NULL;
+    if (entry->share) {
+        __atomic_fetch_add(&entry->share->refcnt, 1, __ATOMIC_RELAXED);
+    }
+    memcpy(entry->client_guid, request->compound->conn->client_guid, sizeof(entry->client_guid));
+    memcpy(entry->create_guid, open->create_guid, sizeof(entry->create_guid));
+    entry->name_len = open->name_len;
+    if (entry->name_len > sizeof(entry->name)) {
+        entry->name_len = sizeof(entry->name);
+    }
+    memcpy(entry->name, open->name, entry->name_len);
+    HASH_ADD(hh, prepared, persistent_id, sizeof(entry->persistent_id), entry);
+    return prepared;
+} /* chimera_smb_durable_registration_prepare */
+
+void
+chimera_smb_durable_registration_discard(struct chimera_smb_durable_entry **prepared)
+{
+    struct chimera_smb_durable_entry *entry = *prepared;
+
+    if (!entry) {
+        return;
+    }
+    HASH_CLEAR(hh, *prepared);
+    chimera_smb_durable_entry_free(entry);
+} /* chimera_smb_durable_registration_discard */
+
+void
+chimera_smb_durable_registration_publish(
+    struct chimera_server_smb_shared  *shared,
+    struct chimera_smb_durable_entry **prepared)
+{
+    struct chimera_smb_durable_entry *entry = *prepared, *existing;
+
+    if (!entry) {
+        return;
+    }
+    evpl_mutex_lock(&shared->durable.lock);
+    HASH_FIND(hh, shared->durable.by_pid, &entry->persistent_id,
+              sizeof(entry->persistent_id), existing);
+    if (!existing) {
+        if (!shared->durable.by_pid) {
+            shared->durable.by_pid = entry;
+            *prepared              = NULL;
+        } else {
+            unsigned int noexpand = shared->durable.by_pid->hh.tbl->noexpand;
+            HASH_CLEAR(hh, *prepared);
+            shared->durable.by_pid->hh.tbl->noexpand = 1;
+            HASH_ADD(hh, shared->durable.by_pid, persistent_id, sizeof(entry->persistent_id), entry);
+            shared->durable.by_pid->hh.tbl->noexpand = noexpand;
+        }
+    }
+    evpl_mutex_unlock(&shared->durable.lock);
+} /* chimera_smb_durable_registration_publish */
+
+static struct chimera_smb_durable_entry *
+chimera_smb_durable_prepare_record(const struct chimera_smb_durable_record *record)
+{
+    struct chimera_smb_durable_entry *entry;
     uint32_t                          name_len;
 
+    if (record->persistent_id == UINT64_MAX) {
+        return NULL;
+    }
     entry = calloc(1, sizeof(*entry));
+    if (!entry) {
+        return NULL;
+    }
 
     entry->persistent_id = record->persistent_id;
     entry->session_id    = record->session_id;
@@ -129,21 +228,49 @@ chimera_smb_durable_recover_entry(
     }
     entry->name_len = name_len;
     memcpy(entry->name, record->name, name_len);
+    return entry;
+} /* chimera_smb_durable_prepare_record */
+
+static void
+chimera_smb_durable_advance_pid(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          pid)
+{
+    uint64_t next = atomic_load(&shared->next_persistent_id);
+
+    /* CREATE allocates without durable.lock. A plain load/store here can move
+     * the allocator backwards over a concurrent allocation. */
+    while (next <= pid && !atomic_compare_exchange_weak(
+               &shared->next_persistent_id, &next, pid + 1)) {
+    }
+} /* chimera_smb_durable_advance_pid */
+
+/* Insert a cold entry recovered from a backend record at startup.  open_file is
+ * NULL until a reconnect re-opens the file.  Skips duplicates (idempotent). */
+SYMBOL_EXPORT void
+chimera_smb_durable_recover_entry(
+    struct chimera_server_smb_shared        *shared,
+    const struct chimera_smb_durable_record *record)
+{
+    struct chimera_smb_durable_entry *entry = chimera_smb_durable_prepare_record(record), *existing;
+    uint64_t                          pid = record->persistent_id;
+
+    if (!entry) {
+        return;
+    }
 
     evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &pid, sizeof(pid), existing);
     if (existing) {
         evpl_mutex_unlock(&shared->durable.lock);
-        free(entry);
+        chimera_smb_durable_entry_free(entry);
         return;
     }
     HASH_ADD(hh, shared->durable.by_pid, persistent_id, sizeof(entry->persistent_id), entry);
 
     /* Keep the id allocator ahead of every recovered persistent id so a fresh
      * open can never collide with a not-yet-reclaimed one. */
-    if (atomic_load(&shared->next_persistent_id) <= pid) {
-        atomic_store(&shared->next_persistent_id, pid + 1);
-    }
+    chimera_smb_durable_advance_pid(shared, pid);
     evpl_mutex_unlock(&shared->durable.lock);
 } /* chimera_smb_durable_recover_entry */
 
@@ -162,7 +289,7 @@ chimera_smb_durable_forget(
     evpl_mutex_unlock(&shared->durable.lock);
 
     if (entry) {
-        free(entry);
+        chimera_smb_durable_entry_free(entry);
     }
 } /* chimera_smb_durable_forget */
 
@@ -185,6 +312,14 @@ struct chimera_smb_durable_doc {
     int                         file_fh_len;
 };
 
+/* A record can precede SMB access/share/type admission. Until gen_open_file
+ * publishes an open, terminal failure owns only the request's saved record
+ * identity. Retire that record with a typed compound before sending its error. */
+struct smb_unpublished_record_cleanup {
+    struct chimera_smb_request *request;
+    uint32_t                    status;
+};
+
 /* The reap's unlink, as one run:
  *
  *   PUTFH(recorded parent) -> OPEN_CURRENT(PATH) -> REMOVE(name, match fh)
@@ -196,104 +331,219 @@ struct chimera_smb_durable_doc {
  * knob (op_set_remove_match), which is what makes the inode-scoping a property
  * of the REMOVE rather than of which VFS entry point was picked. */
 static void
-chimera_smb_durable_doc_complete(
+smb_unpublished_record_removed(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    struct chimera_smb_durable_doc *ctx    = private_data;
-    enum chimera_vfs_error          status = chimera_vfs_compound_status(compound);
+    struct smb_unpublished_record_cleanup *ctx     = private_data;
+    struct chimera_smb_request            *request = ctx->request;
+    uint32_t                               status  = ctx->status;
+    enum chimera_vfs_error                 error   = chimera_vfs_compound_status(compound);
 
-    if (status != CHIMERA_VFS_OK) {
-        chimera_smb_debug("durable delete-on-close: unlink of '%.*s' failed (error %d)",
-                          ctx->doc_info.name_len, ctx->doc_info.name, status);
+    if (error != CHIMERA_VFS_OK && error != CHIMERA_VFS_ENOENT) {
+        chimera_smb_error("unpublished CREATE record deletion failed: pid=%lx error=%d",
+                          request->create.persist_pid, error);
+    }
+    chimera_vfs_compound_free(compound);
+    free(ctx);
+    chimera_smb_complete_request(request, status);
+} /* smb_unpublished_record_removed */
+
+bool
+chimera_smb_create_cleanup_failed_record(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    if (!request->create.persist_fh_len || request->create.r_open_file ||
+        status == SMB2_STATUS_SUCCESS || status == SMB2_STATUS_PENDING) {
+        return false;
+    }
+    /* The route is cleanup ownership, including a PUT with ambiguous failure;
+     * it is independent of successful-record proof. Clear both before dispatch
+     * to prevent recursive cleanup on the terminal continuation. */
+    uint32_t                               fh_len = request->create.persist_fh_len;
+    request->create.persist_fh_len         = 0;
+    request->create.persist_record_written = false;
+    struct smb_unpublished_record_cleanup *ctx      = calloc(1, sizeof(*ctx));
+    struct chimera_vfs_compound           *compound = ctx ?
+        chimera_vfs_compound_alloc(request->compound->thread->vfs_thread,
+                                   &request->session_handle->session->cred) : NULL;
+    if (!compound) {
+        free(ctx);
+        chimera_smb_error("cannot delete unpublished CREATE record: pid=%lx",
+                          request->create.persist_pid);
+        return false;
+    }
+    uint8_t  key[CHIMERA_SMB_DURABLE_KEY_LEN];
+    uint32_t key_len = chimera_smb_durable_key(key, request->create.persist_pid);
+    ctx->request = request; ctx->status = status;
+    chimera_vfs_compound_add_putfh(compound, request->create.persist_fh, fh_len);
+    chimera_vfs_compound_add_delete_key_at(compound, key, key_len);
+    chimera_frontend_compound_submit(compound, smb_unpublished_record_removed, ctx);
+    return true;
+} /* chimera_smb_create_cleanup_failed_record */
+
+struct smb_failed_create_cleanup {
+    struct chimera_smb_request   *request;
+    struct chimera_smb_open_file *open;
+    uint32_t                      status;
+};
+
+static void
+smb_failed_create_record_removed(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct smb_failed_create_cleanup *ctx     = private_data;
+    struct chimera_smb_request       *request = ctx->request;
+    enum chimera_vfs_error            error   = chimera_vfs_compound_status(compound);
+
+    if (error != CHIMERA_VFS_OK && error != CHIMERA_VFS_ENOENT) {
+        chimera_smb_error("failed CREATE durable record deletion failed: pid=%lx error=%d",
+                          ctx->open->file_id.pid, error);
+    }
+    chimera_vfs_compound_free(compound);
+    uint32_t                          status = ctx->status;
+    chimera_smb_open_file_release(request, ctx->open);
+    free(ctx);
+    chimera_smb_complete_request(request, status);
+} /* smb_failed_create_record_removed */
+
+void
+chimera_smb_create_failed_open(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct chimera_smb_open_file     *open   = request->create.r_open_file;
+
+    /* This path owns published-open cleanup, including its record. Do not
+     * redispatch the unpublished-record hook after r_open_file is cleared. */
+    request->create.persist_record_written = false;
+    request->create.persist_fh_len         = 0;
+    struct smb_failed_create_cleanup *ctx      = NULL;
+    struct chimera_vfs_compound      *compound = NULL;
+    if (open->flags & CHIMERA_SMB_OPEN_FILE_PERSISTED) {
+        uint8_t                        fh[CHIMERA_VFS_FH_SIZE], key[CHIMERA_SMB_DURABLE_KEY_LEN];
+        uint32_t                       fh_len = 0;
+        struct chimera_vfs_file_state *file   = open->share_file_state;
+        if (file) {
+            evpl_mutex_lock(&file->lock);
+        }
+        /* A concurrent logical CLOSE can already have detached its handle.
+         * The open's retained file state still identifies the record's backend. */
+        if (open->handle) {
+            fh_len = open->handle->fh_len;
+            memcpy(fh, open->handle->fh, fh_len);
+        } else if (file) {
+            fh_len = file->fh_len;
+            memcpy(fh, file->fh, fh_len);
+        }
+        if (file) {
+            evpl_mutex_unlock(&file->lock);
+        }
+        ctx = calloc(1, sizeof(*ctx));
+        if (ctx && fh_len) {
+            compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                  &request->session_handle->session->cred);
+        }
+        if (compound) {
+            ctx->request = request;
+            ctx->open    = open;
+            ctx->status  = status;
+            uint32_t key_len = chimera_smb_durable_key(key, open->file_id.pid);
+            chimera_vfs_compound_add_putfh(compound, fh, fh_len);
+            chimera_vfs_compound_add_delete_key_at(compound, key, key_len);
+        } else {
+            free(ctx);
+            ctx = NULL;
+            /* The request is already failing. Still retire the unreachable
+             * public open if resource exhaustion prevents record cleanup. */
+            chimera_smb_error("cannot delete failed CREATE durable record: pid=%lx",
+                              open->file_id.pid);
+        }
     }
 
-    chimera_vfs_compound_free(compound);
-    chimera_vfs_close_ref_dispatch(ctx->vfs_thread, &ctx->doc_info.close_ref,
-                                   NULL, NULL);
-    free(ctx);
-} /* chimera_smb_durable_doc_complete */
+    /* These are terminal effects of the failed, already accepted CREATE/EA
+     * prefix. They are performed once, outside the retryable deletion attempt.
+     * No reconnect may discover the failed open while its record is removed. */
+    request->create.r_open_file = NULL;
+    if (!memcmp(&request->compound->saved_file_id, &open->file_id, sizeof(open->file_id))) {
+        request->compound->saved_file_id.pid = UINT64_MAX;
+        request->compound->saved_file_id.vid = UINT64_MAX;
+    }
+    struct chimera_smb_tree          *tree   = open->tree;
+    unsigned int                      bucket = open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    struct chimera_smb_open_file     *live;
+    struct chimera_smb_durable_entry *entry;
+    bool                              owner_ref = false;
+    /* A peer PreviousSessionId can park the already published open while its
+     * EA callback is pending. Parking transfers the tree's owning reference
+     * to the registry. Detach both under the same bucket -> registry lock
+     * order as parking, so exactly one owner is transferred to this cleanup.
+     * Reclaim cannot rehome it while CREATE still holds its caller reference. */
+    evpl_mutex_lock(&tree->open_files_lock[bucket]);
+    evpl_mutex_lock(&thread->shared->durable.lock);
+    HASH_FIND(hh, tree->open_files[bucket], &open->file_id, sizeof(open->file_id), live);
+    if (live == open) {
+        HASH_DELETE(hh, tree->open_files[bucket], open);
+        owner_ref = true;
+    }
+    HASH_FIND(hh, thread->shared->durable.by_pid, &open->file_id.pid,
+              sizeof(open->file_id.pid), entry);
+    if (entry && entry->open_file == open) {
+        if (entry->parked) {
+            owner_ref = true;
+        }
+        HASH_DELETE(hh, thread->shared->durable.by_pid, entry);
+    } else {
+        entry = NULL;
+    }
+    open->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+    evpl_mutex_unlock(&thread->shared->durable.lock);
+    evpl_mutex_unlock(&tree->open_files_lock[bucket]);
+    if (entry) {
+        chimera_smb_durable_entry_free(entry);
+    }
+    if (owner_ref) {
+        chimera_smb_open_file_release(request, open);
+    }
+    if (compound) {
+        chimera_frontend_compound_submit(compound, smb_failed_create_record_removed, ctx);
+        return;
+    }
+    chimera_smb_open_file_release(request, open);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_create_failed_open */
 
-/*
- * Release a parked durable open's VFS handle honoring delete-on-close: if the
- * handle was delete-pending (a DELETE_ON_CLOSE durable handle whose last close
- * is this teardown), the file is unlinked asynchronously (no request needed).
- * Requires a live event-loop pump, so it must NOT be used on the shutdown drain.
- */
 static void
 chimera_smb_durable_release_handle(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file)
 {
-    struct chimera_smb_durable_doc *ctx;
-    struct chimera_vfs_doc_info     doc_info;
-    struct chimera_vfs_compound    *compound;
-    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
-    int                             file_fh_len;
-    int                             need_doc;
-    int                             idx;
+    struct chimera_vfs_doc_info doc_info;
 
-    if (!open_file->handle) {
-        return;
+    if (open_file->handle && chimera_smb_release_doc(thread, open_file, &doc_info)) {
+        chimera_smb_teardown_doc_unlink(thread, &doc_info);
     }
-
-    /* Capture the target file's FH before release_doc clears the handle, so the
-     * async unlink below is inode-scoped (see struct chimera_smb_durable_doc). */
-    file_fh_len = open_file->handle->fh_len;
-    memcpy(file_fh, open_file->handle->fh, file_fh_len);
-
-    need_doc          = chimera_vfs_release_doc(thread->vfs_thread, open_file->handle, &doc_info);
-    open_file->handle = NULL;
-
-    if (!need_doc || doc_info.parent_fh_len == 0) {
-        return;
-    }
-
-    ctx              = malloc(sizeof(*ctx));
-    ctx->vfs_thread  = thread->vfs_thread;
-    ctx->doc_info    = doc_info;
-    ctx->file_fh_len = file_fh_len;
-    memcpy(ctx->file_fh, file_fh, file_fh_len);
-
-    /* The credential is the context's, which is what lets it outlive the
-     * submission: the arming open recorded it and this reap runs under it. */
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
-                                          &ctx->doc_info.cred);
-
-    chimera_vfs_compound_add_putfh(compound, ctx->doc_info.parent_fh,
-                                   ctx->doc_info.parent_fh_len);
-
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH, 0);
-
-    idx = chimera_vfs_compound_add_remove(compound,
-                                          ctx->doc_info.name,
-                                          ctx->doc_info.name_len,
-                                          0, 0, 0);
-
-    if (idx < 0) {
-        /* The recorded name does not fit a sequence's own bound: a run that
-         * cannot express the unlink is not submitted half-built. */
-        chimera_vfs_compound_free(compound);
-        chimera_vfs_close_ref_dispatch(ctx->vfs_thread,
-                                       &ctx->doc_info.close_ref, NULL, NULL);
-        free(ctx);
-        return;
-    }
-
-    /* Unlink the name only while it still resolves to THIS object: the reap of
-     * a delete-on-close handle can land arbitrarily late, and a name that now
-     * belongs to something else must be left alone.  No directory lease is
-     * spared -- the client that armed the flag is gone. */
-    chimera_vfs_compound_op_set_remove_match(compound, (uint32_t) idx,
-                                             ctx->file_fh,
-                                             (uint32_t) ctx->file_fh_len,
-                                             1, NULL);
-
-    chimera_vfs_compound_submit(compound, chimera_smb_durable_doc_complete,
-                                ctx);
 } /* chimera_smb_durable_release_handle */
+
+static void
+smb_durable_retired(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open,
+    void                             *private_data)
+{
+    struct chimera_smb_durable_entry *entry = private_data;
+
+    chimera_smb_durable_release_handle(thread, open);
+    chimera_smb_open_file_drain_locks(thread, open);
+    atomic_store(&open->refcnt, 0);
+    chimera_smb_open_file_free(thread, open);
+    if (entry) {
+        chimera_smb_durable_entry_free(entry);
+    }
+} /* smb_durable_retired */
 
 /* Purge a parked (disconnected) *durable* open by persistent id when a new,
  * conflicting open arrives: MS-SMB2 has the disconnected handle yield.  Tears
@@ -321,7 +571,7 @@ chimera_smb_durable_purge_parked(
         !entry->cold && entry->open_file) {
         HASH_DELETE(hh, shared->durable.by_pid, entry);
         open_file = entry->open_file;
-        free(entry);
+        chimera_smb_durable_entry_free(entry);
     }
     evpl_mutex_unlock(&shared->durable.lock);
 
@@ -329,9 +579,8 @@ chimera_smb_durable_purge_parked(
         return false;
     }
 
-    chimera_smb_open_file_drain_locks(thread, open_file);
-    chimera_smb_durable_release_handle(thread, open_file);
-    chimera_smb_open_file_free(thread, open_file);
+    open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+    chimera_smb_open_file_retire_async(thread, open_file, smb_durable_retired, NULL);
     return true;
 } /* chimera_smb_durable_purge_parked */
 
@@ -423,6 +672,13 @@ chimera_smb_durable_park(
     evpl_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &pid, sizeof(pid), entry);
     if (entry) {
+        /* Called while the original tree bucket is live/locked. Only an
+         * actual parked entry owns this pin; an already-forgotten open must
+         * not acquire an unpaired tree reference. */
+        if (!open_file->durable_tree_pin) {
+            open_file->tree->compound_pins++;
+            open_file->durable_tree_pin = open_file->tree;
+        }
         /* The disconnect-survival timeout: a resiliency request SETS the open's
          * timeout (MS-SMB2 3.3.5.15.9 -- it governs even when the open is also
          * durable/persistent, and may be SHORTER than the durable default), so
@@ -449,6 +705,10 @@ chimera_smb_durable_park(
     }
     evpl_mutex_unlock(&shared->durable.lock);
 
+    if (!entry) {
+        return;
+    }
+
     /* Park the caching grant's claim AND the share reservation so the claim
      * core treats this disconnected holder as courtesy-held (advertised H and
      * the H denial are masked while parked): a compatible new open coexists
@@ -463,7 +723,7 @@ chimera_smb_durable_park(
         chimera_vfs_claim_park(&open_file->grant->claim, true);
     }
     if (open_file->share_lease_inserted) {
-        chimera_vfs_claim_park(&open_file->share_lease, true);
+        chimera_vfs_claim_park(chimera_smb_share_claim(open_file), true);
     }
 } /* chimera_smb_durable_park */
 
@@ -539,7 +799,7 @@ chimera_smb_durable_claim(
     had_lease = entry && entry->open_file &&
         entry->open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE;
 
-    if (!entry) {
+    if (!entry || chimera_smb_durable_share_retired(entry)) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (!entry->parked) {
         /* The handle is flagged live -- either genuinely still open on another
@@ -551,6 +811,12 @@ chimera_smb_durable_claim(
          * disconnect is processed the entry becomes parked and the retry
          * reclaims it; a genuinely-live handle never parks and the retry budget
          * lapses into OBJECT_NAME_NOT_FOUND. */
+        *r_retry = true;
+        *status  = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (entry->open_file && atomic_load(&entry->open_file->refcnt) != 1) {
+        /* Do not rehome bucket ownership or reset refcnt while old-channel
+         * compounds still own the parked open. The existing reconnect timer
+         * retries once those requests have drained. */
         *r_retry = true;
         *status  = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (!entry->never_expires && !entry->cold &&
@@ -616,7 +882,7 @@ chimera_smb_durable_claim(
          * Remove it and tell the caller to re-open the file (cold reclaim);
          * the reopen path re-registers a fresh warm entry. */
         HASH_DELETE(hh, shared->durable.by_pid, entry);
-        free(entry);
+        chimera_smb_durable_entry_free(entry);
         *r_cold = true;
         *status = SMB2_STATUS_SUCCESS;
     } else {
@@ -682,7 +948,8 @@ chimera_smb_durable_claim_by_guid(
 
     HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
     {
-        if (entry->cold || !entry->open_file) {
+        if (entry->cold || !entry->open_file ||
+            chimera_smb_durable_share_retired(entry)) {
             continue;
         }
         if (memcmp(entry->create_guid, create_guid, 16) != 0) {
@@ -694,6 +961,10 @@ chimera_smb_durable_claim_by_guid(
         }
 
         if (entry->parked) {
+            if (atomic_load(&entry->open_file->refcnt) != 1) {
+                result = CHIMERA_SMB_GUID_REPLAY_RETRY;
+                break;
+            }
             if (entry->open_file->flags & CHIMERA_SMB_OPEN_FILE_YIELDED) {
                 /* The disconnected open's caching state was revoked to admit a
                  * conflicting open; it is no longer reclaimable. */
@@ -748,6 +1019,40 @@ chimera_smb_durable_claim_by_guid(
     return result;
 } /* chimera_smb_durable_claim_by_guid */
 
+struct chimera_smb_durable_reap_ctx {
+    struct chimera_server_smb_thread *thread;
+    struct chimera_smb_durable_entry *entry;
+};
+
+static void
+chimera_smb_durable_reap_finish(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_durable_entry *entry)
+{
+    struct chimera_smb_open_file *open_file = entry->open_file;
+
+    open_file->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+    chimera_smb_open_file_retire_async(thread, open_file, smb_durable_retired, entry);
+} /* chimera_smb_durable_reap_finish */
+
+static void
+chimera_smb_durable_reap_record_removed(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_durable_reap_ctx *ctx        = private_data;
+    enum chimera_vfs_error               error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    ctx->thread->maintenance_compounds--;
+    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_ENOENT) {
+        chimera_smb_error("retired share durable record deletion failed: pid=%lx error=%d",
+                          ctx->entry->persistent_id, error_code);
+    }
+    chimera_smb_durable_reap_finish(ctx->thread, ctx->entry);
+    free(ctx);
+} /* chimera_smb_durable_reap_record_removed */
+
 void
 chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
 {
@@ -772,10 +1077,11 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
          * lives until explicit close or admin action), and cold entries have no
          * live open to tear down — skip both.  A persistent+resilient handle is
          * NOT never_expires: its resiliency timeout governs and it IS reaped. */
-        if (entry->never_expires || entry->cold || !entry->open_file) {
+        if (entry->cold || !entry->open_file) {
             continue;
         }
-        if (chimera_timespec_cmp(&now, &entry->deadline) < 0) {
+        if (!chimera_smb_durable_share_retired(entry) &&
+            (entry->never_expires || chimera_timespec_cmp(&now, &entry->deadline) < 0)) {
             continue;
         }
         HASH_DELETE(hh, shared->durable.by_pid, entry);
@@ -793,13 +1099,31 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
         chimera_smb_debug("durable: reaping expired handle pid=%lx '%.*s'",
                           open_file->file_id.pid, open_file->name_len, open_file->name);
 
-        chimera_smb_open_file_drain_locks(thread, open_file);
-        /* Grace-timer reap honors delete-on-close (a DELETE_ON_CLOSE durable
-         * handle whose last close is this expiry unlinks the file). */
-        chimera_smb_durable_release_handle(thread, open_file);
-        chimera_smb_open_file_free(thread, open_file);
+        if (chimera_smb_durable_share_retired(entry) &&
+            (open_file->flags & CHIMERA_SMB_OPEN_FILE_PERSISTED) && open_file->handle) {
+            uint8_t                              key[CHIMERA_SMB_DURABLE_KEY_LEN];
+            uint32_t                             key_len = chimera_smb_durable_key(key, open_file->file_id.pid);
+            struct chimera_smb_durable_reap_ctx *ctx     = malloc(sizeof(*ctx));
 
-        free(entry);
+            if (!ctx) {
+                chimera_smb_error("cannot allocate durable record deletion: pid=%lx", entry->persistent_id);
+                chimera_smb_durable_reap_finish(thread, entry);
+                continue;
+            }
+            ctx->thread = thread;
+            ctx->entry  = entry;
+            /* Keep the backing handle pinned until the durable record has
+             * been deleted, so rmfs cannot race this administrative revoke. */
+            struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(
+                thread->vfs_thread, chimera_vfs_get_server_cred());
+            chimera_vfs_compound_add_putfh(compound, open_file->handle->fh, open_file->handle->fh_len);
+            chimera_vfs_compound_add_delete_key_at(compound, key, key_len);
+            thread->maintenance_compounds++;
+            chimera_frontend_compound_submit(compound, chimera_smb_durable_reap_record_removed, ctx);
+            continue;
+        }
+        /* Grace expiry and share retirement both honor delete-on-close. */
+        chimera_smb_durable_reap_finish(thread, entry);
     }
 } /* chimera_smb_durable_sweep */
 
@@ -879,7 +1203,7 @@ chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
         }
         chimera_smb_open_file_free(thread, open_file);
 
-        free(entry);
+        chimera_smb_durable_entry_free(entry);
     }
 } /* chimera_smb_durable_drain_all */
 
@@ -996,65 +1320,188 @@ chimera_smb_durable_deserialize(
 *  Startup recovery: rebuild cold entries from a share's backend      *
 * ------------------------------------------------------------------ */
 
-static int
-chimera_smb_durable_recover_cb(
-    const void *key,
-    uint32_t    key_len,
-    const void *value,
-    uint32_t    value_len,
-    void       *private_data)
+/* Recovery publishes one bounded, accepted page at a time. Each page builds a
+ * private hash before finish, so publication cannot allocate after acceptance.
+ * A failed/rejected page never installs records or advances the ID allocator. */
+static void
+chimera_smb_durable_recover_reset(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_durable_recover_ctx *ctx = private_data;
-    struct chimera_smb_durable_record       record;
+    struct chimera_smb_durable_entry       *entry, *tmp;
 
-    /* Keys are returned in order; once we walk past the "smbdh" prefix there
-     * are no more handle records, so stop the scan. */
-    if (key_len < CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN ||
-        memcmp(key, CHIMERA_SMB_DURABLE_KEY_PREFIX, CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN) != 0) {
-        return 1;
+    (void) compound;
+    HASH_ITER(hh, ctx->prepared, entry, tmp)
+    {
+        HASH_DELETE(hh, ctx->prepared, entry);
+        chimera_smb_durable_entry_free(entry);
     }
+} /* chimera_smb_durable_recover_reset */
 
-    if (chimera_smb_durable_deserialize(value, value_len, &record) == 0) {
-        chimera_smb_durable_recover_entry(ctx->shared, &record);
+static void
+chimera_smb_durable_recover_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_smb_durable_recover_ctx *ctx = private_data;
+    const struct chimera_vfs_compound_op   *op  = chimera_vfs_compound_op(compound, index);
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
     }
+    for (uint32_t i = 0; i < op->kv_num_entries; i++) {
+        const struct chimera_vfs_compound_kv_entry *kv = &op->kv_entries[i];
+        struct chimera_smb_durable_record           record;
+        struct chimera_smb_durable_entry           *entry, *existing;
+        if (chimera_smb_durable_deserialize(kv->value, kv->value_len, &record) != 0 ||
+            record.persistent_id == UINT64_MAX) {
+            continue;
+        }
+        HASH_FIND(hh, ctx->prepared, &record.persistent_id, sizeof(record.persistent_id), existing);
+        if (existing) {
+            continue;
+        }
+        entry = chimera_smb_durable_prepare_record(&record);
+        if (!entry) {
+            *status = CHIMERA_VFS_ENOSPC; return;
+        }
+        HASH_ADD(hh, ctx->prepared, persistent_id, sizeof(entry->persistent_id), entry);
+    }
+} /* chimera_smb_durable_recover_prepare */
 
-    return 0;
-} /* chimera_smb_durable_recover_cb */
+static void
+chimera_smb_durable_recover_publish(struct chimera_smb_durable_recover_ctx *ctx)
+{
+    struct chimera_server_smb_shared *shared = ctx->thread->shared;
+    struct chimera_smb_durable_entry *entry, *tmp, *existing;
+
+    evpl_mutex_lock(&shared->durable.lock);
+    if (!shared->durable.by_pid) {
+        shared->durable.by_pid = ctx->prepared;
+        ctx->prepared          = NULL;
+        HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
+        {
+            chimera_smb_durable_advance_pid(shared, entry->persistent_id);
+        }
+    } else {
+        unsigned int noexpand = shared->durable.by_pid->hh.tbl->noexpand;
+        shared->durable.by_pid->hh.tbl->noexpand = 1;
+        HASH_ITER(hh, ctx->prepared, entry, tmp)
+        {
+            HASH_DELETE(hh, ctx->prepared, entry);
+            HASH_FIND(hh, shared->durable.by_pid, &entry->persistent_id,
+                      sizeof(entry->persistent_id), existing);
+            if (existing) {
+                chimera_smb_durable_entry_free(entry); continue;
+            }
+            HASH_ADD(hh, shared->durable.by_pid, persistent_id, sizeof(entry->persistent_id), entry);
+            chimera_smb_durable_advance_pid(shared, entry->persistent_id);
+        }
+        shared->durable.by_pid->hh.tbl->noexpand = noexpand;
+    }
+    evpl_mutex_unlock(&shared->durable.lock);
+} /* chimera_smb_durable_recover_publish */
+
+static struct chimera_vfs_compound * chimera_smb_durable_recover_page(
+    struct chimera_smb_durable_recover_ctx *ctx,
+    const void                             *start,
+    uint32_t                                start_len);
+static void chimera_smb_durable_recover_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data);
+
+static void
+chimera_smb_durable_recover_continue(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_smb_durable_recover_ctx *ctx = (struct chimera_smb_durable_recover_ctx *)
+        ((char *) timer - offsetof(struct chimera_smb_durable_recover_ctx, continuation));
+    struct chimera_vfs_compound            *compound = ctx->next_page;
+
+    (void) evpl;
+    ctx->next_page = NULL;
+    chimera_frontend_compound_submit(compound, chimera_smb_durable_recover_complete, ctx);
+} /* chimera_smb_durable_recover_continue */
 
 static void
 chimera_smb_durable_recover_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    (void) error_code;
-    free(private_data);
+    struct chimera_smb_durable_recover_ctx *ctx    = private_data;
+    enum chimera_vfs_error                  status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, 1);
+        chimera_smb_durable_recover_publish(ctx);
+        if (op->kv_more) {
+            /* Builder copies the inclusive resume key before this page frees it. */
+            ctx->next_page = chimera_smb_durable_recover_page(ctx, op->kv_next_key, op->kv_next_key_len);
+        }
+    } else {
+        chimera_smb_error("durable recovery page failed: error=%d", status);
+    }
+    chimera_smb_durable_recover_reset(compound, ctx);
+    chimera_vfs_compound_free(compound);
+    if (ctx->next_page) {
+        /* Avoid unbounded recursion when backend dispatch completes inline. */
+        evpl_add_oneshot_timer(ctx->thread->evpl, &ctx->continuation,
+                               chimera_smb_durable_recover_continue, 1);
+    } else {
+        ctx->thread->maintenance_compounds--;
+        free(ctx);
+    }
 } /* chimera_smb_durable_recover_complete */
 
-/* Best-effort, idempotent scan of a share's backend for persisted handle
- * records, rebuilding cold registry entries.  `fh` is any handle on the share's
- * backend (the share root); the search routes to that backend.  Runs on an SMB
- * thread (has a vfs_thread).  A reconnect that races this scan simply falls
- * back to a fresh open. */
+static struct chimera_vfs_compound *
+chimera_smb_durable_recover_page(
+    struct chimera_smb_durable_recover_ctx *ctx,
+    const void                             *start,
+    uint32_t                                start_len)
+{
+    struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(
+        ctx->thread->vfs_thread, chimera_vfs_get_server_cred());
+    /* Exclusive successor of the durable prefix bounds the scan, including
+     * fallback KV namespaces, without a side-effectful per-record callback. */
+    static const char            end[] = "smbdi";
+
+    chimera_vfs_compound_add_putfh(compound, ctx->fh, ctx->fh_len);
+    int                          search = chimera_vfs_compound_add_search_keys_at(compound,
+                                                                                  start, start_len, end, sizeof(end) - 1
+                                                                                  ,
+                                                                                  CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE,
+                                                                                  128, 1024 * 1024);
+    chimera_vfs_compound_set_op_callbacks(compound, search, NULL,
+                                          chimera_smb_durable_recover_prepare, ctx);
+    chimera_vfs_compound_set_attempt_reset(compound, chimera_smb_durable_recover_reset, ctx);
+    return compound;
+} /* chimera_smb_durable_recover_page */
+
+/* Best-effort, idempotent recovery, in bounded accepted pages. A reconnect that
+ * races a not-yet-accepted page retains the existing fresh-open fallback. */
 SYMBOL_EXPORT void
 chimera_smb_durable_recover_share(
     struct chimera_server_smb_thread *thread,
     const void                       *fh,
     int                               fh_len)
 {
+    if (!fh || fh_len <= 0 || fh_len > CHIMERA_VFS_FH_SIZE) {
+        return;
+    }
     struct chimera_smb_durable_recover_ctx *ctx = calloc(1, sizeof(*ctx));
-
-    ctx->shared = thread->shared;
-
-    /* Stays a per-op call, and is the one in src/server/smb that does: a
-     * key-value search is not a file-system operation and has no compound op --
-     * it addresses none of the four cursors, enumerates a backend's KV store
-     * rather than a namespace, and streams its answers through a per-record
-     * callback that no sequence result can hold. */
-    chimera_vfs_search_keys_at(thread->vfs_thread, NULL, fh, fh_len,
-                               CHIMERA_SMB_DURABLE_KEY_PREFIX,
-                               CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN,
-                               NULL, 0, 0,
-                               chimera_smb_durable_recover_cb,
-                               chimera_smb_durable_recover_complete,
-                               ctx);
+    if (!ctx) {
+        return;
+    }
+    ctx->thread = thread;
+    ctx->fh_len = fh_len;
+    memcpy(ctx->fh, fh, fh_len);
+    struct chimera_vfs_compound            *compound = chimera_smb_durable_recover_page(ctx,
+                                                                                        CHIMERA_SMB_DURABLE_KEY_PREFIX,
+                                                                                        CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN);
+    thread->maintenance_compounds++;
+    chimera_frontend_compound_submit(compound, chimera_smb_durable_recover_complete, ctx);
 } /* chimera_smb_durable_recover_share */

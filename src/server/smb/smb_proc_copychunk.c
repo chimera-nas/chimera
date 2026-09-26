@@ -210,13 +210,9 @@ chimera_smb_copychunk_io_owner(
     memset(actor, 0, sizeof(*actor));
     actor->owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
     actor->owner.client_key = request->session_handle->session->client_key;
-    if (open_file->grant) {
-        actor->owner = open_file->grant->claim.owner;
-    } else {
-        actor->owner.owner_lo = open_file->file_id.pid;
-        actor->owner.owner_hi = open_file->file_id.vid;
-    }
-    actor->op_handle = handle;
+    actor->owner.owner_lo   = open_file->file_id.pid;
+    actor->owner.owner_hi   = open_file->file_id.vid;
+    actor->op_handle        = handle;
 } /* chimera_smb_copychunk_io_owner */
 
 /* Issue the next pending chunk, or finish if all are done. */
@@ -226,7 +222,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
     struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
     struct chimera_vfs_state  *vfs_state  = vfs_thread->vfs->vfs_state;
     uint32_t                   i          = request->ioctl.cc_chunk_idx;
-    struct chimera_claim_actor io_owner;
+    struct chimera_claim_actor src_owner, dst_owner;
 
     if (i >= request->ioctl.cc_chunk_count) {
         chimera_smb_copychunk_done(request, SMB2_STATUS_SUCCESS);
@@ -249,7 +245,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
      * (smb2.ioctl.copy_chunk_src_lock / copy_chunk_dest_lock).  The response body
      * reports zero chunks written. */
     chimera_smb_copychunk_io_owner(request, request->ioctl.cc_src_open_file,
-                                   request->ioctl.cc_src_handle, &io_owner);
+                                   request->ioctl.cc_src_handle, &src_owner);
     if (chimera_vfs_claim_io_denied(
             vfs_state,
             request->ioctl.cc_src_handle->fh,
@@ -257,14 +253,14 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
             request->ioctl.cc_src_handle->fh_hash,
             request->ioctl.cc_chunks[i].src_offset,
             request->ioctl.cc_chunks[i].length,
-            false /* read */, &io_owner)) {
+            false /* read */, &src_owner)) {
         chimera_smb_copychunk_error_with_body(request,
                                               SMB2_STATUS_FILE_LOCK_CONFLICT);
         return;
     }
 
     chimera_smb_copychunk_io_owner(request, request->ioctl.cc_dst_open_file,
-                                   request->ioctl.cc_dst_handle, &io_owner);
+                                   request->ioctl.cc_dst_handle, &dst_owner);
     if (chimera_vfs_claim_io_denied(
             vfs_state,
             request->ioctl.cc_dst_handle->fh,
@@ -272,7 +268,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
             request->ioctl.cc_dst_handle->fh_hash,
             request->ioctl.cc_chunks[i].dst_offset,
             request->ioctl.cc_chunks[i].length,
-            true /* write */, &io_owner)) {
+            true /* write */, &dst_owner)) {
         chimera_smb_copychunk_error_with_body(request,
                                               SMB2_STATUS_FILE_LOCK_CONFLICT);
         return;
@@ -298,6 +294,15 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
                                         request->ioctl.cc_chunks[i].length,
                                         0, /* copychunk materializes holes */
                                         0, 0);
+
+    struct chimera_vfs_compound_op *copy_op = chimera_vfs_compound_op_args(
+        request->vfs_compound, chimera_vfs_compound_num_ops(request->vfs_compound) - 1);
+    if (copy_op) {
+        copy_op->src_io_owner      = src_owner;
+        copy_op->have_src_io_owner = 1;
+        copy_op->io_owner          = dst_owner;
+        copy_op->have_io_owner     = 1;
+    }
 
     chimera_vfs_compound_submit(request->vfs_compound,
                                 chimera_smb_copychunk_sequence_complete,
@@ -477,3 +482,208 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
                                 chimera_smb_copychunk_src_getattr_complete,
                                 request);
 } /* chimera_smb_ioctl_copychunk */
+
+struct smb_copychunk_compound {
+    struct smb_vfs_file *source;
+};
+
+static void
+smb_copychunk_attempt_owner(struct smb_vfs_command *command)
+{
+    struct chimera_vfs_open_handle *identity = command->actor.op_handle;
+
+    chimera_smb_copychunk_io_owner(command->request, command->open, identity, &command->actor);
+    command->actor.op_handle = identity;
+} /* smb_copychunk_attempt_owner */
+
+static void
+smb_copychunk_op_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command         *command       = private_data;
+    struct smb_copychunk_compound  *ctx           = command->private_data;
+    struct chimera_vfs_compound_op *op            = chimera_vfs_compound_op_args(compound, index);
+    unsigned int                    source_status = chimera_smb_compound_file_prepare(compound, ctx->source);
+
+    if (source_status != SMB2_STATUS_SUCCESS) {
+        command->status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        *status         = CHIMERA_VFS_ESTALE;
+        return;
+    }
+    op->src_handle        = ctx->source->handle;
+    op->in_handle         = command->handle;
+    op->src_io_owner      = ctx->source->actor;
+    op->io_owner          = command->actor;
+    op->have_src_io_owner = op->have_io_owner = 1;
+    if (chimera_vfs_compound_io_denied(compound, op->src_handle, op->src_offset, op->length, false, &op->src_io_owner)
+        ||
+        chimera_vfs_compound_io_denied(compound, op->in_handle, op->offset, op->length, true, &op->io_owner)) {
+        command->request->ioctl.cc_chunks_written = 0;
+        command->request->ioctl.cc_total_written  = 0;
+        command->request->ioctl.cc_limit_response = 1;
+        command->status                           = SMB2_STATUS_FILE_LOCK_CONFLICT;
+        *status                                   = CHIMERA_VFS_EACCES;
+    }
+} /* smb_copychunk_op_prepare */
+
+static void
+smb_copychunk_next(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    struct smb_copychunk_compound        *ctx     = command->private_data;
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+
+    if (*status != CHIMERA_VFS_OK) {
+        if (command->status != SMB2_STATUS_SUCCESS) {
+            return;
+        }
+        command->status = *status == CHIMERA_VFS_ENOTSUP ? SMB2_STATUS_NOT_SUPPORTED :
+            *status == CHIMERA_VFS_EISDIR ? SMB2_STATUS_INVALID_DEVICE_REQUEST : SMB2_STATUS_INVALID_PARAMETER;
+        return;
+    }
+    if (op->type == CHIMERA_VFS_COMPOUND_OP_CHECKPOINT) {
+        int get = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MASK_STAT);
+        chimera_vfs_compound_op_set_handle(compound, get, ctx->source->handle);
+        chimera_vfs_compound_set_op_callbacks(compound, get, NULL, smb_copychunk_next, command);
+        return;
+    }
+    if (op->type == CHIMERA_VFS_COMPOUND_OP_GETATTR) {
+        request->ioctl.cc_src_size = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? op->attr.va_size : 0;
+    } else {
+        request->ioctl.cc_total_written += op->written;
+        request->ioctl.cc_chunks_written++;
+        request->ioctl.cc_chunk_idx++;
+    }
+    unsigned int i = request->ioctl.cc_chunk_idx;
+    if (i == request->ioctl.cc_chunk_count) {
+        return;
+    }
+    uint64_t     offset = request->ioctl.cc_chunks[i].src_offset;
+    uint64_t     length = request->ioctl.cc_chunks[i].length;
+    if (offset > request->ioctl.cc_src_size || length > request->ioctl.cc_src_size - offset) {
+        command->status                  = SMB2_STATUS_INVALID_VIEW_SIZE;
+        request->ioctl.cc_limit_response = 1;
+        return;
+    }
+    if (length > UINT64_MAX - request->ioctl.cc_chunks[i].dst_offset) {
+        command->status = SMB2_STATUS_INVALID_PARAMETER;
+        return;
+    }
+    int next = chimera_vfs_compound_add_copy_range(compound, ctx->source->handle, offset,
+                                                   command->handle, request->ioctl.cc_chunks[i].dst_offset, length, 0, 0
+                                                   , 0);
+    if (next >= 0) {
+        chimera_vfs_compound_set_op_callbacks(compound, next, smb_copychunk_op_prepare, smb_copychunk_next, command);
+    }
+} /* smb_copychunk_next */
+
+static int
+smb_copychunk_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct smb_copychunk_compound *ctx = calloc(1, sizeof(*ctx));
+
+    command->private_data = ctx;
+    if (ctx) {
+        ctx->source = chimera_smb_compound_pin_file(command, command->request->ioctl.cc_src_file_id);
+    }
+    return chimera_vfs_compound_add_checkpoint(compound);
+} /* smb_copychunk_build */
+
+static void
+smb_copychunk_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command        *command = private_data;
+    struct smb_copychunk_compound *ctx     = command->private_data;
+    struct chimera_smb_request    *request = command->request;
+
+    (void) index; (void) status;
+    request->ioctl.cc_chunk_idx      = request->ioctl.cc_chunks_written = request->ioctl.cc_chunk_bytes = 0;
+    request->ioctl.cc_total_written  = 0;
+    request->ioctl.cc_limit_response = 0;
+    if (!ctx) {
+        command->status = SMB2_STATUS_INSUFFICIENT_RESOURCES; return;
+    }
+    if (command->state->channel_sequence_valid &&
+        (uint16_t) (request->channel_sequence - command->state->channel_sequence) >= 0x8000) {
+        command->status = SMB2_STATUS_FILE_NOT_AVAILABLE;
+        return;
+    }
+    command->state->channel_sequence       = request->channel_sequence;
+    command->state->channel_sequence_valid = command->state->sequence_dirty = 1;
+    if (!request->ioctl.cc_chunk_count || request->ioctl.max_output_response < 12) {
+        command->status = SMB2_STATUS_INVALID_PARAMETER;
+        return;
+    }
+    uint64_t total  = 0;
+    bool     limits = request->ioctl.cc_chunk_count > CHIMERA_SMB_CC_MAX_CHUNKS;
+    if (!limits) {
+        for (unsigned int i = 0; i < request->ioctl.cc_chunk_count; i++) {
+            uint32_t length = request->ioctl.cc_chunks[i].length;
+            limits |= !length || length > CHIMERA_SMB_CC_MAX_CHUNK_LEN;
+            total  += length;
+        }
+    }
+    if (limits || total > CHIMERA_SMB_CC_MAX_TOTAL_LEN) {
+        request->ioctl.cc_chunks_written = CHIMERA_SMB_CC_MAX_CHUNKS;
+        request->ioctl.cc_chunk_bytes    = CHIMERA_SMB_CC_MAX_CHUNK_LEN;
+        request->ioctl.cc_total_written  = CHIMERA_SMB_CC_MAX_TOTAL_LEN;
+        request->ioctl.cc_limit_response = 1;
+        command->status                  = SMB2_STATUS_INVALID_PARAMETER;
+        return;
+    }
+    if (!ctx->source || chimera_smb_compound_file_prepare(compound, ctx->source) != SMB2_STATUS_SUCCESS) {
+        command->status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        return;
+    }
+    if (!(ctx->source->open->granted_access & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE)) ||
+        !(command->open->granted_access & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) ||
+        (request->ioctl.ctl_code == SMB2_FSCTL_SRV_COPYCHUNK && !(command->open->granted_access & SMB2_FILE_READ_DATA)))
+    {
+        command->status = SMB2_STATUS_ACCESS_DENIED;
+        return;
+    }
+    smb_copychunk_attempt_owner(command);
+} /* smb_copychunk_prepare */
+
+static void
+smb_copychunk_release(struct smb_vfs_command *command)
+{
+    free(command->private_data);
+    command->private_data = NULL;
+} /* smb_copychunk_release */
+
+static struct chimera_smb_file_id
+smb_copychunk_file_id(struct chimera_smb_request *request)
+{
+    return request->ioctl.file_id;
+} /* smb_copychunk_file_id */
+
+static int
+smb_copychunk_eligible(struct chimera_smb_request *request)
+{
+    (void) request;
+    return 1;
+} /* smb_copychunk_eligible */
+
+const struct smb_vfs_command_ops chimera_smb_copychunk_compound_ops = {
+    .file_id  = smb_copychunk_file_id,
+    .eligible = smb_copychunk_eligible,
+    .build    = smb_copychunk_build,
+    .prepare  = smb_copychunk_prepare,
+    .complete = smb_copychunk_next,
+    .release  = smb_copychunk_release,
+};

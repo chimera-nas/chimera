@@ -16,9 +16,11 @@
 #include "evpl/evpl_http.h"
 #include "common/format.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
+#include "s3_temp.h"
 #include "s3_multipart.h"
 #include "s3_etag.h"
 #include "s3_procs.h"
@@ -279,11 +281,9 @@ struct chimera_s3_part_destroy_ctx {
     struct chimera_vfs_cred          cred;
     struct chimera_server_s3_thread *thread;
     struct chimera_s3_part          *part;
+    struct chimera_vfs_open_handle  *dir_handle;
 };
 
-/* The unlink sequence is over.  Its status is not consulted: a temp file
- * that could not be removed is leaked rather than anything crashing, exactly
- * as a directory that could not be opened left it behind before. */
 static void
 chimera_s3_part_destroy_complete(
     struct chimera_vfs_compound *compound,
@@ -315,190 +315,19 @@ chimera_s3_multipart_part_destroy_async(
         return;
     }
 
-    /* One sequence under the identity that staged the part: PUTFH of the
-     * part's directory, REMOVE_PATH of its temp name.  The credential lives on
-     * the context because the request that staged the part is long gone. */
     ctx         = calloc(1, sizeof(*ctx));
     ctx->thread = thread;
     ctx->part   = part;
     ctx->cred   = part->cred;
 
     compound = chimera_vfs_compound_alloc(thread->vfs, &ctx->cred);
-
     chimera_vfs_compound_add_putfh(compound, part->dir_fh, part->dir_fhlen);
-    chimera_vfs_compound_add_remove_path(compound, part->tmp_name,
-                                         part->tmp_name_len, 0);
-
-    chimera_vfs_compound_submit(compound, chimera_s3_part_destroy_complete,
-                                ctx);
-} /* chimera_s3_multipart_part_destroy_async */
-
-/* ----- the part-file setup sequence, shared by UploadPart, UploadPartCopy
- * and CompleteMultipartUpload's destination -----
- *
- * PUT's shape: PUTFH(bucket), CREATE_PATH of the key's parent chain (mkdir
- * -p, so the chain is materialized lazily as PUT does it), OPEN_CURRENT of
- * that directory, GETHANDLE so the caller keeps the directory open, then the
- * file itself: CREATE_UNLINKED where the backend has the capability, or an
- * OPEN of a hidden "._chimera_" temp name that a later RENAME publishes.
- * Which of the two is decided here, from the bucket's module, before the
- * sequence is built -- the executor would report ENOTSUP for the op on a
- * backend without the capability, but a sequence built for the wrong shape
- * is a second round trip for nothing. */
-
-/* The sequence's fixed shape: which op's out_handle is which. */
-#define CHIMERA_S3_MPU_SETUP_DIR_OP  3   /* the GETHANDLE: the directory        */
-#define CHIMERA_S3_MPU_SETUP_FILE_OP 4   /* CREATE_UNLINKED or OPEN: the file   */
-
-static void
-chimera_s3_mpu_add_part_setup(
-    struct chimera_vfs_compound *compound,
-    struct chimera_s3_request   *request,
-    const char                  *dirpath,
-    int                          dirpathlen,
-    const char                  *tmp_name,
-    int                          tmp_name_len)
-{
-    struct chimera_vfs_attrs no_attr;
-
-    memset(&no_attr, 0, sizeof(no_attr));
-
-    request->set_attr.va_req_mask = 0;
-    request->set_attr.va_set_mask = 0;
-
-    chimera_vfs_compound_add_putfh(compound, request->bucket_fh,
-                                   request->bucket_fhlen);
-    chimera_vfs_compound_add_create_path(compound,
-                                         CHIMERA_VFS_COMPOUND_CREATE_DIR,
-                                         dirpath, dirpathlen,
-                                         NULL, 0,
-                                         &no_attr,
-                                         CHIMERA_VFS_ATTR_FH,
-                                         1);
     chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_PATH |
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
-    chimera_vfs_compound_add_gethandle(compound);
-
-    if (tmp_name_len == 0) {
-        request->multipart.tmp_name_len = 0;
-
-        chimera_vfs_compound_add_create_unlinked(
-            compound,
-            CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY,
-            &request->set_attr,
-            CHIMERA_VFS_ATTR_FH);
-    } else {
-        memcpy(request->multipart.tmp_name, tmp_name, tmp_name_len);
-        request->multipart.tmp_name[tmp_name_len] = '\0';
-        request->multipart.tmp_name_len           = tmp_name_len;
-
-        chimera_vfs_compound_add_open(
-            compound,
-            request->multipart.tmp_name,
-            request->multipart.tmp_name_len,
-            CHIMERA_VFS_OPEN_CREATE,
-            0,
-            &request->set_attr,
-            CHIMERA_VFS_ATTR_FH,
-            0,
-            0);
-    }
-} /* chimera_s3_mpu_add_part_setup */
-
-static inline int
-chimera_s3_mpu_can_create_unlinked(
-    struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request       *request)
-{
-    return (chimera_vfs_module_capabilities(thread->vfs,
-                                            request->bucket_fh,
-                                            request->bucket_fhlen) &
-            CHIMERA_VFS_CAP_CREATE_UNLINKED) != 0;
-} /* chimera_s3_mpu_can_create_unlinked */
-
-/* The setup sequence finished: on success both handles become the request's
- * (dir_handle, file_handle); on any failure nothing is taken, so whatever
- * the sequence opened before it failed is released with it. */
-static enum chimera_vfs_error
-chimera_s3_mpu_take_part_setup(
-    struct chimera_vfs_compound *compound,
-    struct chimera_s3_request   *request)
-{
-    enum chimera_vfs_error status = chimera_vfs_compound_status(compound);
-
-    if (status == CHIMERA_VFS_OK) {
-        request->dir_handle = chimera_vfs_compound_take_handle(
-            compound, CHIMERA_S3_MPU_SETUP_DIR_OP);
-        request->file_handle = chimera_vfs_compound_take_handle(
-            compound, CHIMERA_S3_MPU_SETUP_FILE_OP);
-    }
-
-    return status;
-} /* chimera_s3_mpu_take_part_setup */
-
-/* The parent directory of an object key, and the key's final component.
- * A key with no '/' lives in the bucket root, spelled "/" so CREATE_PATH
- * resolves the bucket itself. */
-static void
-chimera_s3_mpu_split_key(
-    struct chimera_s3_request *request,
-    const char               **r_dirpath,
-    int                       *r_dirpathlen)
-{
-    const char *slash = strrchr(request->path, '/');
-
-    if (slash) {
-        *r_dirpath    = request->path;
-        *r_dirpathlen = slash - request->path;
-        request->name = slash + 1;
-        while (*request->name == '/') {
-            request->name++;
-        }
-    } else {
-        *r_dirpath    = "/";
-        *r_dirpathlen = 1;
-        request->name = request->path;
-    }
-    request->name_len = strlen(request->name);
-} /* chimera_s3_mpu_split_key */
-
-/* ----- batched range transfers -----
- *
- * A COPY_RANGE may move fewer bytes than asked, and the ops behind it in the
- * same sequence were built for the full amount.  The gate vetoes a short one
- * (EAGAIN, answered from the op's own `written` against the length the batch
- * recorded for it) so the sequence stops there, and the completion resumes
- * from the bytes actually moved.  A backend's own EAGAIN is told apart by
- * having moved nothing. */
-
-struct chimera_s3_range_batch {
-    int     n;
-    int64_t length[CHIMERA_VFS_COMPOUND_MAX_OPS];
-};
-
-static void
-chimera_s3_range_batch_gate(
-    struct chimera_vfs_compound *compound,
-    uint32_t                     index,
-    enum chimera_vfs_error      *status,
-    void                        *private_data)
-{
-    struct chimera_s3_range_batch        *batch = private_data;
-    const struct chimera_vfs_compound_op *op;
-
-    if (*status != CHIMERA_VFS_OK || (int) index >= batch->n) {
-        return;
-    }
-
-    op = chimera_vfs_compound_op(compound, index);
-
-    if (op->type == CHIMERA_VFS_COMPOUND_OP_COPY_RANGE &&
-        (int64_t) op->written < batch->length[index]) {
-        *status = CHIMERA_VFS_EAGAIN;
-    }
-} /* chimera_s3_range_batch_gate */
+                                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY
+                                          , 0);
+    chimera_vfs_compound_add_remove(compound, part->tmp_name, part->tmp_name_len, 0, 0, 0);
+    chimera_frontend_compound_submit(compound, chimera_s3_part_destroy_complete, ctx);
+} /* chimera_s3_multipart_part_destroy_async */
 
 /* ----- response helpers ----- */
 
@@ -577,8 +406,8 @@ chimera_s3_mp_format_date(
 
 /* ----- CreateMultipartUpload ----- */
 
-void
-chimera_s3_create_multipart_upload(
+static void
+chimera_s3_create_multipart_upload_accepted(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
@@ -755,189 +584,292 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
     }
 } /* chimera_s3_upload_part_finish */
 
-/* One chunk's WRITE sequence is over.  The payload iovecs were BORROWED by
- * the sequence and are released here, once it is. */
+struct s3_part_transfer {
+    struct chimera_s3_request      *request;
+    struct chimera_vfs_open_handle *directory, *file;
+    struct chimera_vfs_open_handle *attempt_directory, *attempt_file;
+    struct evpl_iovec               data;
+    char                           *directory_path;
+    uint64_t                        offset;
+    uint32_t                        limit, used, count;
+    int                             inflight, pumping, finished, first, final, unnamed;
+    int                             transferred;
+    int                             directory_result, file_result;
+};
+
+void
+chimera_s3_upload_part_cleanup(struct chimera_s3_request *request)
+{
+    struct s3_part_transfer *ctx = request->multipart_transfer;
+
+    if (!ctx) {
+        return;
+    }
+    if (ctx->file) {
+        chimera_vfs_release(request->thread->vfs, ctx->file);
+    }
+    if (ctx->directory) {
+        chimera_vfs_release(request->thread->vfs, ctx->directory);
+    }
+    if (request->multipart.upload) {
+        chimera_s3_multipart_upload_release(request->thread, request->multipart.upload);
+        request->multipart.upload = NULL;
+    }
+    if (!ctx->transferred && request->multipart.tmp_name_len) {
+        chimera_s3_remove_temp(request, ctx->directory_path, strlen(ctx->directory_path),
+                               request->multipart.tmp_name, request->multipart.tmp_name_len);
+    }
+    evpl_iovec_release(request->thread->evpl, &ctx->data);
+    free(ctx->directory_path);
+    free(ctx);
+    request->multipart_transfer = NULL;
+} /* chimera_s3_upload_part_cleanup */
+
 static void
-chimera_s3_upload_part_write_complete(
+chimera_s3_part_fail(
+    struct s3_part_transfer *ctx,
+    enum chimera_s3_status   status)
+{
+    ctx->finished           = 1;
+    ctx->request->status    = status;
+    ctx->request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+    if (ctx->request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(ctx->request->thread->evpl, ctx->request);
+    }
+} /* chimera_s3_part_fail */
+
+static void
+chimera_s3_part_attempt_reset(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    struct chimera_s3_io            *io         = private_data;
-    struct chimera_s3_request       *request    = io->request;
-    struct chimera_server_s3_thread *thread     = request->thread;
-    struct evpl                     *evpl       = thread->evpl;
-    enum chimera_vfs_error           error_code = chimera_vfs_compound_status(compound);
+    struct s3_part_transfer *ctx = private_data;
 
-    chimera_vfs_compound_free(compound);
+    ctx->attempt_directory = ctx->directory;
+    ctx->attempt_file      = ctx->file;
+} /* chimera_s3_part_attempt_reset */
 
-    evpl_iovecs_release(evpl, io->iov, io->niov);
-    chimera_s3_io_free(thread, io);
+static void
+chimera_s3_part_check_write(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, index);
 
-    request->io_pending--;
+    if (*status == CHIMERA_VFS_OK && op->written != op->count) {
+        *status = CHIMERA_VFS_EIO;
+    }
+} /* chimera_s3_part_check_write */
 
-    if (error_code) {
-        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+static void
+chimera_s3_part_append_write(
+    struct chimera_vfs_compound *compound,
+    struct s3_part_transfer     *ctx)
+{
+    if (ctx->count) {
+        int index = chimera_vfs_compound_add_write(compound, ctx->attempt_file, ctx->offset, ctx->count, 1, &ctx->data,
+                                                   1, 0, 0, NULL);
+        chimera_vfs_compound_set_op_callbacks(compound, index, NULL,
+                                              chimera_s3_part_check_write, ctx);
+    }
+} /* chimera_s3_part_append_write */
+
+static void
+chimera_s3_part_file_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct s3_part_transfer *ctx = private_data;
+
+    if (*status != CHIMERA_VFS_OK) {
         return;
     }
+    ctx->attempt_file = chimera_vfs_compound_op(compound, index)->out_handle;
+    chimera_s3_part_append_write(compound, ctx);
+} /* chimera_s3_part_file_ready */
 
-    if (request->io_pending == 0 &&
-        request->vfs_state == CHIMERA_S3_VFS_STATE_RECVED) {
-        chimera_s3_upload_part_finish(request);
+static void
+chimera_s3_part_directory_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct s3_part_transfer   *ctx = private_data;
+    struct chimera_vfs_module *module;
+    struct chimera_vfs_attrs   attrs = { 0 };
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
     }
-} /* chimera_s3_upload_part_write_complete */
+    ctx->attempt_directory = chimera_vfs_compound_op(compound, index)->out_handle;
+    module                 = chimera_vfs_get_module(ctx->request->thread->vfs,
+                                                    ctx->attempt_directory->fh, ctx->attempt_directory->fh_len);
+    ctx->unnamed = module && (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED);
+    if (ctx->unnamed) {
+        ctx->file_result = chimera_vfs_compound_add_create_unlinked(compound, CHIMERA_VFS_OPEN_INFERRED, &attrs,
+                                                                    CHIMERA_VFS_ATTR_FH);
+    } else {
+        ctx->file_result = chimera_vfs_compound_add_open(compound, ctx->request->multipart.tmp_name, strlen(ctx->request
+                                                                                                            ->
+                                                                                                            multipart.
+                                                                                                            tmp_name),
+                                                         CHIMERA_VFS_OPEN_CREATE, 0, &attrs, CHIMERA_VFS_ATTR_FH, 0, 0);
+    }
+    chimera_vfs_compound_set_op_callbacks(compound, ctx->file_result, NULL,
+                                          chimera_s3_part_file_ready, ctx);
+} /* chimera_s3_part_directory_ready */
+
+static void
+chimera_s3_part_compound_done(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct s3_part_transfer   *ctx     = private_data;
+    struct chimera_s3_request *request = ctx->request;
+
+
+    enum chimera_vfs_error     status = chimera_vfs_compound_status(compound);
+
+    ctx->inflight = 0;
+    /* Ordinary operation failure can leave a named temporary behind. Publish
+    * cleanup bookkeeping after finish accepts that prefix, even on error. */
+    if (chimera_vfs_compound_finish_status(compound) == CHIMERA_VFS_OK &&
+        ctx->attempt_directory) {
+        request->multipart.tmp_name_len = ctx->unnamed ? 0 : strlen(request->multipart.tmp_name);
+    }
+    if (status != CHIMERA_VFS_OK || request->abandoned) {
+        enum chimera_s3_status failure = chimera_s3_compound_error(compound, request,
+                                                                   CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        chimera_vfs_compound_free(compound);
+        chimera_s3_part_fail(ctx, failure);
+        goto request_drop;
+    }
+    if (ctx->first) {
+        ctx->directory = chimera_vfs_compound_take_handle(compound, ctx->directory_result);
+        ctx->file      = chimera_vfs_compound_take_handle(compound, ctx->file_result);
+    }
+    chimera_vfs_compound_free(compound);
+    ctx->first   = 0;
+    ctx->offset += ctx->count;
+    ctx->used   -= ctx->count;
+    if (ctx->used) {
+        memmove(evpl_iovec_data(&ctx->data),
+                (char *) evpl_iovec_data(&ctx->data) + ctx->count, ctx->used);
+    }
+    if (ctx->final) {
+        ctx->finished                   = 1;
+        ctx->transferred                = 1;
+        request->file_cur_offset        = ctx->offset;
+        request->file_handle            = ctx->file;
+        request->dir_handle             = ctx->directory;
+        request->multipart.tmp_name_len = ctx->unnamed ? 0 : strlen(request->multipart.tmp_name);
+        ctx->file                       = NULL;
+        ctx->directory                  = NULL;
+        /* Shared upload state and ETag publication happen only after the
+        * final compound has accepted every operation in this attempt. */
+        chimera_s3_upload_part_finish(request);
+    } else if (!ctx->pumping) {
+        chimera_s3_upload_part_recv(request->thread->evpl, request);
+    }
+ request_drop:
+    chimera_s3_request_drop(request);
+} /* chimera_s3_part_compound_done */
+
+static void
+chimera_s3_part_submit(struct s3_part_transfer *ctx)
+{
+    struct chimera_s3_request   *request = ctx->request;
+    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_attrs     attrs = { 0 };
+
+    ctx->count = ctx->used > ctx->limit ? ctx->limit : ctx->used;
+    ctx->final = request->http_state == CHIMERA_S3_HTTP_STATE_RECVED &&
+        evpl_http_request_get_data_avail(request->http_request) == 0 && ctx->used <= ctx->limit;
+    evpl_iovec_set_length(&ctx->data, ctx->count);
+    if (ctx->first) {
+        compound = chimera_s3_compound_alloc(request);
+        chimera_vfs_compound_add_create_tree(compound, ctx->directory_path,
+                                             strlen(ctx->directory_path), &attrs, CHIMERA_VFS_ATTR_FH);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_DIRECTORY, 0);
+        ctx->directory_result = chimera_vfs_compound_add_gethandle(compound);
+        chimera_vfs_compound_set_op_callbacks(compound, ctx->directory_result, NULL,
+                                              chimera_s3_part_directory_ready, ctx);
+    } else {
+        compound               = chimera_vfs_compound_alloc(request->thread->vfs, &request->cred);
+        ctx->attempt_file      = ctx->file;
+        ctx->attempt_directory = ctx->directory;
+        chimera_s3_part_append_write(compound, ctx);
+    }
+    chimera_vfs_compound_set_attempt_reset(compound, chimera_s3_part_attempt_reset, ctx);
+    ctx->inflight = 1;
+    chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_part_compound_done, ctx);
+} /* chimera_s3_part_submit */
 
 void
 chimera_s3_upload_part_recv(
     struct evpl               *evpl,
     struct chimera_s3_request *request)
 {
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_server_s3_shared *shared = thread->shared;
-    struct chimera_s3_config        *config = shared->config;
-    struct chimera_s3_io            *io;
-    struct chimera_vfs_compound     *compound;
-    uint64_t                         avail;
-    int                              final;
+    struct s3_part_transfer *ctx = request->multipart_transfer;
+    struct evpl_iovec        incoming[CHIMERA_S3_IOV_MAX];
+    uint64_t                 avail;
+    int                      niov;
 
-    final = (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED);
-
- again:
-
-    avail = evpl_http_request_get_data_avail(request->http_request);
-
-    if (avail < config->io_size && !final) {
+    if (!ctx || ctx->inflight || ctx->pumping || ctx->finished || request->abandoned) {
         return;
     }
+    chimera_s3_request_get(request);
 
-    if (avail > config->io_size) {
-        avail = config->io_size;
+    ctx->pumping = 1;
+    while (!ctx->inflight && !ctx->finished) {
+        avail = evpl_http_request_get_data_avail(request->http_request);
+        if (avail > ctx->limit + 1 - ctx->used) {
+            avail = ctx->limit + 1 - ctx->used;
+        }
+        if (avail) {
+            niov = evpl_http_request_get_datav(evpl, request->http_request, incoming, avail);
+            for (int i = 0; i < niov; i++) {
+                if (request->chunked) {
+                    int used = ctx->used;
+                    s3_chunk_decode(&request->chunk, evpl_iovec_data(&incoming[i]),
+                                    evpl_iovec_length(&incoming[i]), evpl_iovec_data(&ctx->data), &used);
+                    ctx->used = used;
+                } else {
+                    memcpy((char *) evpl_iovec_data(&ctx->data) + ctx->used,
+                           evpl_iovec_data(&incoming[i]), evpl_iovec_length(&incoming[i]));
+                    ctx->used += evpl_iovec_length(&incoming[i]);
+                }
+            }
+            evpl_iovecs_release(evpl, incoming, niov);
+            if (request->chunked && request->chunk.error) {
+                chimera_s3_part_fail(ctx, CHIMERA_S3_STATUS_BAD_REQUEST);
+                break;
+            }
+        }
+        if (ctx->used > ctx->limit ||
+            (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED &&
+             evpl_http_request_get_data_avail(request->http_request) == 0)) {
+            if (request->chunked && request->http_state == CHIMERA_S3_HTTP_STATE_RECVED &&
+                evpl_http_request_get_data_avail(request->http_request) == 0 && !request->chunk.done) {
+                chimera_s3_part_fail(ctx, CHIMERA_S3_STATUS_BAD_REQUEST);
+                break;
+            }
+            chimera_s3_part_submit(ctx);
+        } else if (!avail) {
+            break;
+        }
     }
-
-    if (avail == 0 && final) {
-        request->vfs_state = CHIMERA_S3_VFS_STATE_RECVED;
-
-        if (request->io_pending == 0) {
-            chimera_s3_upload_part_finish(request);
-        }
-        return;
-    }
-
-    io = chimera_s3_io_alloc(thread, request);
-
-    if (request->chunked) {
-        /* De-chunk the aws-chunked framing into a fresh buffer. Decoding only
-         * strips framing, so the decoded length never exceeds the raw input
-         * and a single output iovec of `avail` bytes always suffices. The raw
-         * input is pulled into a separate scratch array and released once
-         * copied; the decoded output is allocated directly into io->iov[0] so
-         * libevpl's iovec ownership tracking stays intact. */
-        struct evpl_iovec in_iov[CHIMERA_S3_IOV_MAX];
-        int               in_niov;
-        int               out_len = 0;
-        int               i;
-
-        in_niov = evpl_http_request_get_datav(evpl, request->http_request,
-                                              in_iov, avail);
-
-        evpl_iovec_alloc(evpl, avail, 0, 1, 0, &io->iov[0]);
-
-        for (i = 0; i < in_niov; i++) {
-            s3_chunk_decode(&request->chunk,
-                            evpl_iovec_data(&in_iov[i]),
-                            evpl_iovec_length(&in_iov[i]),
-                            evpl_iovec_data(&io->iov[0]),
-                            &out_len);
-        }
-
-        evpl_iovecs_release(evpl, in_iov, in_niov);
-
-        if (request->chunk.error) {
-            evpl_iovec_release(evpl, &io->iov[0]);
-            chimera_s3_io_free(thread, io);
-            request->status    = CHIMERA_S3_STATUS_BAD_REQUEST;
-            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-            return;
-        }
-
-        if (out_len == 0) {
-            /* This read carried only framing (e.g. a chunk header or the
-             * trailer); nothing to write yet. */
-            evpl_iovec_release(evpl, &io->iov[0]);
-            chimera_s3_io_free(thread, io);
-            goto again;
-        }
-
-        evpl_iovec_set_length(&io->iov[0], out_len);
-        io->niov = 1;
-        avail    = out_len;
-    } else {
-        io->niov = evpl_http_request_get_datav(evpl, request->http_request,
-                                               io->iov, avail);
-    }
-
-    request->io_pending++;
-
-    /* One WRITE per chunk, addressed through the part's own handle -- taken
-     * from the setup sequence, so it outlives every one of these. */
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_vfs_compound_add_write(compound,
-                                   request->file_handle,
-                                   request->file_cur_offset,
-                                   avail,
-                                   1,
-                                   io->iov,
-                                   io->niov,
-                                   0,
-                                   0,
-                                   NULL);
-
-    chimera_vfs_compound_submit(compound,
-                                chimera_s3_upload_part_write_complete, io);
-
-    request->file_cur_offset += avail;
-
-    goto again;
+    ctx->pumping = 0;
+    chimera_s3_request_drop(request);
 } /* chimera_s3_upload_part_recv */
-
-/* The part-file setup sequence is over.  The status maps as the three per-op
- * steps it replaced did: a failed parent-chain create is NoSuchKey, and a
- * failed directory open or file create an internal error.  The op index says
- * which. */
-static void
-chimera_s3_upload_part_setup_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
-    enum chimera_vfs_error           error_code;
-    enum chimera_s3_status           fallback;
-
-    error_code = chimera_s3_mpu_take_part_setup(compound, request);
-
-    fallback = chimera_vfs_compound_num_completed(compound) <= 2 ?
-        CHIMERA_S3_STATUS_NO_SUCH_KEY : CHIMERA_S3_STATUS_INTERNAL_ERROR;
-
-    chimera_vfs_compound_free(compound);
-
-    if (error_code) {
-        chimera_s3_multipart_upload_release(thread, request->multipart.upload);
-        request->multipart.upload = NULL;
-        request->status           = chimera_s3_status_from_vfs(error_code, fallback);
-        request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(thread->evpl, request);
-        }
-        return;
-    }
-
-    request->vfs_state = CHIMERA_S3_VFS_STATE_RECV;
-
-    chimera_s3_upload_part_recv(evpl, request);
-} /* chimera_s3_upload_part_setup_complete */
 
 void
 chimera_s3_upload_part(
@@ -947,11 +879,10 @@ chimera_s3_upload_part(
 {
     struct chimera_server_s3_shared    *shared = thread->shared;
     struct chimera_s3_multipart_upload *upload;
-    struct chimera_vfs_compound        *compound;
-    const char                         *dirpath;
+    const char                         *slash;
+    const char                         *dirpath = request->path;
     int                                 dirpathlen;
-    char                                tmp_name[64];
-    int                                 tmp_name_len = 0;
+    struct s3_part_transfer            *ctx;
 
     /* AWS spec: part numbers must be in [1, 10000]. */
     if (request->multipart.part_number < 1 ||
@@ -981,30 +912,34 @@ chimera_s3_upload_part(
     request->multipart.upload  = upload;
     request->multipart.is_copy = 0;
 
-    chimera_s3_mpu_split_key(request, &dirpath, &dirpathlen);
+    slash = rindex(request->path, '/');
 
-    request->io_pending = 0;
-
-    if (!chimera_s3_mpu_can_create_unlinked(thread, request)) {
-        tmp_name_len = snprintf(tmp_name, sizeof(tmp_name),
-                                "._chimera_mpu_%.16s_%d",
-                                request->multipart.upload_id,
-                                request->multipart.part_number);
+    if (slash) {
+        dirpathlen    = slash - request->path;
+        request->name = slash + 1;
+        while (*request->name == '/') {
+            request->name++;
+        }
+    } else {
+        dirpath       = "/";
+        dirpathlen    = 1;
+        request->name = request->path;
     }
+    request->name_len = strlen(request->name);
 
-    /* PUT's setup, in one sequence: the parent directory chain materialized
-     * lazily, the directory opened and kept, the part file created. */
-    chimera_s3_request_get(request);
-
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_s3_mpu_add_part_setup(compound, request,
-                                  dirpath, dirpathlen,
-                                  tmp_name, tmp_name_len);
-
-    chimera_vfs_compound_submit(compound,
-                                chimera_s3_upload_part_setup_complete,
-                                request);
+    ctx                         = calloc(1, sizeof(*ctx));
+    ctx->request                = request;
+    ctx->directory_path         = strndup(dirpath, dirpathlen);
+    ctx->limit                  = chimera_s3_compound_chunk_size(request);
+    ctx->first                  = 1;
+    request->multipart_transfer = ctx;
+    snprintf(request->multipart.tmp_name, sizeof(request->multipart.tmp_name),
+             "._chimera_mpu_%.16s_%d", request->multipart.upload_id,
+             request->multipart.part_number);
+    evpl_iovec_alloc(evpl, ctx->limit + 1, 0, 1, 0, &ctx->data);
+    request->io_pending = 0;
+    request->vfs_state  = CHIMERA_S3_VFS_STATE_RECV;
+    chimera_s3_upload_part_recv(evpl, request);
 } /* chimera_s3_upload_part */
 
 /* ----- UploadPartCopy ----- */
@@ -1018,6 +953,8 @@ chimera_s3_upload_part(
  */
 
 struct chimera_s3_upload_copy_ctx {
+    int                             submitting, again, terminal;
+    enum chimera_s3_status          terminal_status;
     struct chimera_s3_request      *request;
     struct chimera_vfs_open_handle *src_handle;
     enum chimera_s3_upc_mode {
@@ -1029,12 +966,18 @@ struct chimera_s3_upload_copy_ctx {
     int64_t                         copied; /* bytes copied so far         */
     int                             src_bucket_namelen;
     int                             src_key_len;
-    int                             rw_niov;
+    struct chimera_vfs_open_handle *attempt_src, *attempt_file, *attempt_dir;
+    char                           *src_path;
+    const char                     *dirpath;
+    int                             dirpathlen;
+    int                             destination_bucket, source_bucket, source_attr;
+    int                             source_result, directory_result, file_result;
+    int64_t                         attempt_copied;
+    enum chimera_s3_status          failure;
     char                            src_bucket_name[256];
     char                            src_key[1024];
     struct evpl_iovec               rw_iov[CHIMERA_S3_IOV_MAX];
-    /* The COPY_RANGE batch in flight: how much each op was built to move. */
-    struct chimera_s3_range_batch   batch;
+    int                             attempt_tmp_name_len;
 };
 
 /*
@@ -1163,9 +1106,6 @@ chimera_s3_upc_parse_range(
     return 0;
 } /* chimera_s3_upc_parse_range */
 
-static void chimera_s3_upc_step(
-    struct chimera_s3_upload_copy_ctx *ctx);
-
 /* Terminal error path for the copy phase. */
 static void
 chimera_s3_upc_fail(
@@ -1175,6 +1115,16 @@ chimera_s3_upc_fail(
     struct chimera_s3_request       *request = ctx->request;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
+
+    if (ctx->submitting) {
+        ctx->terminal        = 2;
+        ctx->terminal_status = status;
+        return;
+    }
+
+    chimera_s3_remove_temp(request, ctx->dirpath, ctx->dirpathlen,
+                           request->multipart.tmp_name, request->multipart.tmp_name_len);
+
 
     if (ctx->src_handle) {
         chimera_vfs_release(thread->vfs, ctx->src_handle);
@@ -1192,7 +1142,7 @@ chimera_s3_upc_fail(
         request->multipart.upload = NULL;
     }
 
-    chimera_s3_request_drop(ctx->request);
+    free(ctx->src_path);
     free(ctx);
 
     request->status    = status;
@@ -1200,6 +1150,7 @@ chimera_s3_upc_fail(
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
+    chimera_s3_request_drop(request);
 } /* chimera_s3_upc_fail */
 
 /* Copy phase complete: hand off to the shared part-registration + response
@@ -1212,6 +1163,12 @@ chimera_s3_upc_done(struct chimera_s3_upload_copy_ctx *ctx)
     struct chimera_s3_request       *request = ctx->request;
     struct chimera_server_s3_thread *thread  = request->thread;
 
+    if (ctx->submitting) {
+        ctx->terminal = 1;
+        return;
+    }
+
+
     if (ctx->src_handle) {
         chimera_vfs_release(thread->vfs, ctx->src_handle);
         ctx->src_handle = NULL;
@@ -1219,341 +1176,289 @@ chimera_s3_upc_done(struct chimera_s3_upload_copy_ctx *ctx)
 
     request->file_cur_offset = ctx->length;
 
-    chimera_s3_request_drop(ctx->request);
+    free(ctx->src_path);
     free(ctx);
 
     chimera_s3_upload_part_finish(request);
+    chimera_s3_request_drop(request);
 } /* chimera_s3_upc_done */
 
-/* A COPY_RANGE batch is over.  Every op that ran OK moved what it was built
- * to move; a short one was vetoed by the gate and moved `written`; anything
- * else is the backend's refusal. */
-static void
-chimera_s3_upc_copy_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_upload_copy_ctx    *ctx = private_data;
-    const struct chimera_vfs_compound_op *op;
-    uint32_t                              completed, i;
-    int                                   failed = 0;
-
-    completed = chimera_vfs_compound_num_completed(compound);
-
-    if (completed == 0) {
-        /* Nothing ran: a sequence that could not be built, not a batch with
-         * nothing to do -- which would re-issue itself forever. */
-        failed = 1;
-    }
-
-    for (i = 0; i < completed; i++) {
-        op = chimera_vfs_compound_op(compound, i);
-
-        if (op->status == CHIMERA_VFS_OK) {
-            ctx->copied += ctx->batch.length[i];
-        } else if (op->status == CHIMERA_VFS_EAGAIN && op->written > 0) {
-            ctx->copied += op->written;
-            break;
-        } else {
-            failed = 1;
-            break;
-        }
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    if (failed) {
-        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    chimera_s3_upc_step(ctx);
-} /* chimera_s3_upc_copy_complete */
-
-/* The WRITE half of a read+write chunk is over: the iovecs the READ handed
- * over were BORROWED by it and are released now. */
-static void
-chimera_s3_upc_write_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_upload_copy_ctx    *ctx    = private_data;
-    struct chimera_server_s3_thread      *thread = ctx->request->thread;
-    struct evpl                          *evpl   = thread->evpl;
-    const struct chimera_vfs_compound_op *op     = chimera_vfs_compound_op(compound, 0);
-    enum chimera_vfs_error                error_code;
-    uint32_t                              length;
-
-    error_code = chimera_vfs_compound_status(compound);
-    length     = op->written;
-
-    chimera_vfs_compound_free(compound);
-
-    evpl_iovecs_release(evpl, ctx->rw_iov, ctx->rw_niov);
-    ctx->rw_niov = 0;
-
-    if (error_code) {
-        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    ctx->copied += length;
-    chimera_s3_upc_step(ctx);
-} /* chimera_s3_upc_write_complete */
-
-/* The READ half is over: its data is taken (the references are ours from
- * here) and written by a following sequence -- following, because the
- * WRITE's payload is the READ's answer. */
-static void
-chimera_s3_upc_read_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_upload_copy_ctx    *ctx    = private_data;
-    struct chimera_server_s3_thread      *thread = ctx->request->thread;
-    const struct chimera_vfs_compound_op *op     = chimera_vfs_compound_op(compound, 0);
-    struct chimera_vfs_compound          *write;
-    struct evpl_iovec                    *iov;
-    enum chimera_vfs_error                error_code;
-    uint32_t                              count;
-
-    error_code = chimera_vfs_compound_status(compound);
-    count      = op->read_len;
-
-    chimera_vfs_compound_take_iov(compound, 0, &iov, &ctx->rw_niov);
-
-    chimera_vfs_compound_free(compound);
-
-    if (error_code) {
-        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    write = chimera_vfs_compound_alloc(thread->vfs, &ctx->request->cred);
-
-    chimera_vfs_compound_add_write(write,
-                                   ctx->request->file_handle,
-                                   ctx->copied,           /* destination part offset */
-                                   count,
-                                   1,
-                                   ctx->rw_iov,
-                                   ctx->rw_niov,
-                                   0,
-                                   0,
-                                   NULL);
-
-    chimera_vfs_compound_submit(write, chimera_s3_upc_write_complete, ctx);
-} /* chimera_s3_upc_read_complete */
+static void chimera_s3_upc_submit(
+    struct chimera_s3_upload_copy_ctx *ctx);
 
 static void
-chimera_s3_upc_step(struct chimera_s3_upload_copy_ctx *ctx)
-{
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_vfs_compound     *compound;
-    uint64_t                         remaining, chunk, offset;
-
-    remaining = ctx->length - ctx->copied;
-    if (remaining == 0) {
-        chimera_s3_upc_done(ctx);
-        return;
-    }
-
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    if (ctx->mode == CHIMERA_S3_UPC_COPY) {
-        /* As many io_size chunks as one sequence holds, both handles the
-         * caller's. */
-        offset       = ctx->copied;
-        ctx->batch.n = 0;
-
-        while (remaining > 0 && ctx->batch.n < CHIMERA_VFS_COMPOUND_MAX_OPS) {
-            chunk = thread->shared->config->io_size;
-            if (chunk > remaining) {
-                chunk = remaining;
-            }
-
-            chimera_vfs_compound_add_copy_range(compound,
-                                                ctx->src_handle,
-                                                ctx->src_first + offset,
-                                                request->file_handle,
-                                                offset,
-                                                chunk,
-                                                0,
-                                                0, 0);
-
-            ctx->batch.length[ctx->batch.n++] = chunk;
-
-            offset    += chunk;
-            remaining -= chunk;
-        }
-
-        chimera_vfs_compound_set_gate(compound, chimera_s3_range_batch_gate,
-                                      &ctx->batch);
-
-        chimera_vfs_compound_submit(compound, chimera_s3_upc_copy_complete,
-                                    ctx);
-    } else {
-        chunk = thread->shared->config->io_size;
-        if (chunk > remaining) {
-            chunk = remaining;
-        }
-
-        chimera_vfs_compound_add_read(compound,
-                                      ctx->src_handle,
-                                      ctx->src_first + ctx->copied,
-                                      chunk,
-                                      ctx->rw_iov,
-                                      CHIMERA_S3_IOV_MAX,
-                                      0,
-                                      NULL,
-                                      NULL, 0);
-
-        chimera_vfs_compound_submit(compound, chimera_s3_upc_read_complete,
-                                    ctx);
-    }
-} /* chimera_s3_upc_step */
-
-/* Both source and destination part are open; choose the transfer primitive
- * (copy_range when both live on the same module, else buffered read+write). */
-static void
-chimera_s3_upc_start_transfer(struct chimera_s3_upload_copy_ctx *ctx)
-{
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_vfs_module       *src_module, *dst_module;
-
-    if (ctx->length == 0) {
-        chimera_s3_upc_done(ctx);
-        return;
-    }
-
-    src_module = chimera_vfs_get_module(thread->vfs,
-                                        ctx->src_handle->fh,
-                                        ctx->src_handle->fh_len);
-    dst_module = chimera_vfs_get_module(thread->vfs,
-                                        request->file_handle->fh,
-                                        request->file_handle->fh_len);
-
-    if (dst_module && src_module == dst_module &&
-        (dst_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
-        ctx->mode = CHIMERA_S3_UPC_COPY;
-    } else {
-        ctx->mode = CHIMERA_S3_UPC_RW;
-    }
-
-    ctx->copied = 0;
-    chimera_s3_upc_step(ctx);
-} /* chimera_s3_upc_start_transfer */
-
-/* ----- destination part file creation (mirrors UploadPart) ----- */
-
-/* The destination setup sequence -- PUT's shape, see
- * chimera_s3_mpu_add_part_setup -- is over. */
-static void
-chimera_s3_upc_dest_complete(
+chimera_s3_upc_reset(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
     struct chimera_s3_upload_copy_ctx *ctx = private_data;
-    enum chimera_vfs_error             error_code;
 
-    error_code = chimera_s3_mpu_take_part_setup(compound, ctx->request);
+    ctx->attempt_src          = ctx->src_handle;
+    ctx->attempt_dir          = ctx->request->dir_handle;
+    ctx->attempt_file         = ctx->request->file_handle;
+    ctx->attempt_copied       = ctx->copied;
+    ctx->attempt_tmp_name_len = ctx->request->multipart.tmp_name_len;
+    ctx->failure              = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+} /* chimera_s3_upc_reset */
 
-    chimera_vfs_compound_free(compound);
+static void
+chimera_s3_upc_transfer_done(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_upload_copy_ctx    *ctx = private_data;
+    const struct chimera_vfs_compound_op *op  = chimera_vfs_compound_op(compound, index);
 
-    if (error_code) {
-        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
+    if (*status != CHIMERA_VFS_OK) {
         return;
     }
+    if (!op->written || op->written > ctx->length - ctx->attempt_copied) {
+        *status = CHIMERA_VFS_EIO;
+        return;
+    }
+    ctx->attempt_copied += op->written;
+} /* chimera_s3_upc_transfer_done */
 
-    chimera_s3_upc_start_transfer(ctx);
-} /* chimera_s3_upc_dest_complete */
-
-/* The source sequence -- PUTROOT, LOOKUP_PATH of the source bucket,
- * LOOKUP_PATH of the source key, OPEN_CURRENT for data, GETHANDLE -- is
- * over.  Which op stopped it says what to answer: the bucket lookup is
- * NoSuchBucket, the key lookup and the open NoSuchKey.  The range is checked
- * against the size the key lookup reported; an unsatisfiable one leaves the
- * source handle untaken, so the sequence releases it. */
 static void
-chimera_s3_upc_source_complete(
+chimera_s3_upc_read_done(
     struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_upload_copy_ctx    *ctx = private_data;
+    const struct chimera_vfs_compound_op *op  = chimera_vfs_compound_op(compound, index);
+    int                                   write_index;
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (!op->read_len) {
+        *status = CHIMERA_VFS_EIO;
+        return;
+    }
+    write_index = chimera_vfs_compound_add_write(compound, ctx->attempt_file, ctx->attempt_copied, op->read_len, 1, op->
+                                                 iov, op->niov, 0, 0, NULL);
+    chimera_vfs_compound_set_op_callbacks(compound, write_index, NULL,
+                                          chimera_s3_upc_transfer_done, ctx);
+} /* chimera_s3_upc_read_done */
+
+static void
+chimera_s3_upc_append_transfer(
+    struct chimera_vfs_compound       *compound,
+    struct chimera_s3_upload_copy_ctx *ctx)
+{
+    uint64_t remaining = ctx->length - ctx->attempt_copied;
+    uint32_t count     = chimera_s3_compound_chunk_size(ctx->request);
+    int      index;
+
+    if (!remaining) {
+        return;
+    }
+    if (remaining < count) {
+        count = remaining;
+    }
+    if (ctx->mode == CHIMERA_S3_UPC_COPY) {
+        index = chimera_vfs_compound_add_copy_range(compound,
+                                                    ctx->attempt_src, ctx->src_first + ctx->attempt_copied,
+                                                    ctx->attempt_file, ctx->attempt_copied, count, 0, 0, 0);
+    } else {
+        index = chimera_vfs_compound_add_read(compound, ctx->attempt_src, ctx->src_first + ctx->attempt_copied, count,
+                                              ctx->rw_iov, CHIMERA_S3_IOV_MAX, 0, NULL, NULL, 0);
+    }
+    chimera_vfs_compound_set_op_callbacks(compound, index, NULL,
+                                          ctx->mode == CHIMERA_S3_UPC_COPY ?
+                                          chimera_s3_upc_transfer_done : chimera_s3_upc_read_done, ctx);
+} /* chimera_s3_upc_append_transfer */
+
+static void
+chimera_s3_upc_file_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_upload_copy_ctx *ctx = private_data;
+    struct chimera_vfs_module         *src, *dst;
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    ctx->attempt_file = chimera_vfs_compound_op(compound, index)->out_handle;
+    src               = chimera_vfs_get_module(ctx->request->thread->vfs,
+                                               ctx->attempt_src->fh, ctx->attempt_src->fh_len);
+    dst = chimera_vfs_get_module(ctx->request->thread->vfs,
+                                 ctx->attempt_file->fh, ctx->attempt_file->fh_len);
+    ctx->mode = dst && dst == src && (dst->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) ?
+        CHIMERA_S3_UPC_COPY : CHIMERA_S3_UPC_RW;
+    chimera_s3_upc_append_transfer(compound, ctx);
+} /* chimera_s3_upc_file_ready */
+
+static void
+chimera_s3_upc_directory_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_upload_copy_ctx *ctx     = private_data;
+    struct chimera_s3_request         *request = ctx->request;
+    struct chimera_vfs_module         *module;
+    struct chimera_vfs_attrs           attrs = { 0 };
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    ctx->attempt_dir = chimera_vfs_compound_op(compound, index)->out_handle;
+    module           = chimera_vfs_get_module(request->thread->vfs,
+                                              ctx->attempt_dir->fh, ctx->attempt_dir->fh_len);
+    if (module && (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED)) {
+        ctx->attempt_tmp_name_len = 0;
+        ctx->file_result          = chimera_vfs_compound_add_create_unlinked(compound, CHIMERA_VFS_OPEN_INFERRED, &attrs
+                                                                             , CHIMERA_VFS_ATTR_FH);
+    } else {
+        ctx->attempt_tmp_name_len = strlen(request->multipart.tmp_name);
+        ctx->file_result          = chimera_vfs_compound_add_open(compound, request->multipart.tmp_name, ctx->
+                                                                  attempt_tmp_name_len, CHIMERA_VFS_OPEN_CREATE, 0, &
+                                                                  attrs, CHIMERA_VFS_ATTR_FH, 0, 0);
+    }
+    chimera_vfs_compound_set_op_callbacks(compound, ctx->file_result, NULL,
+                                          chimera_s3_upc_file_ready, ctx);
+} /* chimera_s3_upc_directory_ready */
+
+static void
+chimera_s3_upc_source_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
     void                        *private_data)
 {
     struct chimera_s3_upload_copy_ctx    *ctx     = private_data;
     struct chimera_s3_request            *request = ctx->request;
-    struct chimera_server_s3_thread      *thread  = request->thread;
-    const struct chimera_vfs_compound_op *key;
-    enum chimera_vfs_error                error_code;
-    uint32_t                              completed;
-    int64_t                               src_size;
-    const char                           *dirpath;
-    int                                   dirpathlen;
-    char                                  tmp_name[64];
-    int                                   tmp_name_len = 0;
-    struct chimera_vfs_compound          *dest;
+    const struct chimera_vfs_compound_op *source, *bucket;
+    struct chimera_vfs_attrs              attrs = { 0 };
+    uint64_t                              size;
 
-    error_code = chimera_vfs_compound_status(compound);
-    completed  = chimera_vfs_compound_num_completed(compound);
-
-    if (error_code) {
-        chimera_vfs_compound_free(compound);
-        chimera_s3_upc_fail(ctx, completed <= 2 ?
-                            CHIMERA_S3_STATUS_NO_SUCH_BUCKET :
-                            CHIMERA_S3_STATUS_NO_SUCH_KEY);
+    if (*status != CHIMERA_VFS_OK) {
+        ctx->failure = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         return;
     }
-
-    key = chimera_vfs_compound_op(compound, 2);
-
-    if (!(key->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
-        chimera_vfs_compound_free(compound);
-        chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
+    ctx->attempt_src = chimera_vfs_compound_op(compound, index)->out_handle;
+    source           = chimera_vfs_compound_op(compound, ctx->source_attr);
+    if (!(source->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
+        *status = CHIMERA_VFS_EIO;
         return;
     }
-
-    src_size = key->attr.va_size;
-
-    /* No explicit range copies the whole object. */
-    if (!request->multipart.has_copy_range) {
-        ctx->src_first = 0;
-        ctx->length    = src_size;
-    } else {
-        /* Range bounds were validated as well-formed at entry; now check
-         * satisfiability against the object size -> InvalidRange (416). */
-        if (ctx->src_first >= src_size || ctx->length > src_size ||
-            ctx->src_first + ctx->length > src_size) {
-            chimera_vfs_compound_free(compound);
-            chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INVALID_RANGE);
+    size = source->attr.va_size;
+    if (request->multipart.has_copy_range) {
+        ctx->src_first = request->multipart.copy_range_first;
+        ctx->length    = request->multipart.copy_range_last - ctx->src_first + 1;
+        if (ctx->src_first >= size || ctx->length > size - ctx->src_first) {
+            ctx->failure = CHIMERA_S3_STATUS_INVALID_RANGE;
+            *status      = CHIMERA_VFS_EINVAL;
             return;
         }
+    } else {
+        ctx->src_first = 0;
+        ctx->length    = size;
     }
+    bucket = chimera_vfs_compound_op(compound, ctx->destination_bucket);
+    chimera_vfs_compound_add_putfh(compound, bucket->fh, bucket->fh_len);
+    chimera_vfs_compound_add_create_tree(compound, ctx->dirpath, ctx->dirpathlen,
+                                         &attrs, CHIMERA_VFS_ATTR_FH);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY
+                                          , 0);
+    ctx->directory_result = chimera_vfs_compound_add_gethandle(compound);
+    chimera_vfs_compound_set_op_callbacks(compound, ctx->directory_result, NULL,
+                                          chimera_s3_upc_directory_ready, ctx);
+} /* chimera_s3_upc_source_ready */
 
-    ctx->src_handle = chimera_vfs_compound_take_handle(compound, 4);
+static void
+chimera_s3_upc_compound_done(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_s3_upload_copy_ctx *ctx     = private_data;
+    enum chimera_vfs_error             status  = chimera_vfs_compound_status(compound);
+    enum chimera_s3_status             failure = chimera_s3_compound_error(compound, ctx->request, ctx->failure);
 
+    if (chimera_vfs_compound_finish_status(compound) == CHIMERA_VFS_OK) {
+        ctx->request->multipart.tmp_name_len = ctx->attempt_tmp_name_len;
+    }
+    if (status != CHIMERA_VFS_OK) {
+        if (!ctx->src_handle && chimera_vfs_compound_finish_status(compound) == CHIMERA_VFS_OK) {
+            if (chimera_vfs_compound_op(compound, ctx->source_bucket)->status == CHIMERA_VFS_ENOENT) {
+                failure = CHIMERA_S3_STATUS_NO_SUCH_BUCKET;
+            } else if (chimera_vfs_compound_op(compound, ctx->source_attr)->status == CHIMERA_VFS_ENOENT) {
+                failure = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+            }
+        }
+        chimera_vfs_compound_free(compound);
+        chimera_s3_upc_fail(ctx, failure);
+        return;
+    }
+    if (!ctx->request->file_handle) {
+        ctx->request->file_handle = chimera_vfs_compound_take_handle(compound, ctx->file_result);
+        ctx->request->dir_handle  = chimera_vfs_compound_take_handle(compound, ctx->directory_result);
+        if (ctx->attempt_copied < ctx->length) {
+            ctx->src_handle = chimera_vfs_compound_take_handle(compound, ctx->source_result);
+        }
+    }
+    ctx->copied = ctx->attempt_copied;
     chimera_vfs_compound_free(compound);
-
-    /* Source object is open and its size validated against the requested
-     * range; create the destination part file under the object key's parent
-     * directory. */
-    chimera_s3_mpu_split_key(request, &dirpath, &dirpathlen);
-
-    if (!chimera_s3_mpu_can_create_unlinked(thread, request)) {
-        tmp_name_len = snprintf(tmp_name, sizeof(tmp_name),
-                                "._chimera_mpu_%.16s_%d",
-                                request->multipart.upload_id,
-                                request->multipart.part_number);
+    if (ctx->copied == ctx->length) {
+        chimera_s3_upc_done(ctx);
+    } else {
+        chimera_s3_upc_submit(ctx);
     }
+} /* chimera_s3_upc_compound_done */
 
-    dest = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
+static void
+chimera_s3_upc_submit(struct chimera_s3_upload_copy_ctx *ctx)
+{
+    struct chimera_s3_request   *request = ctx->request;
+    struct chimera_vfs_compound *compound;
 
-    chimera_s3_mpu_add_part_setup(dest, request,
-                                  dirpath, dirpathlen,
-                                  tmp_name, tmp_name_len);
-
-    chimera_vfs_compound_submit(dest, chimera_s3_upc_dest_complete, ctx);
-} /* chimera_s3_upc_source_complete */
+    if (ctx->submitting) {
+        ctx->again = 1;
+        return;
+    }
+    ctx->submitting = 1;
+    do {
+        ctx->again = 0;
+        if (ctx->src_handle) {
+            compound = chimera_vfs_compound_alloc(request->thread->vfs, &request->cred);
+            chimera_s3_upc_reset(compound, ctx);
+            chimera_s3_upc_append_transfer(compound, ctx);
+        } else {
+            compound                = chimera_s3_compound_alloc(request);
+            ctx->destination_bucket = chimera_vfs_compound_add_getfh(compound);
+            chimera_vfs_compound_add_putfh(compound, request->thread->shared->root_fh,
+                                           request->thread->shared->root_fh_len);
+            ctx->source_bucket = chimera_vfs_compound_add_lookup_path(
+                compound, ctx->src_path, strlen(ctx->src_path),
+                CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);
+            ctx->source_attr = chimera_vfs_compound_add_lookup_path(
+                compound, ctx->src_key, ctx->src_key_len,
+                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, CHIMERA_VFS_LOOKUP_FOLLOW);
+            chimera_vfs_compound_add_open_current(compound, 0, 0);
+            ctx->source_result = chimera_vfs_compound_add_gethandle(compound);
+            chimera_vfs_compound_set_op_callbacks(compound, ctx->source_result, NULL,
+                                                  chimera_s3_upc_source_ready, ctx);
+        }
+        chimera_vfs_compound_set_attempt_reset(compound, chimera_s3_upc_reset, ctx);
+        chimera_frontend_compound_submit(compound, chimera_s3_upc_compound_done, ctx);
+    } while (ctx->again && !ctx->terminal);
+    ctx->submitting = 0;
+    if (ctx->terminal == 1) {
+        chimera_s3_upc_done(ctx);
+    } else if (ctx->terminal == 2) {
+        chimera_s3_upc_fail(ctx, ctx->terminal_status);
+    }
+} /* chimera_s3_upc_submit */
 
 void
 chimera_s3_upload_part_copy(
@@ -1564,10 +1469,9 @@ chimera_s3_upload_part_copy(
     struct chimera_server_s3_shared    *shared = thread->shared;
     struct chimera_s3_multipart_upload *upload;
     struct chimera_s3_upload_copy_ctx  *ctx;
-    struct chimera_vfs_compound        *compound;
     const char                         *copy_source, *copy_range;
     const struct s3_bucket             *src_bucket;
-    char                               *src_path;
+    const char                         *slash;
 
     /* Validate part number first (cheap). */
     if (request->multipart.part_number < 1 ||
@@ -1635,32 +1539,24 @@ chimera_s3_upload_part_copy(
         return;
     }
 
-    src_path = strdup(chimera_s3_bucket_get_path(src_bucket));
+    ctx->src_path = strdup(chimera_s3_bucket_get_path(src_bucket));
     chimera_s3_release_bucket(shared);
-    if (!src_path) {
+    if (!ctx->src_path) {
         chimera_s3_upc_fail(ctx, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         return;
     }
-
-    /* Resolve and open the source in one sequence (the path is copied by the
-     * adder, so the bucket map can be released as soon as it is built). */
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_vfs_compound_add_putroot(compound);
-    chimera_vfs_compound_add_lookup_path(compound,
-                                         src_path, strlen(src_path),
-                                         CHIMERA_VFS_ATTR_FH,
-                                         CHIMERA_VFS_LOOKUP_FOLLOW);
-    chimera_vfs_compound_add_lookup_path(compound,
-                                         ctx->src_key, ctx->src_key_len,
-                                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                                         CHIMERA_VFS_LOOKUP_FOLLOW);
-    chimera_vfs_compound_add_open_current(compound, 0, 0);
-    chimera_vfs_compound_add_gethandle(compound);
-
-    free(src_path);
-
-    chimera_vfs_compound_submit(compound, chimera_s3_upc_source_complete, ctx);
+    slash           = strrchr(request->path, '/');
+    ctx->dirpath    = slash ? request->path : "/";
+    ctx->dirpathlen = slash ? slash - request->path : 1;
+    request->name   = slash ? slash + 1 : request->path;
+    while (*request->name == '/') {
+        request->name++;
+    }
+    request->name_len = strlen(request->name);
+    snprintf(request->multipart.tmp_name, sizeof(request->multipart.tmp_name),
+             "._chimera_mpu_%.16s_%d", request->multipart.upload_id,
+             request->multipart.part_number);
+    chimera_s3_upc_submit(ctx);
 } /* chimera_s3_upload_part_copy */
 
 /* ----- CompleteMultipartUpload body accumulation + parser ----- */
@@ -1999,23 +1895,17 @@ chimera_s3_complete_send_response(
 
 /* Deferred response after object tags were applied (store-by-path callback).
 * Part count + combined etag were stashed on the request by finish_common. */
-static void
-chimera_s3_complete_send_response_deferred(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    uint64_t etag[2] = { request->etag[0], request->etag[1] };
 
-    chimera_s3_complete_send_response(evpl, request, request->multipart.part_number, etag);
-} /* chimera_s3_complete_send_response_deferred */
 
 enum chimera_s3_assemble_mode {
-    CHIMERA_S3_ASSEMBLE_MOVE,
     CHIMERA_S3_ASSEMBLE_COPY,
     CHIMERA_S3_ASSEMBLE_RW,
 };
 
 struct chimera_s3_complete_ctx {
+    int                                 submitting, again, terminal;
+    enum chimera_vfs_error              terminal_error;
+    enum chimera_s3_status              failure;
     struct chimera_s3_request          *request;
     struct chimera_s3_multipart_upload *upload;
     int                                 part_count;
@@ -2025,348 +1915,46 @@ struct chimera_s3_complete_ctx {
     int64_t                             write_offset;
     int64_t                             part_offset;
     enum chimera_s3_assemble_mode       assemble_mode;
+    struct chimera_vfs_open_handle     *attempt_dir, *attempt_file;
+    int                                 attempt_idx, attempt_steps, attempt_read_used, published;
+    int                                 directory_result, file_result;
+    int64_t                             attempt_write_offset, attempt_part_offset;
+    enum chimera_s3_assemble_mode       attempt_mode;
     int                                 rw_niov;
     struct evpl_iovec                   rw_iov[CHIMERA_S3_IOV_MAX];
-    /* The range batch in flight: one MOVE_RANGE or COPY_RANGE per part, up
-     * to a sequence's worth.  `batch` records each op's length for the
-     * short-copy gate; `batch_part` which part each op moves. */
-    struct chimera_s3_range_batch       batch;
-    int                                 batch_part[CHIMERA_VFS_COMPOUND_MAX_OPS];
-    /* Bounded retry of the destination setup sequence. The linux backend
+    /* Bounded retry of the destination parent-dir create. The linux backend
      * can transiently return ESTALE from open_by_handle_at when a cached
-     * directory handle is being recycled under concurrent load; re-running
-     * the whole sequence from the bucket handle clears it. */
+     * directory handle is being recycled under concurrent load; re-walking the
+     * create from the (re-resolved) bucket handle clears it. */
     int                                 create_retries;
     int                                 dirpathlen;
     char                                dirpath[CHIMERA_S3_KEY_MAX];
-    /* One-shot timer used to back off between destination setup retries so a
-     * concurrent open-handle-cache eviction (the source of the transient
-     * ESTALE/ENOENT, see chimera_s3_complete_setup_complete) has time to
-     * drain before we re-run. */
+    /* One-shot timer used to back off between destination parent-dir create
+     * retries so a concurrent open-handle-cache eviction (the source of the
+     * transient ESTALE/ENOENT, see chimera_s3_complete_create_root_callback)
+     * has time to drain before we re-walk. */
     struct evpl_timer                   create_retry_timer;
+    int                                 attempt_tmp_name_len;
 };
 
 #define CHIMERA_S3_COMPLETE_CREATE_MAX_RETRIES      32
-/* Back-off between setup retries. The transient ESTALE/ENOENT is caused by a
+/* Back-off between create retries. The transient ESTALE/ENOENT is caused by a
  * directory handle being recycled by the VFS close-sweep thread under load; the
  * earlier immediate (same-event-loop) re-walks could all race the same eviction
  * window and exhaust the bound while the sweep was still in flight. Yielding for
- * a short interval between attempts lets the sweep drain so the re-run resolves
+ * a short interval between attempts lets the sweep drain so the re-walk resolves
  * a fresh handle. 1ms * 32 retries = up to ~32ms, comfortably longer than the
  * eviction window while still well inside the client's request timeout. */
 #define CHIMERA_S3_COMPLETE_CREATE_RETRY_BACKOFF_US 1000
 
-static void chimera_s3_complete_assemble_next(
-    struct chimera_s3_complete_ctx *ctx);
-
-static void chimera_s3_complete_finalize(
-    struct chimera_s3_complete_ctx *ctx);
-
 static void chimera_s3_complete_finish_common(
     enum chimera_vfs_error error_code,
     void                  *private_data);
-
 static void chimera_s3_complete_create_dir(
     struct chimera_s3_complete_ctx *ctx);
-
 static int chimera_s3_complete_create_retry(
     struct chimera_s3_complete_ctx *ctx,
     enum chimera_vfs_error          error_code);
-
-/* ----- Assembly: walk parts list, copy/move/rw each part into dest -----
- *
- * MOVE and COPY assemble in batches: one range op per part, as many parts as
- * one sequence holds (32), both handles the caller's.  RW assembles one
- * io_size chunk at a time as a READ sequence followed by a WRITE sequence,
- * because the WRITE's payload is the READ's answer. */
-
-/* `done` bytes of the current part landed in the destination. */
-static void
-chimera_s3_complete_assemble_advance(
-    struct chimera_s3_complete_ctx *ctx,
-    int64_t                         done)
-{
-    ctx->write_offset += done;
-    ctx->part_offset  += done;
-
-    if (ctx->part_offset >= ctx->client_parts[ctx->client_idx]->size) {
-        ctx->client_idx++;
-        ctx->part_offset = 0;
-    }
-} /* chimera_s3_complete_assemble_advance */
-
-/* A MOVE_RANGE / COPY_RANGE batch is over.  Every op that ran OK moved its
- * whole part; then either the batch ended, a COPY came up short (vetoed by
- * the gate, `written` says how short), or the backend refused one. */
-static void
-chimera_s3_complete_batch_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_complete_ctx       *ctx = private_data;
-    const struct chimera_vfs_compound_op *op;
-    enum chimera_vfs_error                error_code = CHIMERA_VFS_OK;
-    uint32_t                              completed, i;
-
-    completed = chimera_vfs_compound_num_completed(compound);
-
-    if (completed == 0) {
-        /* Nothing ran: a sequence that could not be built.  Not "nothing to
-         * do", which would re-issue the same batch forever. */
-        error_code = chimera_vfs_compound_status(compound);
-    }
-
-    for (i = 0; i < completed; i++) {
-        op = chimera_vfs_compound_op(compound, i);
-
-        /* The op's part: the batch's first op continues the part the
-         * assembly stood at, every later one starts its own part from 0
-         * (the zero-byte parts the batch skipped are skipped here too). */
-        ctx->client_idx = ctx->batch_part[i];
-        if (i > 0) {
-            ctx->part_offset = 0;
-        }
-
-        if (op->status == CHIMERA_VFS_OK) {
-            chimera_s3_complete_assemble_advance(ctx, ctx->batch.length[i]);
-            continue;
-        }
-
-        if (op->status == CHIMERA_VFS_EAGAIN &&
-            ctx->assemble_mode == CHIMERA_S3_ASSEMBLE_COPY && op->written > 0) {
-            /* Short copy: the following batch continues with the same part. */
-            chimera_s3_complete_assemble_advance(ctx, op->written);
-            break;
-        }
-
-        if (op->status == CHIMERA_VFS_EINVAL &&
-            ctx->assemble_mode == CHIMERA_S3_ASSEMBLE_MOVE) {
-            /* memfs move_range is a zero-copy block-pointer swap and rejects
-             * sub-block-aligned moves with EINVAL. Real S3 part sizes (e.g.
-             * the AWS CLI's trailing part) are rarely block-aligned, so fall
-             * back to read+write for the rest of the assembly. Once the
-             * running write offset is unaligned no further move_range can
-             * succeed anyway, so switching the whole remainder to RW (rather
-             * than per-part probing) avoids repeated failed moves. Nothing
-             * was moved on EINVAL, so part_offset/write_offset are unchanged
-             * and the retry is safe. */
-            ctx->assemble_mode = CHIMERA_S3_ASSEMBLE_RW;
-            break;
-        }
-
-        error_code = op->status;
-        break;
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    if (error_code) {
-        chimera_s3_complete_finish_common(error_code, ctx);
-        return;
-    }
-
-    chimera_s3_complete_assemble_next(ctx);
-} /* chimera_s3_complete_batch_complete */
-
-/* The WRITE half of a read+write chunk is over: the iovecs the READ handed
- * over were BORROWED by it and are released now. */
-static void
-chimera_s3_complete_rw_write_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_complete_ctx       *ctx    = private_data;
-    struct chimera_server_s3_thread      *thread = ctx->request->thread;
-    struct evpl                          *evpl   = thread->evpl;
-    const struct chimera_vfs_compound_op *op     = chimera_vfs_compound_op(compound, 0);
-    enum chimera_vfs_error                error_code;
-    uint32_t                              length;
-
-    error_code = chimera_vfs_compound_status(compound);
-    length     = op->written;
-
-    chimera_vfs_compound_free(compound);
-
-    evpl_iovecs_release(evpl, ctx->rw_iov, ctx->rw_niov);
-    ctx->rw_niov = 0;
-
-    if (error_code) {
-        chimera_s3_complete_finish_common(error_code, ctx);
-        return;
-    }
-
-    chimera_s3_complete_assemble_advance(ctx, length);
-    chimera_s3_complete_assemble_next(ctx);
-} /* chimera_s3_complete_rw_write_complete */
-
-/* The READ half is over: its data is taken (the references are ours from
- * here, in ctx->rw_iov, the array the READ was given) and written by a
- * following sequence. */
-static void
-chimera_s3_complete_rw_read_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_s3_complete_ctx       *ctx     = private_data;
-    struct chimera_s3_request            *request = ctx->request;
-    struct chimera_server_s3_thread      *thread  = request->thread;
-    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, 0);
-    struct chimera_vfs_compound          *write;
-    struct evpl_iovec                    *iov;
-    enum chimera_vfs_error                error_code;
-    uint32_t                              count;
-
-    error_code = chimera_vfs_compound_status(compound);
-    count      = op->read_len;
-
-    chimera_vfs_compound_take_iov(compound, 0, &iov, &ctx->rw_niov);
-
-    chimera_vfs_compound_free(compound);
-
-    if (error_code) {
-        chimera_s3_complete_finish_common(error_code, ctx);
-        return;
-    }
-
-    if (count == 0) {
-        /* The part is shorter than it was recorded: a zero-byte write would
-         * advance nothing and this would spin. */
-        evpl_iovecs_release(thread->evpl, ctx->rw_iov, ctx->rw_niov);
-        ctx->rw_niov = 0;
-        chimera_s3_complete_finish_common(CHIMERA_VFS_EIO, ctx);
-        return;
-    }
-
-    write = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_vfs_compound_add_write(write,
-                                   request->file_handle,
-                                   ctx->write_offset,
-                                   count,
-                                   1,
-                                   ctx->rw_iov,
-                                   ctx->rw_niov,
-                                   0,
-                                   0,
-                                   NULL);
-
-    chimera_vfs_compound_submit(write, chimera_s3_complete_rw_write_complete,
-                                ctx);
-} /* chimera_s3_complete_rw_read_complete */
-
-static void
-chimera_s3_complete_assemble_rw(struct chimera_s3_complete_ctx *ctx)
-{
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_part          *part    = ctx->client_parts[ctx->client_idx];
-    uint64_t                         chunk   = thread->shared->config->io_size;
-    uint64_t                         remaining;
-    struct chimera_vfs_compound     *compound;
-
-    remaining = part->size - ctx->part_offset;
-    if (chunk > remaining) {
-        chunk = remaining;
-    }
-
-    /* The READ may fill up to CHIMERA_S3_IOV_MAX slots of ctx->rw_iov, the
-     * descriptor array it is lent; the data it references is the compound's
-     * until the completion takes it. */
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_vfs_compound_add_read(compound,
-                                  part->file_handle,
-                                  ctx->part_offset,
-                                  chunk,
-                                  ctx->rw_iov,
-                                  CHIMERA_S3_IOV_MAX,
-                                  0,
-                                  NULL,
-                                  NULL, 0);
-
-    chimera_vfs_compound_submit(compound, chimera_s3_complete_rw_read_complete,
-                                ctx);
-} /* chimera_s3_complete_assemble_rw */
-
-static void
-chimera_s3_complete_assemble_next(struct chimera_s3_complete_ctx *ctx)
-{
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_part          *part;
-    struct chimera_vfs_compound     *compound;
-    int64_t                          write_offset, part_offset, remaining;
-    int                              idx;
-
-    /* Skip any zero-byte parts. */
-    while (ctx->client_idx < ctx->part_count &&
-           ctx->client_parts[ctx->client_idx]->size == 0) {
-        ctx->client_idx++;
-        ctx->part_offset = 0;
-    }
-
-    if (ctx->client_idx >= ctx->part_count) {
-        /* All parts processed; finalize (link/rename into place). */
-        chimera_s3_complete_finalize(ctx);
-        return;
-    }
-
-    if (ctx->assemble_mode == CHIMERA_S3_ASSEMBLE_RW) {
-        chimera_s3_complete_assemble_rw(ctx);
-        return;
-    }
-
-    /* One range op per part, from where the assembly stands, until the parts
-     * or the sequence run out. */
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    ctx->batch.n = 0;
-    write_offset = ctx->write_offset;
-    part_offset  = ctx->part_offset;
-
-    for (idx = ctx->client_idx;
-         idx < ctx->part_count && ctx->batch.n < CHIMERA_VFS_COMPOUND_MAX_OPS;
-         idx++, part_offset = 0) {
-        part = ctx->client_parts[idx];
-
-        if (part->size == 0) {
-            continue;
-        }
-
-        remaining = part->size - part_offset;
-
-        if (ctx->assemble_mode == CHIMERA_S3_ASSEMBLE_MOVE) {
-            chimera_vfs_compound_add_move_range(compound,
-                                                part->file_handle,
-                                                part_offset,
-                                                request->file_handle,
-                                                write_offset,
-                                                remaining,
-                                                0, 0, 0);
-        } else {
-            chimera_vfs_compound_add_copy_range(compound,
-                                                part->file_handle,
-                                                part_offset,
-                                                request->file_handle,
-                                                write_offset,
-                                                remaining,
-                                                0,
-                                                0, 0);
-        }
-
-        ctx->batch_part[ctx->batch.n]   = idx;
-        ctx->batch.length[ctx->batch.n] = remaining;
-        ctx->batch.n++;
-
-        write_offset += remaining;
-    }
-
-    chimera_vfs_compound_set_gate(compound, chimera_s3_range_batch_gate,
-                                  &ctx->batch);
-
-    chimera_vfs_compound_submit(compound, chimera_s3_complete_batch_complete,
-                                ctx);
-} /* chimera_s3_complete_assemble_next */
 
 static void
 chimera_s3_complete_finish_common(
@@ -2378,8 +1966,20 @@ chimera_s3_complete_finish_common(
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
     int                              count   = ctx->part_count;
+    enum chimera_s3_status           failure = ctx->failure;
     uint64_t                         etag[2];
-    char                            *tagging = NULL;
+
+    if (ctx->submitting) {
+        ctx->terminal       = 1;
+        ctx->terminal_error = error_code;
+        return;
+    }
+
+    if (error_code) {
+        chimera_s3_remove_temp(request, ctx->dirpath, ctx->dirpathlen,
+                               request->multipart.tmp_name, request->multipart.tmp_name_len);
+    }
+
 
     etag[0] = ctx->combined_etag[0];
     etag[1] = ctx->combined_etag[1];
@@ -2391,12 +1991,6 @@ chimera_s3_complete_finish_common(
     if (request->file_handle) {
         chimera_vfs_release(thread->vfs, request->file_handle);
         request->file_handle = NULL;
-    }
-
-    /* Capture any x-amz-tagging set at CreateMultipartUpload before dropping
-     * the upload (which owns the string). */
-    if (!error_code && ctx->upload && ctx->upload->tagging) {
-        tagging = strdup(ctx->upload->tagging);
     }
 
     /* Stash the part count + etag for the deferred response. */
@@ -2418,11 +2012,15 @@ chimera_s3_complete_finish_common(
         struct chimera_server_s3_shared *shared = thread->shared;
 
         if (!error_code) {
-            chimera_s3_multipart_table_detach(shared->multipart_table,
-                                              request->multipart.upload_id,
-                                              request->multipart.upload_idlen);
-            /* Drop the table's implicit (insert) ref now that it is unlinked. */
-            chimera_s3_multipart_upload_release(thread, ctx->upload);
+            struct chimera_s3_multipart_upload *detached =
+                chimera_s3_multipart_table_detach(shared->multipart_table,
+                                                  request->multipart.upload_id,
+                                                  request->multipart.upload_idlen);
+            /* Abort can already have consumed the table reference while the
+             * assembly compound was running. Drop it only if we detached it. */
+            if (detached) {
+                chimera_s3_multipart_upload_release(thread, detached);
+            }
         } else {
             evpl_mutex_lock(&ctx->upload->lock);
             ctx->upload->completing = 0;
@@ -2435,7 +2033,6 @@ chimera_s3_complete_finish_common(
     }
 
     free(ctx->client_parts);
-    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     free(request->multipart.body_buf);
@@ -2444,192 +2041,335 @@ chimera_s3_complete_finish_common(
     request->multipart.body_cap = 0;
 
     if (error_code) {
-        request->status    = chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        request->status = failure ? failure :
+            chimera_s3_status_from_vfs(error_code, CHIMERA_S3_STATUS_INTERNAL_ERROR);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
         }
-        return;
+        goto request_drop;
     }
-
-    /* Apply the object tags (if any) before emitting the success response. The
-    * multipart.response iovec used by the response builder must not be
-    * allocated until tagging is done, so we defer it to the store callback. */
-    if (tagging) {
-        struct chimera_s3_tagging_ctx *tctx = calloc(1, sizeof(*tctx));
-
-        request->tagging = tctx;
-
-        if (chimera_s3_tagging_parse_header(tctx, tagging) == 0 &&
-            tctx->n_tags > 0) {
-            free(tagging);
-            chimera_s3_tagging_store_by_path(evpl, thread, request,
-                                             chimera_s3_complete_send_response_deferred);
-            return;
-        }
-
-        /* Empty/invalid tagging: ignore and fall through to the response. */
-        free(request->tagging);
-        request->tagging = NULL;
-    }
-
-    free(tagging);
 
     chimera_s3_complete_send_response(evpl, request, count, etag);
+ request_drop:
+    chimera_s3_request_drop(request);
 } /* chimera_s3_complete_finish_common */
 
-/* The publish sequence is over, one way or the other. */
-static void
-chimera_s3_complete_publish_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    enum chimera_vfs_error error_code = chimera_vfs_compound_status(compound);
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_s3_complete_finish_common(error_code, private_data);
-} /* chimera_s3_complete_publish_complete */
-
-/* Publish the assembled object under its key.  A temp-named scratch file is
- * RENAMEd over the key (PUTFH(dir), SAVEFH, RENAME: both directories are
- * the key's); an unlinked one is LINKed in with replace, the object being
- * the SAVED fh and its directory the current one. */
-static void
-chimera_s3_complete_finalize(struct chimera_s3_complete_ctx *ctx)
-{
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_vfs_compound     *compound;
-    int                              index;
-
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    if (request->multipart.tmp_name_len) {
-        chimera_vfs_compound_add_putfh(compound,
-                                       request->dir_handle->fh,
-                                       request->dir_handle->fh_len);
-        chimera_vfs_compound_add_savefh(compound);
-        chimera_vfs_compound_add_rename(compound,
-                                        request->multipart.tmp_name,
-                                        request->multipart.tmp_name_len,
-                                        request->name,
-                                        request->name_len,
-                                        0, 0, 0);
-    } else {
-        chimera_vfs_compound_add_putfh(compound,
-                                       request->file_handle->fh,
-                                       request->file_handle->fh_len);
-        chimera_vfs_compound_add_savefh(compound);
-        chimera_vfs_compound_add_putfh(compound,
-                                       request->dir_handle->fh,
-                                       request->dir_handle->fh_len);
-        index = chimera_vfs_compound_add_link(compound,
-                                              request->name,
-                                              request->name_len,
-                                              CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
-                                              0, 0);
-        chimera_vfs_compound_op_set_link_opts(compound, index, 1, NULL, NULL);
-    }
-
-    chimera_vfs_compound_submit(compound, chimera_s3_complete_publish_complete,
-                                ctx);
-} /* chimera_s3_complete_finalize */
+static int chimera_s3_complete_append_next(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_s3_complete_ctx *ctx);
 
 static void
-chimera_s3_complete_start_assembly(struct chimera_s3_complete_ctx *ctx)
-{
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_vfs_module       *module;
-
-    /* The destination file's module determines which assembly primitive
-     * we use. Sources and destination must be on the same module since
-     * range ops are intra-module. All parts in this upload were created
-     * in the same dir, so this is automatically true. */
-    module = chimera_vfs_get_module(thread->vfs,
-                                    request->file_handle->fh,
-                                    request->file_handle->fh_len);
-
-    if (module->capabilities & CHIMERA_VFS_CAP_MOVE_RANGE) {
-        ctx->assemble_mode = CHIMERA_S3_ASSEMBLE_MOVE;
-    } else if (module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) {
-        ctx->assemble_mode = CHIMERA_S3_ASSEMBLE_COPY;
-    } else {
-        ctx->assemble_mode = CHIMERA_S3_ASSEMBLE_RW;
-    }
-
-    ctx->client_idx   = 0;
-    ctx->write_offset = 0;
-    ctx->part_offset  = 0;
-
-    chimera_s3_complete_assemble_next(ctx);
-} /* chimera_s3_complete_start_assembly */
-
-/* The destination setup sequence is over.  On success the directory and the
- * scratch file are the request's; on a transient failure the whole sequence
- * is re-run after a back-off (nothing was taken, so whatever it opened went
- * with it); anything else fails the Complete. */
-static void
-chimera_s3_complete_setup_complete(
+chimera_s3_complete_attempt_reset(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
     struct chimera_s3_complete_ctx *ctx = private_data;
-    enum chimera_vfs_error          error_code;
 
-    error_code = chimera_s3_mpu_take_part_setup(compound, ctx->request);
+    ctx->attempt_dir          = ctx->request->dir_handle;
+    ctx->attempt_file         = ctx->request->file_handle;
+    ctx->attempt_tmp_name_len = ctx->request->multipart.tmp_name_len;
+    ctx->attempt_idx          = ctx->client_idx;
+    ctx->attempt_write_offset = ctx->write_offset;
+    ctx->attempt_part_offset  = ctx->part_offset;
+    ctx->attempt_mode         = ctx->assemble_mode;
+    ctx->attempt_steps        = 0;
+    ctx->attempt_read_used    = 0;
+    ctx->published            = 0;
+    ctx->failure              = CHIMERA_S3_STATUS_OK;
+} /* chimera_s3_complete_attempt_reset */
 
-    chimera_vfs_compound_free(compound);
+static int
+chimera_s3_complete_append_publish(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_s3_complete_ctx *ctx)
+{
+    struct chimera_s3_request *request = ctx->request;
+    int                        index;
 
-    if (error_code) {
-        /* The linux backend can transiently return ESTALE (and, while a parent
-         * directory is being recycled, ENOENT) from open_by_handle_at when a
-         * cached directory handle is being evicted concurrently -- from the
-         * parent-chain create, or from the open of the directory it just
-         * made. Re-running the sequence from the bucket handle (after a
-         * back-off so the concurrent eviction drains) resolves a fresh handle
-         * and succeeds. Bound the retries so a genuinely missing parent still
-         * errors out. */
-        if (chimera_s3_complete_create_retry(ctx, error_code)) {
-            return;
-        }
-        chimera_s3_complete_finish_common(error_code, ctx);
+    chimera_vfs_compound_add_puthandle(compound, ctx->attempt_file,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+    if (chimera_s3_tagging_compound_store(compound, request) < 0) {
+        return -1;
+    }
+    if (ctx->attempt_tmp_name_len) {
+        chimera_vfs_compound_add_putfh(compound, ctx->attempt_dir->fh,
+                                       ctx->attempt_dir->fh_len);
+        chimera_vfs_compound_add_savefh(compound);
+        index = chimera_vfs_compound_add_rename(compound, request->multipart.tmp_name, ctx->attempt_tmp_name_len,
+                                                request->name, request->name_len, 0, 0, 0);
+    } else {
+        chimera_vfs_compound_add_putfh(compound, ctx->attempt_file->fh,
+                                       ctx->attempt_file->fh_len);
+        chimera_vfs_compound_add_savefh(compound);
+        chimera_vfs_compound_add_putfh(compound, ctx->attempt_dir->fh,
+                                       ctx->attempt_dir->fh_len);
+        index = chimera_vfs_compound_add_link_replace(compound, request->name,
+                                                      request->name_len, 0);
+    }
+    ctx->published = 1;
+    return index < 0 ? -1 : 0;
+} /* chimera_s3_complete_append_publish */
+
+static void
+chimera_s3_complete_transfer_done(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_complete_ctx       *ctx  = private_data;
+    const struct chimera_vfs_compound_op *op   = chimera_vfs_compound_op(compound, index);
+    struct chimera_s3_part               *part = ctx->client_parts[ctx->attempt_idx];
+    uint64_t                              length;
+
+    if (*status != CHIMERA_VFS_OK) {
         return;
     }
+    length = op->written;
+    if (!length || length > part->size - ctx->attempt_part_offset) {
+        *status = CHIMERA_VFS_EIO;
+        return;
+    }
+    ctx->attempt_write_offset += length;
+    ctx->attempt_part_offset  += length;
+    if (ctx->attempt_part_offset == part->size) {
+        ctx->attempt_idx++;
+        ctx->attempt_part_offset = 0;
+    }
+    if (chimera_s3_complete_append_next(compound, ctx) < 0) {
+        *status = CHIMERA_VFS_ENOSPC;
+    }
+} /* chimera_s3_complete_transfer_done */
 
-    chimera_s3_complete_start_assembly(ctx);
-} /* chimera_s3_complete_setup_complete */
+static void
+chimera_s3_complete_read_done(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_complete_ctx       *ctx = private_data;
+    const struct chimera_vfs_compound_op *op  = chimera_vfs_compound_op(compound, index);
+    int                                   write_index;
 
-/* Kick off (or retry) the destination setup: PUT's shape, with the scratch
- * file named for this request when the backend cannot create it unlinked. */
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (!op->read_len) {
+        *status = CHIMERA_VFS_EIO;
+        return;
+    }
+    ctx->attempt_read_used = 1;
+    write_index            = chimera_vfs_compound_add_write(compound, ctx->attempt_file, ctx->attempt_write_offset, op->
+                                                            read_len, 1, op->iov, op->niov, 0, 0, NULL);
+    chimera_vfs_compound_set_op_callbacks(compound, write_index, NULL,
+                                          chimera_s3_complete_transfer_done, ctx);
+} /* chimera_s3_complete_read_done */
+
+static int
+chimera_s3_complete_append_next(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_s3_complete_ctx *ctx)
+{
+    struct chimera_s3_part *part;
+    uint64_t                length;
+    int                     index;
+
+    while (ctx->attempt_idx < ctx->part_count &&
+           !ctx->client_parts[ctx->attempt_idx]->size) {
+        ctx->attempt_idx++;
+        ctx->attempt_part_offset = 0;
+    }
+    if (ctx->attempt_idx == ctx->part_count) {
+        return chimera_s3_complete_append_publish(compound, ctx);
+    }
+    /* Range operations retain no body buffers. Bound their operation count;
+     * a buffered transfer keeps only one READ's references per attempt. */
+    if (ctx->attempt_steps >= 128 || ctx->attempt_read_used) {
+        return 0;
+    }
+    ctx->attempt_steps++;
+    part   = ctx->client_parts[ctx->attempt_idx];
+    length = part->size - ctx->attempt_part_offset;
+    if (ctx->attempt_mode == CHIMERA_S3_ASSEMBLE_COPY) {
+        index = chimera_vfs_compound_add_copy_range(
+            compound, part->file_handle, ctx->attempt_part_offset,
+            ctx->attempt_file, ctx->attempt_write_offset, length, 0, 0, 0);
+    } else {
+        uint32_t chunk = chimera_s3_compound_chunk_size(ctx->request);
+        if (length < chunk) {
+            chunk = length;
+        }
+        ctx->attempt_read_used = 1;
+        index                  = chimera_vfs_compound_add_read(compound, part->file_handle, ctx->attempt_part_offset,
+                                                               chunk, ctx->rw_iov, CHIMERA_S3_IOV_MAX, 0, NULL, NULL, 0)
+        ;
+    }
+    chimera_vfs_compound_set_op_callbacks(
+        compound, index, NULL,
+        ctx->attempt_mode == CHIMERA_S3_ASSEMBLE_RW ?
+        chimera_s3_complete_read_done : chimera_s3_complete_transfer_done, ctx);
+    return index < 0 ? -1 : 0;
+} /* chimera_s3_complete_append_next */
+
+static void
+chimera_s3_complete_file_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_complete_ctx *ctx = private_data;
+    struct chimera_vfs_module      *module;
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    ctx->attempt_file = chimera_vfs_compound_op(compound, index)->out_handle;
+    module            = chimera_vfs_get_module(ctx->request->thread->vfs,
+                                               ctx->attempt_file->fh, ctx->attempt_file->fh_len);
+    /* Accepted assembly chunks can precede a later transfer or publication
+     * failure. Keep the uploaded parts intact until publication succeeds so
+     * Complete can retry from the same inputs; MOVE_RANGE would consume them
+     * even if a future backend rolls back only the final compound. */
+    ctx->attempt_mode = module && (module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) ?
+        CHIMERA_S3_ASSEMBLE_COPY : CHIMERA_S3_ASSEMBLE_RW;
+    if (chimera_s3_complete_append_next(compound, ctx) < 0) {
+        *status = CHIMERA_VFS_ENOSPC;
+    }
+} /* chimera_s3_complete_file_ready */
+
+static void
+chimera_s3_complete_directory_ready(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_complete_ctx *ctx     = private_data;
+    struct chimera_s3_request      *request = ctx->request;
+    struct chimera_vfs_module      *module;
+    struct chimera_vfs_attrs        attrs = { 0 };
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    ctx->attempt_dir = chimera_vfs_compound_op(compound, index)->out_handle;
+    module           = chimera_vfs_get_module(request->thread->vfs,
+                                              ctx->attempt_dir->fh, ctx->attempt_dir->fh_len);
+    if (module && (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED)) {
+        ctx->attempt_tmp_name_len = 0;
+        ctx->file_result          = chimera_vfs_compound_add_create_unlinked(compound, CHIMERA_VFS_OPEN_INFERRED, &attrs
+                                                                             , CHIMERA_VFS_ATTR_FH);
+    } else {
+        ctx->attempt_tmp_name_len = strlen(request->multipart.tmp_name);
+        ctx->file_result          = chimera_vfs_compound_add_open(compound, request->multipart.tmp_name, ctx->
+                                                                  attempt_tmp_name_len, CHIMERA_VFS_OPEN_CREATE, 0, &
+                                                                  attrs, CHIMERA_VFS_ATTR_FH, 0, 0);
+    }
+    chimera_vfs_compound_set_op_callbacks(compound, ctx->file_result, NULL,
+                                          chimera_s3_complete_file_ready, ctx);
+} /* chimera_s3_complete_directory_ready */
+
+static void
+chimera_s3_complete_compound_done(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_s3_complete_ctx *ctx     = private_data;
+    struct chimera_s3_request      *request = ctx->request;
+    enum chimera_vfs_error          status  = chimera_vfs_compound_status(compound);
+
+    if (chimera_vfs_compound_finish_status(compound) == CHIMERA_VFS_OK) {
+        ctx->request->multipart.tmp_name_len = ctx->attempt_tmp_name_len;
+    }
+    if (status != CHIMERA_VFS_OK) {
+        ctx->failure = chimera_s3_compound_error(compound, request,
+                                                 CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        int retry_create = !ctx->attempt_file && ctx->failure != CHIMERA_S3_STATUS_NO_SUCH_BUCKET;
+        chimera_vfs_compound_free(compound);
+        if (retry_create && chimera_s3_complete_create_retry(ctx, status)) {
+            return;
+        }
+        chimera_s3_complete_finish_common(status, ctx);
+        return;
+    }
+    if (ctx->published) {
+        chimera_vfs_compound_free(compound);
+        chimera_s3_complete_finish_common(CHIMERA_VFS_OK, ctx);
+        return;
+    }
+    if (!request->file_handle) {
+        request->dir_handle  = chimera_vfs_compound_take_handle(compound, ctx->directory_result);
+        request->file_handle = chimera_vfs_compound_take_handle(compound, ctx->file_result);
+    }
+    ctx->client_idx    = ctx->attempt_idx;
+    ctx->write_offset  = ctx->attempt_write_offset;
+    ctx->part_offset   = ctx->attempt_part_offset;
+    ctx->assemble_mode = ctx->attempt_mode;
+    chimera_vfs_compound_free(compound);
+    chimera_s3_complete_create_dir(ctx);
+} /* chimera_s3_complete_compound_done */
+
+/* Even an all-empty tail must build after reset so its publication flag and
+ * part cursor survive submission and are rebuilt on every rejected attempt. */
+static void
+chimera_s3_complete_resume(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    if (*status == CHIMERA_VFS_OK &&
+        chimera_s3_complete_append_next(compound, private_data) < 0) {
+        *status = CHIMERA_VFS_ENOSPC;
+    }
+} /* chimera_s3_complete_resume */
+
 static void
 chimera_s3_complete_create_dir(struct chimera_s3_complete_ctx *ctx)
 {
-    struct chimera_s3_request       *request = ctx->request;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_vfs_compound     *compound;
-    char                             tmp_name[64];
-    int                              tmp_name_len = 0;
+    struct chimera_s3_request   *request = ctx->request;
+    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_attrs     attrs = { 0 };
 
-    if (!chimera_s3_mpu_can_create_unlinked(thread, request)) {
-        tmp_name_len = snprintf(tmp_name, sizeof(tmp_name),
-                                "._chimera_mpufinal_%" PRIx64 "%" PRIx64,
-                                (uint64_t) request,
-                                (uint64_t) request->start_time.tv_nsec);
+    if (ctx->submitting) {
+        ctx->again = 1;
+        return;
     }
-
-    compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-    chimera_s3_mpu_add_part_setup(compound, request,
-                                  ctx->dirpath, ctx->dirpathlen,
-                                  tmp_name, tmp_name_len);
-
-    chimera_vfs_compound_submit(compound, chimera_s3_complete_setup_complete,
-                                ctx);
+    ctx->submitting = 1;
+    do {
+        ctx->again = 0;
+        if (request->file_handle) {
+            compound = chimera_vfs_compound_alloc(request->thread->vfs, &request->cred);
+            chimera_vfs_compound_add_puthandle(compound, request->file_handle,
+                                               CHIMERA_VFS_OPEN_INFERRED);
+            int resume = chimera_vfs_compound_add_gethandle(compound);
+            chimera_vfs_compound_set_op_callbacks(compound, resume, NULL,
+                                                  chimera_s3_complete_resume, ctx);
+        } else {
+            compound = chimera_s3_compound_alloc(request);
+            chimera_vfs_compound_add_create_tree(compound, ctx->dirpath, ctx->dirpathlen,
+                                                 &attrs, CHIMERA_VFS_ATTR_FH);
+            chimera_vfs_compound_add_open_current(
+                compound, CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+                CHIMERA_VFS_OPEN_DIRECTORY, 0);
+            ctx->directory_result = chimera_vfs_compound_add_gethandle(compound);
+            chimera_vfs_compound_set_op_callbacks(
+                compound, ctx->directory_result, NULL,
+                chimera_s3_complete_directory_ready, ctx);
+        }
+        chimera_vfs_compound_set_attempt_reset(compound, chimera_s3_complete_attempt_reset, ctx);
+        chimera_frontend_compound_submit(compound, chimera_s3_complete_compound_done, ctx);
+    } while (ctx->again && !ctx->terminal);
+    ctx->submitting = 0;
+    if (ctx->terminal) {
+        chimera_s3_complete_finish_common(ctx->terminal_error, ctx);
+    }
 } /* chimera_s3_complete_create_dir */
 
-/* One-shot timer callback: re-run the destination setup after a back-off. */
+/* One-shot timer callback: re-drive the parent-dir create after a back-off. */
 static void
 chimera_s3_complete_create_retry_timer_cb(
     struct evpl       *evpl,
@@ -2644,18 +2384,15 @@ chimera_s3_complete_create_retry_timer_cb(
 } /* chimera_s3_complete_create_retry_timer_cb */
 
 /*
- * Schedule a back-off'd retry of the destination setup sequence. Returns 1 if
+ * Schedule a back-off'd retry of the destination parent-dir create. Returns 1 if
  * a retry was armed (caller must return), 0 if the bound is exhausted or the
  * error is not a transient handle-recycle error (caller should fail the op).
  *
  * The transient ESTALE/ENOENT is produced by the linux backend's
  * open_by_handle_at when a cached directory handle is being evicted by the VFS
- * close-sweep thread under concurrent load. An immediate re-run in the same
+ * close-sweep thread under concurrent load. An immediate re-walk in the same
  * event-loop turn races the same eviction window; backing off for a short
- * interval lets the sweep drain so the re-run resolves a fresh handle.
- *
- * Nothing is held across the retry: a failed setup sequence takes no handle,
- * and releases every one it opened.
+ * interval lets the sweep drain so the re-walk resolves a fresh handle.
  */
 static int
 chimera_s3_complete_create_retry(
@@ -2671,6 +2408,17 @@ chimera_s3_complete_create_retry(
     }
 
     ctx->create_retries++;
+
+    /* Drop any partially-resolved destination handles before re-walking so the
+     * retry starts clean (and so a stale handle is not released twice). */
+    if (ctx->request->dir_handle) {
+        chimera_vfs_release(thread->vfs, ctx->request->dir_handle);
+        ctx->request->dir_handle = NULL;
+    }
+    if (ctx->request->file_handle) {
+        chimera_vfs_release(thread->vfs, ctx->request->file_handle);
+        ctx->request->file_handle = NULL;
+    }
 
     evpl_add_oneshot_timer(thread->evpl, &ctx->create_retry_timer,
                            chimera_s3_complete_create_retry_timer_cb,
@@ -2782,7 +2530,7 @@ struct chimera_s3_complete_retry_ctx {
  * If the object the prior Complete assembled is present, replay the success
  * response; otherwise the upload truly never existed -> NoSuchUpload. */
 static void
-chimera_s3_complete_retry_lookup_complete(
+chimera_s3_complete_retry_lookup_callback(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
@@ -2791,6 +2539,8 @@ chimera_s3_complete_retry_lookup_complete(
     struct chimera_server_s3_thread      *thread     = request->thread;
     struct evpl                          *evpl       = thread->evpl;
     enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    enum chimera_s3_status                failure    = chimera_s3_compound_error(compound, request,
+                                                                                 CHIMERA_S3_STATUS_NO_SUCH_UPLOAD);
 
     chimera_vfs_compound_free(compound);
 
@@ -2804,7 +2554,7 @@ chimera_s3_complete_retry_lookup_complete(
         chimera_s3_complete_send_response(evpl, request, rctx->part_count,
                                           rctx->combined_etag);
     } else {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_UPLOAD;
+        request->status    = failure;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -2813,7 +2563,7 @@ chimera_s3_complete_retry_lookup_complete(
 
     chimera_s3_request_drop(rctx->request);
     free(rctx);
-} /* chimera_s3_complete_retry_lookup_complete */
+} /* chimera_s3_complete_retry_lookup_callback */
 
 /*
  * Phase 2: full body in hand. Parse the manifest, validate against the
@@ -2831,15 +2581,15 @@ chimera_s3_complete_multipart_upload_body_done(
     struct chimera_s3_part             *part;
     struct chimera_s3_part            **server_parts = NULL;
     struct chimera_s3_client_part      *client_parts = NULL;
-    struct chimera_vfs_compound        *compound;
-    int                                 n_client = 0;
+    int                                 n_client     = 0;
     enum chimera_s3_status              err;
 
     struct {
         uint64_t etag[2];
     } *etag_buf = NULL;
     XXH128_hash_t                       h;
-    const char                         *dirpath;
+    const char                         *slash;
+    const char                         *dirpath = request->path;
     int                                 dirpathlen;
     int                                 i;
 
@@ -2901,18 +2651,11 @@ chimera_s3_complete_multipart_upload_body_done(
             rctx->combined_etag[1] = combined[1];
             free(client_parts);
 
-            /* The probe: PUTFH(bucket), LOOKUP_PATH of the key. */
-            compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-
-            chimera_vfs_compound_add_putfh(compound, request->bucket_fh,
-                                           request->bucket_fhlen);
-            chimera_vfs_compound_add_lookup_path(compound,
-                                                 request->path, request->path_len,
+            struct chimera_vfs_compound *compound = chimera_s3_compound_alloc(request);
+            chimera_vfs_compound_add_lookup_path(compound, request->path, request->path_len,
                                                  CHIMERA_VFS_ATTR_FH, 0);
-
-            chimera_vfs_compound_submit(compound,
-                                        chimera_s3_complete_retry_lookup_complete,
-                                        rctx);
+            chimera_frontend_compound_submit(compound,
+                                             chimera_s3_complete_retry_lookup_callback, rctx);
             return;
         }
 
@@ -3015,12 +2758,24 @@ chimera_s3_complete_multipart_upload_body_done(
     /* Suppress unused warning when zero parts had no contribution. */
     (void) part;
 
-    /* Create the final object using the same setup sequence as PUT. Compute
-     * parent dir from object key. */
-    chimera_s3_mpu_split_key(request, &dirpath, &dirpathlen);
+    /* Create the final object using the same dir-open + create pattern as
+     * PUT. Compute parent dir from object key. */
+    slash = rindex(request->path, '/');
+    if (slash) {
+        dirpathlen    = slash - request->path;
+        request->name = slash + 1;
+        while (*request->name == '/') {
+            request->name++;
+        }
+    } else {
+        dirpath       = "/";
+        dirpathlen    = 1;
+        request->name = request->path;
+    }
+    request->name_len = strlen(request->name);
 
-    /* Stash the parent dirpath so the setup can be retried on a transient
-     * ESTALE (see chimera_s3_complete_setup_complete). */
+    /* Stash the parent dirpath so the create can be retried on a transient
+     * ESTALE (see chimera_s3_complete_create_root_callback). */
     if (dirpathlen > (int) sizeof(ctx->dirpath) - 1) {
         dirpathlen = sizeof(ctx->dirpath) - 1;
     }
@@ -3028,13 +2783,23 @@ chimera_s3_complete_multipart_upload_body_done(
     ctx->dirpath[dirpathlen] = '\0';
     ctx->dirpathlen          = dirpathlen;
 
+    snprintf(request->multipart.tmp_name, sizeof(request->multipart.tmp_name),
+             "._chimera_mpufinal_%" PRIx64 "%" PRIx64,
+             (uint64_t) request, (uint64_t) request->start_time.tv_nsec);
+    if (upload->tagging) {
+        request->tagging = calloc(1, sizeof(*request->tagging));
+        if (chimera_s3_tagging_parse_header(request->tagging, upload->tagging) != 0) {
+            free(request->tagging);
+            request->tagging = NULL;
+        }
+    }
     chimera_s3_complete_create_dir(ctx);
 } /* chimera_s3_complete_multipart_upload_body_done */
 
 /* ----- AbortMultipartUpload ----- */
 
-void
-chimera_s3_abort_multipart_upload(
+static void
+chimera_s3_abort_multipart_upload_accepted(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
@@ -3069,8 +2834,8 @@ chimera_s3_abort_multipart_upload(
 
 /* ----- ListParts ----- */
 
-void
-chimera_s3_list_parts(
+static void
+chimera_s3_list_parts_accepted(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
@@ -3209,8 +2974,8 @@ chimera_s3_mpu_row_cmp(
     return strcmp(ra->upload_id, rb->upload_id);
 } /* chimera_s3_mpu_row_cmp */
 
-void
-chimera_s3_list_multipart_uploads(
+static void
+chimera_s3_list_multipart_uploads_accepted(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
@@ -3340,4 +3105,99 @@ chimera_s3_list_multipart_uploads(
     free(rows);
 
     chimera_s3_mp_send_response(evpl, request, body_start, bp);
+} /* chimera_s3_list_multipart_uploads */
+
+/* Multipart control operations publish registry changes and HTTP responses
+* only after the request's bucket-resolution compound has been accepted. */
+typedef void (*chimera_s3_mp_control_fn)(
+    struct evpl *,
+    struct chimera_server_s3_thread *,
+    struct chimera_s3_request *);
+
+struct chimera_s3_mp_control_ctx {
+    struct chimera_s3_request *request;
+    chimera_s3_mp_control_fn   accepted;
+};
+
+static void
+chimera_s3_mp_control_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_s3_mp_control_ctx *ctx      = private_data;
+    struct chimera_s3_request        *request  = ctx->request;
+    chimera_s3_mp_control_fn          accepted = ctx->accepted;
+    enum chimera_vfs_error            status   = chimera_vfs_compound_status(compound);
+
+    enum chimera_s3_status            failure = chimera_s3_compound_error(compound, request,
+                                                                          CHIMERA_S3_STATUS_NO_SUCH_BUCKET);
+
+
+
+    chimera_vfs_compound_free(compound);
+    free(ctx);
+    if (request->abandoned || !request->http_request) {
+        goto request_drop;
+    }
+    if (status != CHIMERA_VFS_OK) {
+        request->status    = failure;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(request->thread->evpl, request);
+        }
+        goto request_drop;
+    }
+    accepted(request->thread->evpl, request->thread, request);
+ request_drop:
+    chimera_s3_request_drop(request);
+} /* chimera_s3_mp_control_complete */
+
+static void
+chimera_s3_mp_control_submit(
+    struct chimera_s3_request *request,
+    chimera_s3_mp_control_fn   accepted)
+{
+    struct chimera_s3_mp_control_ctx *ctx      = calloc(1, sizeof(*ctx));
+    struct chimera_vfs_compound      *compound = chimera_s3_compound_alloc(request);
+
+    ctx->request  = request;
+    ctx->accepted = accepted;
+    chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_mp_control_complete, ctx);
+} /* chimera_s3_mp_control_submit */
+
+void
+chimera_s3_create_multipart_upload(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    chimera_s3_mp_control_submit(request, chimera_s3_create_multipart_upload_accepted);
+} /* chimera_s3_create_multipart_upload */
+
+void
+chimera_s3_abort_multipart_upload(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    chimera_s3_mp_control_submit(request, chimera_s3_abort_multipart_upload_accepted);
+} /* chimera_s3_abort_multipart_upload */
+
+void
+chimera_s3_list_parts(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    chimera_s3_mp_control_submit(request, chimera_s3_list_parts_accepted);
+} /* chimera_s3_list_parts */
+
+void
+chimera_s3_list_multipart_uploads(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    chimera_s3_mp_control_submit(request, chimera_s3_list_multipart_uploads_accepted);
 } /* chimera_s3_list_multipart_uploads */

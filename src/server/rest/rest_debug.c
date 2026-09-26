@@ -6,16 +6,11 @@
  * Test-only debug endpoint: POST /api/v1/debug/fsop
  *
  * Performs a server-side filesystem mutation (unlink/rename/link/chmod) on a
- * path within an exported share, issued directly through the VFS layer. The
+ * path within an exported share, issued as a single VFS compound. The
  * VFS core recalls any outstanding delegation/oplock on the affected file as a
  * natural side effect of these metadata operations, which lets the pynfs
  * DELEG16-20 tests drive an "out-of-band" recall that chimera otherwise has no
  * way to simulate on an in-memory backend.
- *
- * Each op is one sequence rooted at PUTROOT and addressed by path: unlink is
- * REMOVE_PATH, rename RENAME_PATH, link LINK_PATH, and chmod resolves the
- * object (LOOKUP_PATH), opens it (OPEN_CURRENT) and applies the mode through
- * that open (SETATTR) -- the open belongs to the sequence and goes with it.
  *
  * This route is only reachable when the rest_debug_fsops config flag is set;
  * it is never enabled in production.
@@ -37,6 +32,7 @@
 #include "server/server.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
+#include "common/compound_retry.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "rest_internal.h"
@@ -44,7 +40,6 @@
 struct rest_fsop_ctx {
     struct evpl              *evpl;
     struct evpl_http_request *request;
-    struct chimera_vfs_attrs  set_attr;
 };
 
 static void
@@ -67,11 +62,8 @@ rest_fsop_send_json(
     evpl_http_server_dispatch_default(request, status);
 } /* rest_fsop_send_json */
 
-/*
- * The one completion for every op: maps the sequence's status to an HTTP
- * response and frees the context.  Nothing is read back from the ops, and
- * whatever the sequence opened (chmod's handle) is released with it.
- */
+/* Only terminal completion publishes the HTTP response. Rejected finishes
+* replay through the common bounded adapter with compound-owned inputs. */
 static void
 rest_fsop_complete(
     struct chimera_vfs_compound *compound,
@@ -81,8 +73,8 @@ rest_fsop_complete(
     enum chimera_vfs_error error_code = chimera_vfs_compound_status(compound);
     char                   response[128];
 
+    /* The compound owns every intermediate handle, including chmod's open. */
     chimera_vfs_compound_free(compound);
-
     if (error_code == CHIMERA_VFS_OK) {
         rest_fsop_send_json(ctx->evpl, ctx->request, 200, "{\"status\":\"ok\"}");
     } else {
@@ -90,7 +82,6 @@ rest_fsop_complete(
                  "{\"error\":\"fsop failed\",\"vfs_error\":%d}", error_code);
         rest_fsop_send_json(ctx->evpl, ctx->request, 500, response);
     }
-
     free(ctx);
 } /* rest_fsop_complete */
 
@@ -102,15 +93,13 @@ chimera_rest_handle_debug_fsop(
     const char                 *body,
     int                         body_len)
 {
-    json_t                        *root;
-    json_error_t                   error;
-    const char                    *op;
-    const char                    *path;
-    const char                    *path2;
-    json_t                        *mode_obj;
-    struct rest_fsop_ctx          *ctx;
-    struct chimera_vfs_compound   *compound;
-    const struct chimera_vfs_cred *cred = chimera_vfs_get_server_cred();
+    json_t                      *root;
+    json_error_t                 error;
+    const char                  *op, *path, *path2 = NULL;
+    const char                  *bad_request = NULL;
+    json_t                      *mode_obj    = NULL;
+    struct rest_fsop_ctx        *ctx;
+    struct chimera_vfs_compound *compound;
 
     root = json_loadb(body, body_len, 0, &error);
     if (!root) {
@@ -121,84 +110,62 @@ chimera_rest_handle_debug_fsop(
 
     op   = json_string_value(json_object_get(root, "op"));
     path = json_string_value(json_object_get(root, "path"));
-
     if (!op || !path || strlen(path) >= CHIMERA_VFS_PATH_MAX) {
-        json_decref(root);
-        rest_fsop_send_json(evpl, request, 400,
-                            "{\"error\":\"Bad Request\",\"message\":\"missing op or path\"}");
-        return;
-    }
-
-    ctx          = calloc(1, sizeof(*ctx));
-    ctx->evpl    = evpl;
-    ctx->request = request;
-
-    /* The paths are copied by the adders, so the JSON document need only
-     * outlive the build. */
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, cred);
-
-    chimera_vfs_compound_add_putroot(compound);
-
-    if (strcmp(op, "unlink") == 0) {
-        chimera_vfs_compound_add_remove_path(compound, path, strlen(path), 0);
-    } else if (strcmp(op, "rename") == 0) {
+        bad_request = "missing op or path";
+    } else if (!strcmp(op, "rename") || !strcmp(op, "link")) {
         path2 = json_string_value(json_object_get(root, "path2"));
         if (!path2 || strlen(path2) >= CHIMERA_VFS_PATH_MAX) {
-            chimera_vfs_compound_free(compound);
-            json_decref(root);
-            free(ctx);
-            rest_fsop_send_json(evpl, request, 400,
-                                "{\"error\":\"Bad Request\",\"message\":\"rename requires path2\"}");
-            return;
+            bad_request = !strcmp(op, "rename") ? "rename requires path2" : "link requires path2";
         }
-        chimera_vfs_compound_add_rename_path(compound,
-                                             path, strlen(path),
-                                             path2, strlen(path2));
-    } else if (strcmp(op, "link") == 0) {
-        path2 = json_string_value(json_object_get(root, "path2"));
-        if (!path2 || strlen(path2) >= CHIMERA_VFS_PATH_MAX) {
-            chimera_vfs_compound_free(compound);
-            json_decref(root);
-            free(ctx);
-            rest_fsop_send_json(evpl, request, 400,
-                                "{\"error\":\"Bad Request\",\"message\":\"link requires path2\"}");
-            return;
-        }
-        chimera_vfs_compound_add_link_path(compound,
-                                           path, strlen(path), 0,
-                                           path2, strlen(path2), 0);
-    } else if (strcmp(op, "chmod") == 0) {
+    } else if (!strcmp(op, "chmod")) {
         mode_obj = json_object_get(root, "mode");
         if (!json_is_integer(mode_obj)) {
-            chimera_vfs_compound_free(compound);
-            json_decref(root);
-            free(ctx);
-            rest_fsop_send_json(evpl, request, 400,
-                                "{\"error\":\"Bad Request\",\"message\":\"chmod requires integer mode\"}");
-            return;
+            bad_request = "chmod requires integer mode";
         }
+    } else if (strcmp(op, "unlink")) {
+        bad_request = "unknown op";
+    }
+    if (bad_request) {
+        char response[128];
 
-        ctx->set_attr.va_req_mask = 0;
-        ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-        ctx->set_attr.va_mode     = json_integer_value(mode_obj);
-
-        chimera_vfs_compound_add_lookup_path(compound, path, strlen(path),
-                                             CHIMERA_VFS_ATTR_FH,
-                                             CHIMERA_VFS_LOOKUP_FOLLOW);
-        chimera_vfs_compound_add_open_current(compound,
-                                              CHIMERA_VFS_OPEN_INFERRED |
-                                              CHIMERA_VFS_OPEN_PATH, 0);
-        chimera_vfs_compound_add_setattr(compound, NULL, &ctx->set_attr, 0, 0);
-    } else {
-        chimera_vfs_compound_free(compound);
+        snprintf(response, sizeof(response),
+                 "{\"error\":\"Bad Request\",\"message\":\"%s\"}", bad_request);
         json_decref(root);
-        free(ctx);
-        rest_fsop_send_json(evpl, request, 400,
-                            "{\"error\":\"Bad Request\",\"message\":\"unknown op\"}");
+        rest_fsop_send_json(evpl, request, 400, response);
         return;
     }
 
-    json_decref(root);
+    ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        json_decref(root);
+        rest_fsop_send_json(evpl, request, 500, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    ctx->evpl    = evpl;
+    ctx->request = request;
+    compound     = chimera_vfs_compound_alloc(thread->vfs_thread, chimera_vfs_get_server_cred());
+    chimera_vfs_compound_add_putroot(compound);
 
-    chimera_vfs_compound_submit(compound, rest_fsop_complete, ctx);
+    if (!strcmp(op, "unlink")) {
+        chimera_vfs_compound_add_remove_path(compound, path, strlen(path), 0);
+    } else if (!strcmp(op, "rename")) {
+        chimera_vfs_compound_add_rename_path(compound, path, strlen(path), path2, strlen(path2));
+    } else if (!strcmp(op, "link")) {
+        chimera_vfs_compound_add_link_path(compound, path, strlen(path), 0, path2, strlen(path2), 0);
+    } else {
+        struct chimera_vfs_attrs attr = { 0 };
+
+        attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        attr.va_mode     = json_integer_value(mode_obj);
+        chimera_vfs_compound_add_lookup_path(compound, path, strlen(path),
+                                             CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH, 0);
+        chimera_vfs_compound_add_setattr(compound, NULL, &attr, 0, 0);
+    }
+
+    /* Builders copy paths and attributes, so neither JSON nor stack storage
+     * needs to survive asynchronous execution or finish retries. */
+    json_decref(root);
+    chimera_frontend_compound_submit(compound, rest_fsop_complete, ctx);
 } /* chimera_rest_handle_debug_fsop */

@@ -16,6 +16,37 @@ target_include_directories(test_state_table PRIVATE
 add_test(NAME chimera/server/nfs/state_table
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_state_table)
 
+# Exercise the actual legacy LOCKU early-error and replay paths without RPC.
+add_executable(test_legacy_lock_replay test_legacy_lock_replay.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_locku.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_lock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_open_confirm.c)
+target_link_libraries(test_legacy_lock_replay chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
+target_include_directories(test_legacy_lock_replay PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/legacy_lock_replay
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_legacy_lock_replay)
+
+add_executable(test_delegation_io test_delegation_io.c)
+target_link_libraries(test_delegation_io chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
+target_include_directories(test_delegation_io PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/delegation_io
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_delegation_io)
+
+add_executable(test_layout_barrier test_layout_barrier.c)
+target_link_libraries(test_layout_barrier chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
+target_include_directories(test_layout_barrier PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/layout_barrier
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_layout_barrier)
+
 # Unit test for the NFS4.1 SEQUENCE replay slot state machine.  Drives
 # nfs4_replay_slot_acquire / _finalize directly.  We compile the
 # session source file straight into the test executable (rather than
@@ -26,6 +57,7 @@ add_executable(test_replay_slot
     test_replay_slot.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_session.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_change.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
@@ -48,6 +80,7 @@ add_executable(test_nfs_persist
     test_nfs_persist.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_session.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_change.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
@@ -180,6 +213,14 @@ add_test(NAME chimera/server/nfs/open_owner_lifetime
 # Needs pynfs for its NFSv4.0 client, and a network namespace to own port 2049;
 # the wrapper exits 77 (skip) if pynfs is missing at run time.
 if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
+    add_test(NAME chimera/server/nfs/v40_delegation_replay
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_v40_drc_replay_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_v40_delegation_replay.py)
+    set_tests_properties(chimera/server/nfs/v40_delegation_replay PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1;V40_DELEGATIONS=true")
     add_test(NAME chimera/server/nfs/v40_drc_replay
         COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_v40_drc_replay_test_wrapper.sh
                 ${CMAKE_BINARY_DIR}/src/daemon/chimera
@@ -189,6 +230,81 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
         SKIP_RETURN_CODE 77
         TIMEOUT 180
         ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
+
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
+    # Test-only fault injection; never linked into or configured by the daemon.
+    add_library(nfs4_compound_finish_retry SHARED nfs4_compound_finish_retry.c)
+    target_include_directories(nfs4_compound_finish_retry PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(nfs4_compound_finish_retry chimera_vfs ${CMAKE_DL_LIBS})
+    foreach(minor 0 1 2)
+        if(minor EQUAL 0)
+            set(compound_boundary_script ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_v40_boundaries.py)
+        else()
+            set(compound_boundary_script ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_boundaries.py)
+        endif()
+        add_test(NAME chimera/server/nfs/compound_boundaries_v4.${minor}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                    /opt/pynfs
+                    ${compound_boundary_script}
+                    ${minor})
+        set_tests_properties(chimera/server/nfs/compound_boundaries_v4.${minor} PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+            ENVIRONMENT "PYTHONUNBUFFERED=1")
+        add_test(NAME chimera/server/nfs/compound_finish_retry_v4.${minor}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                    /opt/pynfs
+                    ${compound_boundary_script}
+                    ${minor}
+                    $<TARGET_FILE:nfs4_compound_finish_retry>)
+        set_tests_properties(chimera/server/nfs/compound_finish_retry_v4.${minor} PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+            ENVIRONMENT "PYTHONUNBUFFERED=1")
+    endforeach()
+    foreach(feature namespace proxy3 proxy4)
+        foreach(mode accepted retry)
+            set(retry_preload)
+            if(mode STREQUAL "retry")
+                set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+            endif()
+            add_test(NAME chimera/server/nfs/compound_adoption_${feature}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                        /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_adoption.py
+                        2 ${retry_preload})
+            set_tests_properties(chimera/server/nfs/compound_adoption_${feature}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+        endforeach()
+    endforeach()
+    foreach(feature delegation pnfs pnfs_unsupported)
+        add_test(NAME chimera/server/nfs/compound_features_${feature}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                    /opt/pynfs
+                    ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_features.py
+                    2)
+        set_tests_properties(chimera/server/nfs/compound_features_${feature} PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+            ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+        add_test(NAME chimera/server/nfs/compound_features_${feature}_retry
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                    /opt/pynfs
+                    ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_features.py
+                    2
+                    $<TARGET_FILE:nfs4_compound_finish_retry>)
+        set_tests_properties(chimera/server/nfs/compound_features_${feature}_retry PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+            ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+    endforeach()
 endif()
 
 # Tag every test registered above with the 'nfs' label so these NFS server unit

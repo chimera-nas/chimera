@@ -13,151 +13,12 @@
 #include "nfs4_callback.h"
 #include "nfs4_named_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
-
-/*
- * The claim-core SHARE reservation an OPEN asks for, built from the
- * operation's arguments and the client that sent them.
- *
- * Everything here is a pure function of the wire and the client table, which
- * is why it is separable from taking it: a sequenced OPEN builds the lease
- * when the sequence is BUILT and lets a CLAIM op of the run do the
- * arbitration, and the op-at-a-time path below builds it and acquires in the
- * same breath.  The lease is heap-allocated because the claim core keeps
- * pointers into a claim it has inserted (see struct nfs4_share_lease).
- *
- * Returns NULL when the OPEN reserves nothing at all -- which the scan makes
- * unreachable for a sequence (share_access must carry READ or WRITE) but the
- * op-at-a-time path still has to tolerate.
- */
-SYMBOL_EXPORT struct nfs4_share_lease *
-chimera_nfs4_open_share_lease_build(
-    const struct OPEN4args *args,
-    struct nfs_client      *client,
-    uint32_t                share_access,
-    uint32_t                share_deny)
-{
-    struct nfs4_share_lease   *share;
-    struct chimera_claim_owner owner;
-    uint8_t                    granted = 0;
-    uint8_t                    denied  = 0;
-
-    if (share_access & OPEN4_SHARE_ACCESS_READ) {
-        granted |= CHIMERA_CLAIM_R;
-    }
-    if (share_access & OPEN4_SHARE_ACCESS_WRITE) {
-        granted |= CHIMERA_CLAIM_W;
-    }
-    if (share_deny & OPEN4_SHARE_DENY_READ) {
-        denied |= CHIMERA_CLAIM_R;
-    }
-    if (share_deny & OPEN4_SHARE_DENY_WRITE) {
-        denied |= CHIMERA_CLAIM_W;
-    }
-
-    if (granted == 0 && denied == 0) {
-        return NULL;
-    }
-
-    share = calloc(1, sizeof(*share));
-
-    if (!share) {
-        return NULL;
-    }
-
-    memset(&owner, 0, sizeof(owner));
-    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
-    owner.client_key = client->client_id;
-    /* The open-owner string as it arrived, which is what the open_owner this
-     * OPEN resolves to is keyed on -- so a lease built before the state
-     * exists and one built from the state carry the same owner. */
-    owner.owner_lo = XXH3_64bits(args->owner.owner.data,
-                                 args->owner.owner.len);
-    owner.owner_hi = 0;
-
-    chimera_vfs_claim_init_nfs4_open(&share->claim, granted, denied, &owner);
-    /* Courteous server: report this share reservation dead once the owning
-     * client's lease lapses, so a conflicting open reclaims it; reclaim flags
-     * the client for sweep teardown. */
-    share->claim.is_alive_cb = nfs_client_lease_alive;
-    share->claim.revoked_cb  = nfs_client_lease_revoked_cb;
-    share->claim.cb_private  = client;
-
-    return share;
-} /* chimera_nfs4_open_share_lease_build */
-
-/*
- * Take a built lease against `handle`, the op-at-a-time way.
- *
- * Also the sequenced path's fallback: a run that fails AFTER the OPEN's CLAIM
- * was granted has the claim released out from under it by the executor's abort
- * release, which happens before the completion callback -- so the OPEN's fill
- * finds its file state gone and arbitrates again, here, for the result it is
- * in the middle of writing.  That is the asymmetry with LOCK, which ends its
- * run rather than re-arbitrate: a claim taken for an op whose result is
- * already committed cannot be re-arbitrated, and one taken for the op
- * currently being filled can.
- */
-SYMBOL_EXPORT nfsstat4
-chimera_nfs4_open_share_lease_acquire(
-    struct nfs_request             *req,
-    struct nfs4_share_lease        *share,
-    struct chimera_vfs_open_handle *handle)
-{
-    struct chimera_vfs_state      *vfs_state = req->thread->vfs->vfs_state;
-    struct chimera_vfs_file_state *file_state;
-    enum chimera_vfs_claim_result  result;
-
-    file_state = chimera_vfs_state_get(vfs_state,
-                                       handle->fh, handle->fh_len,
-                                       handle->fh_hash, true);
-    if (!file_state) {
-        return NFS4ERR_SERVERFAULT;
-    }
-
-    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
-                                           &share->claim, NULL);
-
-    return chimera_nfs4_open_share_status(share, file_state, result);
-} /* chimera_nfs4_open_share_lease_acquire */
-
-/*
- * What an arbitration answer means to an OPEN, and what the lease owns
- * afterwards.  Shared by the acquire above and by the sequenced path, whose
- * answer comes back on a CLAIM op of the run rather than from a call.
- */
-SYMBOL_EXPORT nfsstat4
-chimera_nfs4_open_share_status(
-    struct nfs4_share_lease       *share,
-    struct chimera_vfs_file_state *file_state,
-    enum chimera_vfs_claim_result  result)
-{
-    if (result == CHIMERA_CLAIM_GRANTED) {
-        share->file_state = file_state;
-        share->held       = true;
-        return NFS4_OK;
-    }
-
-    /* Not granted: the lease owns nothing.  The caller frees it. */
-    share->file_state = NULL;
-
-    if (result == CHIMERA_CLAIM_BREAKING) {
-        /* The conflict is a breakable holder -- an NFSv4 delegation being
-         * recalled (the arbitration already kicked the break).  Tell the
-         * client to retry; by the next attempt the delegation's DELEGRETURN
-         * should have released the claim and the SHARE will be granted (RFC
-         * 7530 §10.2 recommends NFS4ERR_DELAY while a recall is
-         * outstanding). */
-        return NFS4ERR_DELAY;
-    }
-
-    return NFS4ERR_SHARE_DENIED;
-} /* chimera_nfs4_open_share_status */
 
 /*
  * Acquire a cross-protocol SHARE reservation in the claim core for a freshly
@@ -166,7 +27,7 @@ chimera_nfs4_open_share_status(
  * this adds the NLM/SMB dimension so an NFSv4 OPEN that denies read/write
  * collides with an SMB open holding that access (and vice versa).
  *
- * Returns NFS4_OK on success (lease stored on the state, released at
+ * Returns NFS4_OK on success (claim stored on the state, released at
  * open_state_cleanup), NFS4ERR_SHARE_DENIED on cross-protocol conflict.
  */
 static nfsstat4
@@ -174,10 +35,14 @@ chimera_nfs4_open_acquire_share(
     struct nfs_request    *req,
     struct nfs_open_state *state)
 {
-    struct OPEN4args         *args      = &req->args_compound->argarray[req->index].opopen;
-    struct chimera_vfs_state *vfs_state = req->thread->vfs->vfs_state;
-    struct nfs4_share_lease  *share;
-    nfsstat4                  status;
+    struct OPEN4args               *args      = &req->args_compound->argarray[req->index].opopen;
+    struct chimera_vfs_state       *vfs_state = req->thread->vfs->vfs_state;
+    struct chimera_vfs_open_handle *handle    = state->handle;
+    struct chimera_vfs_file_state  *file_state;
+    struct chimera_claim_owner      owner;
+    enum chimera_vfs_claim_result   result;
+    uint8_t                         granted = 0;
+    uint8_t                         denied  = 0;
 
     /* share_access MUST request at least one of READ or WRITE (RFC 7530
      * §16.16.5 / §9.9); a value with neither base mode is invalid. */
@@ -186,22 +51,66 @@ chimera_nfs4_open_acquire_share(
         return NFS4ERR_INVAL;
     }
 
-    share = chimera_nfs4_open_share_lease_build(args, state->owner->client,
-                                                args->share_access,
-                                                args->share_deny);
+    if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
+        granted |= CHIMERA_CLAIM_R;
+    }
+    if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+        granted |= CHIMERA_CLAIM_W;
+    }
+    if (args->share_deny & OPEN4_SHARE_DENY_READ) {
+        denied |= CHIMERA_CLAIM_R;
+    }
+    if (args->share_deny & OPEN4_SHARE_DENY_WRITE) {
+        denied |= CHIMERA_CLAIM_W;
+    }
 
-    if (!share) {
+    if (granted == 0 && denied == 0) {
         return NFS4_OK;
     }
 
-    status = chimera_nfs4_open_share_lease_acquire(req, share, state->handle);
-
-    if (status != NFS4_OK) {
-        nfs4_share_lease_free(vfs_state, share);
-        return status;
+    file_state = chimera_vfs_state_get(vfs_state,
+                                       handle->fh, handle->fh_len,
+                                       handle->fh_hash, true);
+    if (!file_state) {
+        return NFS4ERR_SERVERFAULT;
     }
 
-    state->share = share;
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    owner.client_key = state->owner->client->client_id;
+    owner.owner_lo   = XXH3_64bits(state->owner->owner,
+                                   state->owner->owner_len);
+    owner.owner_hi = 0;
+
+    chimera_vfs_claim_init_nfs4_open(&state->share_claim, granted, denied,
+                                     &owner);
+    /* Courteous server: report this share reservation dead once the owning
+     * client's lease lapses, so a conflicting open reclaims it; reclaim flags
+     * the client for sweep teardown. */
+    state->share_claim.is_alive_cb = nfs_client_lease_alive;
+    state->share_claim.revoked_cb  = nfs_client_lease_revoked_cb;
+    state->share_claim.cb_private  = state->owner->client;
+
+    struct chimera_vfs_claim_conflict conflict;
+    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
+                                           &state->share_claim, &conflict);
+    if (result == CHIMERA_CLAIM_BREAKING || conflict.admission_fenced) {
+        /* An insertion fence is transient coordination, not a share denial.
+         * Otherwise the conflict is a breakable holder -- an NFSv4 delegation being
+         * recalled (try_acquire already kicked the break).  Tell the client to
+         * retry; by the next attempt the delegation's DELEGRETURN should have
+         * released the claim and the SHARE will be granted (RFC 7530 §10.2
+         * recommends NFS4ERR_DELAY while a recall is outstanding). */
+        chimera_vfs_state_put(vfs_state, file_state);
+        return NFS4ERR_DELAY;
+    }
+    if (result != CHIMERA_CLAIM_GRANTED) {
+        chimera_vfs_state_put(vfs_state, file_state);
+        return NFS4ERR_SHARE_DENIED;
+    }
+
+    state->share_file_state = file_state;
+    state->share_claim_held = true;
     return NFS4_OK;
 } /* chimera_nfs4_open_acquire_share */
 
@@ -383,6 +292,23 @@ chimera_nfs4_open_grant_delegation(
         return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
     }
 
+    struct chimera_vfs_attrs projected_attr;
+    if (deleg_type == OPEN_DELEGATE_WRITE) {
+        if (!nfs4_change_register(thread->shared->nfs4_state_table.change_table, req->fh, req->fhlen)) {
+            return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
+        }
+        if (file_attr) {
+            struct nfs4_change_observation *observation;
+            projected_attr = *file_attr;
+            if (nfs4_change_project(thread->shared->nfs4_state_table.change_table,
+                                    req->fh, req->fhlen, &projected_attr, &req->change_observations,
+                                    &observation) != NFS4_OK) {
+                return chimera_nfs4_open_deleg_none(req, res, WND4_RESOURCE);
+            }
+            file_attr = &projected_attr;
+        }
+    }
+
     deleg = nfs_delegation_create(client, deleg_type,
                                   req->fh, req->fhlen, fh_hash,
                                   req->export_id,
@@ -415,18 +341,6 @@ chimera_nfs4_open_grant_delegation(
     }
     deleg->file_state = file_state;
 
-    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
-                                           &deleg->claim, NULL);
-    if (result != CHIMERA_CLAIM_GRANTED) {
-        /* Contention (another open / claim): just decline to delegate. */
-        chimera_vfs_state_put(vfs_state, file_state);
-        deleg->file_state = NULL;
-        nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
-                               thread->vfs_thread);
-        return chimera_nfs4_open_deleg_none(req, res, WND4_CONTENTION);
-    }
-    deleg->lease_held = true;
-
     /* RFC 7530/8881 §10.4.3: cache the file's change attribute at grant (sc).
      * Only meaningful for a write delegation (the holder can modify locally);
      * captured when the OPEN path supplied the change-derivation attrs.  If they
@@ -442,6 +356,18 @@ chimera_nfs4_open_grant_delegation(
         deleg->combine_valid = true;
         evpl_mutex_unlock(&deleg->combine_lock);
     }
+
+    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
+                                           &deleg->claim, NULL);
+    if (result != CHIMERA_CLAIM_GRANTED) {
+        /* Contention (another open / claim): just decline to delegate. */
+        chimera_vfs_state_put(vfs_state, file_state);
+        deleg->file_state = NULL;
+        nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,
+                               thread->vfs_thread);
+        return chimera_nfs4_open_deleg_none(req, res, WND4_CONTENTION);
+    }
+    deleg->lease_held = true;
 
     res->resok4.delegation.delegation_type = deleg_type;
 
@@ -500,14 +426,6 @@ chimera_nfs4_open_grant_delegation(
  * On entry, `handle` must be a +1 reference returned by chimera_vfs_open_at
  * or chimera_vfs_open_fh.  On create, ownership transfers to the new
  * open_state; on coalesce, the function calls chimera_vfs_release on it.
- *
- * `share` is a SHARE reservation already granted for this OPEN, whose
- * ownership passes here -- the sequenced path, where the arbitration was a
- * CLAIM op of the run.  NULL means "take it here", which is what the
- * op-at-a-time path does.  Either way it ends up on the new state, is
- * released on a coalesce (the first OPEN of this (owner, fh) keeps the
- * reservation, which is the rule this path has always followed), and is
- * given back on every error.
  */
 SYMBOL_EXPORT nfsstat4
 chimera_nfs4_open_install_state(
@@ -517,7 +435,6 @@ chimera_nfs4_open_install_state(
     bool                            file_created,
     const uint8_t                  *base_fh,
     int                             base_fh_len,
-    struct nfs4_share_lease        *share,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags)
 {
@@ -532,7 +449,6 @@ chimera_nfs4_open_install_state(
 
     if (!client) {
         chimera_vfs_release(req->thread->vfs_thread, handle);
-        nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
         return NFS4ERR_STALE_CLIENTID;
     }
     if (client->expired) {
@@ -560,7 +476,6 @@ chimera_nfs4_open_install_state(
         if (required &&
             !chimera_vfs_access_allowed(attr, &req->cred, required)) {
             chimera_vfs_release(req->thread->vfs_thread, handle);
-            nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
             return NFS4ERR_ACCESS;
         }
     }
@@ -584,6 +499,17 @@ chimera_nfs4_open_install_state(
         nfs_open_owner_put(req->open_4_0_owner);
         nfs_open_owner_get(owner);
         req->open_4_0_owner = owner;
+    }
+
+    /* Another request has reserved this owner's first OPEN or pending CLOSEs
+     * for a compound. Do not install/coalesce behind its acceptance boundary. */
+    evpl_mutex_lock(&client->lock);
+    bool compound_pending = owner->compound_pending != NULL || owner->compound_close_count != 0 ||
+        owner->compound_reservation != NULL;
+    evpl_mutex_unlock(&client->lock);
+    if (compound_pending) {
+        status = NFS4ERR_DELAY;
+        goto err_release_handle;
     }
 
     /* RFC 7530 §9.10: check share-mode conflict against opens by *other*
@@ -636,15 +562,7 @@ chimera_nfs4_open_install_state(
         /* The SHARE reservation acquired on the first OPEN of this
          * (owner, fh) stays in force.  Broadening share bits on
          * coalesce is not re-checked cross-protocol in this pass —
-         * upstream's intra-client check is likewise coalesce-exempt.
-         *
-         * A sequence that took one anyway -- because a coalesce is a fact
-         * about a file handle the OPEN had not yet resolved when the run was
-         * built -- gives it straight back.  The gate spares the CLAIM op
-         * whenever it can see the coalesce coming, so this is the narrow
-         * case where it could not. */
-        nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
-        share = NULL;
+         * upstream's intra-client check is likewise coalesce-exempt. */
     } else {
         struct nfs_open_state *new_state;
 
@@ -664,22 +582,14 @@ chimera_nfs4_open_install_state(
             goto err_release_handle;
         }
 
-        /* Cross-protocol SHARE coordination.  Already arbitrated when the
-         * caller handed one over -- a CLAIM op of the run took it, and the
-         * state simply adopts it.  Otherwise it is taken here.  On conflict,
-         * tear the just-created state back down (releasing the handle) and
-         * fail. */
-        if (share) {
-            new_state->share = share;
-            share            = NULL;
-        } else {
-            status = chimera_nfs4_open_acquire_share(req, new_state);
-            if (status != NFS4_OK) {
-                nfs_open_state_destroy(new_state,
-                                       &req->thread->shared->nfs4_state_table,
-                                       req->thread->vfs_thread);
-                goto err_put_owner;
-            }
+        /* Cross-protocol SHARE coordination.  On conflict, tear the
+         * just-created state back down (releasing the handle) and fail. */
+        status = chimera_nfs4_open_acquire_share(req, new_state);
+        if (status != NFS4_OK) {
+            nfs_open_state_destroy(new_state,
+                                   &req->thread->shared->nfs4_state_table,
+                                   req->thread->vfs_thread);
+            goto err_put_owner;
         }
 
         /* Named-attribute (stream) open: take a stream holder on the BASE file so
@@ -716,94 +626,9 @@ chimera_nfs4_open_install_state(
  err_release_handle:
     chimera_vfs_release(req->thread->vfs_thread, handle);
  err_put_owner:
-    nfs4_share_lease_free(req->thread->vfs->vfs_state, share);
     nfs_open_owner_put(owner);
     return status;
 } /* chimera_nfs4_open_install_state */
-
-/*
- * The part of installing an OPEN's state that has to be settled BEFORE the
- * share reservation is arbitrated -- asked separately so a sequenced OPEN can
- * ask it from its gate, while the object it opened is in hand and before the
- * CLAIM op that takes the reservation has run.
- *
- * It answers the two questions whose answers OUTRANK a share conflict, in the
- * order install_state asks them (so NFS4ERR_ACCESS still beats
- * NFS4ERR_SHARE_DENIED), plus one the arbitration itself depends on: whether
- * this OPEN will COALESCE onto an open this owner already holds on the
- * object.  A coalesce takes no new reservation -- the first OPEN's stays in
- * force -- so a sequence that knows the answer here can spare its CLAIM op
- * rather than take a reservation it would immediately give back.
- *
- * Everything it reads is memory the server already holds, it changes nothing,
- * and asking it twice asks the same question: the gate's contract exactly.
- * install_state asks all of it again afterwards, which is what keeps the two
- * entrances one body of rules rather than two.
- */
-SYMBOL_EXPORT nfsstat4
-chimera_nfs4_open_precheck(
-    struct nfs_request             *req,
-    const struct OPEN4args         *args,
-    struct nfs_client              *client,
-    struct nfs_open_owner          *owner,
-    const struct chimera_vfs_attrs *attr,
-    bool                            file_created,
-    const uint8_t                  *fh,
-    uint16_t                        fh_len,
-    int                            *out_coalesce)
-{
-    struct nfs_open_state *existing;
-    nfsstat4               status;
-
-    *out_coalesce = 0;
-
-    if (!client || !owner) {
-        return NFS4ERR_STALE_CLIENTID;
-    }
-
-    /* The object's ACL against the requested share access -- install_state's
-     * own check, verbatim, including why a create skips it. */
-    if (attr && !file_created) {
-        uint32_t required = 0;
-
-        if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
-            required |= CHIMERA_ACE_READ_DATA;
-        }
-        if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
-            required |= CHIMERA_ACE_WRITE_DATA;
-        }
-
-        if (required &&
-            !chimera_vfs_access_allowed(attr, &req->cred, required)) {
-            return NFS4ERR_ACCESS;
-        }
-    }
-
-    /* RFC 7530 §9.10: share-mode conflict against opens by *other* owners on
-     * this client. */
-    status = nfs_client_check_share_conflict(client, owner, fh, fh_len,
-                                             args->share_access,
-                                             args->share_deny);
-    if (status != NFS4_OK) {
-        return status;
-    }
-
-    existing = nfs_open_owner_find_state(owner, fh, fh_len);
-
-    if (existing) {
-        /* RFC 7530 §9.9: a same-owner re-open is still a distinct share
-         * request -- it must not ask for access the existing open denies, nor
-         * deny access the existing open holds. */
-        if ((existing->share_access & args->share_deny) ||
-            (args->share_access & existing->share_deny)) {
-            return NFS4ERR_SHARE_DENIED;
-        }
-
-        *out_coalesce = 1;
-    }
-
-    return NFS4_OK;
-} /* chimera_nfs4_open_precheck */
 
 /*
  * RFC 7530 §9.1.7 OPEN completion: advance open_owner.seqid and cache the
@@ -839,19 +664,8 @@ chimera_nfs4_open_nonreg_status(
     return NFS4ERR_WRONG_TYPE;
 } /* chimera_nfs4_open_nonreg_status */
 
-/*
- * Everything chimera_nfs4_open_finish does except hand the request on: the
- * RFC 7530 §9.1.7 seqid advance and replay record, the encoder's owner pin,
- * and the 4.1 current stateid.
- *
- * Split out because an OPEN that a VFS sequence carries is no longer
- * necessarily the last op of its COMPOUND.  When it is not, the OPEN's
- * wrapper has to run as its RESULT is filled -- while req->index still names
- * the OPEN -- and the ops behind it are filled afterwards, with the generic
- * completion handing the request on once.
- */
-SYMBOL_EXPORT void
-chimera_nfs4_open_settle(
+static void
+chimera_nfs4_open_finish(
     struct nfs_request *req,
     nfsstat4            status)
 {
@@ -867,14 +681,12 @@ chimera_nfs4_open_settle(
 
         evpl_mutex_lock(&owner->lock);
         owner->seqid = args->seqid;
-        nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
-                           status == NFS4_OK ? &res->resok4.stateid : NULL);
-        /* RFC 7530 §9.1.7 wants the stored last response replayed verbatim.
-         * rflags carries OPEN4_RESULT_CONFIRM (§16.18.5), which a client may
-         * act on, so keep it alongside the stateid. */
-        if (status == NFS4_OK) {
-            owner->replay.rflags = res->resok4.rflags;
-        }
+        res->status  = status;
+        /* The output FH is part of OPEN's effect on its compound cursor.
+         * Own it alongside the complete reply, including delegation permission
+         * bytes, before request buffers are returned. */
+        chimera_nfs_abort_if(!nfs4_replay_record_open(&owner->replay, args->seqid, res, req->fh, req->fhlen),
+                             "OPEN reply exceeds owned replay snapshot bounds");
         evpl_mutex_unlock(&owner->lock);
     }
 
@@ -893,14 +705,6 @@ chimera_nfs4_open_settle(
             &req->res_compound.resarray[req->index].opopen;
         chimera_nfs4_set_current_stateid(req, &res->resok4.stateid);
     }
-} /* chimera_nfs4_open_settle */
-
-static void
-chimera_nfs4_open_finish(
-    struct nfs_request *req,
-    nfsstat4            status)
-{
-    chimera_nfs4_open_settle(req, status);
 
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_open_finish */
@@ -932,18 +736,20 @@ chimera_nfs4_open_unwind_state(struct nfs_request *req)
 
 static void
 chimera_nfs4_open_trunc_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
 {
     struct nfs_request     *req   = private_data;
     struct nfs_state_table *table = &req->thread->shared->nfs4_state_table;
     struct OPEN4res        *res   =
         &req->res_compound.resarray[req->index].opopen;
-    enum chimera_vfs_error  error_code;
 
-    error_code = chimera_vfs_compound_status(compound);
-
-    chimera_vfs_compound_free(compound);
+    (void) pre_attr;
+    (void) set_attr;
+    (void) post_attr;
 
     nfs_state_table_release(table, req->nfs_state_ref, NFS4_SLOT_TYPE_OPEN,
                             req->thread->vfs_thread);
@@ -999,19 +805,13 @@ chimera_nfs4_open_complete(
             req->open_trunc_attr.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
             req->open_trunc_attr.va_size     = 0;
 
-            /* One op, against the OPEN's own handle: the stateid authorizes
-             * the size change the way a descriptor authorizes ftruncate(2),
-             * which is what a SETATTR through a handle the CALLER named means
-             * -- rather than being re-gated against the file's mode. */
-            struct chimera_vfs_compound *compound =
-                chimera_vfs_compound_alloc(req->thread->vfs_thread,
-                                           &req->cred);
-
-            chimera_vfs_compound_add_setattr(compound, open_state->handle,
-                                             &req->open_trunc_attr, 0, 0);
-
-            chimera_vfs_compound_submit(compound,
-                                        chimera_nfs4_open_trunc_complete, req);
+            chimera_vfs_fsetattr(req->thread->vfs_thread, &req->cred,
+                                 open_state->handle,
+                                 &req->open_trunc_attr,
+                                 0,
+                                 0,
+                                 chimera_nfs4_open_trunc_complete,
+                                 req);
             return;
         }
         /* The state was reaped before the truncate could run (a lease sweep
@@ -1035,6 +835,10 @@ chimera_nfs4_open_complete(
 void
 chimera_nfs4_open_resume_after_probe(struct nfs_request *req)
 {
+    if (req->compound_probe_resume) {
+        req->compound_probe_resume(req);
+        return;
+    }
     struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
     bool             deferred;
 
@@ -1046,281 +850,408 @@ chimera_nfs4_open_resume_after_probe(struct nfs_request *req)
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_resume_after_probe */
 
-/*
- * OPEN as one run: PUTFH, OPEN_CURRENT (the current object, as a directory),
- * OPEN.
- *
- * The chain the per-op path walked by hand -- resolve the name, judge its type,
- * then open it, and on an exclusive collision open again to read the verifier
- * back -- is what the OPEN op's three options ARE, and every one of them is
- * chosen from the OPEN's own arguments, before the run starts:
- *
- *   REGULAR_ONLY          the name is resolved and a non-regular object is
- *                         answered for by TYPE rather than opened -- a native
- *                         open of a FIFO can block, and of a socket reports
- *                         ENXIO where the protocol owes its own error.  The
- *                         mode comes back in `existing_mode`.
- *   ATTRS_ON_CREATE_ONLY  UNCHECKED4: the create attributes describe a
- *                         creation, so an open that found the name leaves the
- *                         object alone.  `existed` says which happened, and is
- *                         what decides the deferred truncate below.
- *   EXCLUSIVE_RETRY       EXCLUSIVE4 / EXCLUSIVE4_1: a collision OPENS what is
- *                         already there, so the verifier stamped in its
- *                         timestamps can be compared, instead of failing.
- *
- * So the whole of the operation is three ops, and the request is no longer
- * between them.
- */
-#define NFS4_OPEN_OP_OPEN 2
-
-struct nfs4_open_run_ctx {
-    struct nfs_request       *req;
-    /* The decoded create attributes.  The run copies the struct and borrows
-     * the ACL it points at; this keeps the ORIGINAL request, which is what
-     * says whether an UNCHECKED4 create asked for size 0. */
-    struct chimera_vfs_attrs *attr;
-    uint8_t                   by_name;
-};
-
-/* An exclusive create is the one that stamps a verifier and therefore the one
- * that has to look at whatever it collides with. */
-static inline int
-nfs4_open_is_exclusive(const struct OPEN4args *args)
-{
-    return args->openhow.opentype == OPEN4_CREATE &&
-           (args->openhow.how.mode == EXCLUSIVE4 ||
-            args->openhow.how.mode == EXCLUSIVE4_1);
-} /* nfs4_open_is_exclusive */
-
-/*
- * Which of the requested attributes the create actually applied.  The op's
- * set_attr is the executor's copy, which it blanks when the name resolved to
- * something that already existed -- so an open that created nothing reports
- * nothing set.  The requested set lives in a different arm of openhow.how for
- * each create mode, and EXCLUSIVE4 has none at all: its verifier occupies that
- * slot, so reading it as an attribute request would be reading the verifier's
- * bytes as an attribute mask.
- */
 static void
-chimera_nfs4_open_fill_attrset(
-    struct nfs_request             *req,
-    const struct OPEN4args         *args,
-    struct OPEN4res                *res,
-    const struct chimera_vfs_attrs *applied)
+chimera_nfs4_open_exclusive_verify(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
 {
-    struct chimera_vfs_attrs copy = *applied;
-    uint32_t                 n_mask;
-    uint32_t                *mask;
-    int                      rc;
-
-    res->resok4.num_attrset = 0;
-
-    if (args->openhow.opentype != OPEN4_CREATE ||
-        args->openhow.how.mode == EXCLUSIVE4) {
-        return;
-    }
-
-    if (args->openhow.how.mode == EXCLUSIVE4_1) {
-        n_mask = args->openhow.how.ch_createboth.cva_attrs.num_attrmask;
-        mask   = args->openhow.how.ch_createboth.cva_attrs.attrmask;
-    } else {
-        n_mask = args->openhow.how.createattrs.num_attrmask;
-        mask   = args->openhow.how.createattrs.attrmask;
-    }
-
-    rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
-    chimera_nfs_abort_if(rc, "Failed to allocate array");
-
-    res->resok4.num_attrset = chimera_nfs4_mask2attr(&copy, n_mask, mask,
-                                                     res->resok4.attrset);
-} /* chimera_nfs4_open_fill_attrset */
-
-static void
-chimera_nfs4_open_run_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs4_open_run_ctx             *ctx  = private_data;
-    struct nfs_request                   *req  = ctx->req;
-    struct OPEN4args                     *args = &req->args_compound->argarray[req->index].opopen;
-    struct OPEN4res                      *res  = &req->res_compound.resarray[req->index].opopen;
-    const struct chimera_vfs_compound_op *op;
-    struct chimera_vfs_open_handle       *handle;
-    struct chimera_vfs_attrs              attr, dir_pre, dir_post;
-    enum chimera_vfs_error                error_code;
-    uint32_t                              install_rflags = 0;
-    uint8_t                               created, existed;
-    nfsstat4                              status;
-
-    error_code = chimera_vfs_compound_status(compound);
-    op         = chimera_vfs_compound_op(compound, NFS4_OPEN_OP_OPEN);
-    existed    = op->existed;
+    struct nfs_request             *req           = private_data;
+    struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+    const uint8_t                  *verf;
+    uint32_t                        verf_atime, verf_mtime;
+    nfsstat4                        status;
 
     if (error_code != CHIMERA_VFS_OK) {
-        if (existed && nfs4_open_is_exclusive(args) &&
-            (error_code == CHIMERA_VFS_ENXIO ||
-             error_code == CHIMERA_VFS_EISDIR ||
-             error_code == CHIMERA_VFS_ELOOP)) {
-            /* The exclusive-create collision was re-opened to read its
-             * verifier, and the re-open refused it by type.  No object that is
-             * not a regular file can carry the verifier an EXCLUSIVE4 create
-             * stamped, so what those errors stand for is simply "an object that
-             * is not our earlier create exists": NFS4ERR_EXIST (RFC 7530
-             * §16.16.4). */
+        /* The exclusive-create probe found an existing name and this re-open
+         * fetches its verifier (atime/mtime).  A non-regular object refuses a
+         * data open -- ENXIO for a socket, EISDIR for a directory, ELOOP for
+         * a symlink -- but no such object can ever carry the verifier an
+         * EXCLUSIVE4 create stamped, so the answer those errors stand for is
+         * simply "an object that is not our earlier create exists":
+         * NFS4ERR_EXIST (RFC 7530 16.16.4). */
+        if (error_code == CHIMERA_VFS_ENXIO ||
+            error_code == CHIMERA_VFS_EISDIR ||
+            error_code == CHIMERA_VFS_ELOOP) {
             res->status = NFS4ERR_EXIST;
-        } else if (existed && op->existing_mode &&
-                   !S_ISREG(op->existing_mode)) {
-            /* The type gate refused the open before it happened.  The VFS
-             * reports the nearest POSIX answer; NFSv4 has its own, and a
-             * different one per minor version, decided from the mode the
-             * refusal carried. */
-            res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
-                                                          op->existing_mode);
         } else {
             res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         }
-
-        chimera_vfs_compound_free(compound);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
         chimera_nfs4_open_complete(req, res->status);
         return;
     }
 
-    /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular file.  The
-     * type gate already refused one for every shape that asked for it; a create
-     * that did not ask is judged here on what it opened.
-     *
-     * An exclusive-create COLLISION is the exception, and answers for the type
-     * below instead: whatever is in the way, it cannot be carrying the verifier
-     * this create stamped, so what the protocol wants is NFS4ERR_EXIST (RFC
-     * 7530 §16.16.4) and not a type error -- which is the answer the verifier
-     * comparison reaches for it. */
-    if (!(existed && nfs4_open_is_exclusive(args)) &&
-        (op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISREG(op->attr.va_mode)) {
-        res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
-                                                      op->attr.va_mode);
-        chimera_vfs_compound_free(compound);
-        chimera_nfs4_open_complete(req, res->status);
-        return;
-    }
-
-    if (existed && nfs4_open_is_exclusive(args)) {
-        const uint8_t *verf;
-        uint32_t       verf_atime, verf_mtime;
-
-        verf = (args->openhow.how.mode == EXCLUSIVE4) ?
-            args->openhow.how.createverf :
-            args->openhow.how.ch_createboth.cva_verf;
-
-        memcpy(&verf_atime, verf, sizeof(verf_atime));
-        memcpy(&verf_mtime, verf + sizeof(verf_atime), sizeof(verf_mtime));
-
-        if (!(op->attr.va_set_mask & CHIMERA_VFS_ATTR_ATIME) ||
-            !(op->attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME) ||
-            op->attr.va_atime.tv_sec != verf_atime ||
-            op->attr.va_mtime.tv_sec != verf_mtime) {
-            /* Somebody else's file is in the way.  The handle was never taken,
-             * so the free puts it back. */
-            chimera_vfs_compound_free(compound);
-            res->status = NFS4ERR_EXIST;
-            chimera_nfs4_open_complete(req, NFS4ERR_EXIST);
-            return;
-        }
-    }
-
-    /* Everything the install needs is read out of the run before it is freed:
-     * the handle it takes ownership of, the object's attributes, and the
-     * directory's either side of the create. */
-    attr     = op->attr;
-    dir_pre  = op->dir_pre_attr;
-    dir_post = op->dir_post_attr;
-    created  = op->created;
-
-    /* An UNCHECKED4 create of a name that was already there opens it without
-     * restyling it, except that size 0 truncates.  The truncate is deliberately
-     * NOT part of the open: that call opens and applies attributes in one step,
-     * while the share reservation is not admitted until install_state runs -- so
-     * an OPEN destined to fail NFS4ERR_SHARE_DENIED would empty the file on its
-     * way to failing.  Note it here and let chimera_nfs4_open_complete apply it
-     * once the reservation is actually held. */
-    if (existed && args->openhow.opentype == OPEN4_CREATE &&
-        args->openhow.how.mode == UNCHECKED4 &&
-        (ctx->attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
-        ctx->attr->va_size == 0) {
-        req->open_trunc_pending = true;
-    }
-
-    if (ctx->by_name) {
-        chimera_nfs4_open_fill_attrset(req, args, res, &op->set_attr);
+    if (args->openhow.how.mode == EXCLUSIVE4) {
+        verf = args->openhow.how.createverf;
     } else {
-        /* An open-by-handle created nothing and applied nothing. */
-        res->resok4.num_attrset = 0;
+        verf = args->openhow.how.ch_createboth.cva_verf;
     }
 
-    handle = chimera_vfs_compound_take_handle(compound, NFS4_OPEN_OP_OPEN);
+    memcpy(&verf_atime, verf, sizeof(verf_atime));
+    memcpy(&verf_mtime, verf + sizeof(verf_atime), sizeof(verf_mtime));
 
-    chimera_vfs_compound_free(compound);
-
-    if (!handle) {
-        res->status = NFS4ERR_SERVERFAULT;
-        chimera_nfs4_open_complete(req, res->status);
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) ||
+        !(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) ||
+        attr->va_atime.tv_sec != verf_atime ||
+        attr->va_mtime.tv_sec != verf_mtime) {
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        res->status = NFS4ERR_EXIST;
+        chimera_nfs4_open_complete(req, NFS4ERR_EXIST);
         return;
     }
 
-    /* Capture the file handle before install_state, which may release the
-     * handle when it coalesces onto an existing open state.  CLAIM_FH and
-     * CLAIM_PREVIOUS name the object by the filehandle already on the wire, so
-     * req->fh is left as it was. */
-    if (ctx->by_name) {
+    /* Verifier matches - this is a retry, treat as success.  Capture FH and
+     * lock capabilities before install_state may release the handle. */
+    {
+        uint32_t install_rflags = 0;
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;
-    }
 
-    /* From here install_state owns the handle, including releasing it on every
-     * one of its own failures.  An open-by-handle reports no attributes, and
-     * install_state reads that as "access was established when this filehandle
-     * was resolved" -- which is what it must not be told by an empty attribute
-     * set that looks like a real one. */
-    status = chimera_nfs4_open_install_state(req, handle,
-                                             ctx->by_name ? &attr : NULL,
-                                             ctx->by_name ? created : false,
-                                             NULL, 0, NULL,
-                                             &res->resok4.stateid,
-                                             &install_rflags);
+        status = chimera_nfs4_open_install_state(req, handle, attr,
+                                                 handle->r_created,
+                                                 NULL, 0,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
 
-    if (status != NFS4_OK) {
-        res->status = status;
-        chimera_nfs4_open_complete(req, status);
-        return;
-    }
-
-    res->status = NFS4_OK;
-    /* The claim core arbitrates byte ranges with POSIX semantics for every
-     * backend now -- a CHIMERA_VFS_CAP_CLAIM_RANGE backend only widens that
-     * arbitration past this node -- so the advertisement no longer depends on
-     * the backend having a lock passthrough. */
-    res->resok4.rflags = install_rflags | OPEN4_RESULT_LOCKTYPE_POSIX;
-
-    if (ctx->by_name) {
+        res->status = NFS4_OK;
         /* An exclusive-create retry does not modify the directory, so cinfo
          * reports before == after == the directory's (unchanged) change
          * attribute rather than a bare zero, which a revalidating client would
          * otherwise mistake for the directory changing. */
-        chimera_nfs4_set_changeinfo(&res->resok4.cinfo, &dir_pre, &dir_post);
-    } else {
-        /* An open-by-handle changed no directory. */
+        chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
+        /* The claim core arbitrates byte ranges with POSIX semantics for
+         * every backend now -- a CHIMERA_VFS_CAP_CLAIM_RANGE backend only
+         * widens that arbitration past this node -- so the advertisement no
+         * longer depends on the backend having a lock passthrough. */
+        res->resok4.rflags = install_rflags | OPEN4_RESULT_LOCKTYPE_POSIX;
+    }
+    res->resok4.num_attrset = 0;
+
+    /* Release the parent handle before grant_delegation so the cb-probe
+    * defer path (which returns without completing the OPEN) does not leak
+    * it -- the resume callback only knows how to call open_complete. */
+    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+    if (chimera_nfs4_open_grant_delegation(req, res, attr)) {
+        return; /* parked; resume from nfs4_cb_null_complete */
+    }
+    chimera_nfs4_open_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_exclusive_verify */
+
+static void
+chimera_nfs4_open_at_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct nfs_request             *req           = private_data;
+    struct OPEN4args               *args          = &req->args_compound->argarray[req->index].opopen;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+    int                             rc;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        if (error_code == CHIMERA_VFS_EEXIST &&
+            args->openhow.opentype == OPEN4_CREATE &&
+            (args->openhow.how.mode == EXCLUSIVE4 ||
+             args->openhow.how.mode == EXCLUSIVE4_1)) {
+            set_attr->va_set_mask = 0;
+            set_attr->va_req_mask = 0;
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                                parent_handle,
+                                args->claim.file.data,
+                                args->claim.file.len,
+                                CHIMERA_VFS_OPEN_INFERRED,
+                                set_attr,
+                                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME,
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                chimera_nfs4_open_exclusive_verify,
+                                req);
+            return;
+        }
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular file.
+     * A directory yields NFS4ERR_ISDIR; other non-regular objects yield
+     * NFS4ERR_SYMLINK (4.0) or NFS4ERR_SYMLINK/WRONG_TYPE (4.1+). */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
+        res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
+                                                      attr->va_mode);
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    {
+        uint32_t install_rflags = 0;
+        nfsstat4 status;
+
+        /* Capture FH before install_state may release the handle (coalesce). */
+        memcpy(req->fh, handle->fh, handle->fh_len);
+        req->fhlen = handle->fh_len;
+
+        status = chimera_nfs4_open_install_state(req, handle, attr,
+                                                 handle->r_created,
+                                                 NULL, 0,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
         res->resok4.cinfo.atomic = 0;
         res->resok4.cinfo.before = 0;
         res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            OPEN4_RESULT_LOCKTYPE_POSIX;
+    }
+    res->resok4.num_attrset = 0;
+
+    if (args->openhow.opentype == OPEN4_CREATE &&
+        (args->openhow.how.mode == UNCHECKED4 || args->openhow.how.mode == GUARDED4)) {
+        rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
+        chimera_nfs_abort_if(rc, "Failed to allocate array");
+        res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                         args->openhow.how.createattrs.num_attrmask,
+                                                         args->openhow.how.createattrs.attrmask,
+                                                         res->resok4.attrset);
+    } else if (args->openhow.opentype == OPEN4_CREATE &&
+               args->openhow.how.mode == EXCLUSIVE4_1) {
+        rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
+        chimera_nfs_abort_if(rc, "Failed to allocate array");
+        res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                         args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                                                         args->openhow.how.ch_createboth.cva_attrs.attrmask,
+                                                         res->resok4.attrset);
+    } else {
+        res->resok4.num_attrset = 0;
     }
 
-    if (chimera_nfs4_open_grant_delegation(req, res,
-                                           ctx->by_name ? &attr : NULL)) {
+    chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
+
+    /* Release the parent handle before grant_delegation so the cb-probe
+    * defer path (which returns without completing the OPEN) does not leak
+    * it -- the resume callback only knows how to call open_complete. */
+    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+    if (chimera_nfs4_open_grant_delegation(req, res, attr)) {
         return; /* parked; resume from nfs4_cb_null_complete */
     }
 
     chimera_nfs4_open_complete(req, NFS4_OK);
-} /* chimera_nfs4_open_run_complete */
+} /* chimera_nfs4_open_at_complete */
+
+struct nfs4_open_lookup_regular_ctx {
+    struct nfs_request       *req;
+    struct chimera_vfs_attrs *attr;
+    const char               *name;
+    uint32_t                  namelen;
+    unsigned int              flags;
+};
+
+struct nfs4_open_unchecked_ctx {
+    struct nfs_request       *req;
+    struct chimera_vfs_attrs *attr;
+    const char               *name;
+    uint32_t                  namelen;
+    unsigned int              flags;
+};
+
+static void
+chimera_nfs4_open_lookup_regular_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct nfs4_open_lookup_regular_ctx *ctx           = private_data;
+    struct nfs_request                  *req           = ctx->req;
+    struct OPEN4res                     *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle      *parent_handle = req->handle;
+
+    (void) dir_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* OPEN4_NOCREATE must classify special objects by type before the
+     * backend tries to open them.  Native opens of FIFOs, sockets, and
+     * devices can otherwise block or report backend-specific errors.
+     * Typing follows RFC 7530 §16.16.6 / RFC 8881 §18.16.4. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
+        res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
+                                                      attr->va_mode);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        parent_handle,
+                        ctx->name,
+                        ctx->namelen,
+                        ctx->flags,
+                        ctx->attr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+                        CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                        chimera_nfs4_open_at_complete,
+                        req);
+} /* chimera_nfs4_open_lookup_regular_complete */
+
+static void
+chimera_nfs4_open_unchecked_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *existing_attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct nfs4_open_unchecked_ctx *ctx           = private_data;
+    struct nfs_request             *req           = ctx->req;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+
+    (void) dir_attr;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        /* The object already exists.  Classify special objects by type before
+         * the backend tries to open them -- a native open of a FIFO, socket,
+         * or device can block or report a backend-specific errno (ENXIO on a
+         * FIFO with no peer), where RFC 7530 §16.16.6 / RFC 8881 §18.16.4
+         * require the protocol-level type error.  Mirrors the NOCREATE path. */
+        if ((existing_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            !S_ISREG(existing_attr->va_mode)) {
+            res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
+                                                          existing_attr->va_mode);
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, res->status);
+            return;
+        }
+
+        /* RFC 7530 OPEN/UNCHECKED recreate: create attrs are ignored for an
+         * existing object, except size=0 truncates the file.
+         *
+         * The truncate is deliberately NOT handed to the open below.  That
+         * call opens and applies attributes in one step, while the share
+         * reservation is not admitted until chimera_nfs4_open_acquire_share()
+         * runs on the completion -- so an OPEN destined to fail
+         * NFS4ERR_SHARE_DENIED emptied the file on its way to failing.  A
+         * failed OPEN must leave the object alone; note it here and let
+         * chimera_nfs4_open_complete() apply it once the reservation is
+         * actually held. */
+        if ((ctx->attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+            ctx->attr->va_size == 0) {
+            req->open_trunc_pending = true;
+        }
+        ctx->attr->va_set_mask = 0;
+        ctx->attr->va_req_mask = 0;
+    } else if (error_code != CHIMERA_VFS_ENOENT) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                        parent_handle,
+                        ctx->name,
+                        ctx->namelen,
+                        ctx->flags,
+                        ctx->attr,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+                        CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                        chimera_nfs4_open_at_complete,
+                        req);
+} /* chimera_nfs4_open_unchecked_lookup_complete */
+
+static void
+chimera_nfs4_open_claim_fh_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request             *req           = private_data;
+    struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
+    struct chimera_vfs_open_handle *parent_handle = req->handle;
+    nfsstat4                        status;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* CLAIM_FH/CLAIM_PREVIOUS: req->fh already carries the FH that was put
+     * on the wire; no need to overwrite from handle->fh.  Capture lock caps
+     * before install_state may release the handle. */
+    {
+        uint32_t install_rflags = 0;
+
+        status = chimera_nfs4_open_install_state(req, handle, NULL, false,
+                                                 NULL, 0,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            OPEN4_RESULT_LOCKTYPE_POSIX;
+    }
+    res->resok4.num_attrset = 0;
+
+    /* Release the parent handle before grant_delegation so the cb-probe
+    * defer path (which returns without completing the OPEN) does not leak
+    * it -- the resume callback only knows how to call open_complete. */
+    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+    /* CLAIM_FH/CLAIM_PREVIOUS does not getattr the file; sc is captured lazily
+     * on the first peer CB_GETATTR (combine_valid stays false). */
+    if (chimera_nfs4_open_grant_delegation(req, res, NULL)) {
+        return; /* parked; resume from nfs4_cb_null_complete */
+    }
+    chimera_nfs4_open_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_claim_fh_complete */
 
 /*
  * Validate the delegate_stateid an OPEN with CLAIM_DELEGATE_CUR cites (RFC
@@ -1361,22 +1292,26 @@ chimera_nfs4_open_check_delegate_cur(struct nfs_request *req)
 } /* chimera_nfs4_open_check_delegate_cur */
 
 static void
-chimera_nfs4_open_issue(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req)
+chimera_nfs4_open_parent_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *parent_handle,
+    void                           *private_data)
 {
-    struct OPEN4args            *args = &req->args_compound->argarray[req->index].opopen;
-    struct OPEN4res             *res  = &req->res_compound.resarray[req->index].opopen;
-    struct nfs4_open_run_ctx    *ctx;
-    struct chimera_vfs_compound *compound;
-    struct chimera_vfs_attrs    *attr;
-    unsigned int                 flags   = 0;
-    uint32_t                     opts    = 0;
-    const char                  *name    = NULL;
-    int                          namelen = 0;
-    uint64_t                     attr_mask;
-    nfsstat4                     status;
-    uint32_t                     verf_part;
+    struct nfs_request       *req   = private_data;
+    struct OPEN4args         *args  = &req->args_compound->argarray[req->index].opopen;
+    unsigned int              flags = 0;
+    nfsstat4                  status;
+    struct chimera_vfs_attrs *attr;
+    uint32_t                  verf_part;
+
+    req->handle = parent_handle;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
 
     attr = xdr_dbuf_alloc_space(sizeof(*attr), req->encoding->dbuf);
     chimera_nfs_abort_if(attr == NULL, "Failed to allocate space");
@@ -1384,12 +1319,6 @@ chimera_nfs4_open_issue(
     attr->va_req_mask = 0;
     attr->va_set_mask = 0;
 
-    /* Everything below is a pure function of the OPEN's own arguments -- which
-     * is why it happens HERE, before the run, rather than from inside it, and
-     * where the VFS-compound path's scan makes the same decisions.  The create
-     * mode selects the open flags and unmarshals the create attributes;
-     * share_access selects the data-access intent; the claim selects the name
-     * and the two options that depend on what that name resolves to. */
     if (args->openhow.opentype == OPEN4_CREATE) {
         flags |= CHIMERA_VFS_OPEN_CREATE;
 
@@ -1412,6 +1341,8 @@ chimera_nfs4_open_issue(
                     args->openhow.how.createattrs.num_attrmask,
                     args->openhow.how.createattrs.attrmask);
                 if (status != NFS4_OK) {
+                    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                     res->status = status;
                     chimera_nfs4_open_complete(req, status);
                     return;
@@ -1450,6 +1381,8 @@ chimera_nfs4_open_issue(
                         args->openhow.how.ch_createboth.cva_attrs.attrmask);
                 }
                 if (status != NFS4_OK) {
+                    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                     res->status = status;
                     chimera_nfs4_open_complete(req, status);
                     return;
@@ -1511,21 +1444,6 @@ chimera_nfs4_open_issue(
                 attr->va_mtime.tv_nsec = 0;
                 break;
         } /* switch */
-
-        if (args->openhow.how.mode == UNCHECKED4) {
-            /* An UNCHECKED4 create of a name that is already there opens it
-             * without restyling it, except that size 0 truncates -- and the
-             * truncate is deliberately not part of the open, so an OPEN that
-             * fails afterwards leaves the file's contents alone. */
-            opts |= CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY |
-                CHIMERA_VFS_COMPOUND_OPEN_ATTRS_ON_CREATE_ONLY;
-        } else if (args->openhow.how.mode != GUARDED4) {
-            /* EXCLUSIVE4 and EXCLUSIVE4_1 stamp the client's verifier into the
-             * object's atime and mtime, which is how a repeat of the same
-             * create recognises its own earlier one.  A collision therefore has
-             * to be LOOKED AT rather than refused. */
-            opts |= CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY;
-        }
     }
 
     /* Carry the requested share access into the VFS open's data-access
@@ -1547,13 +1465,70 @@ chimera_nfs4_open_issue(
             status = chimera_nfs4_validate_name(&args->claim.file);
 
             if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                 res->status = status;
                 chimera_nfs4_open_complete(req, status);
                 return;
             }
 
-            name    = (const char *) args->claim.file.data;
-            namelen = (int) args->claim.file.len;
+            if (args->openhow.opentype == OPEN4_NOCREATE) {
+                struct nfs4_open_lookup_regular_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.file.data;
+                ctx->namelen = args->claim.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.file.data,
+                                      args->claim.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
+                return;
+            }
+
+            if (args->openhow.opentype == OPEN4_CREATE &&
+                args->openhow.how.mode == UNCHECKED4) {
+                struct nfs4_open_unchecked_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.file.data;
+                ctx->namelen = args->claim.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.file.data,
+                                      args->claim.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_unchecked_lookup_complete,
+                                      ctx);
+                return;
+            }
+
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                                parent_handle,
+                                args->claim.file.data,
+                                args->claim.file.len,
+                                flags,
+                                attr,
+                                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                chimera_nfs4_open_at_complete,
+                                req);
             break;
         case CLAIM_DELEGATE_CUR:
             /* RFC 7530 §16.16: open of a file the client already holds a
@@ -1563,6 +1538,8 @@ chimera_nfs4_open_issue(
              * own -- verified below -- so no recall is needed. */
             status = chimera_nfs4_validate_name(&args->claim.delegate_cur_info.file);
             if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                 res->status = status;
                 chimera_nfs4_open_complete(req, status);
                 return;
@@ -1570,13 +1547,69 @@ chimera_nfs4_open_issue(
 
             status = chimera_nfs4_open_check_delegate_cur(req);
             if (status != NFS4_OK) {
+                struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                chimera_vfs_release(req->thread->vfs_thread, parent_handle);
                 res->status = status;
                 chimera_nfs4_open_complete(req, status);
                 return;
             }
 
-            name    = (const char *) args->claim.delegate_cur_info.file.data;
-            namelen = (int) args->claim.delegate_cur_info.file.len;
+            if (args->openhow.opentype == OPEN4_NOCREATE) {
+                struct nfs4_open_lookup_regular_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.delegate_cur_info.file.data;
+                ctx->namelen = args->claim.delegate_cur_info.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.delegate_cur_info.file.data,
+                                      args->claim.delegate_cur_info.file.len,
+                                      CHIMERA_VFS_ATTR_MODE,
+                                      0,
+                                      chimera_nfs4_open_lookup_regular_complete,
+                                      ctx);
+                return;
+            }
+
+            if (args->openhow.opentype == OPEN4_CREATE &&
+                args->openhow.how.mode == UNCHECKED4) {
+                struct nfs4_open_unchecked_ctx *ctx;
+
+                ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+                chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+                ctx->req     = req;
+                ctx->attr    = attr;
+                ctx->name    = args->claim.delegate_cur_info.file.data;
+                ctx->namelen = args->claim.delegate_cur_info.file.len;
+                ctx->flags   = flags;
+
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                                      parent_handle,
+                                      args->claim.delegate_cur_info.file.data,
+                                      args->claim.delegate_cur_info.file.len,
+                                      0,
+                                      0,
+                                      chimera_nfs4_open_unchecked_lookup_complete,
+                                      ctx);
+                return;
+            }
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+                                parent_handle,
+                                args->claim.delegate_cur_info.file.data,
+                                args->claim.delegate_cur_info.file.len,
+                                flags,
+                                attr,
+                                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                chimera_nfs4_open_at_complete,
+                                req);
             break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
@@ -1590,116 +1623,54 @@ chimera_nfs4_open_issue(
              * the client receives an ordinary open stateid it can then return
              * the delegation against.  A client issues this in response to a
              * CB_RECALL, so failing it (NFS4ERR_NOTSUPP) stalls the recall and
-             * prevents a clean DELEGRETURN.
-             *
-             * A nameless OPEN re-opens the current object itself, which is what
-             * chimera_vfs_open_fh did here, and it takes no options: there is no
-             * name to resolve first. */
+             * prevents a clean DELEGRETURN. */
+            chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                                req->fh,
+                                req->fhlen,
+                                flags,
+                                chimera_nfs4_open_claim_fh_complete,
+                                req);
             break;
         default:
             /* CLAIM_DELEGATE_PREV (delegation reclaim across a client reboot)
              * and any unknown claim are not supported -- reject rather than
              * abort the server. */
+        {
+            struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
             res->status = NFS4ERR_NOTSUPP;
             chimera_nfs4_open_complete(req, NFS4ERR_NOTSUPP);
+        }
             return;
     } /* switch */
 
-    if (!namelen) {
-        /* An open-by-handle resolves no name, so neither option applies. */
-        opts = 0;
-    } else if (args->openhow.opentype != OPEN4_CREATE) {
-        /* A plain open must classify a non-regular object before a backend
-         * tries to open it. */
-        opts |= CHIMERA_VFS_COMPOUND_OPEN_REGULAR_ONLY;
-    }
-
-    /* The same attributes the per-op path's open asked for -- no more, so an
-     * object is not stat'd more thoroughly on one path than the other.  An
-     * exclusive create adds the two the verifier lives in. */
-    attr_mask = namelen ? (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
-                           CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME) : 0;
-
-    if (opts & CHIMERA_VFS_COMPOUND_OPEN_EXCLUSIVE_RETRY) {
-        attr_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
-    }
-
-    ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
-    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
-
-    ctx->req     = req;
-    ctx->attr    = attr;
-    ctx->by_name = namelen ? 1 : 0;
-
-    req->handle = NULL;
-
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH |
-                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
-    chimera_vfs_compound_add_open(compound, name, namelen, flags, opts,
-                                  attr, attr_mask,
-                                  namelen ? (CHIMERA_VFS_ATTR_CHANGE |
-                                             CHIMERA_VFS_ATTR_CTIME) : 0,
-                                  namelen ? (CHIMERA_VFS_ATTR_CHANGE |
-                                             CHIMERA_VFS_ATTR_CTIME) : 0);
-
-    chimera_vfs_compound_submit(compound, chimera_nfs4_open_run_complete, ctx);
-} /* chimera_nfs4_open_issue */
+} /* chimera_nfs4_open_complete */
 
 /*
  * OPEN of a named attribute (CLAIM_NULL with the current fh being a synthetic
  * named-attribute directory): create/open the named stream of that name on the
  * base file and install ordinary NFSv4 open state keyed on the stream fh.  No
  * delegation is offered for named attributes.
- *
- * One run -- PUTFH the base, PATH-open it, OPEN_STREAM -- and the handle the
- * stream open produced is TAKEN from it, because that handle is what the open
- * state holds from here on and must outlive the sequence.
  */
-#define NFS4_ATTRDIR_OPEN_OP_STREAM 2
-
 static void
-chimera_nfs4_open_attrdir_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
+chimera_nfs4_open_attrdir_stream_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
 {
-    struct nfs_request                   *req = private_data;
-    struct OPEN4res                      *res =
-        &req->res_compound.resarray[req->index].opopen;
-    const struct chimera_vfs_compound_op *sop;
-    struct chimera_vfs_open_handle       *oh;
-    struct chimera_vfs_attrs              attr;
-    enum chimera_vfs_error                error_code;
-    uint8_t                               base_fh[NFS4_FHSIZE];
-    int                                   base_fh_len;
-    const uint8_t                        *base;
-    uint32_t                              install_rflags = 0;
-    uint8_t                               created;
-    nfsstat4                              status;
+    struct nfs_request *req = private_data;
+    struct OPEN4res    *res = &req->res_compound.resarray[req->index].opopen;
+    uint8_t             base_fh[NFS4_FHSIZE];
+    int                 base_fh_len;
+    const uint8_t      *base;
 
-    error_code = chimera_vfs_compound_status(compound);
+    /* Release the base-file handle opened to reach the stream. */
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    req->handle = NULL;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_free(compound);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_open_complete(req, res->status);
-        return;
-    }
-
-    sop     = chimera_vfs_compound_op(compound, NFS4_ATTRDIR_OPEN_OP_STREAM);
-    attr    = sop->attr;
-    created = sop->created;
-    oh      = chimera_vfs_compound_take_handle(compound,
-                                               NFS4_ATTRDIR_OPEN_OP_STREAM);
-
-    chimera_vfs_compound_free(compound);
-
-    if (!oh) {
-        res->status = NFS4ERR_SERVERFAULT;
         chimera_nfs4_open_complete(req, res->status);
         return;
     }
@@ -1709,49 +1680,60 @@ chimera_nfs4_open_attrdir_complete(
     chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_fh_len);
     memcpy(base_fh, base, base_fh_len);
 
-    memcpy(req->fh, oh->fh, oh->fh_len);
-    req->fhlen = oh->fh_len;
+    {
+        uint32_t install_rflags = 0;
+        nfsstat4 status;
 
-    status = chimera_nfs4_open_install_state(req, oh, &attr, created,
-                                             base_fh, base_fh_len, NULL,
-                                             &res->resok4.stateid,
-                                             &install_rflags);
+        /* Capture the stream fh before install_state may release the handle. */
+        memcpy(req->fh, oh->fh, oh->fh_len);
+        req->fhlen = oh->fh_len;
 
-    if (status != NFS4_OK) {
-        res->status = status;
-        chimera_nfs4_open_complete(req, status);
-        return;
+        status = chimera_nfs4_open_install_state(req, oh, attr,
+                                                 oh->r_created,
+                                                 base_fh, base_fh_len,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            OPEN4_RESULT_LOCKTYPE_POSIX;
+        res->resok4.num_attrset = 0;
     }
-
-    res->status              = NFS4_OK;
-    res->resok4.cinfo.atomic = 0;
-    res->resok4.cinfo.before = 0;
-    res->resok4.cinfo.after  = 0;
-    res->resok4.rflags       = install_rflags | OPEN4_RESULT_LOCKTYPE_POSIX;
-    res->resok4.num_attrset  = 0;
 
     /* Named attributes are never delegated. */
     res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
     chimera_nfs4_open_complete(req, NFS4_OK);
-} /* chimera_nfs4_open_attrdir_complete */
+} /* chimera_nfs4_open_attrdir_stream_complete */
 
 static void
-chimera_nfs4_open_attrdir(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req)
+chimera_nfs4_open_attrdir_base_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
 {
-    struct OPEN4args            *args =
-        &req->args_compound->argarray[req->index].opopen;
-    struct chimera_vfs_compound *compound;
-    const uint8_t               *base;
-    int                          base_len;
-    unsigned int                 flags = 0;
+    struct nfs_request *req   = private_data;
+    struct OPEN4args   *args  = &req->args_compound->argarray[req->index].opopen;
+    struct OPEN4res    *res   = &req->res_compound.resarray[req->index].opopen;
+    uint32_t            flags = 0;
 
-    req->handle = NULL;
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    req->handle = handle;
 
     if (args->openhow.opentype == OPEN4_CREATE) {
         flags |= CHIMERA_VFS_OPEN_CREATE;
-
         if (args->openhow.how.mode == GUARDED4 ||
             args->openhow.how.mode == EXCLUSIVE4 ||
             args->openhow.how.mode == EXCLUSIVE4_1) {
@@ -1759,25 +1741,17 @@ chimera_nfs4_open_attrdir(
         }
     }
 
-    chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
-
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, base, base_len);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH, 0);
     /* set_attr is NULL: a named-stream open must not stamp the base file's
     * mode/owner (memfs applies open_stream set_attr to the base inode). */
-    chimera_vfs_compound_add_open_stream(compound,
-                                         (const char *) args->claim.file.data,
-                                         (int) args->claim.file.len,
-                                         flags, NULL,
-                                         CHIMERA_VFS_ATTR_MASK_STAT);
-
-    chimera_vfs_compound_submit(compound, chimera_nfs4_open_attrdir_complete,
-                                req);
-} /* chimera_nfs4_open_attrdir */
+    chimera_vfs_open_stream(req->thread->vfs_thread, &req->cred,
+                            handle,
+                            args->claim.file.data, args->claim.file.len,
+                            flags,
+                            NULL,
+                            CHIMERA_VFS_ATTR_MASK_STAT,
+                            chimera_nfs4_open_attrdir_stream_complete,
+                            req);
+} /* chimera_nfs4_open_attrdir_base_open_callback */
 
 /*
  * RFC 7530 §9.1.7 entry-time seqid classification for the 4.0 path.
@@ -1850,32 +1824,44 @@ chimera_nfs4_open_4_0_entry(
             &created);
 
         evpl_mutex_lock(&owner->lock);
-        int                    cls = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
-                                                               args->seqid);
+        /* A compound owns both state and the owner-seqid snapshot until its
+         * finish is accepted. Reject a new legacy borrower before it can run
+         * VFS work or publish a consuming error into that reserved replay. */
+        if (owner->compound_reservation) {
+            evpl_mutex_unlock(&owner->lock);
+            nfs_open_owner_put(owner);
+            res->status = NFS4ERR_DELAY;
+            *status     = NFS4ERR_DELAY;
+            return true;
+        }
+        int cls = nfs4_owner_seqid_classify(owner->seqid, &owner->replay,
+                                            args->seqid);
+
+        if (cls == NFS4_SEQID_REPLAY && owner->replay.op != OP_OPEN) {
+            cls = NFS4_SEQID_BAD;
+        }
 
         if (cls == NFS4_SEQID_REPLAY) {
-            /* Return the cached reply.  Simplified replay (status, stateid
-             * and rflags); cinfo/attrset/delegation are reconstructed as
-             * zero/none.  Linux clients tolerate that since they re-fetch
-             * attrs via GETATTR after OPEN.
-             *
-             * rflags is replayed rather than zeroed: RFC 7530 §9.1.7 requires
-             * the stored last response, and dropping OPEN4_RESULT_CONFIRM
-             * (§16.18.5) tells a retransmitting client the opposite of what
-             * the original reply said about its OPEN_CONFIRM obligation.
-             *
-             * A retransmit on the SAME connection is normally answered
-             * byte-exact by the v4.0 reply cache before the compound is
-             * even decoded (nfs4_v40_drc.c), so this branch is reached
-             * only when the retransmit arrives on a new connection. */
-            res->status                            = owner->replay.status;
-            res->resok4.stateid                    = owner->replay.stateid;
-            res->resok4.cinfo.atomic               = 0;
-            res->resok4.cinfo.before               = 0;
-            res->resok4.cinfo.after                = 0;
-            res->resok4.rflags                     = owner->replay.rflags;
-            res->resok4.num_attrset                = 0;
-            res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+            uint32_t *attrset = NULL;
+            uint8_t  *who     = NULL;
+            uint32_t  fh_len;
+            if (owner->replay.status == NFS4_OK && owner->replay.open_valid &&
+                owner->replay.open.num_attrset) {
+                attrset = xdr_dbuf_alloc_space(3 * sizeof(uint32_t), req->encoding->dbuf);
+                chimera_nfs_abort_if(!attrset, "OPEN replay attrset allocation failed");
+            }
+            if (owner->replay.status == NFS4_OK && owner->replay.open_valid &&
+                owner->replay.open.delegation_who_len) {
+                who = xdr_dbuf_alloc_space(owner->replay.open.delegation_who_len, req->encoding->dbuf);
+                chimera_nfs_abort_if(!who, "OPEN replay delegation allocation failed");
+            }
+            if (nfs4_replay_fill_open(&owner->replay, res, attrset, req->fh, &fh_len, who)) {
+                if (res->status == NFS4_OK) {
+                    req->fhlen = fh_len;
+                }
+            } else {
+                res->status = NFS4ERR_BAD_SEQID;
+            }
             evpl_mutex_unlock(&owner->lock);
             /* Early return before the borrow ref transfers to the request;
              * release it here. */
@@ -1986,15 +1972,29 @@ chimera_nfs4_open(
      * directory and the claim names the attribute.  Only CLAIM_NULL is defined
      * inside a named-attr directory. */
     if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        const uint8_t *base;
+        int            base_len;
+
         if (args->claim.claim != CLAIM_NULL) {
             res->status = NFS4ERR_NOTSUPP;
             chimera_nfs4_open_complete(req, res->status);
             return;
         }
 
-        chimera_nfs4_open_attrdir(thread, req);
+        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_open_attrdir_base_open_callback,
+                            req);
         return;
     }
 
-    chimera_nfs4_open_issue(thread, req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_open_parent_complete,
+                        req);
 } /* chimera_nfs4_open */

@@ -73,68 +73,71 @@ struct chimera_vfs_mount_options {
     struct chimera_vfs_mount_option options[CHIMERA_VFS_MOUNT_OPT_MAX];
 };
 
-#define CHIMERA_VFS_OP_MOUNT                    1
-#define CHIMERA_VFS_OP_UMOUNT                   2
-#define CHIMERA_VFS_OP_LOOKUP_AT                3
-#define CHIMERA_VFS_OP_GETATTR                  4
-#define CHIMERA_VFS_OP_READDIR                  5
-#define CHIMERA_VFS_OP_READLINK                 6
-#define CHIMERA_VFS_OP_OPEN_FH                  7
-#define CHIMERA_VFS_OP_OPEN_AT                  8
-#define CHIMERA_VFS_OP_CLOSE                    9
-#define CHIMERA_VFS_OP_READ                     10
-#define CHIMERA_VFS_OP_WRITE                    11
-#define CHIMERA_VFS_OP_REMOVE_AT                12
-#define CHIMERA_VFS_OP_MKDIR_AT                 13
-#define CHIMERA_VFS_OP_COMMIT                   14
-#define CHIMERA_VFS_OP_SYMLINK_AT               15
-#define CHIMERA_VFS_OP_RENAME_AT                16
-#define CHIMERA_VFS_OP_SETATTR                  17
-#define CHIMERA_VFS_OP_LINK_AT                  18
-#define CHIMERA_VFS_OP_CREATE_UNLINKED          19
-#define CHIMERA_VFS_OP_MKNOD_AT                 20
-#define CHIMERA_VFS_OP_PUT_KEY                  21
-#define CHIMERA_VFS_OP_GET_KEY                  22
-#define CHIMERA_VFS_OP_DELETE_KEY               23
-#define CHIMERA_VFS_OP_SEARCH_KEYS              24
-#define CHIMERA_VFS_OP_ALLOCATE                 25
-#define CHIMERA_VFS_OP_SEEK                     26
+#define CHIMERA_VFS_OP_MOUNT               1
+#define CHIMERA_VFS_OP_UMOUNT              2
+#define CHIMERA_VFS_OP_LOOKUP_AT           3
+#define CHIMERA_VFS_OP_GETATTR             4
+#define CHIMERA_VFS_OP_READDIR             5
+#define CHIMERA_VFS_OP_READLINK            6
+#define CHIMERA_VFS_OP_OPEN_FH             7
+#define CHIMERA_VFS_OP_OPEN_AT             8
+#define CHIMERA_VFS_OP_CLOSE               9
+#define CHIMERA_VFS_OP_READ                10
+#define CHIMERA_VFS_OP_WRITE               11
+#define CHIMERA_VFS_OP_REMOVE_AT           12
+#define CHIMERA_VFS_OP_MKDIR_AT            13
+#define CHIMERA_VFS_OP_COMMIT              14
+#define CHIMERA_VFS_OP_SYMLINK_AT          15
+#define CHIMERA_VFS_OP_RENAME_AT           16
+#define CHIMERA_VFS_OP_SETATTR             17
+#define CHIMERA_VFS_OP_LINK_AT             18
+#define CHIMERA_VFS_OP_CREATE_UNLINKED     19
+#define CHIMERA_VFS_OP_MKNOD_AT            20
+#define CHIMERA_VFS_OP_PUT_KEY             21
+#define CHIMERA_VFS_OP_GET_KEY             22
+#define CHIMERA_VFS_OP_DELETE_KEY          23
+#define CHIMERA_VFS_OP_SEARCH_KEYS         24
+#define CHIMERA_VFS_OP_ALLOCATE            25
+#define CHIMERA_VFS_OP_SEEK                26
 /* 27 was CHIMERA_VFS_OP_LOCK; byte ranges now ride the claim wire. */
-#define CHIMERA_VFS_OP_GETPARENT                28
-#define CHIMERA_VFS_OP_COPY_RANGE               29
-#define CHIMERA_VFS_OP_CLONE_RANGE              30
-#define CHIMERA_VFS_OP_MOVE_RANGE               31
-#define CHIMERA_VFS_OP_GET_XATTR                32
-#define CHIMERA_VFS_OP_SET_XATTR                33
-#define CHIMERA_VFS_OP_LIST_XATTRS              34
-#define CHIMERA_VFS_OP_REMOVE_XATTR             35
-#define CHIMERA_VFS_OP_GET_LAYOUT               36
-#define CHIMERA_VFS_OP_OPEN_STREAM              37
-#define CHIMERA_VFS_OP_LIST_STREAMS             38
-#define CHIMERA_VFS_OP_REMOVE_STREAM            39
-#define CHIMERA_VFS_OP_MKFS                     40
-#define CHIMERA_VFS_OP_RMFS                     41
-#define CHIMERA_VFS_OP_CLAIM_ACQUIRE            42
-#define CHIMERA_VFS_OP_CLAIM_RELEASE            43
-#define CHIMERA_VFS_OP_READ_PLUS                44
-#define CHIMERA_VFS_OP_WRITE_SAME               45
-#define CHIMERA_VFS_OP_NUM                      46
+#define CHIMERA_VFS_OP_GETPARENT           28
+#define CHIMERA_VFS_OP_COPY_RANGE          29
+#define CHIMERA_VFS_OP_CLONE_RANGE         30
+#define CHIMERA_VFS_OP_MOVE_RANGE          31
+#define CHIMERA_VFS_OP_GET_XATTR           32
+#define CHIMERA_VFS_OP_SET_XATTR           33
+#define CHIMERA_VFS_OP_LIST_XATTRS         34
+#define CHIMERA_VFS_OP_REMOVE_XATTR        35
+#define CHIMERA_VFS_OP_GET_LAYOUT          36
+#define CHIMERA_VFS_OP_OPEN_STREAM         37
+#define CHIMERA_VFS_OP_LIST_STREAMS        38
+#define CHIMERA_VFS_OP_REMOVE_STREAM       39
+#define CHIMERA_VFS_OP_MKFS                40
+#define CHIMERA_VFS_OP_RMFS                41
+#define CHIMERA_VFS_OP_CLAIM_ACQUIRE       42
+#define CHIMERA_VFS_OP_CLAIM_RELEASE       43
+#define CHIMERA_VFS_OP_READ_PLUS           44
+#define CHIMERA_VFS_OP_WRITE_SAME          45
+#define CHIMERA_VFS_OP_NUM                 46
 
-#define CHIMERA_VFS_OPEN_CREATE                 (1U << 0)
-#define CHIMERA_VFS_OPEN_PATH                   (1U << 1)
-#define CHIMERA_VFS_OPEN_INFERRED               (1U << 2)
-#define CHIMERA_VFS_OPEN_DIRECTORY              (1U << 3)
-#define CHIMERA_VFS_OPEN_READ_ONLY              (1U << 4)
-#define CHIMERA_VFS_OPEN_EXCLUSIVE              (1U << 5)
-#define CHIMERA_VFS_OPEN_NOFOLLOW               (1U << 6)
+#define CHIMERA_VFS_OPEN_CREATE            (1U << 0)
+#define CHIMERA_VFS_OPEN_PATH              (1U << 1)
+#define CHIMERA_VFS_OPEN_INFERRED          (1U << 2)
+#define CHIMERA_VFS_OPEN_DIRECTORY         (1U << 3)
+#define CHIMERA_VFS_OPEN_READ_ONLY         (1U << 4)
+#define CHIMERA_VFS_OPEN_EXCLUSIVE         (1U << 5)
+#define CHIMERA_VFS_OPEN_NOFOLLOW          (1U << 6)
+/* Strict identity check for REMOVE_STREAM; requires the matching capability. */
+#define CHIMERA_VFS_REMOVE_STREAM_MATCH_FH (1U << 0)
+
 /* Replace an existing file's contents on open: truncate to zero and apply
  * set_attr (used for the SMB OVERWRITE / OVERWRITE_IF / SUPERSEDE
  * dispositions).  Backends that do not honor it simply open the file. */
-#define CHIMERA_VFS_OPEN_TRUNCATE               (1U << 7)
+#define CHIMERA_VFS_OPEN_TRUNCATE          (1U << 7)
 /* Access mode: READ_ONLY for O_RDONLY, WRITE_ONLY for O_WRONLY, neither for
  * O_RDWR.  Read access is required unless WRITE_ONLY; write access is required
  * unless READ_ONLY.  Used by the open path to authorize the requested access. */
-#define CHIMERA_VFS_OPEN_WRITE_ONLY             (1U << 8)
+#define CHIMERA_VFS_OPEN_WRITE_ONLY        (1U << 8)
 /* Stop if the final path component is an existing symbolic link: the backend
  * returns CHIMERA_VFS_ELOOP instead of opening, colliding with (O_EXCL), or
  * truncating it -- the check precedes the existence/EXCLUSIVE test.  Set by the
@@ -142,7 +145,7 @@ struct chimera_vfs_mount_options {
  * STATUS_STOPPED_ON_SYMLINK regardless of the create disposition (MS-SMB2
  * 3.3.5.9).  POSIX/NFS callers leave it clear and keep their existing
  * symlink-leaf semantics. */
-#define CHIMERA_VFS_OPEN_STOP_SYMLINK           (1U << 9)
+#define CHIMERA_VFS_OPEN_STOP_SYMLINK      (1U << 9)
 /* The create must yield a *regular* file (POSIX/NFS3 CREATE semantics): if the
  * name already exists as a non-regular object, the backend returns an error
  * instead of opening it -- a directory gives CHIMERA_VFS_EISDIR, any other
@@ -151,7 +154,7 @@ struct chimera_vfs_mount_options {
  * OPEN_EXCLUSIVE).  Native backends answer from the inode metadata they already
  * hold; passthrough resolves the leaf type without a data open.  SMB leaves it
  * clear and keeps its open-any-type disposition. */
-#define CHIMERA_VFS_OPEN_CREATE_REGULAR         (1U << 10)
+#define CHIMERA_VFS_OPEN_CREATE_REGULAR    (1U << 10)
 
 /* Suppress the VFS core's FILE_ADDED change-notify emission when this open
  * creates a file.  Set by the SMB create path, which owns a richer emission
@@ -159,7 +162,7 @@ struct chimera_vfs_mount_options {
  * key sparing) and would otherwise deliver duplicate CHANGE_NOTIFY events.
  * Every other caller leaves it clear so a create is observable by change
  * watchers and directory-lease holders regardless of arrival protocol. */
-#define CHIMERA_VFS_OPEN_NO_NOTIFY              (1U << 11)
+#define CHIMERA_VFS_OPEN_NO_NOTIFY         (1U << 11)
 
 /* The object this open yields must be a REGULAR file: if it is not, the module
  * refuses instead of opening it, and says what was in the way --
@@ -181,7 +184,7 @@ struct chimera_vfs_mount_options {
  * name, because what matters there is that the name is taken, while this says
  * what the object is, because what matters here is that the operation does not
  * apply to it. */
-#define CHIMERA_VFS_OPEN_REGULAR_ONLY           (1U << 12)
+#define CHIMERA_VFS_OPEN_REGULAR_ONLY      (1U << 12)
 
 /* remove_at flags: an optional assertion about the target's type, letting the
  * single VFS remove op express the rmdir(2)/RMDIR vs unlink(2)/REMOVE
@@ -191,14 +194,35 @@ struct chimera_vfs_mount_options {
  * backends (linux, io_uring) use it to choose unlinkat's AT_REMOVEDIR flag.
  * With neither set the op removes whatever the name resolves to (legacy
  * behavior). */
-#define CHIMERA_VFS_REMOVE_ISDIR                (1U << 0) /* target must be a directory */
-#define CHIMERA_VFS_REMOVE_ISNOTDIR             (1U << 1) /* target must not be a directory */
+#define CHIMERA_VFS_REMOVE_ISDIR           (1U << 0)      /* target must be a directory */
+#define CHIMERA_VFS_REMOVE_ISNOTDIR        (1U << 1)      /* target must not be a directory */
 /* The caller wants the VFS to recall any cross-protocol caching holder on the
  * victim before the unlink.  When set (and caching is enabled and no child_fh
  * was supplied), the remove path resolves the name to its FH and drives a
  * synchronous recall.  Callers with their own recall scheme (e.g. NFSv4, which
  * breaks the delegation and returns NFS4ERR_DELAY) leave it clear. */
-#define CHIMERA_VFS_REMOVE_RECALL               (1U << 2)
+#define CHIMERA_VFS_REMOVE_RECALL          (1U << 2)
+/* Frontend publishes namespace/delete notifications after compound acceptance. */
+#define CHIMERA_VFS_REMOVE_NO_NOTIFY       (1U << 3)
+
+/* Frontend publishes creation only after compound acceptance. */
+#define CHIMERA_VFS_MKDIR_NO_NOTIFY        (1U << 0)
+#define CHIMERA_VFS_SYMLINK_NO_NOTIFY      (1U << 0)
+#define CHIMERA_VFS_MKNOD_NO_NOTIFY        (1U << 0)
+
+/* RENAME flags also accept REMOVE_RECALL for historical callers. */
+#define CHIMERA_VFS_RENAME_SRC_IS_DIR      (1U << 0)
+#define CHIMERA_VFS_RENAME_NOREPLACE       (1U << 3)
+#define CHIMERA_VFS_RENAME_NO_NOTIFY       (1U << 4)
+#define CHIMERA_VFS_RENAME_MATCH_SOURCE_FH (1U << 5)
+/* target_fh is an immutable expected occupied destination, checked atomically. */
+#define CHIMERA_VFS_RENAME_MATCH_DEST_FH   (1U << 6)
+
+enum chimera_vfs_rename_outcome {
+    CHIMERA_VFS_RENAME_OUTCOME_UNKNOWN,
+    CHIMERA_VFS_RENAME_OUTCOME_MOVED,
+    CHIMERA_VFS_RENAME_OUTCOME_NOOP,
+};
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE         0x01
@@ -222,6 +246,9 @@ struct chimera_vfs_mount_options {
 /* RANGE claim flags (claim_acquire.flags) */
 #define CHIMERA_VFS_CLAIM_WAIT                  (1U << 0) /* block until grantable (F_SETLKW) */
 #define CHIMERA_VFS_CLAIM_TEST                  (1U << 1) /* probe only, do not acquire (F_GETLK) */
+/* Typed POSIX replacement: atomically replace same-owner overlap, preserving
+ * coverage outside the requested interval. Legacy token grants omit this. */
+#define CHIMERA_VFS_CLAIM_REPLACE               (1U << 2)
 
 /* Readdir flags */
 #define CHIMERA_VFS_READDIR_EMIT_DOT            (1U << 0) /* Emit "." and ".." entries */
@@ -571,6 +598,7 @@ struct chimera_vfs_request {
      * is the per-file state whose implicit lease this request has pinned
      * (NULL on the fast path where nothing was pinned). */
     struct chimera_claim_actor         io_owner;
+    struct chimera_vfs_io_view         io_view;
     uint8_t                            io_owner_valid;
     /* Set when a lease-holding writer must wait out sync_break read caches:
      * the request is parked on the file's io-wait queue until every such
@@ -909,6 +937,10 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_open_handle *handle;
             struct chimera_vfs_attrs       *set_attr;
+            /* An admitted file overwrite also removes alternate streams.
+             * Ordinary size changes preserve them; a named-stream handle
+             * replaces only its own data fork. */
+            bool                            overwrite;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } setattr;
@@ -943,6 +975,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             uint32_t                        name_len;
+            uint32_t                        flags;
             uint64_t                        name_hash;
             struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
@@ -954,6 +987,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             uint32_t                        name_len;
+            uint32_t                        flags;
             uint64_t                        name_hash;
             struct chimera_vfs_attrs       *set_attr;
             struct chimera_vfs_attrs        r_attr;
@@ -1093,6 +1127,7 @@ struct chimera_vfs_request {
              * The op still completes OK, but the post-removal bookkeeping
              * (negative name-cache entry, FILE_REMOVED notify) must be skipped. */
             uint8_t                         r_unmatched;
+            uint8_t                        *unmatched_out; /* optional typed result, request lifetime */
             /* SMB3 directory-lease self-exemption (see link_at): spare the dir
              * lease named by the deleting open's ParentLeaseKey from the
              * FILE_REMOVED break on the parent.  NULL caller = break all. */
@@ -1107,6 +1142,7 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;
             const char                     *name;
             int                             namelen;
+            uint32_t                        flags;
             uint64_t                        name_hash;
             const char                     *target;
             int                             targetlen;
@@ -1125,31 +1161,35 @@ struct chimera_vfs_request {
         } readlink;
 
         struct {
-            const char              *name;
-            int                      namelen;
-            uint64_t                 name_hash;
-            uint64_t                 new_fh_hash;
-            const void              *new_fh;
-            int                      new_fhlen;
-            uint64_t                 new_name_hash;
-            const char              *new_name;
-            int                      new_namelen;
-            unsigned int             flags;  /* CHIMERA_VFS_REMOVE_* (RECALL) */
-            const uint8_t           *target_fh; /* Optional: target FH if known (for silly rename) */
-            int                      target_fh_len; /* 0 if target_fh not provided */
+            const char                      *name;
+            int                              namelen;
+            uint64_t                         name_hash;
+            uint64_t                         new_fh_hash;
+            const void                      *new_fh;
+            int                              new_fhlen;
+            uint64_t                         new_name_hash;
+            const char                      *new_name;
+            int                              new_namelen;
+            unsigned int                     flags; /* CHIMERA_VFS_RENAME_* plus REMOVE_RECALL */
+            enum chimera_vfs_rename_outcome  r_outcome;
+            enum chimera_vfs_rename_outcome *outcome_result; /* frontend output, VFS-only */
+            uint8_t                          match_source_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                         match_source_fh_len;
+            const uint8_t                   *target_fh; /* Optional: target FH if known (for silly rename) */
+            int                              target_fh_len; /* 0 if target_fh not provided */
             /* Backing store for a target FH the VFS resolved itself (RECALL). */
-            uint8_t                  resolved_target_fh[CHIMERA_VFS_FH_SIZE];
-            uint8_t                  source_fh[CHIMERA_VFS_FH_SIZE]; /* resolved source FH, for delegation recall */
-            int                      source_fh_len; /* 0 if source FH could not be resolved */
+            uint8_t                          resolved_target_fh[CHIMERA_VFS_FH_SIZE];
+            uint8_t                          source_fh[CHIMERA_VFS_FH_SIZE]; /* resolved source FH, for delegation recall */
+            int                              source_fh_len; /* 0 if source FH could not be resolved */
             /* SMB3 directory-lease self-exemption (see link_at): spare the dir
              * lease named by the operating open's ParentLeaseKey from the RENAMED
              * break on the source/dest parent.  NULL caller = no skip. */
-            uint8_t                  parent_lease_skip[16];
-            uint8_t                  parent_lease_skip_valid;
-            struct chimera_vfs_attrs r_fromdir_pre_attr;
-            struct chimera_vfs_attrs r_fromdir_post_attr;
-            struct chimera_vfs_attrs r_todir_pre_attr;
-            struct chimera_vfs_attrs r_todir_post_attr;
+            uint8_t                          parent_lease_skip[16];
+            uint8_t                          parent_lease_skip_valid;
+            struct chimera_vfs_attrs         r_fromdir_pre_attr;
+            struct chimera_vfs_attrs         r_fromdir_post_attr;
+            struct chimera_vfs_attrs         r_todir_pre_attr;
+            struct chimera_vfs_attrs         r_todir_post_attr;
         } rename_at;
 
         struct {
@@ -1159,6 +1199,7 @@ struct chimera_vfs_request {
             const char              *name;
             int                      namelen;
             unsigned int             replace;
+            unsigned int             flags;
             uint64_t                 name_hash;
             /* SMB3 directory-lease self-exemption: when this link/rename is
              * issued through a handle that supplied a ParentLeaseKey, that
@@ -1460,6 +1501,9 @@ struct chimera_vfs_request {
             struct chimera_vfs_open_handle *handle;       /* base file handle */
             const char                     *name;
             uint32_t                        namelen;
+            uint32_t                        flags;
+            uint8_t                         expected_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                        expected_fh_len;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } remove_stream;

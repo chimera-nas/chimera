@@ -58,3 +58,13 @@ chimera_thread_sleep_us(unsigned int delay)
     usleep(delay);
 #endif // ifdef _WIN32
 } // chimera_thread_sleep_us
+
+static inline int
+chimera_mutex_trylock(evpl_mutex_t *mutex)
+{
+#ifdef _WIN32
+    return TryAcquireSRWLockExclusive(mutex) ? 0 : EBUSY;
+#else // ifdef _WIN32
+    return pthread_mutex_trylock(mutex);
+#endif // ifdef _WIN32
+} // chimera_mutex_trylock

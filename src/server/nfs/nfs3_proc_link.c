@@ -5,26 +5,34 @@
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
+#include "nfs3_compound.h"
+
 static void
 chimera_nfs3_link_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_pre_attr,
-    struct chimera_vfs_attrs *r_dir_post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct LINK3res                   res;
-    int                               rc;
+    struct nfs3_compound                 *ctx = private_data;
 
-    res.status = chimera_vfs_error_to_nfsstat3(
-        error_code);
+    if (nfs3_compound_retry(ctx)) {
+        return;
+    }
+    struct nfs_request                   *req             = ctx->req;
+    const struct chimera_vfs_compound_op *op              = nfs3_compound_result(ctx);
+    const struct chimera_vfs_attrs       *r_attr          = &op->attr;
+    const struct chimera_vfs_attrs       *r_dir_pre_attr  = &op->dir_pre_attr;
+    const struct chimera_vfs_attrs       *r_dir_post_attr = &op->dir_post_attr;
+
+    struct chimera_server_nfs_thread     *thread = req->thread;
+    struct chimera_server_nfs_shared     *shared = thread->shared;
+    struct evpl                          *evpl   = thread->evpl;
+    struct LINK3res                       res;
+    int                                   rc;
+
+    res.status = nfs3_compound_status(ctx);
 
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.file_attributes, r_attr);
@@ -37,38 +45,9 @@ chimera_nfs3_link_complete(
     rc = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
+    nfs3_compound_free(ctx);
     nfs_request_free(thread, req);
 } /* chimera_nfs3_link_complete */
-
-static void
-chimera_nfs3_link_sequence_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs_request                   *req = private_data;
-    const struct chimera_vfs_compound_op *op;
-    struct chimera_vfs_attrs              attr, pre_attr, post_attr;
-    enum chimera_vfs_error                status;
-
-    status = chimera_vfs_compound_status(compound);
-
-    memset(&attr, 0, sizeof(attr));
-
-    op = chimera_vfs_compound_op(compound,
-                                 chimera_vfs_compound_num_ops(compound) - 1);
-
-    /* LINK3res carries dir_wcc on both arms. */
-    pre_attr  = op->dir_pre_attr;
-    post_attr = op->dir_post_attr;
-
-    if (status == CHIMERA_VFS_OK) {
-        attr = op->attr;
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_nfs3_link_complete(status, &attr, &pre_attr, &post_attr, req);
-} /* chimera_nfs3_link_sequence_complete */
 
 void
 chimera_nfs3_link(
@@ -82,7 +61,6 @@ chimera_nfs3_link(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
-    struct chimera_vfs_compound      *compound;
     struct LINK3res                   res;
     uint16_t                          linkdir_export_id = 0;
     int                               rc;
@@ -118,22 +96,13 @@ chimera_nfs3_link(
         return;
     }
 
-    /* PUTFH the file, park it, then make the target directory current: the
-     * sequence's LINK reads (SAVED, CURRENT) the same way the VFS call reads
-     * (fh, dir_fh), so the two operands need nothing said about them. */
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    struct nfs3_compound        *ctx      = nfs3_compound_alloc(req, 0);
+    struct chimera_vfs_compound *compound = ctx->compound;
     chimera_vfs_compound_add_savefh(compound);
     chimera_vfs_compound_add_putfh(compound, req->saved_fh, req->saved_fhlen);
-    chimera_vfs_compound_add_link(compound,
-                                  args->link.name.str,
-                                  args->link.name.len,
-                                  CHIMERA_NFS3_ATTR_MASK,
-                                  CHIMERA_NFS3_ATTR_WCC_MASK |
-                                  CHIMERA_VFS_ATTR_ATOMIC,
-                                  CHIMERA_NFS3_ATTR_MASK);
-
-    chimera_vfs_compound_submit(compound,
-                                chimera_nfs3_link_sequence_complete, req);
+    ctx->result = chimera_vfs_compound_add_link(compound, args->link.name.str, args->link.name.len,
+                                                CHIMERA_NFS3_ATTR_MASK, 0, 0);
+    chimera_vfs_compound_set_result_masks(compound, ctx->result, CHIMERA_NFS3_ATTR_MASK, CHIMERA_NFS3_ATTR_WCC_MASK,
+                                          CHIMERA_NFS3_ATTR_MASK);
+    chimera_vfs_compound_submit(compound, chimera_nfs3_link_complete, ctx);
 } /* chimera_nfs3_link */

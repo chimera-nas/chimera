@@ -120,6 +120,7 @@ struct memfs_fork {
 };
 
 struct memfs_dirent {
+    bool                 is_dir; /* Immutable file type, protected by parent lock. */
     uint64_t             inum;
     uint32_t             gen;
     uint32_t             name_len;
@@ -331,6 +332,10 @@ memfs_claim_recall_sweep(
     struct evpl_timer *timer);
 
 struct memfs_fs {
+    /* Only cross-directory directory moves change existing ancestry edges.
+     * They take this exclusively; other renames share it. Namespace/data
+     * operations retain their inode locking and do not serialize here. */
+    evpl_rwlock_t         rename_lock;
     struct memfs_shared     *shared;
     char                    *name;
     struct memfs_inode_list *inode_list;
@@ -564,6 +569,53 @@ memfs_inode_get_inum(
 
     return inode;
 } /* memfs_inode_get_inum */
+
+/* Rename must never wait for another inode while holding namespace locks:
+ * ordinary lookup/remove lock parent then child, and parent order is not FH
+ * order. Return the contended mutex separately from a stale generation. Inode
+ * blocks survive until filesystem destruction (the request pins its mount),
+ * so the mutex remains valid while every inode lock is dropped before waiting.
+ * The next attempt resolves generations and dirents again, never this pointer. */
+static struct memfs_inode *
+memfs_inode_try_inum(
+    struct memfs_fs     *fs,
+    uint64_t             inum,
+    uint32_t             gen,
+    struct memfs_inode **contended)
+{
+    uint32_t            list_id     = inum & CHIMERA_MEMFS_INODE_LIST_MASK;
+    uint64_t            block       = inum >> CHIMERA_MEMFS_INODE_LIST_SHIFT;
+    uint32_t            block_id    = block >> CHIMERA_MEMFS_INODE_BLOCK_SHIFT;
+    uint32_t            block_index = block & CHIMERA_MEMFS_INODE_BLOCK_MASK;
+
+    if (list_id >= fs->num_inode_list || block_id >= fs->inode_list[list_id].num_blocks) {
+        return NULL;
+    }
+    struct memfs_inode *inode = &fs->inode_list[list_id].inode[block_id][block_index];
+    if (chimera_mutex_trylock(&inode->lock)) {
+        *contended = inode;
+        return NULL;
+    }
+    if (inode->gen != gen) {
+        evpl_mutex_unlock(&inode->lock);
+        return NULL;
+    }
+    return inode;
+} /* memfs_inode_try_inum */
+
+static struct memfs_inode *
+memfs_inode_try_fh(
+    struct memfs_fs     *fs,
+    const uint8_t       *fh,
+    int                  fhlen,
+    struct memfs_inode **contended)
+{
+    uint64_t inum;
+    uint32_t gen;
+
+    memfs_fh_to_inum(&inum, &gen, fh, fhlen);
+    return memfs_inode_try_inum(fs, inum, gen, contended);
+} /* memfs_inode_try_fh */
 
 static inline struct memfs_inode *
 memfs_inode_get_fh(
@@ -1099,6 +1151,7 @@ memfs_dirent_alloc(
     struct memfs_thread *thread,
     uint64_t             inum,
     uint32_t             gen,
+    bool                 is_dir,
     uint64_t             hash,
     const char          *name,
     int                  name_len)
@@ -1113,6 +1166,7 @@ memfs_dirent_alloc(
         dirent = malloc(sizeof(*dirent));
     }
 
+    dirent->is_dir   = is_dir;
     dirent->inum     = inum;
     dirent->gen      = gen;
     dirent->hash     = hash;
@@ -1321,6 +1375,7 @@ memfs_fs_create(
 
     chimera_vfs_realtime(&now);
 
+    evpl_rwlock_init(&fs->rename_lock, NULL);
     fs->shared  = shared;
     fs->name    = strndup(name, namelen);
     fs->fsid    = fsid;
@@ -1499,6 +1554,7 @@ memfs_fs_free_contents(struct memfs_fs *fs)
         free(fs->inode_list[i].inode);
     }
 
+    chimera_rwlock_destroy(&fs->rename_lock);
     free(fs->inode_list);
     free(fs->name);
 } /* memfs_fs_free_contents */
@@ -2240,6 +2296,10 @@ memfs_setattr(
         return;
     }
 
+    if (request->setattr.overwrite && !stream && inode->streams) {
+        memfs_streams_free_all(thread, inode);
+    }
+
     fork         = stream ? &stream->fork : &inode->file;
     p_size       = stream ? &stream->size : &inode->size;
     p_space_used = stream ? &stream->space_used : &inode->space_used;
@@ -2248,7 +2308,7 @@ memfs_setattr(
 
     /* Handle truncation: free blocks past new EOF and zero partial block */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
-        S_ISREG(inode->mode) &&
+        (stream || S_ISREG(inode->mode)) &&
         attr->va_size < *p_size) {
 
         struct evpl   *evpl           = thread->evpl;
@@ -2331,7 +2391,7 @@ memfs_setattr(
     /* Apply the new logical size to the resolved fork ourselves (the base
      * inode's size lives on the inode, a stream's on its node), then mask the
      * SIZE bit off so memfs_apply_attrs only touches base-inode metadata. */
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && S_ISREG(inode->mode)) {
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && (stream || S_ISREG(inode->mode))) {
         *p_size = attr->va_size;
         /* POSIX: a successful (f)truncate marks both the last data modification
          * (mtime) and last status change (ctime) times for update.  ctime is
@@ -2956,6 +3016,7 @@ memfs_mkdir_at(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                S_ISDIR(inode->mode),
                                 hash,
                                 request->mkdir_at.name,
                                 request->mkdir_at.name_len);
@@ -3125,6 +3186,7 @@ memfs_mknod_at(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                S_ISDIR(inode->mode),
                                 hash,
                                 request->mknod_at.name,
                                 request->mknod_at.name_len);
@@ -3769,6 +3831,7 @@ memfs_open_at(
         dirent = memfs_dirent_alloc(thread,
                                     inode->inum,
                                     inode->gen,
+                                    S_ISDIR(inode->mode),
                                     hash,
                                     request->open_at.name,
                                     request->open_at.namelen);
@@ -5908,6 +5971,7 @@ memfs_symlink_at(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                S_ISDIR(inode->mode),
                                 hash,
                                 request->symlink_at.name,
                                 request->symlink_at.namelen);
@@ -6027,18 +6091,6 @@ memfs_readlink(
     request->complete(request);
 } /* memfs_readlink */
 
-static inline int
-memfs_fh_compare(
-    const void *fha,
-    int         fha_len,
-    const void *fhb,
-    int         fhb_len)
-{
-    int minlen = fha_len < fhb_len ? fha_len : fhb_len;
-
-    return memcmp(fha, fhb, minlen);
-} /* memfs_fh_compare */
-
 static void
 memfs_rename_at(
     struct memfs_thread        *thread,
@@ -6048,20 +6100,35 @@ memfs_rename_at(
 {
     struct memfs_inode  *old_parent_inode, *new_parent_inode, *child_inode;
     struct memfs_inode  *existing_inode = NULL;
+    struct memfs_inode  *contended;
+    bool                 exclusive = false;
     struct memfs_dirent *new_dirent, *old_dirent, *existing_dirent = NULL;
     int                  cmp;
     struct timespec      now;
-    uint64_t             hash, new_hash;
-
-    chimera_vfs_realtime(&now);
+    uint64_t             hash, new_hash, old_inum, new_inum;
+    uint32_t             old_gen, new_gen;
 
     hash     = request->rename_at.name_hash;
     new_hash = request->rename_at.new_name_hash;
 
-    cmp = memfs_fh_compare(request->fh,
-                           request->fh_len,
-                           request->rename_at.new_fh,
-                           request->rename_at.new_fhlen);
+    memfs_fh_to_inum(&old_inum, &old_gen, request->fh, request->fh_len);
+    memfs_fh_to_inum(&new_inum, &new_gen, request->rename_at.new_fh, request->rename_at.new_fhlen);
+    /* Compare actual inode identities, not encoded FH prefixes. Two routes to
+     * the same inode must acquire its mutex once; differing generations for
+     * one slot cannot both be valid. */
+    if (old_inum == new_inum && old_gen != new_gen) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+    cmp = (old_inum > new_inum) - (old_inum < new_inum);
+
+    evpl_rwlock_rdlock(&fs->rename_lock);
+ restart:
+    old_parent_inode = new_parent_inode = child_inode = NULL;
+    existing_inode   = NULL;
+    contended        = NULL;
+    chimera_vfs_realtime(&now);
 
     if (cmp == 0) {
         old_parent_inode = memfs_inode_get_fh(fs,
@@ -6070,6 +6137,7 @@ memfs_rename_at(
 
         if (!old_parent_inode) {
             request->status = CHIMERA_VFS_ESTALE;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
@@ -6077,6 +6145,7 @@ memfs_rename_at(
         if (!S_ISDIR(old_parent_inode->mode)) {
             evpl_mutex_unlock(&old_parent_inode->lock);
             request->status = CHIMERA_VFS_ENOTDIR;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
@@ -6085,19 +6154,20 @@ memfs_rename_at(
     } else {
         if (cmp < 0) {
             old_parent_inode = memfs_inode_get_fh(fs,
-                                                  request->fh,
-                                                  request->fh_len);
+                                                  request->fh, request->fh_len);
 
-            new_parent_inode = memfs_inode_get_fh(fs,
-                                                  request->rename_at.new_fh,
-                                                  request->rename_at.new_fhlen);
+            new_parent_inode = memfs_inode_try_fh(fs,
+                                                  request->rename_at.new_fh, request->rename_at.new_fhlen, &contended);
         } else {
             new_parent_inode = memfs_inode_get_fh(fs,
                                                   request->rename_at.new_fh,
                                                   request->rename_at.new_fhlen);
-            old_parent_inode = memfs_inode_get_fh(fs,
-                                                  request->fh,
-                                                  request->fh_len);
+            old_parent_inode = memfs_inode_try_fh(fs,
+                                                  request->fh, request->fh_len, &contended);
+        }
+
+        if (contended) {
+            goto retry_contended;
         }
 
         /* Cross-directory rename: both parent inodes are locked at this
@@ -6109,6 +6179,7 @@ memfs_rename_at(
                 evpl_mutex_unlock(&new_parent_inode->lock);
             }
             request->status = CHIMERA_VFS_ENOENT;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
@@ -6119,6 +6190,7 @@ memfs_rename_at(
                 evpl_mutex_unlock(&new_parent_inode->lock);
             }
             request->status = CHIMERA_VFS_ENOTDIR;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
@@ -6126,6 +6198,7 @@ memfs_rename_at(
         if (!new_parent_inode) {
             evpl_mutex_unlock(&old_parent_inode->lock);
             request->status = CHIMERA_VFS_ESTALE;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
@@ -6134,9 +6207,23 @@ memfs_rename_at(
             evpl_mutex_unlock(&new_parent_inode->lock);
             evpl_mutex_unlock(&old_parent_inode->lock);
             request->status = CHIMERA_VFS_ENOTDIR;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
+    }
+
+    /* rmdir/replacement may leave a pinned, empty orphan as either parent.
+     * Such a directory cannot participate in a new namespace link. */
+    if (!old_parent_inode->nlink || !new_parent_inode->nlink) {
+        evpl_mutex_unlock(&old_parent_inode->lock);
+        if (cmp != 0) {
+            evpl_mutex_unlock(&new_parent_inode->lock);
+        }
+        request->status = CHIMERA_VFS_ENOENT;
+        evpl_rwlock_unlock(&fs->rename_lock);
+        request->complete(request);
+        return;
     }
 
     memfs_map_pre_attr(fs, &request->rename_at.r_fromdir_pre_attr, old_parent_inode, request->fh);
@@ -6150,40 +6237,100 @@ memfs_rename_at(
             evpl_mutex_unlock(&new_parent_inode->lock);
         }
         request->status = CHIMERA_VFS_ENOENT;
+        evpl_rwlock_unlock(&fs->rename_lock);
         request->complete(request);
         return;
     }
 
+    if (request->rename_at.flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) {
+        uint8_t  actual[CHIMERA_VFS_FH_SIZE];
+        uint32_t actual_len = chimera_vfs_encode_fh_inum_parent(request->fh,
+                                                                old_dirent->inum, old_dirent->gen, actual);
+        if (actual_len != request->rename_at.match_source_fh_len ||
+            memcmp(actual, request->rename_at.match_source_fh, actual_len)) {
+            evpl_mutex_unlock(&old_parent_inode->lock);
+            if (cmp != 0) {
+                evpl_mutex_unlock(&new_parent_inode->lock);
+            }
+            request->status = CHIMERA_VFS_ESTALE;
+            evpl_rwlock_unlock(&fs->rename_lock);
+            request->complete(request);
+            return;
+        }
+    }
+
+    /* Promote only after discovering a directory move, with no inode locks
+     * held. Another rename may change the entry meanwhile, so start over.
+     * Holding the exclusive topology lock makes the entire ancestry walk and
+     * subsequent parent update one transaction against other directory moves.
+     * mkdir adds only new edges; rmdir/replacement cannot remove a non-empty
+     * ancestor, and the live destination is pinned by its inode lock. */
+    if (old_dirent->is_dir && cmp != 0 && !exclusive) {
+        evpl_mutex_unlock(&old_parent_inode->lock);
+        evpl_mutex_unlock(&new_parent_inode->lock);
+        evpl_rwlock_unlock(&fs->rename_lock);
+        evpl_rwlock_wrlock(&fs->rename_lock);
+        exclusive = true;
+        goto restart;
+    }
+
+    /* File type cannot change while a dirent exists. Its immutable is_dir
+     * bit lets regular-file rename avoid taking ancestor locks entirely,
+     * without adding a child lock before directory-cycle detection. */
     /* POSIX: a directory may not be renamed into itself or one of its own
      * descendants (EINVAL).  Detect this before locking the child -- otherwise,
      * when the source is the destination parent (or an ancestor of it), locking
      * the child would re-lock an already-held inode and self-deadlock.  Walk the
      * destination parent's ancestry; the two already-held parent inodes are read
      * directly, any others are briefly locked. */
-    {
+    if (old_dirent->is_dir && cmp != 0) {
         uint64_t cur_inum = new_parent_inode->inum;
+        uint32_t cur_gen  = new_parent_inode->gen;
         uint64_t par_inum = new_parent_inode->dir.parent_inum;
         uint32_t par_gen  = new_parent_inode->dir.parent_gen;
+        bool     rooted   = false;
         int      bad      = 0;
 
         for (int depth = 0; depth < CHIMERA_VFS_PATH_MAX; depth++) {
-            if (cur_inum == old_dirent->inum) {
+            if (cur_inum == old_dirent->inum && cur_gen == old_dirent->gen) {
                 bad = 1;
                 break;
             }
-            if (par_inum == cur_inum) {
+            if (par_inum == cur_inum && par_gen == cur_gen) {
+                rooted = true;
                 break;  /* reached the root (parent of root is itself) */
             }
+            /* Detect the source in the ancestry edge before acquiring its
+             * inode mutex. Waiting for the next iteration would first lock
+             * that ancestor while holding descendant parent locks. */
+            if (par_inum == old_dirent->inum && par_gen == old_dirent->gen) {
+                bad = 1;
+                break;
+            }
             cur_inum = par_inum;
+            cur_gen  = par_gen;
             if (par_inum == new_parent_inode->inum) {
+                if (par_gen != new_parent_inode->gen) {
+                    break;
+                }
                 par_inum = new_parent_inode->dir.parent_inum;
                 par_gen  = new_parent_inode->dir.parent_gen;
             } else if (par_inum == old_parent_inode->inum) {
+                if (par_gen != old_parent_inode->gen) {
+                    break;
+                }
                 par_inum = old_parent_inode->dir.parent_inum;
                 par_gen  = old_parent_inode->dir.parent_gen;
             } else {
-                struct memfs_inode *anc = memfs_inode_get_inum(fs, par_inum, par_gen);
+                struct memfs_inode *anc = memfs_inode_try_inum(fs, par_inum, par_gen, &contended);
+                if (contended) {
+                    goto retry_contended;
+                }
                 if (!anc) {
+                    break;
+                }
+                if (!S_ISDIR(anc->mode) || !anc->nlink) {
+                    evpl_mutex_unlock(&anc->lock);
                     break;
                 }
                 par_inum = anc->dir.parent_inum;
@@ -6192,18 +6339,22 @@ memfs_rename_at(
             }
         }
 
-        if (bad) {
+        if (bad || !rooted) {
             evpl_mutex_unlock(&old_parent_inode->lock);
             if (cmp != 0) {
                 evpl_mutex_unlock(&new_parent_inode->lock);
             }
             request->status = CHIMERA_VFS_EINVAL;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
     }
 
-    child_inode = memfs_inode_get_inum(fs, old_dirent->inum, old_dirent->gen);
+    child_inode = memfs_inode_try_inum(fs, old_dirent->inum, old_dirent->gen, &contended);
+    if (contended) {
+        goto retry_contended;
+    }
 
     if (!child_inode) {
         evpl_mutex_unlock(&old_parent_inode->lock);
@@ -6211,6 +6362,7 @@ memfs_rename_at(
             evpl_mutex_unlock(&new_parent_inode->lock);
         }
         request->status = CHIMERA_VFS_ENOENT;
+        evpl_rwlock_unlock(&fs->rename_lock);
         request->complete(request);
         return;
     }
@@ -6218,13 +6370,45 @@ memfs_rename_at(
     /* Check if destination already exists */
     rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, existing_dirent);
 
+    if (request->rename_at.flags & CHIMERA_VFS_RENAME_MATCH_DEST_FH) {
+        uint8_t  actual[CHIMERA_VFS_FH_SIZE];
+        uint32_t actual_len = existing_dirent ? chimera_vfs_encode_fh_inum_parent(
+            request->rename_at.new_fh, existing_dirent->inum, existing_dirent->gen, actual) : 0;
+        if (!actual_len || actual_len != (uint32_t) request->rename_at.target_fh_len ||
+            memcmp(actual, request->rename_at.target_fh, actual_len)) {
+            evpl_mutex_unlock(&child_inode->lock);
+            evpl_mutex_unlock(&old_parent_inode->lock);
+            if (cmp != 0) {
+                evpl_mutex_unlock(&new_parent_inode->lock);
+            }
+            request->status = CHIMERA_VFS_ESTALE;
+            evpl_rwlock_unlock(&fs->rename_lock);
+            request->complete(request);
+            return;
+        }
+    }
+
+    if (existing_dirent && (request->rename_at.flags & CHIMERA_VFS_RENAME_NOREPLACE)) {
+        /* Both parent locks cover the absence check and eventual insertion. */
+        evpl_mutex_unlock(&child_inode->lock);
+        evpl_mutex_unlock(&old_parent_inode->lock);
+        if (cmp != 0) {
+            evpl_mutex_unlock(&new_parent_inode->lock);
+        }
+        request->status = CHIMERA_VFS_EEXIST;
+        evpl_rwlock_unlock(&fs->rename_lock);
+        request->complete(request);
+        return;
+    }
+
     if (existing_dirent) {
         /* Check if source and destination refer to the same inode (hardlinks).
          * Per POSIX/Linux: if oldpath and newpath are hardlinks to the same file,
          * rename() should do nothing and return success. */
         if (existing_dirent->inum == old_dirent->inum &&
             existing_dirent->gen == old_dirent->gen) {
-            /* Same inode - do nothing, just return success */
+            /* Atomic successful no-op: neither link nor frontend path moved. */
+            request->rename_at.r_outcome = CHIMERA_VFS_RENAME_OUTCOME_NOOP;
             memfs_map_post_attr(fs, &request->rename_at.r_fromdir_post_attr, old_parent_inode, request->fh);
             memfs_map_post_attr(fs, &request->rename_at.r_todir_post_attr, new_parent_inode, request->rename_at.
                                 new_fh);
@@ -6237,6 +6421,7 @@ memfs_rename_at(
             }
 
             request->status = CHIMERA_VFS_OK;
+            evpl_rwlock_unlock(&fs->rename_lock);
             request->complete(request);
             return;
         }
@@ -6266,7 +6451,10 @@ memfs_rename_at(
             existing_inode     = new_parent_inode;
             existing_is_parent = 1;
         } else {
-            existing_inode = memfs_inode_get_inum(fs, existing_dirent->inum, existing_dirent->gen);
+            existing_inode = memfs_inode_try_inum(fs, existing_dirent->inum, existing_dirent->gen, &contended);
+            if (contended) {
+                goto retry_contended;
+            }
         }
 
         if (existing_inode) {
@@ -6281,6 +6469,7 @@ memfs_rename_at(
                     evpl_mutex_unlock(&new_parent_inode->lock);
                 }
                 request->status = S_ISDIR(existing_inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+                evpl_rwlock_unlock(&fs->rename_lock);
                 request->complete(request);
                 return;
             }
@@ -6297,6 +6486,7 @@ memfs_rename_at(
                     evpl_mutex_unlock(&new_parent_inode->lock);
                 }
                 request->status = CHIMERA_VFS_ENOTEMPTY;
+                evpl_rwlock_unlock(&fs->rename_lock);
                 request->complete(request);
                 return;
             }
@@ -6348,6 +6538,7 @@ memfs_rename_at(
     new_dirent = memfs_dirent_alloc(thread,
                                     old_dirent->inum,
                                     old_dirent->gen,
+                                    old_dirent->is_dir,
                                     new_hash,
                                     request->rename_at.new_name,
                                     request->rename_at.new_namelen);
@@ -6392,8 +6583,30 @@ memfs_rename_at(
 
     memfs_dirent_free(thread, old_dirent);
 
-    request->status = CHIMERA_VFS_OK;
+    request->rename_at.r_outcome = CHIMERA_VFS_RENAME_OUTCOME_MOVED;
+    request->status              = CHIMERA_VFS_OK;
+    evpl_rwlock_unlock(&fs->rename_lock);
     request->complete(request);
+
+    return;
+
+ retry_contended:
+    /* No request-visible EAGAIN and no busy spin: release every inode before
+     * waiting for the holder, then revalidate all identities and attributes.
+     * Keeping the topology lock is safe: another rename never acquires it
+     * while holding an inode mutex. Non-rename operations do not take it. */
+    if (child_inode) {
+        evpl_mutex_unlock(&child_inode->lock);
+    }
+    if (new_parent_inode && new_parent_inode != old_parent_inode) {
+        evpl_mutex_unlock(&new_parent_inode->lock);
+    }
+    if (old_parent_inode) {
+        evpl_mutex_unlock(&old_parent_inode->lock);
+    }
+    evpl_mutex_lock(&contended->lock);
+    evpl_mutex_unlock(&contended->lock);
+    goto restart;
 
 } /* memfs_rename_at */
 
@@ -6552,6 +6765,7 @@ memfs_link_at(
     dirent = memfs_dirent_alloc(thread,
                                 inode->inum,
                                 inode->gen,
+                                S_ISDIR(inode->mode),
                                 hash,
                                 request->link_at.name,
                                 request->link_at.namelen);
@@ -7048,6 +7262,21 @@ memfs_remove_stream(
         return;
     }
 
+    /* Both name resolution and identity comparison are protected by the base
+     * inode lock, which serializes stream creation/removal and ID allocation. */
+    if (request->remove_stream.flags & CHIMERA_VFS_REMOVE_STREAM_MATCH_FH) {
+        uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t fh_len = memfs_encode_stream_fh(request->fh, inode->inum,
+                                                 inode->gen, stream->id, fh);
+        if (fh_len != request->remove_stream.expected_fh_len ||
+            memcmp(fh, request->remove_stream.expected_fh, fh_len)) {
+            evpl_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ESTALE;
+            request->complete(request);
+            return;
+        }
+    }
+
     /* Unlink from the inode's stream list.  If no handle holds it open, free it
      * now; otherwise it survives (unlinked) until its last close -- park it on
      * dead_streams so it is still reclaimed if the inode is torn down before
@@ -7098,12 +7327,137 @@ memfs_claim_file_get(
         return NULL;
     }
     f = calloc(1, sizeof(*f));
+    if (!f) {
+        return NULL;
+    }
     memcpy(f->fh, fh, fh_len);
     f->fh_len  = fh_len;
     f->fh_hash = fh_hash;
     LL_PREPEND(shared->lease_files, f);
     return f;
 } /* memfs_claim_file_get */
+
+/* Normalize EOF geometry while retaining the inode lock through the claim
+ * update. Lock order is inode -> lease registry; no lease-registry path takes
+ * an inode lock, and recall callbacks run after dropping the registry lock. */
+static enum chimera_vfs_error
+memfs_claim_geometry(
+    struct memfs_fs            *fs,
+    struct chimera_vfs_request *request,
+    int                         whence,
+    uint64_t                   *offset,
+    uint64_t                   *length,
+    struct memfs_inode        **locked_inode)
+{
+    if (whence == SEEK_SET) {
+        if (*length != UINT64_MAX && *offset > UINT64_MAX - *length) {
+            return CHIMERA_VFS_EINVAL;
+        }
+        return CHIMERA_VFS_OK;
+    }
+    if (whence != SEEK_END) {
+        return CHIMERA_VFS_EINVAL;
+    }
+    struct memfs_inode *inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
+    if (!inode) {
+        return CHIMERA_VFS_ESTALE;
+    }
+    __int128 start = (__int128) inode->size + (int64_t) *offset;
+    __int128 size  = (int64_t) *length;
+    if (size < 0) {
+        start += size;
+        size   = -size;
+    }
+    if (start < 0 || start > INT64_MAX || (size && start + size - 1 > INT64_MAX)) {
+        evpl_mutex_unlock(&inode->lock);
+        return CHIMERA_VFS_EINVAL;
+    }
+    *offset       = start;
+    *length       = size ? (uint64_t) size : UINT64_MAX;
+    *locked_inode = inode;
+    return CHIMERA_VFS_OK;
+} /* memfs_claim_geometry */
+
+static void
+memfs_claim_ranges_free(struct memfs_claim_range *ranges)
+{
+    while (ranges) {
+        struct memfs_claim_range *next = ranges->next;
+        free(ranges);
+        ranges = next;
+    }
+} /* memfs_claim_ranges_free */
+
+/* Prepare surviving fragments without altering a single committed record.
+ * Both fragments retain the original token: a later token release retires all
+ * surviving pieces, whereas token-zero calls continue to address geometry. */
+static bool
+memfs_claim_carve_prepare(
+    struct memfs_claim_file          *file,
+    const struct chimera_claim_owner *owner,
+    uint64_t                          offset,
+    uint64_t                          length,
+    struct memfs_claim_range        **pieces)
+{
+    __uint128_t end = length == UINT64_MAX ? ((__uint128_t) 1 << 64) : (__uint128_t) offset + length;
+
+    for (struct memfs_claim_range *range = file->ranges; range; range = range->next) {
+        if (!chimera_claim_owner_equal(&range->owner, owner) ||
+            !chimera_vfs_claim_range_overlap_i(range->offset, range->length, offset, length)) {
+            continue;
+        }
+        __uint128_t stop = range->length == UINT64_MAX ? ((__uint128_t) 1 << 64) : (__uint128_t) range->offset + range->
+            length;
+        for (unsigned side = 0; side < 2; side++) {
+            uint64_t start_piece, length_piece;
+            if (side == 0 && range->offset < offset) {
+                start_piece  = range->offset;
+                length_piece = offset - range->offset;
+            } else if (side == 1 && stop > end) {
+                start_piece  = end;
+                length_piece = stop == ((__uint128_t) 1 << 64) ? UINT64_MAX : stop - end;
+            } else {
+                continue;
+            }
+            struct memfs_claim_range *piece = malloc(sizeof(*piece));
+            if (!piece) {
+                memfs_claim_ranges_free(*pieces);
+                *pieces = NULL;
+                return false;
+            }
+            *piece        = *range;
+            piece->offset = start_piece;
+            piece->length = length_piece;
+            LL_PREPEND(*pieces, piece);
+        }
+    }
+    return true;
+} /* memfs_claim_carve_prepare */
+
+static void
+memfs_claim_carve_publish(
+    struct memfs_claim_file          *file,
+    const struct chimera_claim_owner *owner,
+    uint64_t                          offset,
+    uint64_t                          length,
+    struct memfs_claim_range         *pieces)
+{
+    struct memfs_claim_range *range, *tmp;
+
+    LL_FOREACH_SAFE(file->ranges, range, tmp)
+    {
+        if (chimera_claim_owner_equal(&range->owner, owner) &&
+            chimera_vfs_claim_range_overlap_i(range->offset, range->length, offset, length)) {
+            LL_DELETE(file->ranges, range);
+            free(range);
+        }
+    }
+    while (pieces) {
+        range = pieces;
+        LL_DELETE(pieces, range);
+        LL_PREPEND(file->ranges, range);
+    }
+} /* memfs_claim_carve_publish */
 
 static void
 memfs_claim_acquire(
@@ -7114,91 +7468,56 @@ memfs_claim_acquire(
 {
     struct memfs_claim_file  *f;
     struct memfs_claim_agg   *agg, *mine;
-    struct memfs_claim_range *rng;
+    struct memfs_claim_range *rng, *pieces = NULL;
+    struct memfs_inode       *inode  = NULL;
     uint8_t                   klass  = request->claim_acquire.klass;
     uint64_t                  offset = request->claim_acquire.offset;
     uint64_t                  length = request->claim_acquire.length;
 
     (void) thread;
 
-    /* Resolve a SEEK_END range against the file's current size.  The claim
-     * wire hands EOF-relative geometry to the arbiter precisely so the
-     * resolution happens where the size is authoritative; here that means
-     * before the claim lock is taken, since the inode lookup returns the
-     * inode LOCKED and the two locks must not nest. */
-    if (klass == CHIMERA_VFS_CLAIM_KLASS_RANGE &&
-        request->claim_acquire.whence == SEEK_END) {
-        struct memfs_inode *inode;
-        int64_t             start = (int64_t) offset;
-        int64_t             len   = (int64_t) length;
-        int64_t             size;
-
-        inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
-
-        if (!inode) {
-            request->status = CHIMERA_VFS_ESTALE;
+    if (klass == CHIMERA_VFS_CLAIM_KLASS_RANGE) {
+        request->status = memfs_claim_geometry(fs, request,
+                                               request->claim_acquire.whence, &offset, &length, &inode);
+        if (request->status != CHIMERA_VFS_OK) {
             request->complete(request);
             return;
         }
-        size = (int64_t) inode->size;
-        evpl_mutex_unlock(&inode->lock);
-
-        start += size;
-
-        /* A negative length means the range extends BACKWARDS from start
-         * (POSIX l_len < 0), and 0 still means to-EOF in this spelling. */
-        if (len < 0) {
-            start += len;
-            len    = -len;
-        }
-
-        if (start < 0) {
-            /* The range would begin before byte 0. */
-            request->status = CHIMERA_VFS_EINVAL;
-            request->complete(request);
-            return;
-        }
-
-        offset = (uint64_t) start;
-        length = (len == 0) ? UINT64_MAX : (uint64_t) len;
     }
-
+    request->status = CHIMERA_VFS_OK;
     evpl_mutex_lock(&shared->lease_lock);
-
-    f = memfs_claim_file_get(shared, request->fh, request->fh_len,
-                             request->fh_hash, 1);
-
+    f = memfs_claim_file_get(shared, request->fh, request->fh_len, request->fh_hash, 1);
+    if (!f) {
+        request->status = CHIMERA_VFS_ENOSPC;
+        goto out;
+    }
     if (klass == CHIMERA_VFS_CLAIM_KLASS_AGGREGATE) {
         uint8_t rev     = request->claim_acquire.rev_used;
         uint8_t deny    = request->claim_acquire.bind_deny;
         uint8_t granted = rev;
-        int     deny_ok = 1;
-
+        bool    deny_ok = true;
         mine = NULL;
         for (agg = f->aggs; agg; agg = agg->next) {
-            if (chimera_claim_owner_equal(&agg->owner,
-                                          &request->claim_acquire.owner)) {
+            if (chimera_claim_owner_equal(&agg->owner, &request->claim_acquire.owner)) {
                 mine = agg;
                 continue;
             }
-            /* The shared predicate, evaluated on the wire masks. */
-            granted &= (uint8_t) ~(agg->bind_deny);
+            granted &= (uint8_t) ~agg->bind_deny;
             if (deny & agg->rev_used) {
-                deny_ok = 0;
+                deny_ok = false;
             }
         }
-
-        granted &= (uint8_t) ~shared->lease_deny_mask; /* test knob */
-
+        granted &= (uint8_t) ~shared->lease_deny_mask;
         if (!deny_ok) {
-            evpl_mutex_unlock(&shared->lease_lock);
             request->status = CHIMERA_VFS_EACCES;
-            request->complete(request);
-            return;
+            goto out;
         }
-
         if (!mine) {
-            mine        = calloc(1, sizeof(*mine));
+            mine = calloc(1, sizeof(*mine));
+            if (!mine) {
+                request->status = CHIMERA_VFS_ENOSPC;
+                goto out;
+            }
             mine->owner = request->claim_acquire.owner;
             LL_PREPEND(f->aggs, mine);
         }
@@ -7211,81 +7530,60 @@ memfs_claim_acquire(
             mine->recall_due = chimera_vfs_now_ticks() +
                 chimera_vfs_ns_to_ticks(shared->lease_recall_us * 1000ULL);
         }
-
         request->claim_acquire.r_token   = mine->token;
         request->claim_acquire.r_granted = granted;
-        evpl_mutex_unlock(&shared->lease_lock);
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
+        goto out;
     }
-
-    /* RANGE: binding, all-or-nothing, cross-owner overlap+exclusivity.
-     *
-     * CHIMERA_VFS_CLAIM_WAIT is answered as a try: memfs completes inline on
-     * the caller's thread (which is what lets a synchronous acquirer project
-     * at all), so it has nowhere to block, and the claim core queues the
-     * waiter locally either way.  CHIMERA_VFS_CLAIM_TEST reports the
-     * conflict without inserting a record. */
-    if (shared->lease_range_deny) { /* test knob: refuse every range */
-        evpl_mutex_unlock(&shared->lease_lock);
+    if (shared->lease_range_deny) {
         request->claim_acquire.r_token   = 0;
         request->claim_acquire.r_granted = 0;
-        request->status                  = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
+        goto out;
     }
-
     for (rng = f->ranges; rng; rng = rng->next) {
-        if (chimera_claim_owner_equal(&rng->owner,
-                                      &request->claim_acquire.owner)) {
+        if (chimera_claim_owner_equal(&rng->owner, &request->claim_acquire.owner) ||
+            !(rng->exclusive || request->claim_acquire.exclusive) ||
+            !chimera_vfs_claim_range_overlap_i(rng->offset, rng->length, offset, length)) {
             continue;
         }
-        if (!(rng->exclusive || request->claim_acquire.exclusive)) {
-            continue;
-        }
-        if (!chimera_vfs_claim_range_overlap_i(rng->offset, rng->length,
-                                               offset, length)) {
-            continue;
-        }
-        /* Conflict: refuse (r_granted stays 0), and describe the winner so
-         * a caller answering F_GETLK can name it.  memfs has no pids to
-         * report, so r_conflict_pid stays 0. */
-        evpl_mutex_unlock(&shared->lease_lock);
-        request->claim_acquire.r_token         = 0;
-        request->claim_acquire.r_granted       = 0;
-        request->claim_acquire.r_conflict_type = rng->exclusive
-            ? CHIMERA_VFS_LOCK_WRITE : CHIMERA_VFS_LOCK_READ;
+        request->claim_acquire.r_token           = 0;
+        request->claim_acquire.r_granted         = 0;
+        request->claim_acquire.r_conflict_type   = rng->exclusive ? CHIMERA_VFS_LOCK_WRITE : CHIMERA_VFS_LOCK_READ;
         request->claim_acquire.r_conflict_offset = rng->offset;
         request->claim_acquire.r_conflict_length = rng->length;
-        request->status                          = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
+        goto out;
     }
-
     if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST) {
-        /* No conflict found, and a probe records nothing. */
-        evpl_mutex_unlock(&shared->lease_lock);
         request->claim_acquire.r_token         = 0;
         request->claim_acquire.r_granted       = 1;
         request->claim_acquire.r_conflict_type = CHIMERA_VFS_LOCK_UNLOCK;
-        request->status                        = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
+        goto out;
     }
-
-    rng            = calloc(1, sizeof(*rng));
+    rng = calloc(1, sizeof(*rng));
+    if (!rng) {
+        request->status = CHIMERA_VFS_ENOSPC;
+        goto out;
+    }
+    if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_REPLACE) {
+        if (!memfs_claim_carve_prepare(f, &request->claim_acquire.owner, offset, length, &pieces)) {
+            free(rng);
+            request->status = CHIMERA_VFS_ENOSPC;
+            goto out;
+        }
+        memfs_claim_carve_publish(f, &request->claim_acquire.owner, offset, length, pieces);
+    }
     rng->owner     = request->claim_acquire.owner;
     rng->exclusive = request->claim_acquire.exclusive;
     rng->offset    = offset;
     rng->length    = length;
     rng->token     = ++shared->lease_next_token;
     LL_PREPEND(f->ranges, rng);
-
     request->claim_acquire.r_token   = rng->token;
     request->claim_acquire.r_granted = 1;
+ out:
     evpl_mutex_unlock(&shared->lease_lock);
-    request->status = CHIMERA_VFS_OK;
+    if (inode) {
+        evpl_mutex_unlock(&inode->lock);
+    }
     request->complete(request);
 } /* memfs_claim_acquire */
 
@@ -7298,75 +7596,35 @@ memfs_claim_release(
 {
     struct memfs_claim_file  *f;
     struct memfs_claim_agg   *agg;
-    struct memfs_claim_range *rng, *tmp;
-    uint64_t                  token = request->claim_release.token;
+    struct memfs_claim_range *rng, *tmp, *pieces = NULL;
+    struct memfs_inode       *inode    = NULL;
+    uint64_t                  token    = request->claim_release.token;
+    uint64_t                  offset   = request->claim_release.offset;
+    uint64_t                  length   = request->claim_release.length;
+    bool                      geometry = token == 0 && request->claim_release.klass == CHIMERA_VFS_CLAIM_KLASS_RANGE;
 
     (void) thread;
-
-    /* Release by GEOMETRY: the caller never learned the absolute range
-     * (a SEEK_END unlock), so it names the range the way it named the
-     * lock and this side resolves EOF -- atomically with the unlock, for
-     * the same reason the acquire does. */
-    if (token == 0 &&
-        request->claim_release.klass == CHIMERA_VFS_CLAIM_KLASS_RANGE) {
-        uint64_t offset = request->claim_release.offset;
-        uint64_t length = request->claim_release.length;
-
-        if (request->claim_release.whence == SEEK_END) {
-            struct memfs_inode *inode;
-            int64_t             start = (int64_t) offset;
-            int64_t             len   = (int64_t) length;
-            int64_t             size;
-
-            inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
-
-            if (!inode) {
-                request->status = CHIMERA_VFS_ESTALE;
-                request->complete(request);
-                return;
-            }
-            size = (int64_t) inode->size;
-            evpl_mutex_unlock(&inode->lock);
-
-            start += size;
-            if (len < 0) {
-                start += len;
-                len    = -len;
-            }
-            if (start < 0) {
-                request->status = CHIMERA_VFS_EINVAL;
-                request->complete(request);
-                return;
-            }
-            offset = (uint64_t) start;
-            length = (len == 0) ? UINT64_MAX : (uint64_t) len;
+    if (geometry) {
+        request->status = memfs_claim_geometry(fs, request,
+                                               request->claim_release.whence, &offset, &length, &inode);
+        if (request->status != CHIMERA_VFS_OK) {
+            request->complete(request);
+            return;
         }
-
-        evpl_mutex_lock(&shared->lease_lock);
-        f = memfs_claim_file_get(shared, request->fh, request->fh_len,
-                                 request->fh_hash, 0);
-        if (f) {
-            LL_FOREACH_SAFE(f->ranges, rng, tmp)
-            {
-                if (!chimera_claim_owner_equal(&rng->owner,
-                                               &request->claim_release.owner)) {
-                    continue;
-                }
-                if (!chimera_vfs_claim_range_overlap_i(rng->offset, rng->length,
-                                                       offset, length)) {
-                    continue;
-                }
-                LL_DELETE(f->ranges, rng);
-                free(rng);
-            }
-        }
-        evpl_mutex_unlock(&shared->lease_lock);
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
     }
-
+    request->status = CHIMERA_VFS_OK;
     evpl_mutex_lock(&shared->lease_lock);
+    if (geometry) {
+        f = memfs_claim_file_get(shared, request->fh, request->fh_len, request->fh_hash, 0);
+        if (f) {
+            if (!memfs_claim_carve_prepare(f, &request->claim_release.owner, offset, length, &pieces)) {
+                request->status = CHIMERA_VFS_ENOSPC;
+            } else {
+                memfs_claim_carve_publish(f, &request->claim_release.owner, offset, length, pieces);
+            }
+        }
+        goto out;
+    }
     for (f = shared->lease_files; f; f = f->next) {
         for (agg = f->aggs; agg; agg = agg->next) {
             if (agg->token == token) {
@@ -7380,17 +7638,19 @@ memfs_claim_release(
                 goto out;
             }
         }
-        for (rng = f->ranges; rng; rng = rng->next) {
+        LL_FOREACH_SAFE(f->ranges, rng, tmp)
+        {
             if (rng->token == token) {
                 LL_DELETE(f->ranges, rng);
                 free(rng);
-                goto out;
             }
         }
     }
  out:
     evpl_mutex_unlock(&shared->lease_lock);
-    request->status = CHIMERA_VFS_OK;
+    if (inode) {
+        evpl_mutex_unlock(&inode->lock);
+    }
     request->complete(request);
 } /* memfs_claim_release */
 
@@ -7616,8 +7876,10 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_CLAIM_AGGREGATE | CHIMERA_VFS_CAP_CLAIM_RANGE |
-        CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
-        CHIMERA_VFS_CAP_SPARSE,
+        CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME | CHIMERA_VFS_CAP_REMOVE_MATCH_FH |
+        CHIMERA_VFS_CAP_RENAME_NOREPLACE | CHIMERA_VFS_CAP_RENAME_MATCH_FH |
+        CHIMERA_VFS_CAP_RENAME_MATCH_DEST_FH | CHIMERA_VFS_CAP_RENAME_OUTCOME |
+        CHIMERA_VFS_CAP_REMOVE_STREAM_MATCH_FH | CHIMERA_VFS_CAP_SPARSE,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

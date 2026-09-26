@@ -12,9 +12,6 @@
 #endif // ifdef _WIN32
 #include "nfs_common.h"
 #include "nfs_internal.h"
-/* For the LOCK split below: the arbiter's answer and the holder that refused
- * it are what chimera_nfs4_lock_apply takes. */
-#include "vfs/vfs_claim_types.h"
 
 /* Static root file handle for the nfs4_root pseudo-filesystem */
 static const uint8_t *nfs4_root_fh     = (const uint8_t *) "CHIMERA NFS4 ROOT FH";
@@ -171,23 +168,6 @@ nfs4_root_export_fh_resolve(
     nfs4_root_export_fh_callback_t    callback);
 
 /**
- * Is `fh` (minted under `export_id`) the "/" export's root, answered from what
- * is already known?  1 yes, 0 no, -1 not knowable without resolving the export
- * path -- which this never does, because its caller is the VFS-sequence scan
- * and a scan cannot wait.
- *
- * 0 is a definitive no: with no "/" export configured, or a handle minted
- * under another export, nothing about this handle can be a junction.  -1 is
- * only the cold cache, which PUTROOTFH warms on the first mount.
- */
-int
-nfs4_root_export_fh_peek(
-    struct chimera_server_nfs_thread *thread,
-    uint16_t                          export_id,
-    const uint8_t                    *fh,
-    uint32_t                          fh_len);
-
-/**
  * Decide whether the request's current filehandle is the root of the "/"
  * export, and continue the operation via resume(thread, req, at_root_export).
  * The decision is immediate (and resume runs synchronously) unless the root
@@ -237,18 +217,8 @@ chimera_nfs4_getattr_fill(
     struct GETATTR4res             *res,
     const struct chimera_vfs_attrs *attr,
     const uint8_t                  *fh,
-    int                             fhlen);
-
-/* Everything a GETATTR owes once the object has been stat'd: the §10.4.3
- * CB_GETATTR combine when another client holds a write delegation, and the
- * marshalling either way.  It completes the COMPOUND itself, possibly after
- * parking on the query -- which is why a sequence that carries such a GETATTR
- * ends its run at it and hands the request over here rather than filling in
- * place.  `attr` is read, never kept. */
-void
-chimera_nfs4_getattr_settle(
-    struct nfs_request       *req,
-    struct chimera_vfs_attrs *attr);
+    int                             fhlen,
+    bool                            change_projected);
 
 uint32_t
 chimera_nfs4_access_requested(
@@ -262,9 +232,9 @@ void
 chimera_nfs4_access_fill(
     struct nfs_request             *req,
     struct ACCESS4res              *res,
-    const struct chimera_vfs_attrs *attr,
     uint32_t                        requested,
-    uint32_t                        granted);
+    uint32_t                        granted,
+    const struct chimera_vfs_attrs *attr);
 
 nfsstat4
 chimera_nfs4_getfh_fill(
@@ -288,55 +258,8 @@ chimera_nfs4_open_install_state(
     bool                            file_created,
     const uint8_t                  *base_fh,
     int                             base_fh_len,
-    struct nfs4_share_lease        *share,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags);
-
-/* The SHARE reservation an OPEN asks for, and the three things a caller does
- * with it: build it from the wire (before anything is open, which is what
- * lets a sequence take it as a CLAIM op), take it against a handle, and read
- * an arbitration answer back as an NFSv4 status.  See the definitions. */
-struct nfs4_share_lease *
-chimera_nfs4_open_share_lease_build(
-    const struct OPEN4args *args,
-    struct nfs_client      *client,
-    uint32_t                share_access,
-    uint32_t                share_deny);
-
-nfsstat4
-chimera_nfs4_open_share_lease_acquire(
-    struct nfs_request             *req,
-    struct nfs4_share_lease        *share,
-    struct chimera_vfs_open_handle *handle);
-
-nfsstat4
-chimera_nfs4_open_share_status(
-    struct nfs4_share_lease       *share,
-    struct chimera_vfs_file_state *file_state,
-    enum chimera_vfs_claim_result  result);
-
-/* The rules that outrank a share conflict, plus whether this OPEN coalesces
- * -- asked from a sequence's gate, before its CLAIM op runs. */
-nfsstat4
-chimera_nfs4_open_precheck(
-    struct nfs_request             *req,
-    const struct OPEN4args         *args,
-    struct nfs_client              *client,
-    struct nfs_open_owner          *owner,
-    const struct chimera_vfs_attrs *attr,
-    bool                            file_created,
-    const uint8_t                  *fh,
-    uint16_t                        fh_len,
-    int                            *out_coalesce);
-
-/* The OPEN's RFC 7530 §9.1.7 wrapper without the hand-off: the seqid advance,
- * the encoder's owner pin, and the 4.1 current stateid.  For a sequenced OPEN
- * that is not the last op of its COMPOUND, where the wrapper runs as the
- * OPEN's result is filled and the generic completion hands the request on. */
-void
-chimera_nfs4_open_settle(
-    struct nfs_request *req,
-    nfsstat4            status);
 
 /* RFC 7530 §9.1.7 entry-time seqid classification for a 4.0 OPEN.  True when
  * the OPEN is answered outright (replay, bad seqid, stale clientid) with
@@ -716,98 +639,6 @@ chimera_nfs4_delegpurge(
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
-
-/*
- * The four NFSv4 operations that drive no VFS call at all: each resolves a
- * stateid the server already holds, advances a seqid, and changes state.
- *
- * Each is reachable from two entrances.  The per-op handler above completes
- * the request itself; these apply the operation and hand the status back, so
- * the VFS-sequence driver can carry the operation as a SLOT -- an NFSv4 op
- * the run holds a place for and applies in order when the sequence's results
- * are filled, which is what lets the ops in front of it be one VFS sequence
- * instead of ending at the first CLOSE.  See nfs4_compound_vfs.c.
- *
- * All three that address the current filehandle assume it is established: the
- * per-op handler answers NFS4ERR_NOFILEHANDLE before calling, and a sequence
- * only ever runs with a current object.  Every one of them writes its own
- * result, including on the failure paths.
- */
-nfsstat4
-chimera_nfs4_close_apply(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop);
-
-nfsstat4
-chimera_nfs4_locku_apply(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop);
-
-nfsstat4
-chimera_nfs4_open_downgrade_apply(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop);
-
-nfsstat4
-chimera_nfs4_delegreturn_apply(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop);
-
-/*
- * LOCK, in the three pieces the VFS-sequence driver needs it in.
- *
- * Everything the operation settles before it asks the claim layer anything is
- * state the server already holds, so it runs when a sequence is BUILT and the
- * arbitration becomes a CLAIM op of the run.  prepare does that part; apply is
- * everything the arbiter's answer decides; finish is the RFC 7530 §9.1.7 seqid
- * wrapper both entrances owe.  abandon gives back what a prepared LOCK holds
- * when the arbiter is never asked -- no seqid advances there, because the
- * request was not consumed.
- */
-enum nfs4_lock_prepare_result {
-    /* The range claim is built; req->nfs_state_ref and req->nfs_inflight_range
-     * carry the lock_state and the lease, and the caller takes the claim. */
-    NFS4_LOCK_PREPARE_READY,
-    /* *status is the whole answer and nothing is left pinned; the seqid
-     * wrapper runs for it. */
-    NFS4_LOCK_PREPARE_ANSWERED,
-    /* As ANSWERED, but the wrapper must NOT run: a replay and a bad seqid
-     * consume nothing. */
-    NFS4_LOCK_PREPARE_REPLAY,
-};
-
-enum nfs4_lock_prepare_result
-chimera_nfs4_lock_prepare(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop,
-    struct nfs_resop4                *resop,
-    nfsstat4                         *status_out);
-
-nfsstat4
-chimera_nfs4_lock_apply(
-    struct nfs_request                      *req,
-    enum chimera_vfs_claim_result            result,
-    const struct chimera_vfs_claim_conflict *conflict);
-
-void
-chimera_nfs4_lock_finish(
-    struct nfs_request *req,
-    nfsstat4            status);
-
-void
-chimera_nfs4_lock_abandon(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    struct nfs_argop4                *argop);
 
 void
 chimera_nfs4_setclientid(
@@ -1277,6 +1108,9 @@ chimera_nfs4_compound_complete(
     nfsstat4            status)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
+
+    nfs4_change_finish(thread->shared->nfs4_state_table.change_table,
+                       &req->change_observations, true);
 
     if (status != NFS4_OK) {
         req->res_compound.status = status;

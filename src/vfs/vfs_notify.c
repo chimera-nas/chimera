@@ -1246,46 +1246,6 @@ chimera_vfs_notify_emit_body(
     chimera_vfs_notify_resolve(pev);
 } /* chimera_vfs_notify_emit_body */
 
-/* A directory's contents/metadata just changed (a child added / removed /
- * renamed, or a child's attributes set).  Break every SMB3 directory lease on
- * that directory so a client caching its enumeration re-reads it — this is the
- * cross-protocol coherency point: an NFS or S3 mutation breaks an SMB client's
- * directory lease exactly as an SMB mutation does.  Run before taking any notify
- * registry lock (the break brackets the claim core's file lock entirely, so
- * there is no nesting against bucket/mount locks — preserving the lock-order
- * invariant documented above).  `has_skip` spares the lease named by a
- * ParentLeaseKey the mutating client supplied (self-exemption, via the trigger
- * engine's KEY circle); the no-skip wrapper (a leaseless mutator) passes a NULL
- * actor and breaks every directory lease. */
-static inline void
-chimera_vfs_notify_dir_lease_break(
-    struct chimera_vfs_notify *notify,
-    const uint8_t             *dir_fh,
-    uint16_t                   dir_fh_len,
-    uint64_t                   skip_lo,
-    uint64_t                   skip_hi,
-    bool                       has_skip)
-{
-    struct chimera_claim_actor actor;
-
-    if (notify && notify->vfs && notify->vfs->vfs_state) {
-        if (has_skip) {
-            /* The ParentLeaseKey bytes ride in actor.owner.key; everything
-             * else stays zero (a zero owner matches no real claim, so only
-             * the KEY-circle exemption applies). */
-            memset(&actor, 0, sizeof(actor));
-            memcpy(actor.owner.key, &skip_lo, 8);
-            memcpy(actor.owner.key + 8, &skip_hi, 8);
-        }
-        chimera_vfs_claim_invalidate(notify->vfs->vfs_state,
-                                     dir_fh, dir_fh_len,
-                                     chimera_vfs_hash(dir_fh, dir_fh_len),
-                                     CHIMERA_TRIGGER_DIR_CONTENT,
-                                     has_skip ? &actor : NULL,
-                                     0);
-    }
-} /* chimera_vfs_notify_dir_lease_break */
-
 SYMBOL_EXPORT void
 chimera_vfs_notify_emit(
     struct chimera_vfs_notify *notify,
@@ -1297,7 +1257,10 @@ chimera_vfs_notify_emit(
     const char                *old_name,
     uint16_t                   old_name_len)
 {
-    chimera_vfs_notify_dir_lease_break(notify, dir_fh, dir_fh_len, 0, 0, false);
+    if (notify && notify->vfs && notify->vfs->vfs_state) {
+        chimera_vfs_claim_invalidate(notify->vfs->vfs_state, dir_fh, dir_fh_len,
+                                     chimera_vfs_hash(dir_fh, dir_fh_len), CHIMERA_TRIGGER_DIR_CONTENT, NULL, 0);
+    }
     chimera_vfs_notify_emit_body(notify, dir_fh, dir_fh_len, action,
                                  name, name_len, old_name, old_name_len);
 } /* chimera_vfs_notify_emit */
@@ -1316,11 +1279,34 @@ chimera_vfs_notify_emit_lease(
     uint64_t                   skip_hi,
     bool                       has_skip)
 {
-    chimera_vfs_notify_dir_lease_break(notify, dir_fh, dir_fh_len,
-                                       skip_lo, skip_hi, has_skip);
+    (void) skip_lo; (void) skip_hi; (void) has_skip;
+    if (notify && notify->vfs && notify->vfs->vfs_state) {
+        chimera_vfs_claim_invalidate(notify->vfs->vfs_state, dir_fh, dir_fh_len,
+                                     chimera_vfs_hash(dir_fh, dir_fh_len), CHIMERA_TRIGGER_DIR_CONTENT, NULL, 0);
+    }
     chimera_vfs_notify_emit_body(notify, dir_fh, dir_fh_len, action,
                                  name, name_len, old_name, old_name_len);
 } /* chimera_vfs_notify_emit_lease */
+
+SYMBOL_EXPORT void
+chimera_vfs_notify_emit_actor(
+    struct chimera_vfs_notify        *notify,
+    const uint8_t                    *dir_fh,
+    uint16_t                          dir_fh_len,
+    uint32_t                          action,
+    const char                       *name,
+    uint16_t                          name_len,
+    const char                       *old_name,
+    uint16_t                          old_name_len,
+    const struct chimera_claim_actor *actor)
+{
+    if (notify && notify->vfs && notify->vfs->vfs_state) {
+        chimera_vfs_claim_invalidate(notify->vfs->vfs_state, dir_fh, dir_fh_len,
+                                     chimera_vfs_hash(dir_fh, dir_fh_len), CHIMERA_TRIGGER_DIR_CONTENT, actor, 0);
+    }
+    chimera_vfs_notify_emit_body(notify, dir_fh, dir_fh_len, action,
+                                 name, name_len, old_name, old_name_len);
+} /* chimera_vfs_notify_emit_actor */
 
 SYMBOL_EXPORT void
 chimera_vfs_notify_emit_nobreak(
@@ -1821,7 +1807,8 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_REMOVE_AT:
-            if (!request->remove_at.r_unmatched) {
+            if (!request->remove_at.r_unmatched &&
+                !(request->remove_at.flags & CHIMERA_VFS_REMOVE_NO_NOTIFY)) {
                 uint32_t action = CHIMERA_VFS_NOTIFY_FILE_REMOVED;
                 if ((request->remove_at.r_removed_attr.va_set_mask &
                      CHIMERA_VFS_ATTR_MODE) &&
@@ -1839,6 +1826,10 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
             break;
         case CHIMERA_VFS_OP_RENAME_AT:
         {
+            if ((request->rename_at.flags & CHIMERA_VFS_RENAME_NO_NOTIFY) ||
+                request->rename_at.r_outcome == CHIMERA_VFS_RENAME_OUTCOME_NOOP) {
+                break;
+            }
             int cross_dir = (request->fh_len != request->rename_at.new_fhlen) ||
                 memcmp(request->fh, request->rename_at.new_fh,
                        request->fh_len) != 0;
@@ -1878,6 +1869,9 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
                                          NULL, 0);
             break;
         case CHIMERA_VFS_OP_MKDIR_AT:
+            if (request->mkdir_at.flags & CHIMERA_VFS_MKDIR_NO_NOTIFY) {
+                break;
+            }
             chimera_vfs_notify_emit_sync(notify, gate, origin,
                                          request->mkdir_at.handle->fh,
                                          request->mkdir_at.handle->fh_len,
@@ -1887,6 +1881,9 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
                                          NULL, 0);
             break;
         case CHIMERA_VFS_OP_MKNOD_AT:
+            if (request->mknod_at.flags & CHIMERA_VFS_MKNOD_NO_NOTIFY) {
+                break;
+            }
             chimera_vfs_notify_emit_sync(notify, gate, origin,
                                          request->mknod_at.handle->fh,
                                          request->mknod_at.handle->fh_len,
@@ -1896,6 +1893,9 @@ chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
                                          NULL, 0);
             break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
+            if (request->symlink_at.flags & CHIMERA_VFS_SYMLINK_NO_NOTIFY) {
+                break;
+            }
             chimera_vfs_notify_emit_sync(notify, gate, origin,
                                          request->fh, request->fh_len,
                                          CHIMERA_VFS_NOTIFY_FILE_ADDED,
@@ -1941,6 +1941,27 @@ chimera_vfs_notify_gate_install(struct chimera_vfs_request *request)
     }
 
     if (request->notify_gate_wrapped) {
+        return;
+    }
+
+    if (request->opcode == CHIMERA_VFS_OP_REMOVE_AT &&
+        (request->remove_at.flags & CHIMERA_VFS_REMOVE_NO_NOTIFY)) {
+        return;
+    }
+    if (request->opcode == CHIMERA_VFS_OP_MKDIR_AT &&
+        (request->mkdir_at.flags & CHIMERA_VFS_MKDIR_NO_NOTIFY)) {
+        return;
+    }
+    if (request->opcode == CHIMERA_VFS_OP_SYMLINK_AT &&
+        (request->symlink_at.flags & CHIMERA_VFS_SYMLINK_NO_NOTIFY)) {
+        return;
+    }
+    if (request->opcode == CHIMERA_VFS_OP_MKNOD_AT &&
+        (request->mknod_at.flags & CHIMERA_VFS_MKNOD_NO_NOTIFY)) {
+        return;
+    }
+    if (request->opcode == CHIMERA_VFS_OP_RENAME_AT &&
+        (request->rename_at.flags & CHIMERA_VFS_RENAME_NO_NOTIFY)) {
         return;
     }
 

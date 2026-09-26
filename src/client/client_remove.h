@@ -13,30 +13,21 @@
 #include "client_dispatch.h"
 
 static void
-chimera_remove_vfs_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+chimera_remove_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_client_request *request      = private_data;
     struct chimera_client_thread  *thread       = request->thread;
     chimera_remove_callback_t      callback     = request->remove.callback;
     void                          *callback_arg = request->remove.private_data;
-
-    chimera_client_request_free(thread, request);
-
-    callback(thread, error_code, callback_arg);
-} /* chimera_remove_vfs_complete */
-
-static void
-chimera_remove_sequence_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    enum chimera_vfs_error status = chimera_vfs_compound_status(compound);
+    enum chimera_vfs_error         status       = chimera_vfs_compound_status(compound);
 
     chimera_vfs_compound_free(compound);
 
-    chimera_remove_vfs_complete(status, private_data);
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, callback_arg);
 } /* chimera_remove_sequence_complete */
 
 static inline void
@@ -58,38 +49,76 @@ chimera_dispatch_remove(
                                          request->remove.path_len,
                                          request->remove.flags);
 
-    chimera_vfs_compound_submit(compound, chimera_remove_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(compound, chimera_remove_sequence_complete,
+                                     request);
 } /* chimera_dispatch_remove */
 
-/*
- * unlinkat(2) with a real directory descriptor: the descriptor is lent and
- * checked to be a directory, then the same REMOVE_PATH the path form issues
- * from the root resolves the relative path from it -- see
- * chimera_client_compound_at_dir.  The path remove resolves the doomed
- * object itself: it enforces the rmdir-vs-unlink assertion in `flags` for
- * every backend (the NFSv4 proxy's REMOVE is type-agnostic on the wire), and
- * hands the backend the child's fh as the object to recall leases on and, on
- * a path-only mount, to evict from the open caches -- what the per-op chain
- * this replaced looked the child up for.  The descriptor is the caller's and
- * is not released.
- */
+static void
+chimera_remove_at_check(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_client_request  *request = private_data;
+    const struct chimera_vfs_attrs *attr    = &chimera_vfs_compound_op(compound, index)->attr;
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        bool directory = S_ISDIR(attr->va_mode);
+        if (((request->remove.flags & CHIMERA_VFS_REMOVE_ISDIR) && !directory) ||
+            ((request->remove.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && directory)) {
+            *status = directory ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+            return;
+        }
+    }
+    request->remove.child_fh_len = attr->va_fh_len;
+    memcpy(request->remove.child_fh, attr->va_fh, attr->va_fh_len);
+} // chimera_remove_at_check
+
+static void
+chimera_remove_at_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_client_request  *request = private_data;
+    struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op_args(compound, index);
+
+    op->arg_fh_len = request->remove.child_fh_len;
+    memcpy(op->arg_fh, request->remove.child_fh, op->arg_fh_len);
+} // chimera_remove_at_prepare
+
 static inline void
 chimera_dispatch_remove_at(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request)
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *parent_handle,
+    struct chimera_client_request  *request)
 {
-    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, chimera_client_req_cred(request));
 
-    compound = chimera_client_compound_at_dir(thread, request,
-                                              request->remove.parent_handle,
-                                              request->remove.dir_open_flags);
-
-    chimera_vfs_compound_add_remove_path(compound,
-                                         request->remove.path,
-                                         request->remove.path_len,
-                                         request->remove.flags);
-
-    chimera_vfs_compound_submit(compound, chimera_remove_sequence_complete,
-                                request);
+    request->compound = compound;
+    chimera_vfs_compound_add_puthandle(compound, parent_handle, CHIMERA_VFS_OPEN_INFERRED);
+    int                          lookup = chimera_vfs_compound_add_lookup(compound, request->remove.path, request->
+                                                                          remove.path_len, CHIMERA_VFS_ATTR_FH
+                                                                          | CHIMERA_VFS_ATTR_MODE, 0);
+    if (lookup >= 0) {
+        chimera_vfs_compound_op_set_handle(compound, lookup, parent_handle);
+        chimera_vfs_compound_set_op_callbacks(compound, lookup, NULL,
+                                              chimera_remove_at_check, request);
+    }
+    chimera_vfs_compound_add_puthandle(compound, parent_handle, CHIMERA_VFS_OPEN_INFERRED);
+    int remove = chimera_vfs_compound_add_remove(compound, request->remove.path, request->
+                                                 remove.path_len, request->remove.
+                                                 flags, 0, 0);
+    if (remove >= 0) {
+        chimera_vfs_compound_op_set_handle(compound, remove, parent_handle);
+        chimera_vfs_compound_set_op_callbacks(compound, remove,
+                                              chimera_remove_at_prepare, NULL, request);
+    }
+    chimera_frontend_compound_submit(compound, chimera_remove_sequence_complete, request);
 } /* chimera_dispatch_remove_at */

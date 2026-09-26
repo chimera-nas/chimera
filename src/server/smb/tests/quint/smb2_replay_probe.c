@@ -66,7 +66,6 @@
 #include "smb2_mbt_common.h"
 
 static int nfail = 0;
-static int ndev  = 0;
 
 /* A spec-mandated assertion.  Fails the probe (and CI) on a violation. */
 #define EXPECT(ok, ...)                              \
@@ -80,16 +79,6 @@ static int ndev  = 0;
 /* A ground-truth observation (server discretion / recorded behavior). */
 #define NOTE(...)                                    \
         do { printf("note - "); printf(__VA_ARGS__); printf("\n"); } while (0)
-
-/* A recorded, spec-cited DEVIATION.  Loud and counted, but does not fail CI:
- * it pins a known non-conformance so the probe stays a regression anchor.
- * Every use has a DEVIATIONS-SMB.md entry. */
-#define DEVIATION(id, ...)                                       \
-        do {                                                     \
-            printf("DEVIATION %s - ", id); ndev++;               \
-            printf(__VA_ARGS__);                                 \
-            printf("\n");                                        \
-        } while (0)
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -1381,24 +1370,13 @@ sec_r15(struct smb2_env *env)
     EXPECT(st == ST_SUCCESS, "R15 read-only open (0x%08x)", st);
     st = smb2_set_eof(a, ro.file_id, 8192);
     NOTE("R15 SET_EOF through a read-only handle -> 0x%08x", st);
-    if (st == ST_ACCESS_DENIED) {
-        EXPECT(1, "R15 MS-FSA 2.1.5.14: SET_EOF without FILE_WRITE_DATA is "
-               "ACCESS_DENIED");
-    } else {
-        DEVIATION("S-4", "SET_EOF through a handle with no FILE_WRITE_DATA "
-                  "answered 0x%08x; MS-FSA 2.1.5.14 mandates "
-                  "STATUS_ACCESS_DENIED", st);
-    }
+    EXPECT(st == ST_ACCESS_DENIED,
+           "R15 SET_EOF without FILE_WRITE_DATA is ACCESS_DENIED (0x%08x)", st);
     st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
                      NULL, &chk);
+    EXPECT(st == ST_SUCCESS && chk.end_of_file == 4096,
+           "R15 unauthorized size growth leaves EOF unchanged");
     if (st == ST_SUCCESS) {
-        if (chk.end_of_file == 4096) {
-            EXPECT(1, "R15 the unauthorized set changed nothing (4096 bytes)");
-        } else {
-            DEVIATION("S-4", "the unauthorized set TOOK EFFECT: the file is "
-                      "%llu bytes, was 4096",
-                      (unsigned long long) chk.end_of_file);
-        }
         smb2_close(a, chk.file_id);
     }
     smb2_close(a, ro.file_id);
@@ -1413,12 +1391,23 @@ sec_r15(struct smb2_env *env)
     if (st == ST_SUCCESS) {
         st = smb2_set_eof(a, at.file_id, 16384);
         NOTE("R15 SET_EOF through an attribute-only handle -> 0x%08x", st);
-        if (st != ST_ACCESS_DENIED) {
-            DEVIATION("S-4", "SET_EOF through an attribute-only handle "
-                      "answered 0x%08x; MS-FSA 2.1.5.14 mandates "
-                      "STATUS_ACCESS_DENIED", st);
-        }
+        EXPECT(st == ST_ACCESS_DENIED,
+               "R15 attribute-only SET_EOF is ACCESS_DENIED (0x%08x)", st);
+        uint8_t allocation[8];
+        p64(allocation, 0, 0);
+        st = smb2_set_info(a, SMB2_INFO_FILE_T, SMB2_FILE_ALLOCATION_INFO_T,
+                           at.file_id, allocation, sizeof(allocation));
+        EXPECT(st == ST_ACCESS_DENIED,
+               "R15 attribute-only allocation truncation is ACCESS_DENIED (0x%08x)", st);
         smb2_close(a, at.file_id);
+    }
+
+    st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
+                     NULL, &chk);
+    EXPECT(st == ST_SUCCESS && chk.end_of_file == 4096,
+           "R15 refused EOF and allocation changes preserve the original size");
+    if (st == ST_SUCCESS) {
+        smb2_close(a, chk.file_id);
     }
 
     smb2_close(a, rw.file_id);
@@ -1660,13 +1649,10 @@ main(
 
     smb2_env_stop(&env);
 
-    printf("\n# summary: %d recorded deviation(s) (see DEVIATIONS-SMB.md)\n",
-           ndev);
     if (nfail) {
         printf("%d SMB2 replay/ChannelSequence check(s) FAILED\n", nfail);
         return 1;
     }
-    printf("all SMB2 replay/ChannelSequence mandate checks passed"
-           " (%d documented deviation(s))\n", ndev);
+    printf("all SMB2 replay/ChannelSequence mandate checks passed\n");
     return 0;
 } /* main */

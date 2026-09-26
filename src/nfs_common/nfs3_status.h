@@ -18,6 +18,8 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
             return NFS3ERR_NOENT;
         case CHIMERA_VFS_EIO:
             return NFS3ERR_IO;
+        case CHIMERA_VFS_EAGAIN:
+            return NFS3ERR_JUKEBOX;
         case CHIMERA_VFS_ENXIO:
             return NFS3ERR_NXIO;
         case CHIMERA_VFS_EACCES:
@@ -85,6 +87,8 @@ nfs3_client_status_to_chimera_vfs_error(int status)
             return CHIMERA_VFS_ENOENT;
         case NFS3ERR_IO:
             return CHIMERA_VFS_EIO;
+        case NFS3ERR_JUKEBOX:
+            return CHIMERA_VFS_EAGAIN;
         case NFS3ERR_NXIO:
             return CHIMERA_VFS_ENXIO;
         case NFS3ERR_ACCES:

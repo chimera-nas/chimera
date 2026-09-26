@@ -66,6 +66,7 @@ fuse_server_destroy(void *data)
         }
 
         evpl_mutex_destroy(&mount->open_lock);
+        chimera_vfs_lock_domain_destroy(mount->lock_domain);
         evpl_mutex_destroy(&mount->lock_lock);
         evpl_mutex_destroy(&mount->grant_lock);
     }
@@ -208,10 +209,7 @@ fuse_server_thread_init(
 
     evpl_mutex_unlock(&shared->lock);
 
-    evpl_mutex_init(&thread->resume_lock, NULL);
-
     evpl_add_doorbell(evpl, &thread->attach_doorbell, chimera_fuse_attach_channels);
-    evpl_add_doorbell(evpl, &thread->resume_doorbell, chimera_fuse_resume_doorbell);
 
     return thread;
 } /* fuse_server_thread_init */
@@ -281,9 +279,7 @@ fuse_server_thread_destroy(void *data)
     }
 
     evpl_remove_doorbell(thread->evpl, &thread->attach_doorbell);
-    evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
 
-    evpl_mutex_destroy(&thread->resume_lock);
 
     evpl_mutex_lock(&shared->lock);
     last = (--shared->threads_alive == 0);
@@ -394,6 +390,11 @@ chimera_fuse_add_mount(
     if (mount->negative_timeout_ms == UINT32_MAX) {
         mount->negative_timeout_ms =
             mount->coherence_sync ? mount->entry_timeout_ms : 0;
+    }
+
+    mount->lock_domain = chimera_vfs_lock_domain_create(shared->vfs);
+    if (!mount->lock_domain) {
+        return -1;
     }
 
     evpl_mutex_init(&mount->open_lock, NULL);

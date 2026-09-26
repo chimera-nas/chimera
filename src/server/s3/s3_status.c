@@ -122,6 +122,11 @@ chimera_s3_prepare_error_response(
             bp  += sprintf(bp, "  <Message>The specified bucket does not exist.</Message>\n");
             code = 404;
             break;
+        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
+            bp  += sprintf(bp, "  <Code>BucketNotEmpty</Code>\n");
+            bp  += sprintf(bp, "  <Message>The bucket you tried to delete is not empty.</Message>\n");
+            code = 409;
+            break;
         case CHIMERA_S3_STATUS_NO_SUCH_KEY:
             bp  += sprintf(bp, "  <Code>NoSuchKey</Code>\n");
             bp  += sprintf(bp, "  <Message>The specified key does not exist.</Message>\n");
@@ -184,7 +189,6 @@ chimera_s3_prepare_error_response(
             code = 400;
             break;
         case CHIMERA_S3_STATUS_BAD_REQUEST:
-        case CHIMERA_S3_STATUS_INVALID_ARGUMENT:
             bp  += sprintf(bp, "  <Code>InvalidArgument</Code>\n");
             bp  += sprintf(bp, "  <Message>Invalid Argument</Message>\n");
             code = 400;
@@ -200,12 +204,6 @@ chimera_s3_prepare_error_response(
                           "This error can occur if the tag did not pass input "
                           "validation.</Message>\n");
             code = 400;
-            break;
-        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
-            bp += sprintf(bp, "  <Code>BucketNotEmpty</Code>\n");
-            bp += sprintf(bp,
-                          "  <Message>The bucket you tried to delete is not empty.</Message>\n");
-            code = 409;
             break;
         case CHIMERA_S3_STATUS_INVALID_REQUEST:
             bp += sprintf(bp, "  <Code>InvalidRequest</Code>\n");

@@ -16,6 +16,8 @@
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
+#include "common/compound_retry.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 
 static unsigned int
@@ -40,66 +42,6 @@ chimera_fuse_open_flags(uint32_t flags)
 } /* chimera_fuse_open_flags */
 
 /* --- OPEN --- */
-
-static void
-chimera_fuse_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request   *req    = private_data;
-    struct chimera_fuse_thread    *thread = req->thread;
-    struct chimera_fuse_mount     *mount  = req->channel->mount;
-    struct chimera_fuse_open_file *file;
-    struct fuse_open_out           out;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    /* Bind what the open-time gate authorized onto the handle.  Without this
-     * the first write or ftruncate re-derives the grant from the file's
-     * current mode (chimera_vfs_write_gate_complete), which is how a chmod
-     * after open used to revoke an already-open descriptor's write right.
-     * The open cache is credential-keyed when gating is in force, so the
-     * grant recorded here belongs to this caller alone. */
-    if (req->u.open.granted) {
-        oh->granted_access |= req->u.open.granted;
-        oh->granted_valid   = 1;
-        oh->granted_bound   = 1;
-    }
-
-    file = calloc(1, sizeof(*file));
-
-    file->handle     = oh;
-    file->mount      = mount;
-    file->open_flags = req->u.open.vfs_flags;
-
-    chimera_fuse_file_link(mount, file);
-
-    memset(&out, 0, sizeof(out));
-    out.fh = (uint64_t) (uintptr_t) file;
-
-    /* With an invalidation grant in force from here on, the kernel's cached
-     * pages are guaranteed to be dropped when any other party changes the
-     * file, so letting them survive across open/close cycles is coherent --
-     * and a real read-cache win.  (Pages, unlike attributes, are only
-     * seeded through us AFTER the arm, so a fresh grant fully covers
-     * them.)  No grant (contention) means no coverage: ttl mode keeps the
-     * kernel's default invalidate-on-open behavior, sync mode goes further
-     * and bypasses the page cache entirely so an uncovered open can never
-     * serve stale data. */
-    out.open_flags |= chimera_fuse_open_cache_flags(
-        mount, chimera_fuse_grant_open(thread, mount, req->nodeid, oh));
-
-    if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
-        /* The kernel never learned this fh, so no RELEASE will come. */
-        chimera_fuse_file_unlink(mount, file);
-        chimera_vfs_release(thread->vfs_thread, file->handle);
-        free(file);
-    }
-} /* chimera_fuse_open_callback */
 
 /*
  * POSIX binds I/O rights when a file is opened, and opening by file handle
@@ -139,6 +81,10 @@ chimera_fuse_open_sequence_complete(
 {
     struct chimera_fuse_request    *req = private_data;
     struct chimera_vfs_open_handle *oh;
+    struct chimera_fuse_thread     *thread = req->thread;
+    struct chimera_fuse_mount      *mount  = req->channel->mount;
+    struct chimera_fuse_open_file  *file;
+    struct fuse_open_out            out;
     enum chimera_vfs_error          status;
 
     status = chimera_vfs_compound_status(compound);
@@ -153,7 +99,46 @@ chimera_fuse_open_sequence_complete(
     oh = chimera_vfs_compound_take_handle(
         compound, chimera_vfs_compound_num_ops(compound) - 1);
 
-    chimera_fuse_open_callback(CHIMERA_VFS_OK, oh, req);
+    /* Bind what the open-time gate authorized onto the handle.  Without this
+     * the first write or ftruncate re-derives the grant from the file's
+     * current mode (chimera_vfs_write_gate_complete), which is how a chmod
+     * after open used to revoke an already-open descriptor's write right.
+     * The open cache is credential-keyed when gating is in force, so the
+     * grant recorded here belongs to this caller alone. */
+    if (req->u.open.granted) {
+        oh->granted_access |= req->u.open.granted;
+        oh->granted_valid   = 1;
+        oh->granted_bound   = 1;
+    }
+
+    file = calloc(1, sizeof(*file));
+
+    file->handle = oh;
+    file->mount  = mount;
+
+    chimera_fuse_file_link(mount, file);
+
+    memset(&out, 0, sizeof(out));
+    out.fh = (uint64_t) (uintptr_t) file;
+
+    /* With an invalidation grant in force from here on, the kernel's cached
+     * pages are guaranteed to be dropped when any other party changes the
+     * file, so letting them survive across open/close cycles is coherent --
+     * and a real read-cache win.  (Pages, unlike attributes, are only
+     * seeded through us AFTER the arm, so a fresh grant fully covers
+     * them.)  No grant (contention) means no coverage: ttl mode keeps the
+     * kernel's default invalidate-on-open behavior, sync mode goes further
+     * and bypasses the page cache entirely so an uncovered open can never
+     * serve stale data. */
+    out.open_flags |= chimera_fuse_open_cache_flags(
+        mount, chimera_fuse_grant_open(thread, mount, req->nodeid, oh));
+
+    if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
+        /* The kernel never learned this fh, so no RELEASE will come. */
+        chimera_fuse_file_unlink(mount, file);
+        chimera_vfs_release(thread->vfs_thread, file->handle);
+        free(file);
+    }
 } /* chimera_fuse_open_sequence_complete */
 
 void
@@ -238,54 +223,16 @@ chimera_fuse_op_open(
 /* --- CREATE --- */
 
 static void
-chimera_fuse_create_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
-{
-    struct chimera_fuse_request   *req    = private_data;
-    struct chimera_fuse_thread    *thread = req->thread;
-    struct chimera_fuse_mount     *mount  = req->channel->mount;
-    struct chimera_fuse_open_file *file;
-    struct fuse_open_out           out;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    file = calloc(1, sizeof(*file));
-
-    file->handle     = oh;
-    file->mount      = mount;
-    file->open_flags = req->u.create.vfs_flags;
-
-    chimera_fuse_file_link(mount, file);
-
-    memset(&out, 0, sizeof(out));
-    out.fh = (uint64_t) (uintptr_t) file;
-
-    /* No invalidation grant here: the child's nodeid is assigned inside
-     * reply_entry, and the creator's own writes are self-coherent anyway.
-     * Any other mount's open of the file builds its own grant. */
-    if (chimera_fuse_reply_entry(req, attr, &out, sizeof(out)) != 0) {
-        chimera_fuse_file_unlink(mount, file);
-        chimera_vfs_release(thread->vfs_thread, file->handle);
-        free(file);
-    }
-} /* chimera_fuse_create_callback */
-
-static void
 chimera_fuse_create_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
+    struct chimera_fuse_thread           *thread = req->thread;
+    struct chimera_fuse_mount            *mount  = req->channel->mount;
+    struct chimera_fuse_open_file        *file;
+    struct fuse_open_out                  out;
     struct chimera_vfs_open_handle       *oh;
     enum chimera_vfs_error                status;
     uint32_t                              last;
@@ -301,9 +248,24 @@ chimera_fuse_create_sequence_complete(
     op   = chimera_vfs_compound_op(compound, last);
     oh   = chimera_vfs_compound_take_handle(compound, last);
 
-    chimera_fuse_create_callback(CHIMERA_VFS_OK, oh, NULL,
-                                 (struct chimera_vfs_attrs *) &op->attr,
-                                 NULL, NULL, req);
+    file = calloc(1, sizeof(*file));
+
+    file->handle = oh;
+    file->mount  = mount;
+
+    chimera_fuse_file_link(mount, file);
+
+    memset(&out, 0, sizeof(out));
+    out.fh = (uint64_t) (uintptr_t) file;
+
+    /* No invalidation grant here: the child's nodeid is assigned inside
+     * reply_entry, and the creator's own writes are self-coherent anyway.
+     * Any other mount's open of the file builds its own grant. */
+    if (chimera_fuse_reply_entry(req, &op->attr, &out, sizeof(out)) != 0) {
+        chimera_fuse_file_unlink(mount, file);
+        chimera_vfs_release(thread->vfs_thread, file->handle);
+        free(file);
+    }
 } /* chimera_fuse_create_sequence_complete */
 
 void
@@ -346,7 +308,6 @@ chimera_fuse_op_create(
     memset(&req->u.create.set_attr, 0, sizeof(req->u.create.set_attr));
     req->u.create.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     req->u.create.set_attr.va_mode     = (in->mode & 07777) & ~in->umask;
-    req->u.create.vfs_flags            = flags;
 
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
@@ -360,10 +321,7 @@ chimera_fuse_op_create(
                                           CHIMERA_VFS_OPEN_DIRECTORY,
                                           0);
 
-    /* The entry reply describes the new object; the parent's change has no
-     * reader, so neither directory reading is asked for. */
-    chimera_vfs_compound_add_open(req->compound, name, (int) strlen(name),
-                                  flags, 0, &req->u.create.set_attr,
+    chimera_vfs_compound_add_open(req->compound, name, (int) strlen(name), flags, 0, &req->u.create.set_attr,
                                   CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
     chimera_vfs_compound_submit(req->compound,
@@ -446,12 +404,9 @@ chimera_fuse_op_read(
     /* The kernel named an open file, so the sequence addresses that handle
      * and has no current object.  The descriptor array is the request's and
      * stays the request's -- an evpl_iovec records its owner's address, so it
-     * cannot live in the compound and be copied out.  A read reply carries no
-     * attributes, so none are asked for. */
-    chimera_vfs_compound_add_read(req->compound, file->handle,
-                                  in->offset, in->size,
-                                  req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
-                                  0, &actor, NULL, 0);
+     * cannot live in the compound and be copied out. */
+    chimera_vfs_compound_add_read(req->compound, file->handle, in->offset, in->size, req->u.read.iov,
+                                  CHIMERA_FUSE_IOV_MAX, 0, &actor, NULL, 0);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_read_sequence_complete, req);
@@ -460,51 +415,31 @@ chimera_fuse_op_read(
 /* --- WRITE --- */
 
 static void
-chimera_fuse_write_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-    struct fuse_write_out        out;
-
-    evpl_iovec_release(req->thread->evpl, &req->u.write.iov);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    memset(&out, 0, sizeof(out));
-    out.size = length;
-
-    chimera_fuse_reply(req, 0, &out, sizeof(out));
-} /* chimera_fuse_write_complete */
-
-static void
 chimera_fuse_write_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
+    struct fuse_write_out                 out;
     enum chimera_vfs_error                status;
 
     status = chimera_vfs_compound_status(compound);
 
+    evpl_iovec_release(req->thread->evpl, &req->u.write.iov);
+
     if (status != CHIMERA_VFS_OK) {
-        chimera_fuse_write_complete(status, 0, 0, NULL, NULL, req);
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
     op = chimera_vfs_compound_op(compound,
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
-    chimera_fuse_write_complete(status, op->written, op->committed,
-                                NULL, NULL, req);
+    memset(&out, 0, sizeof(out));
+    out.size = op->written;
+
+    chimera_fuse_reply(req, 0, &out, sizeof(out));
 } /* chimera_fuse_write_sequence_complete */
 
 void
@@ -565,9 +500,8 @@ chimera_fuse_op_write(
 
     /* Handle and payload are both borrowed for the length of the sequence;
      * the payload is released by chimera_fuse_write_complete. */
-    chimera_vfs_compound_add_write(req->compound, file->handle,
-                                   in->offset, in->size, sync,
-                                   &req->u.write.iov, 1, 0, 0, &actor);
+    chimera_vfs_compound_add_write(req->compound, file->handle, in->offset, in->size, sync, &req->u.write.iov, 1, 0, 0,
+                                   &actor);
 
     chimera_vfs_compound_submit(req->compound,
                                 chimera_fuse_write_sequence_complete, req);
@@ -587,25 +521,42 @@ chimera_fuse_status_sequence_complete(
                        NULL, 0);
 } /* chimera_fuse_status_sequence_complete */
 
-/* FLUSH and FSYNC are the same sequence against an already-open file. */
+static void
+chimera_fuse_flush_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request *req = private_data;
+
+    /* This is close cleanup, performed once after the retry decision. Keep
+     * the owner's locks throughout rejected COMMIT attempts, then drop them
+     * even when COMMIT fails or finish retries are exhausted: close still
+     * releases POSIX locks when it reports a write error. COMMIT itself does
+     * not acquire or wait on byte-range claims. */
+    chimera_fuse_locks_release_owner(req->thread, req->channel->mount,
+                                     req->u.flush.fh, req->u.flush.fh_len, req->u.flush.owner);
+
+    chimera_fuse_reply(req,
+                       chimera_fuse_errno(chimera_vfs_compound_status(compound)),
+                       NULL, 0);
+} /* chimera_fuse_flush_complete */
+
+/* FLUSH and FSYNC share the COMMIT sequence, with different terminal cleanup. */
 static void
 chimera_fuse_commit_submit(
-    struct chimera_fuse_request   *req,
-    struct chimera_fuse_open_file *file)
+    struct chimera_fuse_request    *req,
+    struct chimera_vfs_open_handle *oh,
+    chimera_vfs_compound_callback_t complete)
 {
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
 
-    /* The kernel named an open file; the sequence borrows it, flagged as it
-     * was opened.  The reply is a bare status, so neither attribute set is
-     * asked for. */
-    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
-                                       file->open_flags);
+    chimera_vfs_compound_add_puthandle(req->compound, oh,
+                                       CHIMERA_VFS_OPEN_INFERRED);
 
     chimera_vfs_compound_add_commit(req->compound, 0, 0, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_status_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound, complete, req);
 } /* chimera_fuse_commit_submit */
 
 void
@@ -625,13 +576,13 @@ chimera_fuse_op_flush(
 
     file = chimera_fuse_file(in->fh);
 
-    /* POSIX: any close by a process drops that process's locks on the
-     * file; the kernel identifies the process via lock_owner. */
-    chimera_fuse_locks_release_owner(req->thread, req->channel->mount,
-                                     file->handle->fh_hash, in->lock_owner);
+    /* Immutable close identity survives every COMMIT attempt. */
+    memcpy(req->u.flush.fh, file->handle->fh, file->handle->fh_len);
+    req->u.flush.fh_len = file->handle->fh_len;
+    req->u.flush.owner  = in->lock_owner;
 
     /* close(2) must surface write errors, so flush commits. */
-    chimera_fuse_commit_submit(req, file);
+    chimera_fuse_commit_submit(req, file->handle, chimera_fuse_flush_complete);
 } /* chimera_fuse_op_flush */
 
 void
@@ -648,7 +599,8 @@ chimera_fuse_op_fsync(
         return;
     }
 
-    chimera_fuse_commit_submit(req, chimera_fuse_file(in->fh));
+    chimera_fuse_commit_submit(req, chimera_fuse_file(in->fh)->handle,
+                               chimera_fuse_status_sequence_complete);
 } /* chimera_fuse_op_fsync */
 
 /* --- RELEASE --- */
@@ -689,7 +641,6 @@ chimera_fuse_op_fallocate(
     uint32_t                     arglen)
 {
     const struct fuse_fallocate_in *in = arg;
-    struct chimera_fuse_open_file  *file;
     uint32_t                        flags;
 
     if (arglen < sizeof(*in)) {
@@ -706,16 +657,14 @@ chimera_fuse_op_fallocate(
         return;
     }
 
-    file = chimera_fuse_file(in->fh);
-
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
 
-    /* The kernel named an open file; the sequence borrows it, flagged as it
-     * was opened.  fallocate(2) reports only success, so neither attribute
-     * set is asked for. */
-    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
-                                       file->open_flags);
+    /* The kernel named an open file; the sequence borrows it.  fallocate(2)
+     * reports only success, so neither attribute set is asked for. */
+    chimera_vfs_compound_add_puthandle(req->compound,
+                                       chimera_fuse_file(in->fh)->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
 
     chimera_vfs_compound_add_allocate(req->compound, NULL,
                                       in->offset, in->length, flags,
@@ -767,9 +716,8 @@ chimera_fuse_op_lseek(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_lseek_in    *in = arg;
-    struct chimera_fuse_open_file *file;
-    uint32_t                       what;
+    const struct fuse_lseek_in *in = arg;
+    uint32_t                    what;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -790,15 +738,12 @@ chimera_fuse_op_lseek(
             return;
     } /* switch */
 
-    file = chimera_fuse_file(in->fh);
-
     req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
                                                &req->cred);
 
-    /* The kernel named an open file; the sequence borrows it, flagged as it
-     * was opened. */
-    chimera_vfs_compound_add_puthandle(req->compound, file->handle,
-                                       file->open_flags);
+    chimera_vfs_compound_add_puthandle(req->compound,
+                                       chimera_fuse_file(in->fh)->handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
 
     chimera_vfs_compound_add_seek(req->compound, NULL, in->offset, what);
 

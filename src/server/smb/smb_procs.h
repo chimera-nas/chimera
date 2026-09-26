@@ -204,6 +204,19 @@ void chimera_smb_query_directory(
 void chimera_smb_set_info(
     struct chimera_smb_request *request);
 
+/* Retire a legacy CREATE open whose later stage failed. Consumes the CREATE
+ * caller reference, removes any durable backend record through a compound, and
+ * completes the request only after cleanup reaches a terminal result. */
+void chimera_smb_create_failed_open(
+    struct chimera_smb_request *request,
+    uint32_t                    status);
+
+/* Delays a failed legacy CREATE reply until a stored, unpublished recovery
+ * record has been removed. Returns true when cleanup owns completion. */
+bool chimera_smb_create_cleanup_failed_record(
+    struct chimera_smb_request *request,
+    uint32_t                    status);
+
 /* Apply a client FILE_FULL_EA_INFORMATION buffer to an open object's xattrs,
  * one EA at a time (shared by SetInfo and CREATE ExtA).  The caller owns ea_buf
  * for the duration; `done` is invoked with the resulting NTSTATUS. */
@@ -376,41 +389,12 @@ void chimera_smb_lock_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
-/* Ask the VFS to take back the sequence a blocking byte-range LOCK parked on
- * `open_file` is waiting in, and to report `status` to the client.  Safe from
- * ANY thread and with the caller's own state lock held -- the cancel is posted,
- * never arbitrated here, so nothing of the LOCK's completes inside the call.
- *
- * `status` decides the reply whichever way the race goes: if the cancel takes
- * the park back the run completes cancelled, and if a grant was already in
- * flight the claim it inserted is released and the client is still told
- * `status` -- which is what the hand-rolled abort did with a ticket that would
- * not dequeue.  No-op when no lock is parked on the open. */
-void chimera_smb_lock_cancel_parked(
-    struct chimera_server_smb_thread *thread,
-    struct chimera_smb_open_file     *open_file,
-    uint32_t                          status);
+/* Signal a waiting compound LOCK under the open's bucket lock. The owning
+ * worker completes it with RANGE_NOT_LOCKED and releases its request pin. */
+void chimera_smb_lock_abort_parked(
+    struct chimera_smb_open_file *open_file);
 
-/* chimera_smb_lock_cancel_parked with the close / tree-disconnect / logoff /
- * teardown status (SMB2_STATUS_RANGE_NOT_LOCKED, MS-SMB2 smb2.lock.cancel
- * "cancel by close").  Always returns NULL: the parked LOCK's completion belongs
- * to its own VFS sequence and fires on the submitting thread, so there is no
- * request for the caller to finish -- a caller that still holds the old
- * `if (parked) park_finish(...)` shape simply does nothing. */
-struct chimera_smb_request *
-chimera_smb_lock_abort_parked(
-    struct chimera_server_smb_thread *thread,
-    struct chimera_smb_open_file     *open_file);
-
-/* Retired with the hand-rolled park; kept while the close and teardown sites
- * that name it are converted separately.  Posts a cancel carrying `status` for
- * a request still parked, and does nothing at all for one that is not. */
-void chimera_smb_lock_park_finish(
-    struct chimera_smb_request *request,
-    uint32_t                    status);
-
-/* Drain (release + free) every byte-range lock entry held by `open_file`.
- * Called at close before the underlying VFS handle is released. */
+/* Retire ACCESS, cache and canonical RANGE ownership before handle release. */
 void chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);

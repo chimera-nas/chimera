@@ -44,6 +44,9 @@
 #include "vfs/vfs_pnfs.h"
 #include "common/mbt_trace_dir.h"
 #include "common/mbt_watchdog.h"
+#include "server/nfs/nfs_fh_wrap.h"
+#include "vfs/vfs.h"
+#include "vfs/vfs_compound.h"
 
 #define V4_BLOCK_SIZE       8192
 #define V4_LOCK_BYTES       8
@@ -441,43 +444,44 @@ struct v4_hist {
 };
 
 struct oracle {
-    struct mbt_env        *env;
-    int                    verbose;
-    int                    minor;
+    struct mbt_env            *env;
+    int                        verbose;
+    int                        minor;
+    struct chimera_vfs_thread *callback_vfs_thread;
 
-    struct mbt_fh          fh[V4_MAX_INOS];       /* ino -> filehandle */
+    struct mbt_fh              fh[V4_MAX_INOS];   /* ino -> filehandle */
 
-    uint64_t               clientid[V4_MAX_CLIENTS];
-    uint8_t                clientid_known[V4_MAX_CLIENTS];
+    uint64_t                   clientid[V4_MAX_CLIENTS];
+    uint8_t                    clientid_known[V4_MAX_CLIENTS];
 
-    uint64_t               confirm_clientid[V4_MAX_TOKS];
-    uint8_t                confirm_verf[V4_MAX_TOKS][8];
-    uint8_t                confirm_known[V4_MAX_TOKS];
+    uint64_t                   confirm_clientid[V4_MAX_TOKS];
+    uint8_t                    confirm_verf[V4_MAX_TOKS][8];
+    uint8_t                    confirm_known[V4_MAX_TOKS];
 
-    uint8_t                sess[V4_MAX_SESS][16];
-    uint8_t                sess_known[V4_MAX_SESS];
-    int                    sess_client[V4_MAX_SESS]; /* model sess -> client */
+    uint8_t                    sess[V4_MAX_SESS][16];
+    uint8_t                    sess_known[V4_MAX_SESS];
+    int                        sess_client[V4_MAX_SESS]; /* model sess -> client */
 
     /* Fore-channel slots the server granted, and a private sequence id on
      * the retry slot (see the DELAY retry in run_compound). */
-    uint32_t               sess_slots[V4_MAX_SESS];
-    uint32_t               retry_seq[V4_MAX_SESS];
+    uint32_t                   sess_slots[V4_MAX_SESS];
+    uint32_t                   retry_seq[V4_MAX_SESS];
 
-    uint8_t                sid_other[V4_MAX_SIDS][12];
-    uint8_t                sid_known[V4_MAX_SIDS];
-    uint64_t               sid_clientid[V4_MAX_SIDS]; /* wire clientid of maker */
-    uint8_t                sid_clientid_known[V4_MAX_SIDS];
+    uint8_t                    sid_other[V4_MAX_SIDS][12];
+    uint8_t                    sid_known[V4_MAX_SIDS];
+    uint64_t                   sid_clientid[V4_MAX_SIDS]; /* wire clientid of maker */
+    uint8_t                    sid_clientid_known[V4_MAX_SIDS];
 
-    struct v4_chg          chg[V4_MAX_CHG];
-    int                    nchg;
+    struct v4_chg              chg[V4_MAX_CHG];
+    int                        nchg;
 
     struct v4_cached cache[V4_MAX_SESS][V4_MAX_SLOTS];
 
-    int                    have_write_verf;
-    uint8_t                write_verf[8];
+    int                        have_write_verf;
+    uint8_t                    write_verf[8];
 
-    uint8_t                deviceid[16];
-    int                    has_deviceid;
+    uint8_t                    deviceid[16];
+    int                        has_deviceid;
 
     /* ino -> the backing location its first LAYOUTGET named.  A metadata
      * server that persists its per-file layout hands out the same one every
@@ -493,34 +497,34 @@ struct oracle {
      * MDS fileid, so the same file re-created on a different DS gets an
      * IDENTICAL native handle -- the deviceid is the only thing that says
      * which server it lives on.  Comparing handles alone silently passes. */
-    struct v4_layout_loc   layout_loc[V4_MAX_INOS];
+    struct v4_layout_loc       layout_loc[V4_MAX_INOS];
 
     /* Per-model-client connections (a model client
     * owns its own connection, like a real one). */
-    struct evpl_rpc2_conn *conns[V4_MAX_CLIENTS];
-    struct evpl_rpc2_conn *ds_conns[MBT_MAX_DS];
+    struct evpl_rpc2_conn     *conns[V4_MAX_CLIENTS];
+    struct evpl_rpc2_conn     *ds_conns[MBT_MAX_DS];
 
     /* CB_RECALL observations (stateid others seen on any backchannel). */
-    uint8_t                recalls[64][12];
-    int                    nrecalls;
+    uint8_t                    recalls[64][12];
+    int                        nrecalls;
 
     /* caps reconciliation */
-    const char            *mandatory[8];
-    int                    nmandatory;
-    int                    skip;
-    char                   skip_feature[64];
-    char                   skip_detail[256];
+    const char                *mandatory[8];
+    int                        nmandatory;
+    int                        skip;
+    char                       skip_feature[64];
+    char                       skip_detail[256];
 
-    uint32_t               status_dev; /* accepted compound status deviation */
-    uint64_t               cur_open_clientid;
-    int                    cur_open_clientid_known;
+    uint32_t                   status_dev; /* accepted compound status deviation */
+    uint64_t                   cur_open_clientid;
+    int                        cur_open_clientid_known;
 
-    struct v4_hist         history[V4_HISTORY];
-    int                    nhist;
+    struct v4_hist             history[V4_HISTORY];
+    int                        nhist;
 
-    uint8_t               *arena;     /* per-compound payload copy space */
-    uint32_t               arena_used;
-    uint8_t               *scratch;   /* expectation expansion */
+    uint8_t                   *arena; /* per-compound payload copy space */
+    uint32_t                   arena_used;
+    uint8_t                   *scratch; /* expectation expansion */
 };
 
 static uint64_t
@@ -799,6 +803,60 @@ v4_cb_null(
     (void) rc;
 } /* v4_cb_null */
 
+struct v4_cb_getattr_pending {
+    struct oracle             *oracle;
+    struct evpl_rpc2_encoding *encoding;
+    struct CB_COMPOUND4res     response;
+    struct CB_GETATTR4res     *getattr;
+    struct chimera_vfs_cred    cred;
+    uint32_t                   requested;
+};
+
+static void
+v4_cb_getattr_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct v4_cb_getattr_pending   *pending = private_data;
+    struct fattr4                  *out     = &pending->getattr->resok4.obj_attributes;
+    const struct chimera_vfs_attrs *attrs   = &chimera_vfs_compound_op(compound, 2)->attr;
+    uint64_t                        values[2];
+    uint32_t                        count = 0, mask = 0;
+    nfsstat4                        status = NFS4_OK;
+
+    if (chimera_vfs_compound_status(compound) != CHIMERA_VFS_OK) {
+        status = NFS4ERR_IO;
+    } else {
+        if (pending->requested & (1U << FATTR4_CHANGE)) {
+            uint64_t change = (attrs->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) ? attrs->va_change :
+                (uint64_t) attrs->va_ctime.tv_sec * 1000000000ULL + attrs->va_ctime.tv_nsec;
+            values[count++] = htobe64(change);
+            mask           |= 1U << FATTR4_CHANGE;
+        }
+        if (pending->requested & (1U << FATTR4_SIZE)) {
+            values[count++] = htobe64(attrs->va_size);
+            mask           |= 1U << FATTR4_SIZE;
+        }
+        out->attrmask       = xdr_dbuf_alloc_space(sizeof(mask), pending->encoding->dbuf);
+        out->attr_vals.data = xdr_dbuf_alloc_space(sizeof(values), pending->encoding->dbuf);
+        if (!out->attrmask || !out->attr_vals.data) {
+            status = NFS4ERR_RESOURCE;
+        } else {
+            out->num_attrmask  = 1;
+            out->attrmask[0]   = mask;
+            out->attr_vals.len = count * sizeof(values[0]);
+            memcpy(out->attr_vals.data, values, out->attr_vals.len);
+        }
+    }
+    pending->getattr->status = status;
+    pending->response.status = status;
+    chimera_vfs_compound_free(compound);
+    int rc = pending->oracle->env->nfs_v4_cb.send_reply_CB_COMPOUND(pending->oracle->env->evpl, NULL,
+                                                                    &pending->response, pending->encoding);
+    (void) rc;
+    free(pending);
+} /* v4_cb_getattr_complete */
+
 static void
 v4_cb_compound(
     struct evpl               *evpl,
@@ -866,6 +924,49 @@ v4_cb_compound(
                 }
                 resop->opcbrecall.status = NFS4_OK;
                 break;
+            case OP_CB_GETATTR:
+            {
+                const struct CB_GETATTR4args *getattr = &argop->opcbgetattr;
+                const uint8_t                *wire    = (const uint8_t *) getattr->fh.data;
+                uint32_t                      trailer = getattr->fh.len && wire[0] == CHIMERA_NFS_FH_TAG_SIGNED ?
+                    CHIMERA_NFS_FH_MAC : 0;
+                if (i + 1 != args->num_argarray ||
+                    getattr->fh.len <= CHIMERA_NFS_FH_HDR + trailer ||
+                    getattr->fh.len > CHIMERA_NFS_FH_HDR + trailer + CHIMERA_VFS_FH_SIZE ||
+                    (wire[0] != CHIMERA_NFS_FH_TAG_PLAIN && wire[0] != CHIMERA_NFS_FH_TAG_SIGNED)) {
+                    resop->opcbgetattr.status = cb_status = NFS4ERR_BADHANDLE;
+                    break;
+                }
+                struct v4_cb_getattr_pending *pending = calloc(1, sizeof(*pending));
+                if (!pending) {
+                    resop->opcbgetattr.status = cb_status = NFS4ERR_RESOURCE;
+                    break;
+                }
+                if (!o->callback_vfs_thread) {
+                    o->callback_vfs_thread = chimera_vfs_thread_init(evpl, chimera_server_get_vfs(o->env->server));
+                }
+                pending->oracle                = o;
+                pending->encoding              = encoding;
+                pending->getattr               = &resop->opcbgetattr;
+                pending->requested             = getattr->num_attr_request ? getattr->attr_request[0] : 0;
+                pending->response              = res;
+                pending->response.num_resarray = args->num_argarray;
+                pending->response.resarray     = resarray;
+                /* The in-process client buffers no private writes. Read its
+                 * backing attributes rather than inventing values from the
+                 * model expectation. This FH came from our own test server;
+                 * stripping its framing here is not a protocol access path. */
+                struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(o->callback_vfs_thread,
+                                                                                   &pending->cred);
+                chimera_vfs_compound_add_putfh(compound, wire + CHIMERA_NFS_FH_HDR,
+                                               getattr->fh.len - CHIMERA_NFS_FH_HDR - trailer);
+                chimera_vfs_compound_add_open(compound, NULL, 0, CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH, 0,
+                                              NULL, 0, 0, 0);
+                chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_SIZE |
+                                                 CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME);
+                chimera_vfs_compound_submit(compound, v4_cb_getattr_complete, pending);
+                return;
+            }
             case OP_CB_LAYOUTRECALL:
                 /* Decline the recall.  NFS4_OK would promise a LAYOUTRETURN,
                  * and there is nobody here to send one: the trace is fixed and
@@ -4075,10 +4176,8 @@ run_compound(
             ctx.cur = itf_i64(jf_val(json_array_get(ops, i)));
         } else if (strcmp(eop, "RPutrootfh") == 0) {
             ctx.cur = 0;
-        } else if (strcmp(eop, "RSecinfo") == 0) {
-            /* SECINFO consumes the current filehandle (RFC 7530 16.31.3), so
-             * drop the tracked cfh exactly as the model does -- any following
-             * op is expected to answer NFS4ERR_NOFILEHANDLE. */
+        } else if (strcmp(eop, "RSecinfo") == 0 && o->minor >= 1 && rep.res[i].status == NFS4_OK) {
+            /* RFC 8881 18.29.3 consumes CFH; v4.0 retains it. */
             ctx.cur = -1;
         } else if (strcmp(eop, "RSavefh") == 0) {
             ctx.saved = ctx.cur;
@@ -4809,6 +4908,9 @@ run_trace(
         if (o->ds_conns[c]) {
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->ds_conns[c]);
         }
+    }
+    if (o->callback_vfs_thread) {
+        chimera_vfs_thread_destroy(o->callback_vfs_thread);
     }
     mbt_env_fs_teardown(env, fsname);
     free(o->arena);

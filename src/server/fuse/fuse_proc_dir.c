@@ -132,6 +132,14 @@ chimera_fuse_op_opendir(
 
 /* --- READDIR / READDIRPLUS --- */
 
+/* Attempt-private entry identity. Node lookup counts and coherence grants
+ * are installed only after the compound's finish has accepted the attempt. */
+struct chimera_fuse_readdir_pending {
+    uint32_t offset;
+    uint32_t fh_len;
+    uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+};
+
 static int
 chimera_fuse_readdir_entry(
     struct chimera_vfs_compound    *compound,
@@ -143,9 +151,8 @@ chimera_fuse_readdir_entry(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg)
 {
-    struct chimera_fuse_request *req   = arg;
-    struct chimera_fuse_mount   *mount = req->channel->mount;
-    uint8_t                     *base  = chimera_fuse_reply_space(req);
+    struct chimera_fuse_request *req  = arg;
+    uint8_t                     *base = chimera_fuse_reply_space(req);
     struct fuse_dirent          *dirent;
     struct fuse_direntplus      *plus;
     size_t                       entsize;
@@ -168,45 +175,13 @@ chimera_fuse_readdir_entry(
         /* The kernel instantiates an inode per entry; "." and ".." are
          * skipped by it and carry nodeid 0 (no lookup count). */
         if (!dot && (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-            uint32_t entry_ms = mount->entry_timeout_ms;
-            uint32_t attr_ms  = mount->attr_timeout_ms;
-            int      cover    = CHIMERA_FUSE_COVER_NONE;
-
-            plus->entry_out.nodeid = chimera_fuse_node_insert(
-                mount->node_table, attrs->va_fh, attrs->va_fh_len);
+            struct chimera_fuse_readdir_pending *pending =
+                &req->u.readdir.pending[req->u.readdir.num_pending++];
+            pending->offset = req->u.readdir.used;
+            pending->fh_len = attrs->va_fh_len;
+            memcpy(pending->fh, attrs->va_fh, attrs->va_fh_len);
             plus->entry_out.generation = 1;
             chimera_fuse_attr_from_vfs(&plus->entry_out.attr, attrs);
-
-            /* An `ls -l` primes the kernel's attribute cache for every
-             * listed file; give each one invalidation coverage.  Listed
-             * directories wait for LOOKUP (a watch per merely-listed
-             * directory buys little). */
-            if (S_ISREG(attrs->va_mode)) {
-                cover = chimera_fuse_grant_ensure(req->thread, mount,
-                                                  plus->entry_out.nodeid,
-                                                  attrs->va_fh, attrs->va_fh_len,
-                                                  chimera_fuse_fh_hash(attrs->va_fh,
-                                                                       attrs->va_fh_len));
-            }
-
-            /* coherence=sync: these attrs came out of the backend's readdir
-             * BEFORE any fresh grant existed, so only a grant that predates
-             * the request protects them.  The dentry is safe under the
-             * directory's own watch, which predates the request whenever the
-             * kernel could ask us to list it (opendir/getattr armed it). */
-            if (mount->coherence_sync) {
-                if (cover != CHIMERA_FUSE_COVER_HELD) {
-                    attr_ms = 0;
-                }
-                if (req->entry_cover != CHIMERA_FUSE_COVER_HELD) {
-                    entry_ms = 0;
-                }
-            }
-
-            plus->entry_out.entry_valid      = entry_ms / 1000;
-            plus->entry_out.entry_valid_nsec = (entry_ms % 1000) * 1000000;
-            plus->entry_out.attr_valid       = attr_ms / 1000;
-            plus->entry_out.attr_valid_nsec  = (attr_ms % 1000) * 1000000;
         } else {
             plus->entry_out.attr.ino = inum;
         }
@@ -245,6 +220,40 @@ chimera_fuse_readdir_entry(
     return 0;
 } /* chimera_fuse_readdir_entry */
 
+static void
+chimera_fuse_readdirplus_publish(struct chimera_fuse_request *req)
+{
+    struct chimera_fuse_mount *mount = req->channel->mount;
+    uint8_t                   *base  = chimera_fuse_reply_space(req);
+
+    for (uint32_t i = 0; i < req->u.readdir.num_pending; i++) {
+        struct chimera_fuse_readdir_pending *pending  = &req->u.readdir.pending[i];
+        struct fuse_direntplus              *plus     = (struct fuse_direntplus *) (base + pending->offset);
+        uint32_t                             entry_ms = mount->entry_timeout_ms;
+        uint32_t                             attr_ms  = mount->attr_timeout_ms;
+
+        plus->entry_out.nodeid = chimera_fuse_node_insert(mount->node_table,
+                                                          pending->fh, pending->fh_len);
+        if (S_ISREG(plus->entry_out.attr.mode)) {
+            chimera_fuse_grant_ensure(req->thread, mount, plus->entry_out.nodeid,
+                                      pending->fh, pending->fh_len,
+                                      chimera_fuse_fh_hash(pending->fh, pending->fh_len));
+        }
+        /* A grant can break/rearm and a directory invalidation can be sent
+         * before this parked reply. Boolean coverage cannot prove continuity
+         * from enumeration through accepted publication. Until there is a
+         * generation/reply interlock, sync READDIRPLUS entries and attributes
+         * remain uncached; later LOOKUP/GETATTR establish protected state. */
+        if (mount->coherence_sync) {
+            attr_ms = entry_ms = 0;
+        }
+        plus->entry_out.entry_valid      = entry_ms / 1000;
+        plus->entry_out.entry_valid_nsec = (entry_ms % 1000) * 1000000;
+        plus->entry_out.attr_valid       = attr_ms / 1000;
+        plus->entry_out.attr_valid_nsec  = (attr_ms % 1000) * 1000000;
+    }
+} /* chimera_fuse_readdirplus_publish */
+
 /* Walk a packed READDIRPLUS reply undoing the lookup-count bumps of entries
  * the kernel never received. */
 static void
@@ -274,15 +283,7 @@ chimera_fuse_readdirplus_unwind(struct chimera_fuse_request *req)
     }
 } /* chimera_fuse_readdirplus_unwind */
 
-/*
- * Put the reply back as it was before the first entry.
- *
- * The buffer itself is only a cursor, but a READDIRPLUS entry is not just
- * bytes: each one interned a nodeid and took a lookup count on it, and may
- * have armed coverage.  Unwinding those is what makes re-filling safe, and is
- * the same walk the send-failure path does -- both are cases where entries
- * were packed and the kernel never saw them.
- */
+/* Discard only private staging; no node or grant was published by this attempt. */
 static void
 chimera_fuse_readdir_reset(
     struct chimera_vfs_compound *compound,
@@ -291,11 +292,8 @@ chimera_fuse_readdir_reset(
 {
     struct chimera_fuse_request *req = private_data;
 
-    if (req->u.readdir.plus) {
-        chimera_fuse_readdirplus_unwind(req);
-    }
-
-    req->u.readdir.used = 0;
+    req->u.readdir.used        = 0;
+    req->u.readdir.num_pending = 0;
 } /* chimera_fuse_readdir_reset */
 
 static void
@@ -311,10 +309,9 @@ chimera_fuse_readdir_sequence_complete(
     status = chimera_vfs_compound_status(compound);
 
     if (status != CHIMERA_VFS_OK) {
-        /* Entries may already be packed -- a backend can emit some and then
-         * fail -- and the kernel will never see them, so give back what they
-         * took before replying the error. */
         chimera_fuse_readdir_reset(compound, 0, req);
+        free(req->u.readdir.pending);
+        req->u.readdir.pending = NULL;
         chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
@@ -323,6 +320,12 @@ chimera_fuse_readdir_sequence_complete(
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
     req->file->readdir_verifier = op->r_verifier;
+
+    if (req->u.readdir.plus) {
+        chimera_fuse_readdirplus_publish(req);
+    }
+    free(req->u.readdir.pending);
+    req->u.readdir.pending = NULL;
 
     rc = chimera_fuse_send_only(req, 0, chimera_fuse_reply_space(req),
                                 req->u.readdir.used);
@@ -356,19 +359,31 @@ chimera_fuse_op_readdir(
     req->u.readdir.plus = (req->opcode == FUSE_READDIRPLUS);
 
     if (req->u.readdir.plus) {
-        /* Entries returned here become kernel dentries under this dir; the
-         * captured coverage conditions their TTLs (per-entry pack above). */
+        /* Keep directory invalidation coverage armed. Sync-mode replies use
+         * zero TTL until enumeration and publication have a version interlock. */
         req->entry_cover = chimera_fuse_watch_dir(req->thread,
                                                   req->channel->mount,
                                                   req->nodeid,
                                                   file->handle->fh,
                                                   file->handle->fh_len);
     }
-    req->u.readdir.used = 0;
-    req->u.readdir.size = in->size;
+    req->u.readdir.used        = 0;
+    req->u.readdir.size        = in->size;
+    req->u.readdir.pending     = NULL;
+    req->u.readdir.num_pending = 0;
 
     if (req->u.readdir.size > CHIMERA_FUSE_BUFSZ - CHIMERA_FUSE_REPLY_OFF) {
         req->u.readdir.size = CHIMERA_FUSE_BUFSZ - CHIMERA_FUSE_REPLY_OFF;
+    }
+    if (req->u.readdir.plus) {
+        uint32_t capacity = req->u.readdir.size / FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET_DIRENTPLUS + 1);
+        if (capacity) {
+            req->u.readdir.pending = calloc(capacity, sizeof(*req->u.readdir.pending));
+            if (!req->u.readdir.pending) {
+                chimera_fuse_reply(req, ENOMEM, NULL, 0);
+                return;
+            }
+        }
     }
 
     attr_mask = req->u.readdir.plus ?

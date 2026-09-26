@@ -18,6 +18,7 @@
 #include "common/logging.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
+#include "vfs/vfs_lock.h"
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_acl.h"
@@ -100,44 +101,8 @@ struct chimera_fuse_shared;
 struct chimera_fuse_request;
 struct chimera_fuse_mount;
 
-/*
- * One POSIX byte-range lock held on behalf of a local process.  The embedded
- * RANGE lease is what the shared vfs_state conflict matrix walks, so these
- * locks conflict correctly with NLM, NFSv4, and SMB2 locks.  The range is
- * POSIX-inclusive [start, end]; end == CHIMERA_FUSE_LOCK_EOF means to-EOF.
- */
+/* Linux's inclusive POSIX byte-range end-of-file sentinel. */
 #define CHIMERA_FUSE_LOCK_EOF        0x7fffffffffffffffULL
-
-struct chimera_fuse_lock {
-    struct chimera_fuse_lock_file     *lf;
-    uint64_t                           start;
-    uint64_t                           end;
-    int                                exclusive;
-    struct chimera_vfs_claim           claim;
-    struct chimera_vfs_pending_acquire ticket;
-    struct chimera_fuse_lock          *prev;
-    struct chimera_fuse_lock          *next;
-};
-
-/* Per-(owner, file) lock bookkeeping: the unit FLUSH's lock_owner releases.
- * Keyed by {owner token, fh_hash} in the mount's lock table; holds a
- * vfs_state file-state reference for the life of its entries. */
-struct chimera_fuse_lock_key {
-    uint64_t owner;
-    uint64_t fh_hash;
-};
-
-struct chimera_fuse_lock_file {
-    struct chimera_fuse_lock_key   key;
-    uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                       fh_len;
-    struct chimera_vfs_file_state *file_state;
-    struct chimera_fuse_lock      *locks;
-    /* Live blocked acquires against this (owner, file); counted so the
-     * bucket outlives a parked SETLKW even with no granted locks. */
-    int                            pending;
-    UT_hash_handle                 hh;
-};
 
 /*
  * Per-(mount, file) caching lease whose break drives kernel cache
@@ -255,10 +220,10 @@ struct chimera_fuse_mount {
     * their VFS handles.  Shared across threads (multi-queue delivery). */
     evpl_mutex_t                    open_lock;
     struct chimera_fuse_open_file  *open_files;
-    /* POSIX byte-range lock table: (owner, file) buckets plus the parked
-     * SETLKW requests INTERRUPT may cancel.  All under lock_lock. */
+    /* VFS owns lock ranges and owner generations. This mutex protects only
+     * requests that FUSE_INTERRUPT may cancel, not claim publication. */
     evpl_mutex_t                    lock_lock;
-    struct chimera_fuse_lock_file  *lock_files;
+    struct chimera_vfs_lock_domain *lock_domain;
     struct chimera_fuse_request    *parked_locks;
     /* Kernel-cache coherence: per-file caching grants and per-directory
      * change watches, both under grant_lock (a leaf: never held while
@@ -310,23 +275,15 @@ struct chimera_fuse_channel {
     struct evpl_fd_event        event;
 };
 
-/* What OPENDIR opens a directory with.  Recorded on the open file so the
- * requests that lend the handle later (READDIR, FSYNCDIR) say what it is. */
+/* One per kernel OPEN/OPENDIR/CREATE; fuse_open_out.fh carries its pointer.
+* The VFS handle is captured into the request at dispatch time, so nothing
+* but OPEN/RELEASE and the shutdown sweep touches this struct afterwards. */
 #define CHIMERA_FUSE_OPENDIR_FLAGS \
         (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)
-
-/* One per kernel OPEN/OPENDIR/CREATE; fuse_open_out.fh carries its pointer.
- * A request that names it lends the handle to its sequence for as long as
- * that request runs, so nothing but OPEN/RELEASE and the shutdown sweep
- * changes this struct afterwards. */
 struct chimera_fuse_open_file {
+    unsigned int                    open_flags;
     struct chimera_vfs_open_handle *handle;
     struct chimera_fuse_mount      *mount;
-    /* The CHIMERA_VFS_OPEN_* word the handle was opened with, which is what
-     * PUTHANDLE owes the sequence: the executor compares it against what each
-     * op needs, so a data handle has to be lent as a data handle and not as
-     * whatever the op would have opened for itself. */
-    unsigned int                    open_flags;
     uint64_t                        readdir_verifier;
     struct chimera_fuse_open_file  *prev;
     struct chimera_fuse_open_file  *next;
@@ -343,58 +300,55 @@ struct chimera_fuse_thread {
     struct chimera_fuse_request *free_requests;
     int                          num_free_requests;
     int                          active_requests;
-    /* Requests completed off-thread (a blocked lock granted or cancelled)
-     * marshalled home for their reply, the cb_doorbell pattern. */
-    evpl_mutex_t                 resume_lock;
-    struct chimera_fuse_request *resume_queue;
-    struct evpl_doorbell         resume_doorbell;
 };
 
 struct chimera_fuse_request {
-    struct chimera_fuse_thread    *thread;
-    struct chimera_fuse_channel   *channel;
-    struct chimera_fuse_request   *next;
-    struct chimera_vfs_cred        cred;
-    uint64_t                       unique;
-    uint32_t                       opcode;
-    uint64_t                       nodeid;
-    uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                       fh_len;
+    struct chimera_fuse_thread     *thread;
+    struct chimera_fuse_channel    *channel;
+    struct chimera_fuse_request    *next;
+    struct chimera_vfs_cred         cred;
+    uint64_t                        unique;
+    uint32_t                        opcode;
+    uint64_t                        nodeid;
+    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                        fh_len;
     /* Second handle for the two-node ops (LINK's target, RENAME's newdir). */
-    uint8_t                        fh2[CHIMERA_VFS_FH_SIZE];
-    uint32_t                       fh2_len;
+    uint8_t                         fh2[CHIMERA_VFS_FH_SIZE];
+    uint32_t                        fh2_len;
+    /* Transient VFS handle for the op in flight; released by the terminal
+     * completion before the reply. */
+    struct chimera_vfs_open_handle *handle;
     /* The VFS sequence this request submitted, freed with the request.  A
      * sequence opens what it needs and releases it with itself, so a request
      * driving one carries no handle of its own. */
-    struct chimera_vfs_compound   *compound;
+    struct chimera_vfs_compound    *compound;
     /* OPEN/CREATE result carrier. */
-    struct chimera_fuse_open_file *file;
+    struct chimera_fuse_open_file  *file;
     /* Receive buffer; request field pointers (names, write payload) point
      * into it, so it is not reused until the request is freed. */
-    struct evpl_iovec              buf;
-    int                            buf_allocated;
-    uint32_t                       buf_len;
+    struct evpl_iovec               buf;
+    int                             buf_allocated;
+    uint32_t                        buf_len;
 
     /* Coverage captured at request ENTRY (before the backend op) by ops that
      * condition reply TTLs on it -- a CHIMERA_FUSE_COVER_* value.  See the
      * COVER_* comment: only pre-existing coverage protects state the backend
      * fetched before the call. */
-    int                            entry_cover;
+    int                             entry_cover;
 
     union {
         struct {
-            uint32_t size;      /* kernel's reply size limit */
-            uint32_t used;      /* bytes packed so far */
-            int      plus;      /* READDIRPLUS */
+            uint32_t                             size; /* kernel's reply size limit */
+            uint32_t                             used; /* bytes packed so far */
+            int                                  plus; /* READDIRPLUS */
+            struct chimera_fuse_readdir_pending *pending;
+            uint32_t                             num_pending;
         } readdir;
         struct {
             struct chimera_vfs_attrs set_attr;
         } setattr;
         struct {
             struct chimera_vfs_attrs set_attr;
-            /* CREATE: the CHIMERA_VFS_OPEN_* word the file is opened with,
-             * carried to the completion so the open file can record it. */
-            unsigned int             vfs_flags;
         } create;               /* also mkdir/mknod/symlink */
         struct {
             struct evpl_iovec iov;
@@ -407,25 +361,15 @@ struct chimera_fuse_request {
             uint32_t size;      /* getxattr/listxattr size probe or limit */
         } xattr;
         struct {
-            /* Heap entry embedding the claim/ticket; the claim's address is
-             * its identity once inserted and must outlive the sequence AND
-             * the lock, so it never lives here. */
-            struct chimera_fuse_lock      *entry;
-            struct chimera_fuse_lock_file *lf;
-            /* GETLK's probe, which is never inserted and so needs only to
-             * outlive the sequence -- which the request does. */
-            struct chimera_vfs_claim       probe;
-            int                            result_errno;
-            int                            parked; /* on mount->parked_locks */
-            /* An interrupt has been marshalled to this request's own thread
-             * and the doorbell still holds the pointer, so the run's
-             * completion must not reply and recycle underneath it: it parks
-             * the outcome in result_errno with `done` and lets the drain
-             * settle.  Both under mount->lock_lock. */
-            int                            cancel_posted;
-            int                            done;
-            struct chimera_fuse_request   *park_prev;
-            struct chimera_fuse_request   *park_next;
+            uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t fh_len;
+            uint64_t owner;
+        } flush;
+        struct {
+            int                          op_index;
+            int                          parked;
+            struct chimera_fuse_request *park_prev;
+            struct chimera_fuse_request *park_next;
         } lock;
         /* DAC pre-check context for ops that must authorize before opening.
          * Lives until the gate's callback fires, so it cannot share storage
@@ -456,7 +400,7 @@ void
 chimera_fuse_channel_dead(
     struct chimera_fuse_channel *channel);
 
-/* Reply helpers: deliver (or drop) the reply, free the request's sequence,
+/* Reply helpers: deliver (or drop) the reply, release any transient handle,
  * and recycle the request.  The int-returning ones report whether the kernel
  * actually took the reply (0) or never will (-1), for callers whose reply
  * hands the kernel a reference they must otherwise undo. */
@@ -486,7 +430,7 @@ chimera_fuse_reply_entry(
 
 /* Split primitives for replies that must inspect the delivery result while
  * the request (and its buffer) is still alive: send without recycling, then
- * finish (free the sequence, recycle the request). */
+ * finish (release any transient handle, recycle the request). */
 int
 chimera_fuse_send_only(
     struct chimera_fuse_request *req,
@@ -720,16 +664,17 @@ void
 chimera_fuse_locks_release_owner(
     struct chimera_fuse_thread *thread,
     struct chimera_fuse_mount  *mount,
-    uint64_t                    fh_hash,
+    const uint8_t              *fh,
+    uint32_t                    fh_len,
     uint64_t                    owner);
 
 /* Cancel the parked SETLKW with the given unique, if any.  Returns 1 when a
- * parked lock was found and cancellation initiated (the cancel itself runs on
- * the request's own thread, which replies EINTR if it wins the race against
- * the grant), 0 when the unique is unknown.  Callable from any thread. */
+ * parked lock was found and cancellation initiated (the original request
+ * replies EINTR via its owning thread), 0 when the unique is unknown. */
 int
 chimera_fuse_locks_interrupt(
     struct chimera_fuse_mount *mount,
+    struct chimera_vfs_state  *state,
     uint64_t                   unique);
 
 /* Teardown: cancel parked acquires and release every granted lock. */
@@ -737,22 +682,6 @@ void
 chimera_fuse_locks_shutdown(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_mount  *mount);
-
-/* Cancel-or-reply path for a blocked lock marshalled home to its own
- * thread -- see chimera_fuse_locks_interrupt. */
-void
-chimera_fuse_lock_resume(
-    struct chimera_fuse_request *req);
-
-/* fuse_dispatch.c: marshal a request home for its reply (any thread). */
-void
-chimera_fuse_resume_post(
-    struct chimera_fuse_request *req);
-
-void
-chimera_fuse_resume_doorbell(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell);
 
 /* fuse_coherence.c */
 void

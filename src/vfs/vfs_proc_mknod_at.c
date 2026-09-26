@@ -27,13 +27,15 @@ chimera_vfs_mknod_at_complete(struct chimera_vfs_request *request)
     if (request->status == CHIMERA_VFS_OK) {
         /* A new node is a directory content change, observable by change
          * watchers and directory-lease holders like any other create. */
-        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                request->mknod_at.handle->fh,
-                                request->mknod_at.handle->fh_len,
-                                CHIMERA_VFS_NOTIFY_FILE_ADDED,
-                                request->mknod_at.name,
-                                request->mknod_at.name_len,
-                                NULL, 0);
+        if (!(request->mknod_at.flags & CHIMERA_VFS_MKNOD_NO_NOTIFY)) {
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->mknod_at.handle->fh,
+                                    request->mknod_at.handle->fh_len,
+                                    CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                    request->mknod_at.name,
+                                    request->mknod_at.name_len,
+                                    NULL, 0);
+        }
 
         chimera_vfs_name_cache_insert(thread, cache,
                                       request->mknod_at.handle->fh_hash,
@@ -113,6 +115,7 @@ chimera_vfs_mknod_at_dispatch(
     const char                     *name,
     int                             namelen,
     struct chimera_vfs_attrs       *attr,
+    uint32_t                        flags,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
@@ -214,6 +217,7 @@ chimera_vfs_mknod_at_dispatch(
     request->mknod_at.name_len                    = namelen;
     request->mknod_at.name_hash                   = name_hash;
     request->mknod_at.set_attr                    = attr;
+    request->mknod_at.flags                       = flags;
     request->mknod_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->mknod_at.r_attr.va_set_mask          = 0;
     request->mknod_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
@@ -237,6 +241,7 @@ struct chimera_vfs_mknod_at_gate {
     struct chimera_vfs_open_handle *handle;
     const char                     *name;
     int                             namelen;
+    uint32_t                        flags;
     struct chimera_vfs_attrs       *attr;
     uint64_t                        attr_mask;
     uint64_t                        pre_attr_mask;
@@ -262,7 +267,7 @@ chimera_vfs_mknod_at_gate_complete(
     }
 
     chimera_vfs_mknod_at_dispatch(gate->thread, gate->cred, gate->handle,
-                                  gate->name, gate->namelen, gate->attr,
+                                  gate->name, gate->namelen, gate->attr, gate->flags,
                                   gate->attr_mask, gate->pre_attr_mask,
                                   gate->post_attr_mask, gate->callback,
                                   gate->private_data);
@@ -284,13 +289,14 @@ chimera_vfs_mknod_at_toolong(
 } /* chimera_vfs_mknod_at_toolong */
 
 SYMBOL_EXPORT void
-chimera_vfs_mknod_at(
+chimera_vfs_mknod_at_flags(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     const char                     *name,
     int                             namelen,
     struct chimera_vfs_attrs       *attr,
+    uint32_t                        flags,
     uint64_t                        attr_mask,
     uint64_t                        pre_attr_mask,
     uint64_t                        post_attr_mask,
@@ -330,6 +336,7 @@ chimera_vfs_mknod_at(
         gate->name           = name;
         gate->namelen        = namelen;
         gate->attr           = attr;
+        gate->flags          = flags;
         gate->attr_mask      = attr_mask;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
@@ -349,7 +356,25 @@ chimera_vfs_mknod_at(
         return;
     }
 
-    chimera_vfs_mknod_at_dispatch(thread, cred, handle, name, namelen, attr,
+    chimera_vfs_mknod_at_dispatch(thread, cred, handle, name, namelen, attr, flags,
                                   attr_mask, pre_attr_mask, post_attr_mask,
                                   callback, private_data);
+} /* chimera_vfs_mknod_at_flags */
+
+SYMBOL_EXPORT void
+chimera_vfs_mknod_at(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    const char                     *name,
+    int                             namelen,
+    struct chimera_vfs_attrs       *attr,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_mknod_at_callback_t callback,
+    void                           *private_data)
+{
+    chimera_vfs_mknod_at_flags(thread, cred, handle, name, namelen, attr, 0,
+                               attr_mask, pre_attr_mask, post_attr_mask, callback, private_data);
 } /* chimera_vfs_mknod_at */

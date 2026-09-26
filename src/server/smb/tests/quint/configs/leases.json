@@ -33,6 +33,7 @@
     { "run": "leaseCacheCloseRegression", "flavor": "stepLease" }
   ],
   "batches": [
-    { "flavor": "stepLease", "steps": 300, "traces": 8, "seed": "0x21" }
+    { "flavor": "stepLease", "steps": 300, "traces": 8, "seed": "0x21" },
+    { "flavor": "stepLease", "steps": 300, "traces": 8, "seed": "0x23" }
   ]
 }

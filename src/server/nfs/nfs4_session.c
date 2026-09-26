@@ -1031,11 +1031,13 @@ nfs4_client_confirm(
  * lock while holding a client lock (nfs_client_destroy runs outside it by
  * design). */
 SYMBOL_EXPORT nfsstat4
-nfs4_clients_check_io_denied(
-    struct nfs4_client_table *table,
-    const uint8_t            *fh,
-    uint16_t                  fh_len,
-    uint32_t                  requested_access)
+nfs4_clients_check_io_denied_except(
+    struct nfs4_client_table     *table,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    uint32_t                      requested_access,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed)
 {
     struct nfs4_client *c, *tmp;
     nfsstat4            status = NFS4_OK;
@@ -1047,8 +1049,8 @@ nfs4_clients_check_io_denied(
         if (!c->unified) {
             continue;
         }
-        status = nfs_client_check_io_denied(c->unified, NULL, fh, fh_len,
-                                            requested_access);
+        status = nfs_client_check_io_denied_except(c->unified, NULL, fh, fh_len,
+                                                   requested_access, closed, num_closed);
         if (status != NFS4_OK) {
             break;
         }
@@ -1056,7 +1058,18 @@ nfs4_clients_check_io_denied(
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
     return status;
+} /* nfs4_clients_check_io_denied_except */
+
+SYMBOL_EXPORT nfsstat4
+nfs4_clients_check_io_denied(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len,
+    uint32_t                  requested_access)
+{
+    return nfs4_clients_check_io_denied_except(table, fh, fh_len, requested_access, NULL, 0);
 } /* nfs4_clients_check_io_denied */
+
 
 /* Cross-client analogue of nfs_client_has_open_state_for_fh: true if ANY
  * client holds this file open.  A removed-but-open file keeps its filehandle
@@ -1064,10 +1077,12 @@ nfs4_clients_check_io_denied(
  * §16.26.5), so PUTFH must consult every client's open state, not just the one
  * bound to the querying connection. */
 SYMBOL_EXPORT bool
-nfs4_clients_have_open_state(
-    struct nfs4_client_table *table,
-    const uint8_t            *fh,
-    uint16_t                  fh_len)
+nfs4_clients_have_open_state_except(
+    struct nfs4_client_table     *table,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed)
 {
     struct nfs4_client *c, *tmp;
     bool                found = false;
@@ -1079,7 +1094,7 @@ nfs4_clients_have_open_state(
         if (!c->unified) {
             continue;
         }
-        if (nfs_client_has_open_state_for_fh(c->unified, fh, fh_len)) {
+        if (nfs_client_has_open_state_for_fh_except(c->unified, fh, fh_len, closed, num_closed)) {
             found = true;
             break;
         }
@@ -1087,6 +1102,15 @@ nfs4_clients_have_open_state(
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
     return found;
+} /* nfs4_clients_have_open_state_except */
+
+SYMBOL_EXPORT bool
+nfs4_clients_have_open_state(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len)
+{
+    return nfs4_clients_have_open_state_except(table, fh, fh_len, NULL, 0);
 } /* nfs4_clients_have_open_state */
 
 /* Recover the byte-string of an NFSv4 lock-owner from the (clientid,
@@ -1355,6 +1379,34 @@ nfs4_session_find_by_clientid(
 
     return session;
 } /* nfs4_session_find_by_clientid */
+
+nfsstat4
+nfs4_client_reserve_compound(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    struct nfs_client       **out)
+{
+    struct nfs4_client *client;
+    nfsstat4            status = NFS4ERR_STALE_CLIENTID;
+
+    *out = NULL;
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), client);
+    if (client && client->nfs4_client_confirmed && client->unified) {
+        /* Removal owns this same table lock before dropping the client for
+         * teardown. Acquire its pin before letting removal proceed; taking a
+         * session reference and pinning later leaves a unified-client UAF. */
+        if (nfs_client_reserve_compound(client->unified)) {
+            *out   = client->unified;
+            status = NFS4_OK;
+        } else {
+            status = NFS4ERR_DELAY;
+        }
+    }
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return status;
+} /* nfs4_client_reserve_compound */
 
 void
 nfs4_destroy_session(

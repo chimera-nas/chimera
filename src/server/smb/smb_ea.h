@@ -135,7 +135,7 @@ chimera_smb_ea_full_parse_one(
     uint32_t pos = *off;
     uint32_t next_off, hdr, need;
 
-    if (pos + 8 > len) {
+    if (pos > len || len - pos < 8) {
         return -1;
     }
 
@@ -147,7 +147,7 @@ chimera_smb_ea_full_parse_one(
     hdr = 8;
     /* name + NUL + value must fit within this entry. */
     need = hdr + e->name_len + 1 + e->value_len;
-    if (pos + need > len) {
+    if (need > len - pos) {
         return -1;
     }
 
@@ -157,7 +157,7 @@ chimera_smb_ea_full_parse_one(
     if (next_off == 0) {
         *off = len;            /* last entry */
     } else {
-        if (next_off < need || pos + next_off > len) {
+        if (next_off < need || next_off > len - pos) {
             return -1;
         }
         *off = pos + next_off;
@@ -181,13 +181,13 @@ chimera_smb_ea_get_parse_one(
     uint32_t pos = *off;
     uint32_t next_off, need;
 
-    if (pos + 5 > len) {
+    if (pos > len || len - pos < 5) {
         return -1;
     }
     memcpy(&next_off, buf + pos, 4);
     *name_len = buf[pos + 4];
     need      = 5 + *name_len + 1;
-    if (pos + need > len) {
+    if (need > len - pos) {
         return -1;
     }
     *name = (const char *) (buf + pos + 5);
@@ -195,7 +195,7 @@ chimera_smb_ea_get_parse_one(
     if (next_off == 0) {
         *off = len;
     } else {
-        if (next_off < need || pos + next_off > len) {
+        if (next_off < need || next_off > len - pos) {
             return -1;
         }
         *off = pos + next_off;

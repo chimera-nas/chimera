@@ -5,6 +5,22 @@
 # SMB2/3 model-based tests (Quint spec + build-time self-test).
 add_subdirectory(quint)
 
+add_executable(smb_namespace_test smb_namespace_test.c ../smb_namespace.c)
+target_include_directories(smb_namespace_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb_namespace_test evpl Threads::Threads)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/smb/namespace COMMAND smb_namespace_test)
+set_tests_properties(chimera/server/smb/namespace PROPERTIES TIMEOUT 60 LABELS "smb")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(smb_durable_compound_test smb_durable_compound_test.c)
+    target_include_directories(smb_durable_compound_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb_durable_compound_test chimera_server chimera_smb chimera_vfs chimera_metrics dl)
+    set_target_properties(smb_durable_compound_test PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/durable_compound COMMAND smb_durable_compound_test)
+    set_tests_properties(chimera/server/smb/durable_compound PROPERTIES TIMEOUT 60 LABELS "smb;compound")
+endif()
+set(CHIMERA_TEST_TIER extended)
+
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)

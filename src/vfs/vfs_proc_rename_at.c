@@ -21,7 +21,8 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_attr_cache   *attr_cache = thread->vfs->vfs_attr_cache;
     chimera_vfs_rename_at_callback_t callback   = request->proto_callback;
 
-    if (request->status == CHIMERA_VFS_OK) {
+    if (request->status == CHIMERA_VFS_OK &&
+        request->rename_at.r_outcome != CHIMERA_VFS_RENAME_OUTCOME_NOOP) {
         int cross_dir = (request->fh_len != request->rename_at.new_fhlen) ||
             memcmp(request->fh, request->rename_at.new_fh,
                    request->fh_len) != 0;
@@ -32,12 +33,13 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
          * dir; for a cross-dir rename it spares whichever parent's lease the key
          * matches (the source, since the open lived there), naturally breaking
          * the other.  NULL caller (NFS/S3) breaks every directory lease. */
-        uint64_t skip_lo = 0, skip_hi = 0;
-        bool     has_skip = request->rename_at.parent_lease_skip_valid;
+        struct chimera_claim_actor        parent_actor = { 0 };
+        const struct chimera_claim_actor *notify_actor = NULL;
 
-        if (has_skip) {
-            memcpy(&skip_lo, request->rename_at.parent_lease_skip, 8);
-            memcpy(&skip_hi, request->rename_at.parent_lease_skip + 8, 8);
+        if (request->io_owner_valid && request->rename_at.parent_lease_skip_valid) {
+            parent_actor = request->io_owner;
+            memcpy(parent_actor.owner.key, request->rename_at.parent_lease_skip, 16);
+            notify_actor = &parent_actor;
         }
 
         /* Which NAME filter sees this is decided by the renamed object's
@@ -46,37 +48,39 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
             (request->rename_at.flags & CHIMERA_VFS_RENAME_SRC_IS_DIR)
             ? CHIMERA_VFS_NOTIFY_RENAMED_DIR : CHIMERA_VFS_NOTIFY_RENAMED;
 
-        if (!cross_dir) {
-            /* Intra-directory rename: a single RENAMED event on the
-             * directory carrying both old and new names. */
-            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                          request->fh,
-                                          request->fh_len,
-                                          rn_class,
-                                          request->rename_at.new_name,
-                                          request->rename_at.new_namelen,
-                                          request->rename_at.name,
-                                          request->rename_at.namelen,
-                                          skip_lo, skip_hi, has_skip);
-        } else {
-            /* Cross-directory rename: source dir sees the OLD name only,
-             * destination sees the NEW name only. */
-            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                          request->fh,
-                                          request->fh_len,
-                                          rn_class,
-                                          NULL, 0,
-                                          request->rename_at.name,
-                                          request->rename_at.namelen,
-                                          skip_lo, skip_hi, has_skip);
-            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
-                                          request->rename_at.new_fh,
-                                          request->rename_at.new_fhlen,
-                                          rn_class,
-                                          request->rename_at.new_name,
-                                          request->rename_at.new_namelen,
-                                          NULL, 0,
-                                          skip_lo, skip_hi, has_skip);
+        if (!(request->rename_at.flags & CHIMERA_VFS_RENAME_NO_NOTIFY)) {
+            if (!cross_dir) {
+                /* Intra-directory rename: a single RENAMED event on the
+                 * directory carrying both old and new names. */
+                chimera_vfs_notify_emit_actor(thread->vfs->vfs_notify,
+                                              request->fh,
+                                              request->fh_len,
+                                              rn_class,
+                                              request->rename_at.new_name,
+                                              request->rename_at.new_namelen,
+                                              request->rename_at.name,
+                                              request->rename_at.namelen,
+                                              notify_actor);
+            } else {
+                /* Cross-directory rename: source dir sees the OLD name only,
+                 * destination sees the NEW name only. */
+                chimera_vfs_notify_emit_actor(thread->vfs->vfs_notify,
+                                              request->fh,
+                                              request->fh_len,
+                                              rn_class,
+                                              NULL, 0,
+                                              request->rename_at.name,
+                                              request->rename_at.namelen,
+                                              notify_actor);
+                chimera_vfs_notify_emit_actor(thread->vfs->vfs_notify,
+                                              request->rename_at.new_fh,
+                                              request->rename_at.new_fhlen,
+                                              rn_class,
+                                              request->rename_at.new_name,
+                                              request->rename_at.new_namelen,
+                                              NULL, 0,
+                                              notify_actor);
+            }
         }
 
         /* Remove cache entries for both old and new paths.
@@ -192,6 +196,9 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
         }
     }
 
+    if (request->rename_at.outcome_result) {
+        *request->rename_at.outcome_result = request->rename_at.r_outcome;
+    }
     chimera_vfs_complete(request);
 
     callback(request->status,
@@ -211,6 +218,10 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
 static void
 chimera_vfs_rename_at_recall_target(struct chimera_vfs_request *request)
 {
+    if (request->rename_at.flags & CHIMERA_VFS_RENAME_NOREPLACE) {
+        chimera_vfs_dispatch(request);
+        return;
+    }
     chimera_vfs_io_recall(request,
                           request->rename_at.target_fh,
                           request->rename_at.target_fh_len,
@@ -234,6 +245,15 @@ chimera_vfs_rename_at_source_lookup_complete(
     void                     *private_data)
 {
     struct chimera_vfs_request *request = private_data;
+
+    if ((request->rename_at.flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) &&
+        (error_code != CHIMERA_VFS_OK || !attr || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH) ||
+         attr->va_fh_len != request->rename_at.match_source_fh_len ||
+         memcmp(attr->va_fh, request->rename_at.match_source_fh, attr->va_fh_len))) {
+        request->status = error_code == CHIMERA_VFS_OK ? CHIMERA_VFS_ESTALE : error_code;
+        request->complete(request);
+        return;
+    }
 
     if (error_code == CHIMERA_VFS_OK && attr->va_fh_len) {
         memcpy(request->rename_at.source_fh, attr->va_fh, attr->va_fh_len);
@@ -328,25 +348,29 @@ chimera_vfs_rename_at_target_lookup_complete(
 
 static void
 chimera_vfs_rename_at_dispatch(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    const void                      *fh,
-    int                              fhlen,
-    const char                      *name,
-    int                              namelen,
-    const void                      *new_fh,
-    int                              new_fhlen,
-    const char                      *new_name,
-    int                              new_namelen,
-    const uint8_t                   *target_fh,
-    int                              target_fh_len,
-    unsigned int                     flags,
-    uint64_t                         pre_attr_mask,
-    uint64_t                         post_attr_mask,
-    const uint8_t                   *parent_lease_skip,
-    struct chimera_vfs_open_handle  *op_handle,
-    chimera_vfs_rename_at_callback_t callback,
-    void                            *private_data)
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    const void                       *fh,
+    int                               fhlen,
+    const char                       *name,
+    int                               namelen,
+    const void                       *new_fh,
+    int                               new_fhlen,
+    const char                       *new_name,
+    int                               new_namelen,
+    const uint8_t                    *target_fh,
+    int                               target_fh_len,
+    unsigned int                      flags,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    const uint8_t                    *parent_lease_skip,
+    struct chimera_vfs_open_handle   *op_handle,
+    const struct chimera_claim_actor *actor,
+    const uint8_t                    *match_source_fh,
+    uint32_t                          match_source_fh_len,
+    enum chimera_vfs_rename_outcome  *outcome,
+    chimera_vfs_rename_at_callback_t  callback,
+    void                             *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -357,23 +381,29 @@ chimera_vfs_rename_at_dispatch(
         return;
     }
 
-    request->opcode                  = CHIMERA_VFS_OP_RENAME_AT;
-    request->complete                = chimera_vfs_rename_at_complete;
-    request->rename_at.name          = name;
-    request->rename_at.namelen       = namelen;
-    request->rename_at.name_hash     = chimera_vfs_hash(name, namelen);
-    request->rename_at.new_fh        = new_fh;
-    request->rename_at.new_fhlen     = new_fhlen;
-    request->rename_at.new_fh_hash   = chimera_vfs_hash(new_fh, new_fhlen);
-    request->rename_at.new_name      = new_name;
-    request->rename_at.new_namelen   = new_namelen;
-    request->rename_at.new_name_hash = chimera_vfs_hash(new_name, new_namelen);
-    request->rename_at.flags         = flags;
+    request->opcode                        = CHIMERA_VFS_OP_RENAME_AT;
+    request->complete                      = chimera_vfs_rename_at_complete;
+    request->rename_at.name                = name;
+    request->rename_at.namelen             = namelen;
+    request->rename_at.name_hash           = chimera_vfs_hash(name, namelen);
+    request->rename_at.new_fh              = new_fh;
+    request->rename_at.new_fhlen           = new_fhlen;
+    request->rename_at.new_fh_hash         = chimera_vfs_hash(new_fh, new_fhlen);
+    request->rename_at.new_name            = new_name;
+    request->rename_at.new_namelen         = new_namelen;
+    request->rename_at.new_name_hash       = chimera_vfs_hash(new_name, new_namelen);
+    request->rename_at.flags               = flags;
+    request->rename_at.r_outcome           = CHIMERA_VFS_RENAME_OUTCOME_UNKNOWN;
+    request->rename_at.outcome_result      = outcome;
+    request->rename_at.match_source_fh_len = match_source_fh_len;
+    if (match_source_fh_len) {
+        memcpy(request->rename_at.match_source_fh, match_source_fh, match_source_fh_len);
+    }
     /* Copy any supplied/resolved clobbered-target FH into request-owned storage:
      * the gate that resolved it frees itself right after this dispatch, so the
      * completion (which invalidates the clobbered inode's attr cache) cannot
      * borrow the gate's buffer. */
-    if (target_fh && target_fh_len > 0) {
+    if (!(flags & CHIMERA_VFS_RENAME_NOREPLACE) && target_fh && target_fh_len > 0) {
         memcpy(request->rename_at.resolved_target_fh, target_fh, target_fh_len);
         request->rename_at.target_fh     = request->rename_at.resolved_target_fh;
         request->rename_at.target_fh_len = target_fh_len;
@@ -404,6 +434,10 @@ chimera_vfs_rename_at_dispatch(
      * MS-SMB2 / dirlease.rename).  A NULL caller (NFS/S3) recalls every holder,
      * preserving the RFC 7530 namespace-recall behaviour. */
     request->io_handle = op_handle;
+    if (actor) {
+        request->io_owner       = *actor;
+        request->io_owner_valid = 1;
+    }
 
     /* Recall delegations before the directory change: first on the source file
      * being moved (its ctime/linkage changes invalidate cached state), then on
@@ -414,7 +448,8 @@ chimera_vfs_rename_at_dispatch(
      * delegation/lease on the doomed target is recalled before it is replaced
      * -- rather than making every by-name caller (NFSv3 RENAME) do that lookup
      * itself.  Only when a caching protocol is enabled. */
-    if ((flags & CHIMERA_VFS_REMOVE_RECALL) && thread->vfs->caching_enabled &&
+    if (!(flags & CHIMERA_VFS_RENAME_NOREPLACE) &&
+        (flags & CHIMERA_VFS_REMOVE_RECALL) && thread->vfs->caching_enabled &&
         !target_fh) {
         chimera_vfs_lookup(thread, cred, new_fh, new_fhlen, new_name, new_namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
@@ -446,32 +481,35 @@ struct chimera_vfs_rename_at_gate {
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
     const void                      *fh;
-    int                              fhlen;
     const char                      *name;
-    int                              namelen;
     const void                      *new_fh;
-    int                              new_fhlen;
     const char                      *new_name;
-    int                              new_namelen;
     const uint8_t                   *target_fh;
-    int                              target_fh_len;
-    unsigned int                     flags;
-    uint8_t                          src_child_fh[CHIMERA_VFS_FH_SIZE];
-    int                              src_child_fh_len;
-    uint8_t                          dst_target_fh[CHIMERA_VFS_FH_SIZE];
-    int                              dst_target_fh_len;
-    uint64_t                         pre_attr_mask;
-    uint64_t                         post_attr_mask;
-    uint8_t                          parent_lease_skip[16];
-    uint8_t                          parent_lease_skip_valid;
     uint8_t                          src_is_dir;
     struct chimera_vfs_open_handle  *op_handle;
+    enum chimera_vfs_rename_outcome *outcome;
     chimera_vfs_rename_at_callback_t callback;
     void                            *private_data;
+    uint64_t                         pre_attr_mask;
+    uint64_t                         post_attr_mask;
+    int                              fhlen;
+    int                              namelen;
+    int                              new_fhlen;
+    int                              new_namelen;
+    int                              target_fh_len;
+    unsigned int                     flags;
+    int                              src_child_fh_len;
+    int                              dst_target_fh_len;
+    struct chimera_claim_actor       actor;
+    uint8_t                          have_actor;
+    uint8_t                          src_child_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                          dst_target_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                          parent_lease_skip[16];
+    uint8_t                          parent_lease_skip_valid;
 };
 
-_Static_assert(sizeof(struct chimera_vfs_rename_at_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
-               "rename_at gate context outgrew the request gate scratch area");
+/* Both resolved identities and the copied actor outlive asynchronous DAC
+ * checks. This gate exceeds the fixed SDK scratch buffer. */
 
 static void
 chimera_vfs_rename_at_gate_fail(
@@ -479,7 +517,7 @@ chimera_vfs_rename_at_gate_fail(
     enum chimera_vfs_error             status)
 {
     gate->callback(status, NULL, NULL, NULL, NULL, gate->private_data);
-    chimera_vfs_gate_scratch_free(gate->thread, gate);
+    free(gate);
 } /* chimera_vfs_rename_at_gate_fail */
 
 static void
@@ -489,17 +527,19 @@ chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
                                    gate->fhlen, gate->name, gate->namelen,
                                    gate->new_fh, gate->new_fhlen,
                                    gate->new_name, gate->new_namelen,
-                                   gate->dst_target_fh_len ?
+                                   !(gate->flags & CHIMERA_VFS_RENAME_MATCH_DEST_FH) && gate->dst_target_fh_len ?
                                    gate->dst_target_fh : gate->target_fh,
-                                   gate->dst_target_fh_len ?
+                                   !(gate->flags & CHIMERA_VFS_RENAME_MATCH_DEST_FH) && gate->dst_target_fh_len ?
                                    gate->dst_target_fh_len : gate->target_fh_len,
                                    gate->flags,
                                    gate->pre_attr_mask, gate->post_attr_mask,
                                    gate->parent_lease_skip_valid ?
                                    gate->parent_lease_skip : NULL,
-                                   gate->op_handle,
-                                   gate->callback, gate->private_data);
-    chimera_vfs_gate_scratch_free(gate->thread, gate);
+                                   gate->op_handle, gate->have_actor ? &gate->actor : NULL,
+                                   (gate->flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? gate->src_child_fh : NULL,
+                                   (gate->flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? gate->src_child_fh_len : 0,
+                                   gate->outcome, gate->callback, gate->private_data);
+    free(gate);
 } /* chimera_vfs_rename_at_gate_dispatch */
 
 /*
@@ -615,6 +655,11 @@ chimera_vfs_rename_at_gate_dst(
         return;
     }
 
+    if (gate->flags & CHIMERA_VFS_RENAME_NOREPLACE) {
+        chimera_vfs_rename_at_gate_dispatch(gate);
+        return;
+    }
+
     if (gate->target_fh && gate->target_fh_len > 0) {
         chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
                                        gate->new_fh, gate->new_fhlen,
@@ -666,6 +711,13 @@ chimera_vfs_rename_at_gate_lookup(
         chimera_vfs_rename_at_gate_fail(gate, status);
         return;
     }
+    if ((gate->flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) &&
+        (!attr || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH) ||
+         attr->va_fh_len != (uint32_t) gate->src_child_fh_len ||
+         memcmp(attr->va_fh, gate->src_child_fh, attr->va_fh_len))) {
+        chimera_vfs_rename_at_gate_fail(gate, CHIMERA_VFS_ESTALE);
+        return;
+    }
 
     gate->src_is_dir = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
         S_ISDIR(attr->va_mode);
@@ -705,29 +757,48 @@ chimera_vfs_rename_at_toolong(
 } /* chimera_vfs_rename_at_toolong */
 
 SYMBOL_EXPORT void
-chimera_vfs_rename_at(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    const void                      *fh,
-    int                              fhlen,
-    const char                      *name,
-    int                              namelen,
-    const void                      *new_fh,
-    int                              new_fhlen,
-    const char                      *new_name,
-    int                              new_namelen,
-    const uint8_t                   *target_fh,
-    int                              target_fh_len,
-    unsigned int                     flags,
-    uint64_t                         pre_attr_mask,
-    uint64_t                         post_attr_mask,
-    const uint8_t                   *parent_lease_skip,
-    struct chimera_vfs_open_handle  *op_handle,
-    chimera_vfs_rename_at_callback_t callback,
-    void                            *private_data)
+chimera_vfs_rename_at_checked_result_actor(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    const void                       *fh,
+    int                               fhlen,
+    const char                       *name,
+    int                               namelen,
+    const void                       *new_fh,
+    int                               new_fhlen,
+    const char                       *new_name,
+    int                               new_namelen,
+    const uint8_t                    *target_fh,
+    int                               target_fh_len,
+    unsigned int                      flags,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    const uint8_t                    *parent_lease_skip,
+    struct chimera_vfs_open_handle   *op_handle,
+    const struct chimera_claim_actor *actor,
+    const uint8_t                    *match_source_fh,
+    uint32_t                          match_source_fh_len,
+    enum chimera_vfs_rename_outcome  *outcome,
+    chimera_vfs_rename_at_callback_t  callback,
+    void                             *private_data)
 {
     struct chimera_vfs_module         *module;
     struct chimera_vfs_rename_at_gate *gate;
+
+    if (outcome) {
+        *outcome = CHIMERA_VFS_RENAME_OUTCOME_UNKNOWN;
+    }
+    if (!fh || !new_fh || fhlen < CHIMERA_VFS_MOUNT_ID_SIZE ||
+        new_fhlen < CHIMERA_VFS_MOUNT_ID_SIZE || fhlen > CHIMERA_VFS_FH_SIZE ||
+        new_fhlen > CHIMERA_VFS_FH_SIZE || !name || !new_name || namelen < 0 || new_namelen < 0 ||
+        target_fh_len < 0 || target_fh_len > CHIMERA_VFS_FH_SIZE || (target_fh_len && !target_fh) ||
+        match_source_fh_len > CHIMERA_VFS_FH_SIZE || (match_source_fh_len && !match_source_fh) ||
+        ((flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) && match_source_fh_len < CHIMERA_VFS_MOUNT_ID_SIZE) ||
+        ((flags & CHIMERA_VFS_RENAME_MATCH_DEST_FH) &&
+         ((flags & CHIMERA_VFS_RENAME_NOREPLACE) || target_fh_len < CHIMERA_VFS_MOUNT_ID_SIZE))) {
+        callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
 
     /* POSIX: renaming to/from "." or ".." is invalid (EINVAL); a final
      * component longer than {NAME_MAX} is ENAMETOOLONG. */
@@ -769,6 +840,20 @@ chimera_vfs_rename_at(
     }
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
+    uint64_t required = 0;
+    if (flags & CHIMERA_VFS_RENAME_NOREPLACE) {
+        required |= CHIMERA_VFS_CAP_RENAME_NOREPLACE;
+    }
+    if (flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) {
+        required |= CHIMERA_VFS_CAP_RENAME_MATCH_FH;
+    }
+    if (flags & CHIMERA_VFS_RENAME_MATCH_DEST_FH) {
+        required |= CHIMERA_VFS_CAP_RENAME_MATCH_DEST_FH;
+    }
+    if (required && (!module || (module->capabilities & required) != required)) {
+        callback(CHIMERA_VFS_ENOTSUP, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
 
     /* gate_needed_dac, not gate_needed: a DELEGATES_DAC passthrough resolves
      * both parents by handle, so the kernel path-resolution permission checks
@@ -777,7 +862,11 @@ chimera_vfs_rename_at(
      * checks, inverting POSIX's observable order (resolution EACCES first).
      * The engine's own source/destination gates below restore it. */
     if (module && chimera_vfs_gate_needed_dac(module->capabilities, cred)) {
-        gate                 = chimera_vfs_gate_scratch_alloc(thread);
+        gate = malloc(sizeof(*gate));
+        if (!gate) {
+            callback(CHIMERA_VFS_ENOSPC, NULL, NULL, NULL, NULL, private_data);
+            return;
+        }
         gate->thread         = thread;
         gate->cred           = cred;
         gate->fh             = fh;
@@ -799,10 +888,20 @@ chimera_vfs_rename_at(
         } else {
             gate->parent_lease_skip_valid = 0;
         }
-        gate->op_handle         = op_handle;
-        gate->callback          = callback;
-        gate->private_data      = private_data;
-        gate->src_child_fh_len  = 0;
+        gate->have_actor = actor != NULL;
+        if (actor) {
+            gate->actor = *actor;
+        }
+        gate->op_handle    = op_handle;
+        gate->outcome      = outcome;
+        gate->callback     = callback;
+        gate->private_data = private_data;
+        /* Reuse the resolved-source buffer for the expected identity. The
+         * lookup must match before replacing it with the same bytes. */
+        gate->src_child_fh_len = (flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? match_source_fh_len : 0;
+        if (gate->src_child_fh_len) {
+            memcpy(gate->src_child_fh, match_source_fh, gate->src_child_fh_len);
+        }
         gate->dst_target_fh_len = 0;
 
         /* Resolve the source object's FH first so the sticky-bit owner check on
@@ -818,5 +917,96 @@ chimera_vfs_rename_at(
                                    new_fh, new_fhlen, new_name, new_namelen,
                                    target_fh, target_fh_len, flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
-                                   op_handle, callback, private_data);
+                                   op_handle, actor, match_source_fh, match_source_fh_len, outcome, callback,
+                                   private_data);
+} /* chimera_vfs_rename_at_checked */
+
+SYMBOL_EXPORT void
+chimera_vfs_rename_at_checked(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    const char                      *name,
+    int                              namelen,
+    const void                      *new_fh,
+    int                              new_fhlen,
+    const char                      *new_name,
+    int                              new_namelen,
+    const uint8_t                   *target_fh,
+    int                              target_fh_len,
+    unsigned int                     flags,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
+    const uint8_t                   *match_source_fh,
+    uint32_t                         match_source_fh_len,
+    chimera_vfs_rename_at_callback_t callback,
+    void                            *private_data)
+{
+    chimera_vfs_rename_at_checked_result(thread, cred, fh, fhlen, name, namelen,
+                                         new_fh, new_fhlen, new_name, new_namelen, target_fh, target_fh_len,
+                                         flags, pre_attr_mask, post_attr_mask, parent_lease_skip, op_handle,
+                                         match_source_fh, match_source_fh_len, NULL, callback, private_data);
+} /* chimera_vfs_rename_at_checked */
+
+SYMBOL_EXPORT void
+chimera_vfs_rename_at(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    const char                      *name,
+    int                              namelen,
+    const void                      *new_fh,
+    int                              new_fhlen,
+    const char                      *new_name,
+    int                              new_namelen,
+    const uint8_t                   *target_fh,
+    int                              target_fh_len,
+    unsigned int                     flags,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
+    chimera_vfs_rename_at_callback_t callback,
+    void                            *private_data)
+{
+    chimera_vfs_rename_at_checked(thread, cred, fh, fhlen, name, namelen,
+                                  new_fh, new_fhlen, new_name, new_namelen, target_fh, target_fh_len,
+                                  flags, pre_attr_mask, post_attr_mask, parent_lease_skip, op_handle,
+                                  NULL, 0, callback, private_data);
 } /* chimera_vfs_rename_at */
+
+/* Compatibility entrypoint for callers without a protocol actor. */
+SYMBOL_EXPORT void
+chimera_vfs_rename_at_checked_result(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    const char                      *name,
+    int                              namelen,
+    const void                      *new_fh,
+    int                              new_fhlen,
+    const char                      *new_name,
+    int                              new_namelen,
+    const uint8_t                   *target_fh,
+    int                              target_fh_len,
+    unsigned int                     flags,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
+    const uint8_t                   *match_source_fh,
+    uint32_t                         match_source_fh_len,
+    enum chimera_vfs_rename_outcome *outcome,
+    chimera_vfs_rename_at_callback_t callback,
+    void                            *private_data)
+{
+    chimera_vfs_rename_at_checked_result_actor(thread, cred, fh, fhlen, name, namelen,
+                                               new_fh, new_fhlen, new_name, new_namelen, target_fh, target_fh_len,
+                                               flags, pre_attr_mask, post_attr_mask, parent_lease_skip, op_handle, NULL,
+                                               match_source_fh, match_source_fh_len, outcome, callback, private_data);
+} /* chimera_vfs_rename_at_checked_result */

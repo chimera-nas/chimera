@@ -6,6 +6,7 @@
 
 #include "common/misc.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_claim.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
@@ -95,6 +96,7 @@ struct chimera_smb_attrs {
     uint32_t smb_compression_unit_size; /* Compression unit size */
 
     uint8_t  smb_disposition; /* Disposition */
+    uint32_t smb_disposition_flags; /* FileDispositionInformationEx flags */
 
     /* FilePositionInformation fields */
     uint64_t smb_position;     /* Current byte offset */
@@ -332,6 +334,23 @@ chimera_smb_marshal_access_attrs(
 
 /* Main marshal functions for each information class */
 
+/* A named stream carries the base inode's metadata, including its directory
+ * mode, but is itself a leaf data fork. Normalize only a reply-local snapshot:
+ * access checks, shared metadata and the backend's identity retain base mode. */
+static inline const struct chimera_vfs_attrs *
+chimera_smb_data_fork_attrs(
+    const struct chimera_vfs_attrs *attr,
+    bool                            stream,
+    struct chimera_vfs_attrs       *snapshot)
+{
+    if (!stream) {
+        return attr;
+    }
+    *snapshot = *attr;
+    snapshot->va_mode = (snapshot->va_mode & ~S_IFMT) | S_IFREG;
+    return snapshot;
+} // chimera_smb_data_fork_attrs
+
 /* Marshal for FileAllInformation (0x12) - the complete set */
 static inline void
 chimera_smb_marshal_attrs(
@@ -349,6 +368,17 @@ chimera_smb_marshal_attrs(
     chimera_smb_marshal_compression_attrs(attr, smb_attr);
     chimera_smb_marshal_access_attrs(attr, smb_attr);
 } /* chimera_smb_marshal_attrs */
+
+static inline void
+chimera_smb_marshal_open_attrs(
+    const struct chimera_vfs_attrs *attr,
+    bool                            stream,
+    struct chimera_smb_attrs       *smb_attr)
+{
+    struct chimera_vfs_attrs snapshot;
+
+    chimera_smb_marshal_attrs(chimera_smb_data_fork_attrs(attr, stream, &snapshot), smb_attr);
+} // chimera_smb_marshal_open_attrs
 
 /* Marshal for FileBasicInformation (0x04) */
 static inline void
@@ -610,7 +640,8 @@ chimera_smb_parse_disposition_info(
     if (evpl_iovec_cursor_try_get_uint8(cursor, &attrs->smb_disposition)) {
         return -1;
     }
-    attrs->smb_attr_mask |= SMB_ATTR_DISPOSITION;
+    attrs->smb_attr_mask        |= SMB_ATTR_DISPOSITION;
+    attrs->smb_disposition_flags = 0;
     return 0;
 } /* chimera_smb_parse_disposition_info */
 
@@ -624,8 +655,9 @@ chimera_smb_parse_disposition_info_ex(
     if (evpl_iovec_cursor_try_get_uint32(cursor, &flags)) {
         return -1;
     }
-    attrs->smb_disposition = (flags & 0x01) ? 1 : 0;
-    attrs->smb_attr_mask  |= SMB_ATTR_DISPOSITION;
+    attrs->smb_disposition       = (flags & 0x01) ? 1 : 0;
+    attrs->smb_disposition_flags = flags;
+    attrs->smb_attr_mask        |= SMB_ATTR_DISPOSITION;
     return 0;
 } /* chimera_smb_parse_disposition_info_ex */
 
@@ -689,7 +721,12 @@ chimera_smb_append_standard_info(
     evpl_iovec_cursor_append_uint64(cursor, attrs->smb_alloc_size);
     evpl_iovec_cursor_append_uint64(cursor, attrs->smb_size);
     evpl_iovec_cursor_append_uint32(cursor, attrs->smb_link_count);
-    evpl_iovec_cursor_append_uint8(cursor, !!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE));
+    /* MS-FSA 2.1.5.12.27: report the link/stream's deletion state to every
+     * opener. CREATE's FILE_DELETE_ON_CLOSE mode alone is not pending yet. */
+    evpl_iovec_cursor_append_uint8(cursor, attrs->smb_link_count == 0 ||
+                                   ((attrs->smb_attr_mask & SMB_ATTR_DISPOSITION) ?
+                                    attrs->smb_disposition :
+                                    chimera_vfs_state_is_delete_pending(open_file->share_file_state)));
     evpl_iovec_cursor_append_uint8(cursor, attrs->smb_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY);
     evpl_iovec_cursor_append_uint16(cursor, 0); /* Reserved */
 } /* chimera_smb_append_standard_info */

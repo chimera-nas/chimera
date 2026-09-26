@@ -172,14 +172,25 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
     struct chimera_smb_request       *request;
 
     while ((request = conn->parked_requests) != NULL) {
-        bool break_parked = request->smb2_hdr.command == SMB2_CREATE &&
-            request->create.break_waiter_counted;
-
         conn->parked_requests    = request->async.park_next;
         request->async.park_next = NULL;
         request->async.armed     = 0;
         evpl_remove_timer(thread->evpl, &request->async.timer);
         chimera_smb_create_break_waiter_retire(request);
+        /* The VFS COORDINATE owns its timer and completion. Its owning-loop
+         * poll observes disconnect; completing the SMB request here would free
+         * the still-running VFS compound underneath that callback. */
+        if (request->compound_coordinate_wait) {
+            continue;
+        }
+
+        /* Namespace admission parks before FileId resolution and owns no
+         * backend callback. With its timer removed, this is its terminal owner. */
+        if (request->namespace_mutation_wait) {
+            request->namespace_mutation_wait = false;
+            chimera_smb_complete_request(request, SMB2_STATUS_CANCELLED);
+            continue;
+        }
 
         /* A CREATE parked on its share-acquire ticket: the run is parked on its
          * share CLAIM and the executor, not this server, owns the ticket.  It
@@ -226,17 +237,15 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
             chimera_smb_open_file_release(request, of);
             request->create.r_open_file = NULL;
         }
-
-        if (break_parked) {
-            /* The break timer was this CREATE's only continuation.
-             * It is cancelled above, so nobody can complete its compound now.
-             * Requests within a compound execute serially: abandon the whole
-             * compound rather than starting its remaining commands on a dead
-             * connection. Share-acquire callbacks are handled separately above;
-             * other CREATEs may already have handed off to an async VFS call.
-             */
-            chimera_smb_create_pending_unregister(request);
-            chimera_smb_compound_free(thread, request->compound);
+        /* With the timer and break waiter removed above these CREATE/pipe
+         * waits have no completion owner left. Finish their compound now;
+         * disconnect/generation checks suppress every transport side effect. */
+        if (request->smb2_hdr.command == SMB2_CREATE || request->async.pipe_read) {
+            if (request->smb2_hdr.command == SMB2_CREATE && request->create.parent_handle) {
+                chimera_vfs_release(thread->vfs_thread, request->create.parent_handle);
+                request->create.parent_handle = NULL;
+            }
+            chimera_smb_complete_request(request, SMB2_STATUS_CANCELLED);
         }
     }
 

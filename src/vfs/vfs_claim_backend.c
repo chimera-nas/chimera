@@ -498,7 +498,7 @@ chimera_vfs_bl_recall_drive(
     /* Recall the cache-class holders (delegations, oplocks, leases) via the
      * namespace-recall engine: full drain for a to-zero recall, flush-style
      * when the backend lets the node keep its read cover. */
-    chimera_vfs_claim_trigger_ns_full(state, file, NULL, flush_only, NULL);
+    chimera_vfs_claim_trigger_ns_full(state, file, NULL, NULL, flush_only);
 
     /* Drain the implicit claim when it holds bits beyond the floor. */
     evpl_mutex_lock(&file->lock);
@@ -857,7 +857,7 @@ chimera_vfs_claim_backend_range_projects(
 {
     struct chimera_vfs_module *module;
 
-    if (!state || !thread || file->bl_range_disabled ||
+    if (!state || !thread || (claim && claim->local_only) || file->bl_range_disabled ||
         !chimera_vfs_claim_backend_range_capable(state)) {
         return false;
     }

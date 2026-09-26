@@ -13,36 +13,6 @@
 /* --- GETXATTR --- */
 
 static void
-chimera_fuse_getxattr_complete(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-    struct fuse_getxattr_out     out;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    if (req->u.xattr.size == 0) {
-        /* Size probe. */
-        memset(&out, 0, sizeof(out));
-        out.size = value_len;
-        chimera_fuse_reply(req, 0, &out, sizeof(out));
-        return;
-    }
-
-    if (value_len > req->u.xattr.size) {
-        chimera_fuse_reply(req, ERANGE, NULL, 0);
-        return;
-    }
-
-    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req), value_len);
-} /* chimera_fuse_getxattr_complete */
-
-static void
 chimera_fuse_getxattr_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
@@ -50,11 +20,12 @@ chimera_fuse_getxattr_sequence_complete(
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                status;
+    struct fuse_getxattr_out              out;
 
     status = chimera_vfs_compound_status(compound);
 
     if (status != CHIMERA_VFS_OK) {
-        chimera_fuse_getxattr_complete(status, 0, req);
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
@@ -62,14 +33,27 @@ chimera_fuse_getxattr_sequence_complete(
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
     /* The sequence staged the value in its own buffer; the size probe never
-     * reads it, and a real read copies only what the kernel asked for, which
-     * chimera_fuse_getxattr_complete has already bounded. */
+     * reads it, and a real read copies only what the kernel asked for, bounded
+     * by the kernel's requested size. */
     if (req->u.xattr.size && op->buffer_len &&
         op->buffer_len <= req->u.xattr.size) {
         memcpy(chimera_fuse_reply_space(req), op->buffer, op->buffer_len);
     }
 
-    chimera_fuse_getxattr_complete(status, op->buffer_len, req);
+    if (req->u.xattr.size == 0) {
+        /* Size probe. */
+        memset(&out, 0, sizeof(out));
+        out.size = op->buffer_len;
+        chimera_fuse_reply(req, 0, &out, sizeof(out));
+        return;
+    }
+
+    if (op->buffer_len > req->u.xattr.size) {
+        chimera_fuse_reply(req, ERANGE, NULL, 0);
+        return;
+    }
+
+    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req), op->buffer_len);
 } /* chimera_fuse_getxattr_sequence_complete */
 
 void
@@ -187,45 +171,6 @@ chimera_fuse_op_setxattr(
 /* --- LISTXATTR --- */
 
 static void
-chimera_fuse_listxattr_complete(
-    enum chimera_vfs_error error_code,
-    const char            *names,
-    uint32_t               names_len,
-    uint32_t               count,
-    uint32_t               eof,
-    uint64_t               cookie,
-    void                  *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-    struct fuse_getxattr_out     out;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    if (!eof) {
-        /* The full list exceeds our reply staging area. */
-        chimera_fuse_reply(req, ERANGE, NULL, 0);
-        return;
-    }
-
-    if (req->u.xattr.size == 0) {
-        memset(&out, 0, sizeof(out));
-        out.size = names_len;
-        chimera_fuse_reply(req, 0, &out, sizeof(out));
-        return;
-    }
-
-    if (names_len > req->u.xattr.size) {
-        chimera_fuse_reply(req, ERANGE, NULL, 0);
-        return;
-    }
-
-    chimera_fuse_reply(req, 0, names, names_len);
-} /* chimera_fuse_listxattr_complete */
-
-static void
 chimera_fuse_listxattr_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
@@ -233,20 +178,37 @@ chimera_fuse_listxattr_sequence_complete(
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                status;
+    struct fuse_getxattr_out              out;
 
     status = chimera_vfs_compound_status(compound);
 
     if (status != CHIMERA_VFS_OK) {
-        chimera_fuse_listxattr_complete(status, NULL, 0, 0, 0, 0, req);
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
     op = chimera_vfs_compound_op(compound,
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
-    chimera_fuse_listxattr_complete(status, op->buffer, op->buffer_len,
-                                    op->buffer_count, op->eof, op->r_cookie,
-                                    req);
+    if (!op->eof) {
+        /* The full list exceeds our reply staging area. */
+        chimera_fuse_reply(req, ERANGE, NULL, 0);
+        return;
+    }
+
+    if (req->u.xattr.size == 0) {
+        memset(&out, 0, sizeof(out));
+        out.size = op->buffer_len;
+        chimera_fuse_reply(req, 0, &out, sizeof(out));
+        return;
+    }
+
+    if (op->buffer_len > req->u.xattr.size) {
+        chimera_fuse_reply(req, ERANGE, NULL, 0);
+        return;
+    }
+
+    chimera_fuse_reply(req, 0, op->buffer, op->buffer_len);
 } /* chimera_fuse_listxattr_sequence_complete */
 
 void

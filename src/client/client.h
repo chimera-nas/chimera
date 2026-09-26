@@ -252,11 +252,11 @@ chimera_writerv(
     chimera_write_callback_t        callback,
     void                           *private_data);
 
-/* Zero-copy read into caller-provided evpl_iovec(s).  Like chimera_read(), but
- * the data lands directly in `iov` (over RDMA the buffers become the server's
- * write target -- no copy).  The caller owns `iov` (borrow): keep the buffers
- * alive until the callback fires, then release them.  The callback reports the
- * byte count and eof; the data is already in the caller's buffers. */
+/* Read into caller-provided evpl_iovec(s). The caller owns the destination:
+ * keep its buffers alive until the callback. Compound attempts read into
+ * private buffers; only accepted bytes are copied into the destination.
+ * Failure leaves destination bytes untouched. The callback reports count/eof.
+ * Destination capacity must cover the bytes returned by the requested read. */
 typedef void (*chimera_read_into_callback_t)(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
@@ -508,6 +508,10 @@ typedef void (*chimera_readdir_complete_t)(
     int                           eof,
     void                         *private_data);
 
+/* Enumerate one accepted page (at most 512 entries). A nonzero entry-callback
+ * return stops after that delivered entry. Resume with the completion cookie;
+ * eof is true only when the accepted directory suffix has all been delivered.
+ * Entry callbacks are never invoked by a rejected compound attempt. */
 void
 chimera_readdir(
     struct chimera_client_thread   *thread,

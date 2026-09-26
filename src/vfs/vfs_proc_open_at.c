@@ -12,6 +12,7 @@
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "sdk/vfs_access.h"
+#include "sdk/vfs_acl.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_name_cache.h"
@@ -35,6 +36,9 @@ chimera_vfs_open_at_checked(
            cred->flavor != CHIMERA_VFS_AUTH_ATTR;
 } /* chimera_vfs_open_at_checked */
 
+/* Publish the callback only after optional record persistence has completed.
+ * Cache/notify work in the handle callback belongs to the successful filesystem
+ * prefix even if the recovery record subsequently fails. */
 static void
 chimera_vfs_open_at_reply(
     struct chimera_vfs_request     *request,
@@ -43,17 +47,48 @@ chimera_vfs_open_at_reply(
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     chimera_vfs_complete(request);
-
-    callback(request->status,
-             handle,
-             request->open_at.set_attr,
-             &request->open_at.r_attr,
-             &request->open_at.r_dir_pre_attr,
-             &request->open_at.r_dir_post_attr,
-             request->proto_private_data);
-
+    callback(request->status, handle, request->open_at.set_attr,
+             &request->open_at.r_attr, &request->open_at.r_dir_pre_attr,
+             &request->open_at.r_dir_post_attr, request->proto_private_data);
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_open_at_reply */
+
+static void
+chimera_vfs_open_hs_put_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_vfs_request     *request = private_data;
+    struct chimera_vfs_open_handle *handle  = request->pending_handle;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* The namespace prefix remains successful, but the caller must not
+         * advertise a persistent handle without a stored recovery record. */
+        chimera_vfs_release(request->thread, handle);
+        handle          = NULL;
+        request->status = error_code;
+    }
+    request->pending_handle = NULL;
+    chimera_vfs_open_at_reply(request, handle);
+} /* chimera_vfs_open_hs_put_complete */
+
+static void
+chimera_vfs_open_at_persist(
+    struct chimera_vfs_request     *request,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_handle_state *hs = request->open_at.handle_state;
+
+    if (request->status == CHIMERA_VFS_OK && handle && hs &&
+        !(request->module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE)) {
+        request->pending_handle = handle;
+        chimera_vfs_put_key_at(request->thread, request->cred, handle->fh, handle->fh_len,
+                               hs->key, hs->key_len, hs->value, hs->value_len,
+                               chimera_vfs_open_hs_put_complete, request);
+        return;
+    }
+    chimera_vfs_open_at_reply(request, handle);
+} /* chimera_vfs_open_at_persist */
 
 static void
 chimera_vfs_open_at_truncate_complete(
@@ -79,7 +114,7 @@ chimera_vfs_open_at_truncate_complete(
         request->open_at.r_attr.va_fh_len    = handle->fh_len;
         request->open_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
-    chimera_vfs_open_at_reply(request, handle);
+    chimera_vfs_open_at_persist(request, handle);
 } /* chimera_vfs_open_at_truncate_complete */
 
 static void
@@ -150,6 +185,9 @@ chimera_vfs_open_at_hdl_callback(
 
     if (handle) {
         handle->r_created = request->open_at.r_created;
+        if (request->open_at.handle_state) {
+            request->open_at.handle_state->r_created = request->open_at.r_created;
+        }
     }
 
     /* POSIX open semantics, evaluated against the just-returned attrs
@@ -244,7 +282,7 @@ chimera_vfs_open_at_hdl_callback(
         return;
     }
 
-    chimera_vfs_open_at_reply(request, handle);
+    chimera_vfs_open_at_persist(request, handle);
 } /* chimera_vfs_open_at_hdl_callback */
 
 static void
@@ -307,29 +345,9 @@ chimera_vfs_open_finish(struct chimera_vfs_request *request)
     }
 } /* chimera_vfs_open_finish */
 
-/* Continuation after the non-atomic handle-state record has been persisted to
- * the default KV (best-effort: a failure leaves the file open without its
- * durable record, which only the in-memory backends ever hit). */
-static void
-chimera_vfs_open_hs_put_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
-{
-    struct chimera_vfs_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_error("open_at: failed to persist handle-state to default KV: %d",
-                          error_code);
-    }
-
-    chimera_vfs_open_finish(request);
-} /* chimera_vfs_open_hs_put_complete */
-
 static void
 chimera_vfs_open_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_handle_state *hs = request->open_at.handle_state;
-
     if (request->open_at.deferred_set_attr) {
         request->open_at.set_attr = request->open_at.deferred_set_attr;
         /* Restore the deferred mutation, preserving a backend's metadata-only
@@ -337,28 +355,37 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
         request->open_at.flags |= request->open_at.original_flags & CHIMERA_VFS_OPEN_TRUNCATE;
     }
 
-    /* Backends that persist handle-state atomically (CAP_ATOMIC_HANDLE_STATE)
-     * have already stored it as part of the open.  For backends without native
-     * KV, the VFS core persists the record to the default KV instead, keyed by
-     * the new file's fh so close/recovery find it on the same backend.  This is
-     * a separate, non-atomic put; it is only reached by in-memory backends
-     * (memfs) and passthrough, where cross-crash atomicity is moot. */
-    if (request->status == CHIMERA_VFS_OK && hs &&
-        !(request->module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE) &&
-        request->thread->vfs->kv_module &&
-        (request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-
-        chimera_vfs_put_key_at(request->thread, request->cred,
-                               request->open_at.r_attr.va_fh,
-                               request->open_at.r_attr.va_fh_len,
-                               hs->key, hs->key_len,
-                               hs->value, hs->value_len,
-                               chimera_vfs_open_hs_put_complete, request);
-        return;
+    if (request->status == CHIMERA_VFS_OK && request->open_at.handle_state) {
+        request->open_at.handle_state->r_created = request->open_at.r_created;
     }
-
     chimera_vfs_open_finish(request);
 } /* chimera_vfs_open_complete */
+
+static void
+chimera_vfs_open_at_search_complete(
+    enum chimera_vfs_error    status,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (status == CHIMERA_VFS_OK) {
+        status = chimera_vfs_gate(attr, request->cred,
+                                  CHIMERA_ACE_EXECUTE);
+    }
+    if (status != CHIMERA_VFS_OK) {
+        /* Return the unchanged parent WCC when available.  These borrowed
+         * attributes remain live through the synchronous failure callback. */
+        if (attr) {
+            request->open_at.r_dir_pre_attr  = *attr;
+            request->open_at.r_dir_post_attr = *attr;
+        }
+        request->status = status;
+        chimera_vfs_open_complete(request);
+        return;
+    }
+    chimera_vfs_dispatch(request);
+} /* chimera_vfs_open_at_search_complete */
 
 static void
 chimera_vfs_open_at_toolong(
@@ -539,6 +566,9 @@ chimera_vfs_open_at_hs_dispatch(
 {
     struct chimera_vfs_request *request;
 
+    if (handle_state) {
+        handle_state->r_created = 0;
+    }
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
 
     /* On a creating open the trailing component is a new name; reject one longer
@@ -631,6 +661,18 @@ chimera_vfs_open_at_hs_dispatch(
     request->proto_callback                      = callback;
     request->proto_private_data                  = private_data;
 
+    /* Searching the parent is required even when CREATE finds an existing
+     * object.  In particular, INFERRED NFS3 creates must not reveal the
+     * existing object's type or truncate it before this authorization.
+     * SMB applies its own traversal policy; delegated-DAC backends enforce
+     * this component lookup themselves. */
+    if (cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+        chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+        chimera_vfs_getattr(thread, cred, handle,
+                            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
+                            chimera_vfs_open_at_search_complete, request);
+        return;
+    }
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_open_at_hs_dispatch */
 

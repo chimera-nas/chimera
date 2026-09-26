@@ -412,7 +412,7 @@ smb2_wire_profile_find(const char *name)
         }
     }
     fprintf(stderr, "smb2 harness: unknown wire profile '%s'\n", name);
-    exit(2);
+    smb2w_fatal_exit(2);
 } /* smb2_wire_profile_find */
 
 /* The credentials smb2_env_open_opts registers when a profile authenticates.
@@ -549,6 +549,13 @@ struct smb2_conn {
      * "did anything of mine complete?" without having to subtract the
      * barrier's own traffic. */
     int                             nreply_app;
+    /* Optional model-driver hook: preserve a deferred CREATE's final reply
+     * while the connection is driving its break ACK or another request. */
+    int                             (*capture_create_reply_fn)(
+        struct smb2_conn *,
+        const uint8_t *,
+        int);
+
 
     /* Async interim (STATUS_PENDING) accounting.  An interim tells the caller
      * the request PARKED server-side (smb_async_interim.c: the interim is sent
@@ -917,7 +924,7 @@ smb2c_notify(
                 if (plen < 0) {
                     fprintf(stderr, "smb2 harness: failed to decrypt a "
                             "TRANSFORM-framed reply (%d bytes)\n", off - 4);
-                    exit(6);
+                    smb2w_fatal_exit(6);
                 }
                 memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
                 off = 4 + plen;
@@ -937,7 +944,7 @@ smb2c_notify(
                 if (plen < 0) {
                     fprintf(stderr, "smb2 harness: failed to decompress a "
                             "COMPRESSION_TRANSFORM reply (%d bytes)\n", off - 4);
-                    exit(6);
+                    smb2w_fatal_exit(6);
                 }
                 memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
                 off = 4 + plen;
@@ -987,6 +994,11 @@ smb2c_notify(
                     c->create_len   = off;
                     c->create_ready = 1;
                     c->nreply++;
+                    c->nreply_app++;
+                    break;
+                }
+                if (cmd == SMB2_CREATE && c->capture_create_reply_fn &&
+                    c->capture_create_reply_fn(c, c->xbuf, off)) {
                     c->nreply_app++;
                     break;
                 }
@@ -1082,7 +1094,7 @@ smb2_env_open_wire(
              "/tmp/smb2_mbt_XXXXXX");
     if (!mkdtemp(env->session_dir)) {
         fprintf(stderr, "mkdtemp(%s) failed\n", env->session_dir);
-        exit(1);
+        smb2w_fatal_exit(1);
     }
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
@@ -1144,7 +1156,7 @@ smb2_env_open_wire(
                                     SMB2W_PASSWORD, NULL,
                                     SMB2W_UID, SMB2W_GID, 1, gids, 1) != 0) {
             fprintf(stderr, "failed to register SMB test user %s\n", SMB2W_USER);
-            exit(1);
+            smb2w_fatal_exit(1);
         }
     }
 
@@ -1183,7 +1195,7 @@ smb2_env_fs_setup(
 {
     if (chimera_server_mkfs(env->server, "memfs", fsname, NULL) != 0) {
         fprintf(stderr, "failed to create memfs filesystem %s\n", fsname);
-        exit(1);
+        smb2w_fatal_exit(1);
     }
     chimera_server_mount(env->server, "share", "memfs", fsname, NULL);
     /* The share carries the env's feature options: continuous availability
@@ -1220,7 +1232,7 @@ smb2_env_fs_teardown(
         if (++tries >= SMB2_RMFS_RETRY_MAX) {
             fprintf(stderr, "failed to remove memfs filesystem %s "
                     "(still busy after %d retries)\n", fsname, tries);
-            exit(1);
+            smb2w_fatal_exit(1);
         }
         usleep(1000);
     }
@@ -1263,7 +1275,7 @@ smb2_conn_open(struct smb2_env *env)
                 "many transport drops needs a larger bound -- raise it (and\n"
                 "MAX_SESS in smb2_mbt_replay.c) rather than reusing a slot.\n",
                 SMB2C_MAX_CONNS);
-        exit(1);
+        smb2w_fatal_exit(1);
     }
 
     c  = calloc(1, sizeof(*c));
@@ -1291,7 +1303,7 @@ smb2_conn_open(struct smb2_env *env)
                            smb2c_notify, smb2c_segment, c);
     if (!c->bind) {
         fprintf(stderr, "failed to connect to in-process SMB server\n");
-        exit(1);
+        smb2w_fatal_exit(1);
     }
     while (!c->connected) {
         smb2_pump(env);
@@ -1458,7 +1470,7 @@ smb2c_no_conn(uint16_t command)
             "%s%s\n", command,
             smb2c_context_str ? "\n  while replaying: " : "",
             smb2c_context_str ? smb2c_context_str : "");
-    exit(5);
+    smb2w_fatal_exit(5);
 } /* smb2c_no_conn */
 
 static inline int
@@ -1718,12 +1730,12 @@ smb2c_dead(struct smb2_conn *c)
                 c->conn_index,
                 smb2c_context_str ? "\n  while replaying: " : "",
                 smb2c_context_str ? smb2c_context_str : "");
-        exit(4);
+        smb2w_fatal_exit(4);
     }
     fprintf(stderr, "SMB server dropped the connection%s%s\n",
             smb2c_context_str ? "\n  while replaying: " : "",
             smb2c_context_str ? smb2c_context_str : "");
-    exit(3);
+    smb2w_fatal_exit(3);
 } /* smb2c_dead */
 
 static inline void
@@ -1742,7 +1754,7 @@ smb2c_hang(
     if (smb2c_context_str) {
         fprintf(stderr, "  while replaying: %s\n", smb2c_context_str);
     }
-    exit(4);
+    smb2w_fatal_exit(4);
 } /* smb2c_hang */
 
 /* Pump the shared loop until `c`'s reply lands.  A reply that never arrives is
@@ -1966,7 +1978,7 @@ smb2_quiesce(struct smb2_env *env)
             "each produced new events%s%s\n", SMB2C_QUIESCE_MAX_PASSES,
             smb2c_context_str ? "\n  while replaying: " : "",
             smb2c_context_str ? smb2c_context_str : "");
-    exit(4);
+    smb2w_fatal_exit(4);
 } /* smb2_quiesce */
 
 static inline uint32_t
@@ -3882,17 +3894,17 @@ smb2_handshake(struct smb2_conn *c)
     st = smb2_negotiate(c);
     if (st != ST_SUCCESS) {
         fprintf(stderr, "NEGOTIATE failed: 0x%08x\n", st);
-        exit(1);
+        smb2w_fatal_exit(1);
     }
     st = smb2_session_setup(c);
     if (st != ST_SUCCESS) {
         fprintf(stderr, "SESSION_SETUP failed: 0x%08x\n", st);
-        exit(1);
+        smb2w_fatal_exit(1);
     }
     st = smb2_tree_connect(c, "\\\\server\\share");
     if (st != ST_SUCCESS) {
         fprintf(stderr, "TREE_CONNECT failed: 0x%08x\n", st);
-        exit(1);
+        smb2w_fatal_exit(1);
     }
 } /* smb2_handshake */
 
@@ -3960,7 +3972,7 @@ smb2_conn_disconnect(struct smb2_conn *c)
                     c->conn_index, SMB2C_HANG_MS,
                     smb2c_context_str ? "\n  while replaying: " : "",
                     smb2c_context_str ? smb2c_context_str : "");
-            exit(4);
+            smb2w_fatal_exit(4);
         }
     }
 } /* smb2_conn_disconnect */

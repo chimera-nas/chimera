@@ -63,6 +63,8 @@ chimera_nfs4_remove_callback(
         return;
     }
 
+    chimera_nfs4_unmarshall_cinfo(&remove_res->opremove.resok4.cinfo,
+                                  &request->remove_at.r_dir_pre_attr, &request->remove_at.r_dir_post_attr);
     /* The parent's post-mutation snapshot (op 5). */
     chimera_nfs4_unmarshall_dir_attr(res, 5, &request->remove_at.r_dir_post_attr);
 

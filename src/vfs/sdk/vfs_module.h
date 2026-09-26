@@ -28,7 +28,8 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION            2
+/* Version 5 adds the VFS-owned creation outcome to handle-state descriptors. */
+#define CHIMERA_VFS_SDK_VERSION            5
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -166,7 +167,7 @@ chimera_vfs_open_handle_retained(
 
 /* Opaque key/value record the caller asks the backend to persist atomically
  * as part of an open/create.  The VFS layer never interprets the bytes; for
- * the SMB server the key is "smbdh\0"+CreateGuid and the value is a serialized
+ * the SMB server the key includes the persistent FileId and the value is a serialized
  * persistent-handle record.  Stored in the backend's KV namespace, so it can
  * later be enumerated with chimera_vfs_search_keys and removed with
  * chimera_vfs_delete_key (clear-on-close / reap need not be atomic). */
@@ -175,25 +176,27 @@ struct chimera_vfs_handle_state {
     uint32_t    key_len;
     const void *value;
     uint32_t    value_len;
+    /* VFS-owned output for OPEN_AT: the filesystem created the entry even if
+     * subsequent record persistence fails. Not proof of record storage. */
+    uint8_t     r_created;
 };
 
 /* If set, module supports extended attributes via
  * chimera_vfs_get_xattr / set_xattr / list_xattrs / remove_xattr.
  * Surfaced over NFSv4.2 (RFC 8276). Modules that leave this unset
  * cause the VFS layer to return ENOTSUP. */
-#define CHIMERA_VFS_CAP_XATTR                 (1U << 18)
+#define CHIMERA_VFS_CAP_XATTR                  (1U << 18)
 
 /* setxattr_option4 values (RFC 8276 §8) passed to chimera_vfs_set_xattr().
  * Kept numerically identical to the on-the-wire NFSv4.2 enum. */
-#define CHIMERA_VFS_XATTR_EITHER              0 /* create or replace */
-#define CHIMERA_VFS_XATTR_CREATE              1 /* must not already exist */
-#define CHIMERA_VFS_XATTR_REPLACE             2 /* must already exist */
+#define CHIMERA_VFS_XATTR_EITHER               0 /* create or replace */
+#define CHIMERA_VFS_XATTR_CREATE               1 /* must not already exist */
+#define CHIMERA_VFS_XATTR_REPLACE              2 /* must already exist */
 
-/* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute, so the NFS
- * server can store per-file pNFS layout state on it and hand out pNFS layouts.
- * This is the "orchestrated" model: the module is a passive vessel and the NFS
- * server produces the layout (creating data-server backing files itself). */
-#define CHIMERA_VFS_CAP_LAYOUT                (1U << 14)
+/* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute. This
+ * storage capability alone does not imply coherent pNFS data routing and must
+ * not be used to advertise or grant an independently writable DS backing. */
+#define CHIMERA_VFS_CAP_LAYOUT                 (1U << 14)
 
 /* Module SOURCES the layout itself: it already knows where a file's data
  * physically lives and synthesizes a protocol-neutral layout via
@@ -201,10 +204,10 @@ struct chimera_vfs_handle_state {
  * what the module returns) and does NO orchestration.  Mutually exclusive in
  * effect with CHIMERA_VFS_CAP_LAYOUT for a given file.  Exactly one of the
  * class bits below should accompany it. */
-#define CHIMERA_VFS_CAP_LAYOUT_SOURCE         (1U << 15)
-#define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX     (1U << 16) /* produces flex-files (RFC 8435)  */
-#define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK    (1U << 17) /* produces block volume (RFC 5663)*/
-#define CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI     (1U << 19) /* produces SCSI volume (RFC 8154) */
+#define CHIMERA_VFS_CAP_LAYOUT_SOURCE          (1U << 15)
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_FLEX      (1U << 16) /* produces flex-files (RFC 8435)  */
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK     (1U << 17) /* produces block volume (RFC 5663)*/
+#define CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI      (1U << 19) /* produces SCSI volume (RFC 8154) */
 
 /* If set, the backend provides the memory for READ data itself (e.g. memfs
  * returns refs to its in-memory SHARED block iovecs; the nfs proxy returns the
@@ -216,7 +219,7 @@ struct chimera_vfs_handle_state {
  * (worker-thread) read path safe without SHARED iovecs -- the buffers are
  * allocated and released on the same (connection) thread.  See
  * chimera_vfs_read_owned() / chimera_vfs_read_complete(). */
-#define CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS (1U << 20)
+#define CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS  (1U << 20)
 
 /* If set, the module stores the canonical Windows/NFSv4 ACL (via va_acl)
  * losslessly.  If unset, the module is mode-only, and a mode-only module that
@@ -233,7 +236,7 @@ struct chimera_vfs_handle_state {
  * collapse to owner/group/other, losing the policy they came to set, so the
  * hidden tab is the honest answer.  Do not widen this to cover mode-mapped
  * backends, and do not add a second capability for them. */
-#define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 23)
+#define CHIMERA_VFS_CAP_ACL_NATIVE             (1U << 23)
 
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
@@ -247,7 +250,7 @@ struct chimera_vfs_handle_state {
  * ACL for them.  Note this is orthogonal to CAP_ACL_NATIVE: "stores the ACL"
  * and "enforces the ACL" are different properties (memfs/cairn store but do not
  * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
-#define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
+#define CHIMERA_VFS_CAP_DELEGATES_DAC          (1U << 21)
 
 /* Refinement of CHIMERA_VFS_CAP_DELEGATES_DAC for PROXY modules (nfs, smb):
  * the real enforcer is a remote server that authorizes every operation with
@@ -259,7 +262,7 @@ struct chimera_vfs_handle_state {
  * provide (NFS3 has no open on the wire) -- the client-side equivalent of a
  * kernel NFS client's ACCESS check at open(2).  Meaningful only alongside
  * DELEGATES_DAC. */
-#define CHIMERA_VFS_CAP_REMOTE_DAC            (1U << 29)
+#define CHIMERA_VFS_CAP_REMOTE_DAC             (1U << 29)
 
 /* If set, the module supports named streams (SMB Alternate Data Streams) on
  * regular files via chimera_vfs_open_stream / list_streams / remove_stream.
@@ -267,7 +270,7 @@ struct chimera_vfs_handle_state {
  * base file's metadata (mode/owner/timestamps/ACL) but has its own size and
  * content.  Modules that leave this unset cause the VFS layer to return
  * ENOTSUP.  Currently only memfs advertises it. */
-#define CHIMERA_VFS_CAP_NAMED_STREAMS         (1U << 22)
+#define CHIMERA_VFS_CAP_NAMED_STREAMS          (1U << 22)
 
 /* If set, the module supplies a native change attribute: a monotonically
  * increasing per-object version counter returned via va_change /
@@ -275,7 +278,7 @@ struct chimera_vfs_handle_state {
  * lets the NFS server return the counter as fattr4_change and report
  * change_attr_type NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR.  Modules that leave this
  * unset have change derived from ctime (change_attr_type TIME_METADATA). */
-#define CHIMERA_VFS_CAP_CHANGE                (1U << 24)
+#define CHIMERA_VFS_CAP_CHANGE                 (1U << 24)
 
 /* If set, the module manages named filesystems via CHIMERA_VFS_OP_MKFS /
  * CHIMERA_VFS_OP_RMFS.  Filesystems are created by name, mounted with a
@@ -283,7 +286,7 @@ struct chimera_vfs_handle_state {
  * filesystem), and removed only while no mount references them (RMFS returns
  * CHIMERA_VFS_EBUSY otherwise).  Modules without this bit interpret the whole
  * module path themselves (e.g. as a host path for passthrough backends). */
-#define CHIMERA_VFS_CAP_MKFS                  (1ULL << 25)
+#define CHIMERA_VFS_CAP_MKFS                   (1ULL << 25)
 
 /* Backend claim arbitration (the claim-core projection boundary).
  *
@@ -320,8 +323,8 @@ struct chimera_vfs_handle_state {
  * A backend implements the same two ops (CHIMERA_VFS_OP_CLAIM_ACQUIRE /
  * _RELEASE) for whichever bits it sets, and invokes the recall callback --
  * AGGREGATE only -- from whatever context it likes (the core marshals). */
-#define CHIMERA_VFS_CAP_CLAIM_AGGREGATE       (1U << 26)
-#define CHIMERA_VFS_CAP_CLAIM_RANGE           (1U << 8)
+#define CHIMERA_VFS_CAP_CLAIM_AGGREGATE        (1U << 26)
+#define CHIMERA_VFS_CAP_CLAIM_RANGE            (1U << 8)
 
 /* If set, the module can natively answer a sparse READ_PLUS (RFC 7862 15.10):
  * given an offset it classifies the leading byte-run as DATA or HOLE from its
@@ -329,12 +332,26 @@ struct chimera_vfs_handle_state {
  * (chimera_vfs_read_plus).  Modules that leave this unset cause the VFS layer to
  * return ENOTSUP and the NFS server to report NFS4ERR_NOTSUPP, so the client
  * falls back to plain READ. */
-#define CHIMERA_VFS_CAP_READ_PLUS             (1U << 27)
+#define CHIMERA_VFS_CAP_READ_PLUS              (1U << 27)
 
 /* If set, the module can natively expand an NFSv4.2 WRITE_SAME (RFC 7862 15.13)
 * Application Data Block -- writing a repeated pattern across a run of blocks --
 * via chimera_vfs_write_same.  Modules that leave this unset surface ENOTSUP. */
-#define CHIMERA_VFS_CAP_WRITE_SAME            (1U << 28)
+#define CHIMERA_VFS_CAP_WRITE_SAME             (1U << 28)
+/* REMOVE_AT atomically compares child_fh before unlinking and reports
+ * r_unmatched without removing a replacement name. No lookup/remove fallback. */
+#define CHIMERA_VFS_CAP_REMOVE_MATCH_FH        (1ULL << 30)
+/* Atomic destination-absence check and rename, never a lookup/rename fallback. */
+#define CHIMERA_VFS_CAP_RENAME_NOREPLACE       (1ULL << 31)
+/* Atomic expected source FH comparison and rename; mismatch returns ESTALE. */
+#define CHIMERA_VFS_CAP_RENAME_MATCH_FH        (1ULL << 32)
+/* REMOVE_STREAM compares the complete expected stream FH atomically with
+ * unlinking its name. A mismatched name binding returns ESTALE unchanged. */
+#define CHIMERA_VFS_CAP_REMOVE_STREAM_MATCH_FH (1ULL << 33)
+/* Atomic occupied destination FH comparison; mismatch/absence returns ESTALE. */
+#define CHIMERA_VFS_CAP_RENAME_MATCH_DEST_FH   (1ULL << 34)
+/* Successful RENAME always reports MOVED or same-inode NOOP atomically. */
+#define CHIMERA_VFS_CAP_RENAME_OUTCOME         (1ULL << 35)
 
 /* If set, the module cannot derive a new object's POSIX group from its parent
  * directory, so the engine must name it.  Every create on such a backend
@@ -347,7 +364,7 @@ struct chimera_vfs_handle_state {
  * chimera_vfs_create_inherit_gid).  An engine backend, a passthrough whose
  * kernel applies the rule, and a proxy whose server applies it all leave this
  * unset. */
-#define CHIMERA_VFS_CAP_CREATE_GID_ENGINE     (1U << 30)
+#define CHIMERA_VFS_CAP_CREATE_GID_ENGINE      (1U << 30)
 
 /* If set, the module keeps files sparse: chimera_vfs_allocate can punch a hole
  * (deallocate a byte range so it reads as zeros without consuming storage) and
@@ -371,7 +388,7 @@ struct chimera_vfs_handle_state {
  * sparseness is a runtime property of the underlying filesystem for the
  * passthroughs and of the negotiated version for the proxies.  The bit exists
  * to answer FileFsAttributeInformation.  Do not turn it into a core gate. */
-#define CHIMERA_VFS_CAP_SPARSE                (1U << 31)
+#define CHIMERA_VFS_CAP_SPARSE                 (1U << 31)
 
 struct chimera_vfs_module {
     /* Required
