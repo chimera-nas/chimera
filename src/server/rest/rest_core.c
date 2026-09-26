@@ -6,6 +6,7 @@
 #include <string.h>
 #include "rest_handlers.h"
 #include "rest_auth.h"
+#include "rest_services.h"
 
 static void
 core_version(

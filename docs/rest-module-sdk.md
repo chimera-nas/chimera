@@ -14,10 +14,10 @@ the same module from different libraries.
 
 ## Platform status
 
-The current implementation uses POSIX dynamic loading and the Unix shared-library
-layout. Native Windows support is pending: the loader and module dependencies
-need integration with the Windows static-library layout before this change can
-build there.
+Modules use the native dynamic loader: `dlopen` on Unix and `LoadLibraryExW` on
+Windows. Windows modules are DLLs even when the server and VFS use static
+libraries. The bundled modules receive a private host-services table and do not
+link another copy of the server or VFS runtime.
 
 ## Configuration
 
@@ -46,9 +46,12 @@ The module name in config must match the library descriptor. Names start with a
 lowercase ASCII letter and contain lowercase letters, digits, hyphens, or
 underscores. When `module_path` is omitted, Chimera loads
 `chimera_rest_<module><platform-module-suffix>` from the directory containing
-`libchimera_rest`. Explicit paths must be absolute. There is no directory scan or
+`libchimera_rest` on Unix, or beside the server executable on Windows. Explicit
+paths must be absolute (drive-rooted or UNC paths on Windows). There is no directory scan or
 fallback to process-global module symbols. Each configured library is loaded
-with `RTLD_NOW | RTLD_LOCAL`; entry-point lookup uses that library's handle.
+with `RTLD_NOW | RTLD_LOCAL` on Unix. Windows loads dependencies from the module
+directory and the default DLL directories. Entry-point lookup always uses the
+configured library's handle.
 
 `config` is a JSON object passed to the module's initializer. Its compact encoding
 must fit the server configuration's 8192-byte field. The server accepts at most

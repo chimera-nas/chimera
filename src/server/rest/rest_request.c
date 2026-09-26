@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#ifndef _WIN32
 #include <strings.h>
+#endif /* ifndef _WIN32 */
 #include "common/macros.h"
 #include "rest_internal.h"
 #include "rest_auth.h"
@@ -50,10 +52,10 @@ reply_ready(
     struct evpl_iovec            iov;
     size_t                       length;
 
-    pthread_mutex_lock(&thread->reply_lock);
+    evpl_mutex_lock(&thread->reply_lock);
     request            = thread->reply_head;
     thread->reply_head = thread->reply_tail = NULL;
-    pthread_mutex_unlock(&thread->reply_lock);
+    evpl_mutex_unlock(&thread->reply_lock);
     while (request) {
         next = request->next_reply;
         if (request->http) {
@@ -107,7 +109,7 @@ chimera_rest_reply(
     }
     /* The outstanding handler reference pins the queue and doorbell through
      * this entire critical section, including ringing from a worker thread. */
-    pthread_mutex_lock(&thread->reply_lock);
+    evpl_mutex_lock(&thread->reply_lock);
     if (thread->reply_tail) {
         thread->reply_tail->next_reply = request;
     } else {
@@ -115,7 +117,7 @@ chimera_rest_reply(
     }
     thread->reply_tail = request;
     evpl_ring_doorbell(&thread->replies);
-    pthread_mutex_unlock(&thread->reply_lock);
+    evpl_mutex_unlock(&thread->reply_lock);
 } /* chimera_rest_reply */
 
 static const char * request_method(const struct chimera_rest_request *r) { return r->method; }
@@ -353,7 +355,7 @@ chimera_rest_dispatch(
 void
 chimera_rest_requests_init(struct chimera_rest_thread *thread)
 {
-    pthread_mutex_init(&thread->reply_lock, NULL);
+    evpl_mutex_init(&thread->reply_lock, NULL);
     evpl_add_doorbell(thread->evpl, &thread->replies, reply_ready);
 } /* chimera_rest_requests_init */
 
@@ -366,5 +368,5 @@ chimera_rest_requests_destroy(struct chimera_rest_thread *thread)
         evpl_continue(thread->evpl);
     }
     evpl_remove_doorbell(thread->evpl, &thread->replies);
-    pthread_mutex_destroy(&thread->reply_lock);
+    evpl_mutex_destroy(&thread->reply_lock);
 } /* chimera_rest_requests_destroy */

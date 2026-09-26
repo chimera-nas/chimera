@@ -6,12 +6,15 @@
 #define _GNU_SOURCE
 #endif /* ifndef _GNU_SOURCE */
 #include <ctype.h>
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif /* ifndef _WIN32 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "rest_internal.h"
 #include "server/server.h"
+#include "rest_services.h"
 
 extern const unsigned char openapi_json[];
 extern const unsigned int  openapi_json_len;
@@ -318,6 +321,100 @@ build_openapi(struct chimera_rest_server *rest)
     chimera_rest_abort_if(!rest->openapi, "Cannot serialize OpenAPI document");
 } /* build_openapi */
 
+/* Keep native loader handles local to each configured library. */
+static void *
+module_symbol(
+    void       *handle,
+    const char *name)
+{
+#ifdef _WIN32
+    return (void *) GetProcAddress((HMODULE) handle, name);
+#else  /* ifdef _WIN32 */
+    return dlsym(handle, name);
+#endif /* ifdef _WIN32 */
+} /* module_symbol */
+
+static int
+module_path_absolute(const char *path)
+{
+#ifdef _WIN32
+    return (isalpha((unsigned char) path[0]) && path[1] == ':' &&
+            (path[2] == '/' || path[2] == '\\')) ||
+           (path[0] == '\\' && path[1] == '\\') ||
+           (path[0] == '/' && path[1] == '/');
+#else  /* ifdef _WIN32 */
+    return path[0] == '/';
+#endif /* ifdef _WIN32 */
+} /* module_path_absolute */
+
+static void
+module_directory(
+    char  *path,
+    size_t size)
+{
+#ifdef _WIN32
+    HMODULE owner;
+    wchar_t wide[4096];
+    DWORD   length;
+
+    chimera_rest_abort_if(!GetModuleHandleExW(
+                              GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              (LPCWSTR) module_directory, &owner),
+                          "Cannot locate REST module owner: %lu", GetLastError());
+    length = GetModuleFileNameW(owner, wide, sizeof(wide) / sizeof(wide[0]));
+    chimera_rest_abort_if(!length || length >= sizeof(wide) / sizeof(wide[0]) ||
+                          !WideCharToMultiByte(CP_UTF8, 0, wide, -1, path, (int) size, NULL, NULL),
+                          "Cannot locate REST module directory: %lu", GetLastError());
+    /* Use a single separator for the common directory/suffix code. */
+    for (char *p = path; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+#else  /* ifdef _WIN32 */
+    Dl_info info;
+
+    chimera_rest_abort_if(!dladdr((void *) module_directory, &info),
+                          "Cannot locate REST module directory");
+    chimera_rest_abort_if(snprintf(path, size, "%s", info.dli_fname) >= (int) size,
+                          "REST module directory is too long");
+#endif /* ifdef _WIN32 */
+    char   *slash = strrchr(path, '/');
+    chimera_rest_abort_if(!slash, "REST owner path has no directory");
+    slash[1] = '\0';
+} /* module_directory */
+
+static void *
+module_open(const char *path)
+{
+#ifdef _WIN32
+    wchar_t wide[4096];
+    HMODULE handle;
+
+    chimera_rest_abort_if(!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                               wide, sizeof(wide) / sizeof(wide[0])),
+                          "Invalid REST module path: %s", path);
+    handle = LoadLibraryExW(wide, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    chimera_rest_abort_if(!handle, "Cannot load REST module %s: Windows error %lu", path, GetLastError());
+    return handle;
+#else  /* ifdef _WIN32 */
+    void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+
+    chimera_rest_abort_if(!handle, "Cannot load REST module %s: %s", path, dlerror());
+    return handle;
+#endif /* ifdef _WIN32 */
+} /* module_open */
+
+static void
+module_close(void *handle)
+{
+#ifdef _WIN32
+    FreeLibrary((HMODULE) handle);
+#else  /* ifdef _WIN32 */
+    dlclose(handle);
+#endif /* ifdef _WIN32 */
+} /* module_close */
+
 void
 chimera_rest_modules_init(
     struct chimera_rest_server         *rest,
@@ -326,8 +423,8 @@ chimera_rest_modules_init(
     const struct chimera_server_rest_module_config *configs;
     struct chimera_rest_loaded_module              *loaded;
     chimera_rest_module_get_fn                      get;
-    Dl_info                                         info;
-    char                                            path[4096], *slash;
+    chimera_rest_bind_fn                            bind;
+    char                                            path[4096];
     int                                             count, i, j;
 
     configs           = chimera_server_config_get_rest_modules(config, &count);
@@ -338,26 +435,23 @@ chimera_rest_modules_init(
         chimera_rest_abort_if(!valid_name(configs[i].name), "Invalid REST module name: %s", configs[i].name);
         loaded = &rest->modules[i];
         if (configs[i].module_path[0]) {
-            chimera_rest_abort_if(configs[i].module_path[0] != '/', "REST module path must be absolute");
+            chimera_rest_abort_if(!module_path_absolute(configs[i].module_path), "REST module path must be absolute");
             snprintf(path, sizeof(path), "%s", configs[i].module_path);
         } else {
-            chimera_rest_abort_if(!dladdr((void *) chimera_rest_modules_init, &info),
-                                  "Cannot locate REST module directory");
-            snprintf(path, sizeof(path), "%s", info.dli_fname);
-            slash = strrchr(path, '/');
-            chimera_rest_abort_if(!slash, "REST library path has no directory");
-            slash[1] = '\0';
+            module_directory(path, sizeof(path));
             size_t length = strlen(path);
             chimera_rest_abort_if(snprintf(path + length, sizeof(path) - length,
                                            "chimera_rest_%s%s", configs[i].name, CHIMERA_REST_MODULE_SUFFIX) >=
                                   (int) (sizeof(path) - length), "REST module path is too long");
         }
-        loaded->handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-        chimera_rest_abort_if(!loaded->handle, "Cannot load REST module %s: %s", path, dlerror());
-        get = (chimera_rest_module_get_fn) dlsym(loaded->handle, CHIMERA_REST_MODULE_ENTRY);
+        loaded->handle = module_open(path);
+        get            = (chimera_rest_module_get_fn) module_symbol(loaded->handle, CHIMERA_REST_MODULE_ENTRY);
         chimera_rest_abort_if(!get, "REST module %s has no %s", path, CHIMERA_REST_MODULE_ENTRY);
         loaded->module = get();
         validate_module(loaded->module, &configs[i]);
+        bind = (chimera_rest_bind_fn) module_symbol(loaded->handle, CHIMERA_REST_BIND_ENTRY);
+        chimera_rest_abort_if(bind && bind(&chimera_rest_host_services),
+                              "REST module %s has incompatible private host services", path);
         for (j = 0; j < i; j++) {
             chimera_rest_abort_if(!strcmp(loaded->module->name, rest->modules[j].module->name) &&
                                   loaded->module->api_version == rest->modules[j].module->api_version,
@@ -386,7 +480,7 @@ chimera_rest_modules_destroy(struct chimera_rest_server *rest)
         if (loaded->module->destroy) {
             loaded->module->destroy(loaded->state);
         }
-        dlclose(loaded->handle);
+        module_close(loaded->handle);
     }
     free(rest->modules);
     free(rest->openapi);

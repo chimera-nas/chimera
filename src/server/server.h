@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#pragma once
+
 #include "common/export.h"
 #include <stdint.h>
 #include <stdio.h>

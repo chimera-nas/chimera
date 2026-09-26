@@ -34,8 +34,8 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
-#include "vfs/vfs_release.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 struct rest_fsop_ctx {
     struct evpl                    *evpl;

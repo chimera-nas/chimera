@@ -14,6 +14,7 @@
 #include "server/smb/smb.h"
 #include "server/s3/s3.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 /*
  * GET /api/core/v1/config

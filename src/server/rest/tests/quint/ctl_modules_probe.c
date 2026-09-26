@@ -2,10 +2,12 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif /* ifndef _WIN32 */
 #include <jansson.h>
 #include <stdatomic.h>
-#include <pthread.h>
+#include <evpl/evpl_platform.h>
 #include "ctl_mbt_common.h"
 
 static const char *mode;
@@ -40,7 +42,7 @@ configure(struct chimera_server_config *config)
         return;
     }
     if (!strcmp(mode, "missing")) {
-        chimera_server_config_add_rest_module(config, "example", "/missing/chimera-rest.so", NULL, 0);
+        chimera_server_config_add_rest_module(config, "example", EXAMPLE_V1 ".missing", NULL, 0);
         return;
     }
     if (!strcmp(mode, "badabi")) {
@@ -79,12 +81,14 @@ main(
     struct ctl_conn          *api, *pending;
     struct ctl_res            res, pending_result = { 0 };
     struct evpl_http_request *request;
-    struct rlimit             no_core = { 0, 0 };
     uint64_t                  deadline;
     char                      body[66];
     json_t                   *doc, *paths;
 
+#ifndef _WIN32
+    struct rlimit             no_core = { 0, 0 };
     setrlimit(RLIMIT_CORE, &no_core);
+#endif /* ifndef _WIN32 */
     mode              = argc > 1 ? argv[1] : "modules";
     opts.auth_enabled = !strcmp(mode, "auth");
     ctl_env_open(&env, &opts);
@@ -154,22 +158,20 @@ main(
     /* Server shutdown disconnects the pending transport before waiting for
      * its external worker. The worker replies through the SDK after failure. */
     struct shutdown_state shutdown = { .server = env.server };
-    pthread_t             shutdown_thread;
+    evpl_native_thread_t  shutdown_thread;
     atomic_init(&shutdown.done, 0);
-    check(!pthread_create(&shutdown_thread, NULL, shutdown_server, &shutdown), "shutdown thread");
+    check(!evpl_native_thread_create(&shutdown_thread, NULL, shutdown_server, &shutdown), "shutdown thread");
     while (!pending_result.done || !atomic_load(&shutdown.done)) {
         evpl_continue(env.evpl);
         check(ctl_now_ms() < deadline, "disconnect completion missing");
     }
-    pthread_join(shutdown_thread, NULL);
+    evpl_native_thread_join(shutdown_thread, NULL);
     ctl_conn_close(pending);
     ctl_conn_close(api);
     evpl_http_destroy(env.agent);
     evpl_destroy(env.evpl);
     prometheus_metrics_destroy(env.registry);
-    char cleanup[512];
-    snprintf(cleanup, sizeof(cleanup), "rm -rf %s", env.session_dir);
-    check(!system(cleanup), "cleanup");
+    check(!chimera_test_remove_tree(env.session_dir), "cleanup");
     return 0;
 
  done:

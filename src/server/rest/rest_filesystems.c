@@ -13,6 +13,7 @@
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/vfs_procs.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 /* ======================== Named filesystems ========================
  *

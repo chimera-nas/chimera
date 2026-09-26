@@ -13,6 +13,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_user_cache.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 struct user_list_ctx {
     json_t *array;

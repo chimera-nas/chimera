@@ -9,33 +9,34 @@ if(NOT WIN32)
     pkg_check_modules(JANSSON REQUIRED jansson)
 endif()
 
-add_library(chimera_rest SHARED rest.c rest_request.c rest_module.c rest_auth.c)
+add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
+    rest.c rest_request.c rest_module.c rest_auth.c rest_services.c)
 target_compile_definitions(chimera_rest PRIVATE
     CHIMERA_REST_MODULE_SUFFIX="${CMAKE_SHARED_MODULE_SUFFIX}")
 
 add_library(chimera_rest_core MODULE rest_core.c rest_users.c rest_exports.c
     rest_shares.c rest_buckets.c rest_mounts.c rest_filesystems.c rest_config.c)
 add_library(chimera_rest_docs MODULE rest_swagger.c)
-foreach(module chimera_rest_core chimera_rest_docs)
+# Bundled modules call back into one host runtime through private services.
+# In particular, Windows DLLs must never link copies of the static VFS/server.
+function(configure_rest_module module)
+    target_sources(${module} PRIVATE rest_module_bind.c)
     set_target_properties(${module} PROPERTIES PREFIX "")
+    target_compile_definitions(${module} PRIVATE CHIMERA_REST_BUNDLED_MODULE=1)
     target_include_directories(${module} PRIVATE ${JANSSON_INCLUDE_DIRS})
-    target_link_libraries(${module} PRIVATE chimera_rest chimera_vfs evpl_http evpl
-        ${JANSSON_LIBRARIES})
-    if(APPLE)
-        target_link_options(${module} PRIVATE -undefined dynamic_lookup)
+    target_link_libraries(${module} PRIVATE jansson)
+    if(CHIMERA_LINUX)
+        target_link_options(${module} PRIVATE -Wl,-z,defs)
     endif()
-    install(TARGETS ${module} LIBRARY DESTINATION lib)
+endfunction()
+foreach(module chimera_rest_core chimera_rest_docs)
+    configure_rest_module(${module})
+    install(TARGETS ${module} LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 endforeach()
 
 if(NOT DISABLE_TESTS)
     add_library(chimera_rest_debug MODULE rest_debug.c)
-    set_target_properties(chimera_rest_debug PROPERTIES PREFIX "")
-    target_include_directories(chimera_rest_debug PRIVATE ${JANSSON_INCLUDE_DIRS})
-    target_link_libraries(chimera_rest_debug PRIVATE chimera_rest chimera_vfs evpl
-        ${JANSSON_LIBRARIES})
-    if(APPLE)
-        target_link_options(chimera_rest_debug PRIVATE -undefined dynamic_lookup)
-    endif()
+    configure_rest_module(chimera_rest_debug)
 endif()
 
 add_library(chimera_rest_sdk INTERFACE)

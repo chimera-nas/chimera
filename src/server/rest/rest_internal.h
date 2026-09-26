@@ -5,7 +5,8 @@
 #pragma once
 
 #include <jansson.h>
-#include <pthread.h>
+#include "common/platform.h"
+#include <evpl/evpl_platform.h>
 #include <stdatomic.h>
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
@@ -63,7 +64,7 @@ struct chimera_rest_thread {
     struct chimera_vfs_thread   *vfs_thread;
     void                       **module_state;
     struct evpl_doorbell         replies;
-    pthread_mutex_t              reply_lock;
+    evpl_mutex_t                 reply_lock;
     struct chimera_rest_request *reply_head;
     struct chimera_rest_request *reply_tail;
     unsigned int                 live_requests;

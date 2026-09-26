@@ -13,6 +13,7 @@
 #include "server/server.h"
 #include "server/s3/s3.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 
 struct bucket_list_ctx {

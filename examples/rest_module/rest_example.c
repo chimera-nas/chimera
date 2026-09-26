@@ -2,7 +2,15 @@
 //
 // SPDX-License-Identifier: MIT
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <process.h>
+#else
 #include <pthread.h>
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +31,11 @@ struct example_state {
 
 struct example_thread {
     struct example_state *state;
+#ifdef _WIN32
+    HANDLE                workers[32];
+#else
     pthread_t             workers[32];
+#endif
     unsigned int          count;
 };
 
@@ -95,22 +107,32 @@ echo(
     host->reply(request, 200, "application/octet-stream", body, length);
 } /* echo */
 
+#ifdef _WIN32
+static unsigned __stdcall
+#else
 static void *
+#endif
 worker(void *data)
 {
     struct example_work            *work  = data;
     const struct chimera_rest_host *host  = work->state->host;
+#ifndef _WIN32
     struct timespec                 delay = { .tv_nsec = 1000000 };
+#endif
 
     atomic_fetch_add(&work->state->waiting, 1);
     while (!host->cancelled(work->request)) {
+#ifdef _WIN32
+        Sleep(1);
+#else
         nanosleep(&delay, NULL);
+#endif
     }
     atomic_fetch_sub(&work->state->waiting, 1);
     /* A reply after disconnect still releases the module's ownership. */
     host->reply(work->request, 204, NULL, NULL, 0);
     free(work);
-    return NULL;
+    return 0;
 } /* worker */
 
 static void
@@ -128,7 +150,12 @@ wait_for_disconnect(
     }
     work->state   = thread->state;
     work->request = request;
+#ifdef _WIN32
+    thread->workers[thread->count] = (HANDLE) _beginthreadex(NULL, 0, worker, work, 0, NULL);
+    if (!thread->workers[thread->count]) {
+#else
     if (pthread_create(&thread->workers[thread->count], NULL, worker, work)) {
+#endif
         free(work);
         thread->state->host->reply(request, 500, NULL, NULL, 0);
         return;
@@ -154,7 +181,12 @@ example_thread_destroy(void *data)
     unsigned int           i;
 
     for (i = 0; i < thread->count; i++) {
+#ifdef _WIN32
+        WaitForSingleObject(thread->workers[i], INFINITE);
+        CloseHandle(thread->workers[i]);
+#else
         pthread_join(thread->workers[i], NULL);
+#endif
     }
     free(thread);
 } /* example_thread_destroy */
