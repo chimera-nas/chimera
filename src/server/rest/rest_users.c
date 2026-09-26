@@ -11,7 +11,7 @@
 #include "evpl/evpl_http.h"
 #include "server/server.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_user_cache.h"
+#include "vfs/vfs_user.h"
 #include "rest_internal.h"
 #include "rest_services.h"
 
